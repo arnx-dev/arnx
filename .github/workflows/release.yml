@@ -1,6 +1,7 @@
-# On a version tag (v0.1.0): test, build the Node package and standalone binaries for macOS (Apple silicon, Intel)
-# and Linux (x64, arm64), publish @arnx-dev/arnx, and attach the binaries to a GitHub release. The tag must match the
-# version in package.json. The package goes to npmjs.com with provenance, through npm trusted publishing (no token).
+# On a version tag (v0.1.1): test, build the Node package and standalone binaries for macOS (Apple silicon, Intel)
+# and Linux (x64, arm64), stage @arnx-dev/arnx on npmjs.com, and attach the binaries to a GitHub release. The tag must
+# match the version in package.json. The package is staged with provenance through npm trusted publishing (no token):
+# it is installable only once a maintainer approves it with 2FA (npmjs.com, Staged Packages, or `npm stage approve`).
 # Nothing runs outside arnx-dev/arnx, so a fork that pushes a tag publishes nothing.
 # A version with a pre-release part (0.2.0-rc.1) gets the npm dist-tag `next` and a pre-release GitHub release:
 # `latest` and releases/latest/download/ move only on plain versions.
@@ -26,8 +27,8 @@ jobs:
         with:
           node-version-file: .nvmrc
           registry-url: https://registry.npmjs.org
-      - name: npm 11.5.1 or later, for trusted publishing
-        run: npm install -g npm@11.6.2
+      - name: npm 11.15.0 or later, for staged publishing
+        run: npm install -g npm@11.21.1
       - name: Tag matches package.json
         run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
       - run: bun install --frozen-lockfile
@@ -41,9 +42,9 @@ jobs:
           done
           node dist/cli.js --version
           (cd dist && sha256sum arnx-* > SHA256SUMS)
-      - name: Publish @arnx-dev/arnx to npmjs.com
+      - name: Stage @arnx-dev/arnx on npmjs.com (published once approved)
         run: |
-          npm publish --provenance --access public \
+          npm stage publish --provenance --access public \
             --tag "$(case "$GITHUB_REF_NAME" in *-*) echo next ;; *) echo latest ;; esac)"
       - name: GitHub release with the binaries
         run: |
