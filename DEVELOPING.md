@@ -435,7 +435,8 @@ CI, teammates) the committed pins are the trusted ones.
 
 ## Releases
 
-A `v*` tag runs `.github/workflows/release.yml`: tests, the Node bundle and the four binaries, then the package on
+Every pull request and push to `main` runs `.github/workflows/ci.yml`: install, type check, `bun test` and `bun run
+smoke`, read-only and with no secrets. A `v*` tag runs `.github/workflows/release.yml`: tests, the Node bundle and the four binaries, then the package on
 npmjs.com (with provenance) and a GitHub release with the binaries and `SHA256SUMS`. The tag must match `version` in
 package.json, which must match `VERSION` in `src/version.ts` and `.claude-plugin/plugin.json`. A version with a
 pre-release part is published under the npm dist-tag `next` and as a pre-release, so `npm install -g @arnx-dev/arnx`

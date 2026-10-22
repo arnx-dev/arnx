@@ -52,7 +52,8 @@ issues go by email, not in an issue: see [SECURITY.md](SECURITY.md).
        bunx tsc --noEmit
        bun run smoke
 
-   Tests never call a model or need keys; `ARNX_DOCKER_TESTS=1 bun test` also runs real containers.
+   CI runs the same four on every pull request. Tests never call a model or need keys; `ARNX_DOCKER_TESTS=1 bun test`
+   also runs real containers.
 4. Keep the change focused, add a test that fails without it, and keep CLI messages short.
 
 A pull request that changes `src/prompts.ts` changes `PROMPT_VERSION` and the reviews we measure, so tell us what it
