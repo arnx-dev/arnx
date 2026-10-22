@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { parseReviewFile, writesFiles } from "../src/config";
 import { describeDetection, detect } from "../src/detect";
 import { defaultSettings } from "../src/settings";
-import { NO_OWN_TESTS, runSuite } from "../src/setup";
+import { hasOwnTests, NO_OWN_TESTS, runSuite } from "../src/setup";
 import { setupPreview } from "../src/setupview";
 import { Cli } from "./helpers/cli";
 import { fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -22,8 +22,9 @@ const YAML = "version: 1\nprojects:\n  app:\n    root: .\n    language: python\n
 /** A run that reports no test at all. */
 const NONE = () => [junitXml([]), "no tests ran", false] as [string, string, boolean];
 
+let apps = 0;
 function app(files: Record<string, string> = {}): string {
-  const repo = initRepo(join(tmp(), "app"));
+  const repo = initRepo(join(tmp(), `app${++apps}`));
   for (const [p, body] of Object.entries({ "pyproject.toml": "[project]\nname = \"app\"\n", "app.py": "X = 1\n",
     ...files })) {
     mkdirSync(join(repo, p, ".."), { recursive: true });
@@ -77,14 +78,28 @@ test("a test_command that deletes or writes files is refused; redirects to /dev/
     "{expect(1).toBe(1)})\" > smoke/smoke.test.ts; npx vitest run {targets}";
   for (const c of [dexdash, "rm -rf build; pytest {targets}", "pytest {targets} | tee out.log",
     "pytest {targets} > out.log", "pytest {targets} >>out.log", "mv conftest.py x; pytest {targets}",
-    "find . -name '*.pyc' -delete && pytest {targets}"]) {
+    "find . -name '*.pyc' -delete && pytest {targets}",
+    // arnx review 20261022-20f6fa: by path, cp and sed -i, redirects of stderr or all output to a file.
+    "/bin/rm -rf tests && pytest {targets}", "cp -r other tests && pytest {targets}", "sed -i s/a/b/ f; pytest {targets}",
+    "pytest {targets} 2>out.log", "pytest {targets} &>out.log", "ls | xargs rm; pytest {targets}"]) {
     expect([c, writesFiles(c)]).toEqual([c, true]);
   }
   for (const c of ["python -m pytest -q {targets}", "pytest {targets} 2>&1", "pytest {targets} >/dev/null 2>&1",
     "pytest {targets} &> /dev/null", "ln -sfn /opt/deps/node_modules node_modules && npx vitest run {targets}",
-    "cd app && pytest --rootdir=. {targets}"]) {
+    "cd app && pytest --rootdir=. {targets}", "pytest {targets} > /dev/null", "pytest {targets} >&2",
+    "pytest -k rm {targets}"]) {
     expect([c, writesFiles(c)]).toEqual([c, false]);
   }
   expect(() => parseReviewFile(YAML.replace("python -m pytest", "rm -rf tests && python -m pytest")))
-    .toThrow("projects.app.test_command: must not delete or write files (rm, mv, tee, > file)");
+    .toThrow("projects.app.test_command: must not delete or write files (rm, mv, cp, sed -i, tee, > file)");
+});
+
+test("tests named by the runner's configuration, or under build/, count as the project's own", () => {
+  // arnx review 20261022-20f6fa: such a project whose suite reports nothing is not proven by the one-line test.
+  const cfg = parseReviewFile(YAML).projects[0]!;
+  expect(hasOwnTests(cfg, app())).toBe(false);
+  expect(hasOwnTests(cfg, app({ "pytest.ini": "[pytest]\npython_files = check_*.py\n", "checks/check_app.py": "" })))
+    .toBe(true);
+  expect(hasOwnTests(cfg, app({ "build/tests/test_x.py": "def test_x():\n    pass\n" }))).toBe(true);
+  expect(hasOwnTests(cfg, app({ "node_modules/x/test_y.py": "" }))).toBe(false);
 });

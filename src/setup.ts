@@ -129,12 +129,21 @@ function ownTestsIn(cfg: ReviewConfig, snap: string, acceptedTestsDir?: string):
     ? ownTestsInWriteDir(cfg, collect(snap, dir, getAdapter(cfg.language).writable), acceptedTestsDir) : [];
 }
 
-/** Folders that hold other people's code or build output, never the project's own tests. */
-const NOT_OWN = new Set(["node_modules", ".git", ".venv", "venv", "__pycache__", "dist", "build", ".arnx-run"]);
+/** Folders that hold other people's code, never the project's own tests (build output is rarely committed, and a
+ * test there is still a test). */
+const NOT_OWN = new Set(["node_modules", ".git", ".venv", "venv", "__pycache__", ".arnx-run"]);
+/** Runner configuration that names its own test files (pytest python_files, jest testMatch/testRegex, a vitest
+ * test.include): file names alone cannot tell such a project has no tests. */
+const CUSTOM_TESTS = /\bpython_files\b|\btestMatch\b|\btestRegex\b|\btest\s*:\s*\{[^}]*\binclude\b/s;
+const RUNNER_CONFIG = /^(?:pytest\.ini|pyproject\.toml|setup\.cfg|tox\.ini|package\.json|(?:jest|vitest|vite)\.config\.[cm]?[jt]s)$/;
 
 /** Whether a Python or JavaScript/TypeScript project has test files of its own in the snapshot (the folder arnx writes
- * its tests to left out). Rust is never asked: its tests sit inside source files. */
+ * its tests to left out), or may have: runner configuration naming its own test files counts too. Rust is never
+ * asked: its tests sit inside source files. */
 export function hasOwnTests(cfg: ReviewConfig, snap: string): boolean {
+  const root = join(snap, cfg.workdir);
+  if (existsSync(root) && readdirSync(root).some((n) => RUNNER_CONFIG.test(n) &&
+    CUSTOM_TESTS.test(readFileSync(join(root, n), "utf8")))) return true;
   const generated = writeDirOf(cfg);
   const visit = (rel: string): boolean => {
     const abs = join(snap, rel);

@@ -416,15 +416,25 @@ export function projectDigest(f: ReviewFile, name: string): string {
     : { project: spec, services });
 }
 
+/** Commands that delete, move or overwrite files, at the start of a command (after ;, &&, ||, |, `(`, sudo or xargs,
+ * by name or by path: /bin/rm). `pytest -k rm` names no command. */
+const AT_COMMAND = String.raw`(?:^|[;&|(])\s*(?:(?:sudo|xargs|command|env)\s+)*(?:\S*\/)?`;
+const WRITER = new RegExp(`${AT_COMMAND}(?:rm|rmdir|unlink|shred|truncate|mv|cp|tee|dd)(?=[\\s;&|)]|$)|` +
+  String.raw`${AT_COMMAND}sed\s+(?:\S+\s+)*-[a-zA-Z]*i|\s-delete\b`);
+
 /** A test command that deletes files or writes them: each run then tests a different repository (dexdash's setup
- * wrote `rm -rf tests && echo "test(...)" > smoke/smoke.test.ts; npx vitest run {targets}`). Redirects to
- * /dev/null and between descriptors (2>&1) are fine; a symlink (ln) is too. */
+ * wrote `rm -rf tests && echo "test(...)" > smoke/smoke.test.ts; npx vitest run {targets}`). Every redirect must go
+ * to another descriptor (2>&1) or to /dev/null; a symlink (ln) is fine. Fails closed: a `>` inside quotes counts. */
 export function writesFiles(command: string): boolean {
-  return /(?:^|[\s;&|(])(?:rm|rmdir|unlink|shred|mv|tee)(?=\s|$)|\s-delete\b/.test(command) ||
-    /(?:^|[^0-9&>])>>?(?!&)\s*(?!\/dev\/null(?:[\s;&|)]|$))/.test(command);
+  if (WRITER.test(command)) return true;
+  for (const m of command.matchAll(/(?:\d|&)?>>?\|?\s*(&?[^\s;&|)]*)/g)) {
+    const target = m[1]!;
+    if (!(target === "/dev/null" || /^&\d?-?$/.test(target) && m[0].includes(">&"))) return true;
+  }
+  return false;
 }
 
-const WRITES = "test_command: must not delete or write files (rm, mv, tee, > file): every run must see the " +
+const WRITES = "test_command: must not delete or write files (rm, mv, cp, sed -i, tee, > file): every run must see the " +
   "repository as it is. Install what the tests need in install; arnx writes its own tests";
 
 export function loadReviewFile(repo: string, { requireApproved = true } = {}): ReviewFile {
