@@ -9,6 +9,11 @@
   },
   "homepage": "https://github.com/arnx-dev/arnx",
   "repository": "https://github.com/arnx-dev/arnx",
+  "icon": ".claude-plugin/icon.svg",
+  "documentationUrl": "https://github.com/arnx-dev/arnx/blob/main/docs/WORKFLOW.md",
+  "supportUrl": "https://github.com/arnx-dev/arnx/issues",
+  "privacyPolicyUrl": "https://arnx.dev/privacy",
+  "termsOfServiceUrl": "https://arnx.dev/terms",
   "license": "Apache-2.0",
   "keywords": [
     "testing",
