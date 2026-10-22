@@ -1,10 +1,11 @@
 // A model-free look at a repository's layout: candidate projects (from manifests), their runners and package
 // managers, workspaces, CI and compose files, and the service images they mention. It only gives hints: the setup
 // agent decides, and each project still has to prove itself by running its suite.
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import type { AdapterId } from "./adapters/types";
 import { workingTreeFiles } from "./change";
+import { loadReviewFile, reviewConfigPath } from "./config";
 import { loadIgnore } from "./ignore";
 import { notableOthers, onlyOtherLanguages, type OtherLanguage, surveyLanguages, type LanguageSurvey } from "./languages";
 
@@ -203,7 +204,10 @@ export function repoLanguages(repo: string): { survey: LanguageSurvey; onlyOther
     const ignored = loadIgnore(repo);
     const files = workingTreeFiles(repo).files.filter((p) => !ignored(p));
     const survey = surveyLanguages(files);
-    return { survey, onlyOthers: onlyOtherLanguages(survey, detect(repo, files).candidates.length) };
+    // Projects in .arnx/review.yaml (approved or not) are what arnx reviews, whatever the files look like.
+    const configured = existsSync(reviewConfigPath(repo))
+      ? loadReviewFile(repo, { requireApproved: false }).projects.length : 0;
+    return { survey, onlyOthers: onlyOtherLanguages(survey, configured || detect(repo, files).candidates.length) };
   } catch {
     return null;
   }

@@ -75,7 +75,7 @@ export function surveyLanguages(files: string[]): LanguageSurvey {
     const top = p.includes("/") ? p.split("/")[0]! : ".";
     o.dirs.set(top, (o.dirs.get(top) ?? 0) + 1);
   }
-  const list = [...others].filter(([, o]) => o.files > 0).map(([name, o]) => {
+  const list = [...others].map(([name, o]) => {
     // Where it lives: the folders of its manifests, else the top-level folders holding most of its files.
     const roots = o.manifests.length ? [...new Set(o.manifests)].sort()
       : [...o.dirs].sort((a, b) => b[1] - a[1]).map(([d]) => d);
@@ -86,11 +86,11 @@ export function surveyLanguages(files: string[]): LanguageSurvey {
 
 const total = (r: Record<string, number>) => Object.values(r).reduce((a, b) => a + b, 0);
 
-/** Whether arnx has nothing to review here: other languages' source files and, of the supported ones, at most a few
- * (config scripts beside a Go module), with no supported project manifest (`supportedProjects` = 0). */
+/** Whether arnx has nothing to review here: other languages' source files or manifests and, of the supported files,
+ * at most a few (config scripts beside a Go module), with no supported project (`supportedProjects` = 0). */
 export function onlyOtherLanguages(s: LanguageSurvey, supportedProjects: number): boolean {
   const others = s.others.reduce((a, o) => a + o.files, 0);
-  return others > 0 && supportedProjects === 0 && total(s.supported) <= others * 0.05;
+  return s.others.length > 0 && supportedProjects === 0 && total(s.supported) <= others * 0.05;
 }
 
 /** The other languages worth naming in a repository that also has supported code. */
@@ -98,9 +98,10 @@ export function notableOthers(s: LanguageSurvey): OtherLanguage[] {
   return s.others.filter((o) => o.files >= MIXED_MIN_FILES || o.manifests > 0);
 }
 
-/** "Go (11 files)" or "Go (11 files) and C/C++ (2 files)". */
+/** "Go (11 files)", "Go (11 files) and C/C++ (2 files)", or "Go (a manifest, no source files)". */
 export function nameLanguages(list: OtherLanguage[]): string {
-  const parts = list.slice(0, 3).map((o) => `${o.name} (${o.files} file${o.files === 1 ? "" : "s"})`);
+  const parts = list.slice(0, 3).map((o) => `${o.name} (${o.files ? `${o.files} file${o.files === 1 ? "" : "s"}`
+    : "a manifest, no source files"})`);
   return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0] ?? "";
 }
 

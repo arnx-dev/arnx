@@ -357,19 +357,17 @@ class Commands {
     this.d.out("");
     // The flow's next step; with arnx cloud and no login, the login first.
     const then = whatNext(repo).command;
-    const next = cloud && !tokenFor(this.d.env, cloudUrl(now, this.d.env)) && callsModels(then)
-      ? ["arnx login", then] : [then];
     // Nothing to set up in a repository arnx cannot review: the note above says so instead.
-    if (!langs?.onlyOthers) {
-      this.d.out(`Next: ${next[0]}`);
-      if (next[1]) this.d.out(`Then: ${next[1]}`);
-    }
+    const next = langs?.onlyOthers ? []
+      : cloud && !tokenFor(this.d.env, cloudUrl(now, this.d.env)) && callsModels(then) ? ["arnx login", then] : [then];
+    if (next[0]) this.d.out(`Next: ${next[0]}`);
+    if (next[1]) this.d.out(`Then: ${next[1]}`);
     const skill = skillStates(repo).every((st) => st.state === "same");
     if (!skill) this.d.out("Optional: arnx skill install (coding agents)");
     const action = !existed ? "created" : force ? "replaced" : "kept";
     this.emit("ok", 0, { state: !existed ? "created" : force ? "replaced" : "already-initialized",
       files: [{ path: config, action }, { path: IGNORE_FILE, action: ignore ? "created" : "kept" }], cloud, next,
-      skill_installed: skill });
+      skill_installed: skill, ...langs?.onlyOthers ? { unsupported: unsupportedText(langs.survey) } : {} });
     return 0;
   }
 

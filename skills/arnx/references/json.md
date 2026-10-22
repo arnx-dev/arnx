@@ -39,8 +39,9 @@ Every other field is the command's own, in snake_case. Paths are relative to the
 | `state` | string | `created` (there was no `.arnx/config.toml`), `already-initialized` (it was there and is kept as it is) or `replaced` (`--force` rewrote it). |
 | `files` | array | The files init looks after, each `{ path, action }`: `.arnx/config.toml` and `.arnxignore`; `action` is `created`, `kept` or `replaced`. |
 | `cloud` | boolean | Models from arnx cloud. `false` after `--cloud` on an existing configuration means it kept your own keys: `arnx cloud on` switches. |
-| `next` | array of strings | The commands to run next, in order (`["arnx setup"]`, or `["arnx login", "arnx setup"]` with arnx cloud and no login). |
+| `next` | array of strings | The commands to run next, in order (`["arnx setup"]`, or `["arnx login", "arnx setup"]` with arnx cloud and no login); empty in a repository arnx cannot review. |
 | `skill_installed` | boolean | This arnx's skill is in every skill folder of the repository; `false`: `arnx skill install`. |
+| `unsupported` | string | Only in a repository written in languages arnx does not review: the note init prints, naming them. |
 
 | `result` | Exit | When |
 |---|---|---|

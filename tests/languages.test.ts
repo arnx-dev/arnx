@@ -6,7 +6,8 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAdapter } from "../src/adapters";
 import { parseReviewFile } from "../src/config";
-import { notableOthers, onlyOtherLanguages, surveyLanguages } from "../src/languages";
+import { repoLanguages } from "../src/detect";
+import { nameLanguages, notableOthers, onlyOtherLanguages, surveyLanguages } from "../src/languages";
 import { coverageMap } from "../src/setup";
 import { Cli } from "./helpers/cli";
 import { commit, gitRepo, initRepo } from "./helpers/gitutil";
@@ -38,6 +39,29 @@ test("the survey counts languages by extension and manifest, leaving vendored co
     "eslint.config.js"]), 0)).toBe(true);
   expect(surveyLanguages(["Main.hs", "app.cabal", "lib/Server.ex", "mix.exs", "src/x.cpp", "src/x.hpp"]).others
     .map((o) => o.name).sort()).toEqual(["C/C++", "Elixir", "Haskell"]);
+  // A manifest alone names its language (arnx review 20261022-0fe7f1, F5).
+  const manifestOnly = surveyLanguages(["go.mod", "README.md"]);
+  expect(manifestOnly.others).toEqual([{ name: "Go", files: 0, manifests: 1, roots: ["."] }]);
+  expect(onlyOtherLanguages(manifestOnly, 0)).toBe(true);
+  expect(nameLanguages(manifestOnly.others)).toBe("Go (a manifest, no source files)");
+});
+
+test("projects in review.yaml are reviewable, whatever the files look like", () => {
+  const repo = initRepo(join(tmp(), "repo"));
+  const go = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`go/f${i}.go`, "package x\n"]));
+  put(repo, { ...go, "pkg/mod.py": "X = 1\n" });
+  commit(repo, "x");
+  expect(repoLanguages(repo)?.onlyOthers).toBe(true);
+  put(repo, { ".arnx/review.yaml": `version: 1
+projects:
+  pkg:
+    root: pkg
+    language: python
+    runner: pytest
+    image: python:3.12
+    test_command: pytest {targets}
+` });
+  expect(repoLanguages(repo)?.onlyOthers).toBe(false);
 });
 
 test("a repository written only in Go: init says so, doctor fails the Languages check, setup stops before sending", async () => {
@@ -51,6 +75,10 @@ test("a repository written only in Go: init says so, doctor fails the Languages 
     "now. Tell us which language you need: https://github.com/arnx-dev/arnx/issues";
   expect(cli.stdout).toContain(`Note: ${line}`);
   expect(cli.stdout).not.toContain("Next: arnx setup");
+  // The JSON says the same: no step to run, and why (arnx review 20261022-0fe7f1, F4).
+  const json = new Cli({ cwd: repo, env });
+  expect(await json.run("init", "--json")).toBe(0);
+  expect(JSON.parse(json.stdout)).toMatchObject({ next: [], unsupported: line });
   expect(await cli.run("doctor")).toBe(3);
   expect(cli.stdout).toContain(`✗ Languages: ${line}`);
   const setup = new Cli({ cwd: repo, env, ask: async () => { throw new Error("asked"); } });
