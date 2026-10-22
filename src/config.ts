@@ -302,7 +302,8 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
     ? rel(spec.install_root, `${at}install_root`, problems) : workdir;
   const install = strList(spec.install, `${at}install`, problems);
   if (install.some((c) => c.includes("\n"))) problems.push(`${at}install: one command per line; use && to chain`);
-  const commandProblems = adapter.validateCommand(spec.test_command, runner).map((p) => at + p);
+  const commandProblems = [...adapter.validateCommand(spec.test_command, runner),
+    ...typeof spec.test_command === "string" && writesFiles(spec.test_command) ? [WRITES] : []].map((p) => at + p);
   problems.push(...commandProblems);
   const command = commandProblems.length ? "" : spec.test_command as string;
   let typecheck: string | undefined;
@@ -414,6 +415,17 @@ export function projectDigest(f: ReviewFile, name: string): string {
   return hash(!f.legacy && SECRET_KEY in f.raw ? { project: spec, services, [SECRET_KEY]: f.raw[SECRET_KEY] }
     : { project: spec, services });
 }
+
+/** A test command that deletes files or writes them: each run then tests a different repository (dexdash's setup
+ * wrote `rm -rf tests && echo "test(...)" > smoke/smoke.test.ts; npx vitest run {targets}`). Redirects to
+ * /dev/null and between descriptors (2>&1) are fine; a symlink (ln) is too. */
+export function writesFiles(command: string): boolean {
+  return /(?:^|[\s;&|(])(?:rm|rmdir|unlink|shred|mv|tee)(?=\s|$)|\s-delete\b/.test(command) ||
+    /(?:^|[^0-9&>])>>?(?!&)\s*(?!\/dev\/null(?:[\s;&|)]|$))/.test(command);
+}
+
+const WRITES = "test_command: must not delete or write files (rm, mv, tee, > file): every run must see the " +
+  "repository as it is. Install what the tests need in install; arnx writes its own tests";
 
 export function loadReviewFile(repo: string, { requireApproved = true } = {}): ReviewFile {
   const path = reviewConfigPath(repo);
