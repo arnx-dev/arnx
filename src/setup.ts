@@ -1,0 +1,851 @@
+// Setup: an agent reads the repository and proposes `.arnx/review.yaml` as a list of projects, proving each one by
+// building its environment and running its existing suite. The user approves; approval runs the suites once more and
+// stamps the file.
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync }
+  from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, posix } from "node:path";
+import { Workspace } from "./agent";
+import type { Brain } from "./brain";
+import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
+import { getAdapter, LANGUAGES } from "./adapters";
+import type { AdapterId, TestResult } from "./adapters/types";
+import { filesAt, hasCommits, snapshot, type Withheld, workingTreeFiles } from "./change";
+import {
+  loadReviewFile, parseReviewFile, projectDigest, readSecretPins, type ReviewConfig, reviewConfigPath, type ReviewFile,
+  secretPinsOf, secretPinsYaml, stamp, stampFile,
+} from "./config";
+import { type Detection, describeDetection, detect, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
+import { describeHints, diagnose, firstLine, type Hint, passingApart, unexplainedFiles } from "./diagnose";
+import type { FailureModel } from "./jev";
+import { ArnxError } from "./errors";
+import { loadIgnore, matcher } from "./ignore";
+import { isSecretPath, type SecretPin } from "./secrets";
+import { type AgentModel, allPrices, type Tool } from "./llm";
+import { ownerFile, runTests } from "./outcomes";
+import { LocalBrain } from "./localbrain";
+import type { Say } from "./progress";
+import { copyManifests, dockerSteps, envKey, type Runner, type SessionFactory } from "./sandbox";
+import { loadSettings, refString, type Settings, settingsPath } from "./settings";
+import { runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
+import { SOURCE } from "./untested";
+import { agentUse, logUsage } from "./usage";
+import { randomHex } from "./util";
+import { VERSION } from "./version";
+import { acceptedPins, type AcceptedPins } from "./check";
+import { collect, dockerSession, isKeptPath, ownTestsInWriteDir, ownTestsProblem, writeDirOf } from "./testround";
+
+export const SUITE_TIMEOUT = 1800;
+export const OUTPUT_TAIL = 6000;
+
+/** What a suite's failures were: tests kept by `arnx accept` that fail as pinned, and failures that block. */
+export interface SuiteCounts { acceptedFailing: number; unexpected: string[] }
+
+/** The accepted files of this project (`accepted`, acceptedPins) that match their pin, and those changed since. */
+function acceptedOf(cfg: ReviewConfig, accepted: AcceptedPins, dir?: string): AcceptedPins {
+  const under = (p: string) => isKeptPath(cfg, p, dir);
+  return { pinned: accepted.pinned.filter(under), changed: accepted.changed.filter((c) => under(c.path)) };
+}
+
+const failedTest = (t: TestResult) => t.outcome === "failed" || t.outcome === "error";
+
+/** `accepted`: the repository's accepted tests (acceptedPins); a pinned one may fail, a changed one blocks.
+ * `acceptedTestsDir`: settings' folder for them. */
+export function suiteOk(results: TestResult[] | null, cfg: ReviewConfig, accepted?: AcceptedPins,
+                        acceptedTestsDir?: string): [boolean, string, SuiteCounts] {
+  const none: SuiteCounts = { acceptedFailing: 0, unexpected: [] };
+  if (results === null) return [false, "the suite produced no report (timed out, or the runner could not start)", none];
+  if (!results.length) return [false, "the suite ran no tests", none];
+  const mine = accepted ? acceptedOf(cfg, accepted, acceptedTestsDir) : { pinned: [], changed: [] };
+  const counts = new Map<string, number>();
+  const unexpected: string[] = [];
+  let acceptedFailing = 0;
+  for (const t of results) {
+    counts.set(t.outcome, (counts.get(t.outcome) ?? 0) + 1);
+    if (!failedTest(t) || cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))) continue;
+    if (ownerFile(t.fileAttr, mine.pinned) !== null) {
+      // Not the suite's failure: counted apart, so a ✓ line never reads "4 failed".
+      acceptedFailing++;
+      counts.set(t.outcome, counts.get(t.outcome)! - 1);
+    } else {
+      unexpected.push(t.testId);
+    }
+  }
+  const summary = [...counts.keys()].sort().filter((o) => counts.get(o)).map((o) => `${counts.get(o)} ${o}`).join(", ") +
+    (acceptedFailing ? ` (${acceptedFailing} accepted test${acceptedFailing === 1 ? "" : "s"} still fail` +
+      `${acceptedFailing === 1 ? "s" : ""})` : "");
+  const c = { acceptedFailing, unexpected };
+  if (mine.changed.length) {
+    return [false, `${summary}; accepted test changed since \`arnx accept\`: ${mine.changed.map((x) =>
+      `${x.change} ${x.path}`).join(", ")} (see \`arnx check\`)`, c];
+  }
+  if (unexpected.length) {
+    return [false, `${summary}; failing outside known_failing: ${unexpected.slice(0, 10).join(", ")}`, c];
+  }
+  if (!counts.get("passed")) return [false, `${summary}; no test passed, so the suite does not run yet`, c];
+  return [true, summary, c];
+}
+
+/** The line approve and setup print when accepted tests still fail. */
+export function stillRed(n: number): string {
+  return `${n} accepted test${n === 1 ? " still fails" : "s still fail"} (bugs not fixed yet): arnx check`;
+}
+
+/** The results without the failures of pinned accepted tests (acceptedPins): what diagnosis and retries look at. */
+function withoutAccepted(results: TestResult[] | null, cfg: ReviewConfig, accepted?: AcceptedPins,
+                         acceptedTestsDir?: string): TestResult[] | null {
+  if (!results || !accepted) return results;
+  const { pinned } = acceptedOf(cfg, accepted, acceptedTestsDir);
+  return results.filter((t) => !failedTest(t) || ownerFile(t.fileAttr, pinned) === null);
+}
+
+/** Why tests were skipped, grouped: `"TEST_DATABASE_URL not set" (8)`. A skip that asks for a service or a
+ * variable means the environment lacks it, which a passing suite hides. */
+export function skipReasons(results: TestResult[] | null, max = 5): string[] {
+  const counts = new Map<string, number>();
+  for (const t of results ?? []) {
+    if (t.outcome !== "skipped") continue;
+    const first = t.message.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+    const reason = first.replace(/^\S+:\d+: /, "").replace(/^Skipped: /, "").slice(0, 160) || "no reason given";
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  const sorted = [...counts].sort((a, b) => b[1] - a[1]);
+  const shown = sorted.slice(0, max).map(([r, n]) => `"${r}" (${n})`);
+  if (sorted.length > max) shown.push(`${sorted.length - max} more reasons`);
+  return shown;
+}
+
+/** Test files with a failure outside known_failing: what a retry with the same environment needs to run again. */
+export function failingFiles(results: TestResult[] | null, cfg: ReviewConfig): string[] {
+  return [...new Set((results ?? []).filter((t) => (t.outcome === "failed" || t.outcome === "error") && t.fileAttr &&
+    !cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))).map((t) => t.fileAttr))].sort();
+}
+
+/** The project's own files in its tests_dir in the snapshot `snap`, which a review would clear (ownTestsInWriteDir). */
+function ownTestsIn(cfg: ReviewConfig, snap: string, acceptedTestsDir?: string): string[] {
+  const dir = writeDirOf(cfg);
+  return existsSync(join(snap, dir))
+    ? ownTestsInWriteDir(cfg, collect(snap, dir, getAdapter(cfg.language).writable), acceptedTestsDir) : [];
+}
+
+/** Most failing files run apart from the rest of the suite to look for order dependence (one extra run). */
+const APART_MAX = 20;
+
+/** [runs, summary, end of the output, why tests were skipped, files with failures, hints about the failures, what
+ * failed (SuiteCounts)]. `targets`: only these files (a retry); empty runs the whole suite. `accepted`: the
+ * repository's accepted tests (acceptedPins), whose pinned failures do not count. `outputLog`: where the whole output
+ * goes. */
+export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string,
+                               { sessionFactory = dockerSession, targets = [], failureModel, key, acceptedTestsDir,
+                                 accepted, outputLog }: {
+                                 sessionFactory?: SessionFactory; targets?: string[]; failureModel?: FailureModel;
+                                 key?: string; acceptedTestsDir?: string; accepted?: AcceptedPins;
+                                 outputLog?: string } = {})
+  : Promise<[boolean, string, string, string[], string[], string, SuiteCounts]> {
+  const none: SuiteCounts = { acceptedFailing: 0, unexpected: [] };
+  // A review clears and collects every writable file in tests_dir: the project's own tests may not live there.
+  const own = ownTestsIn(cfg, snap, acceptedTestsDir);
+  if (own.length) return [false, ownTestsProblem(cfg, own), "", [], [], "", none];
+  if (outputLog) rmSync(outputLog, { force: true });
+  /** The end of `output`, the whole of it kept in outputLog. */
+  const tailOf = (output: string): string => {
+    if (outputLog) {
+      mkdirSync(dirname(outputLog), { recursive: true });
+      writeFileSync(outputLog, output);
+    }
+    return output.slice(-OUTPUT_TAIL);
+  };
+  return sessionFactory(cfg, snap, buildLog, async (session) => {
+    type Out = [boolean, string, string, string[], string[], string, SuiteCounts];
+    const [result, all] = runTests(session, snap, cfg, targets, "suite.xml", SUITE_TIMEOUT);
+    const [ok, summary, counts] = suiteOk(all, cfg, accepted, acceptedTestsDir);
+    // Accepted tests that fail as pinned are not the environment's to fix: diagnosis and retries leave them out.
+    const results = withoutAccepted(all, cfg, accepted, acceptedTestsDir);
+    const skips = skipReasons(results);
+    const failing = failingFiles(results, cfg);
+    if (!ok) {
+      const hints = diagnose(results, cfg, snap);
+      // Failing files with no other explanation run once more, together and without the rest of the suite: those
+      // that pass then depend on a file left out. Only after a whole-suite run, when other files did run.
+      const apart = targets.length ? [] : unexplainedFiles(results, cfg, hints);
+      const others = (results ?? []).some((t) => t.fileAttr && !apart.includes(t.fileAttr));
+      if (apart.length && apart.length <= APART_MAX && others) {
+        const [, again] = runTests(session, snap, cfg, apart, "apart.xml", SUITE_TIMEOUT);
+        const alone = passingApart(apart, again);
+        if (alone.length) hints.push({ kind: "order-dependent", detail: "", files: alone, evidence: "" });
+      }
+      // Experimental: what no signature and no run apart explains is asked of JEV, one failure per file. Asked only
+      // now, since a test that fails for want of another file's state reads like a genuine failure.
+      if (failureModel) hints.push(...await askModel(failureModel, results, cfg, snap, hints));
+      return [ok, summary, tailOf(result.output), skips, failing, describeHints(hints, cfg), counts] as Out;
+    }
+    if (targets.length) return [ok, summary, tailOf(result.output), skips, failing, "", counts] as Out;
+    const [probed, tail, ignored] = probe(session, snap, cfg);
+    if (ignored) return [false, `${summary}; but ${ignored}`, tailOf(tail), skips, failing, "", counts] as Out;
+    if (probed && cfg.typecheck) {
+      // The type check runs once the suite runs: type errors are information, a command that cannot run is not.
+      const t = runTypecheck(session, cfg);
+      if (t.status === "failed" || t.status === "timed-out") {
+        return [false, `${summary}; but the type check (typecheck) ${t.status === "failed" ? "failed without " +
+          "reporting a type error: it could not start, or its output is not tsc's" : `timed out after ` +
+          `${TYPECHECK_TIMEOUT} s`}`, tailOf(t.output), skips, failing, "", counts] as Out;
+      }
+      const errors = t.errors.length;
+      return [true, `${summary}; type check: ${errors ? `${errors} type error${errors === 1 ? "" : "s"}`
+        : "no type errors"}`, tailOf(result.output), skips, failing, "", counts] as Out;
+    }
+    return probed ? [true, summary, tailOf(result.output), skips, failing, "", counts] as Out
+      : [false, `${summary}; but a one-line test placed in ${writeDirOf(cfg)}/ was not run: the runner leaves ` +
+        "that folder out (jest roots, vitest include, testMatch) or does not collect tests named the usual way (an " +
+        "option in test_command). Either set tests_dir to a new folder the runner includes, or fix test_command",
+        tailOf(tail), skips, failing, "", counts] as Out;
+  }, undefined, key);
+}
+
+/** Most failing files asked of the experimental failure model per run. */
+const MODEL_MAX = 10;
+
+async function askModel(model: FailureModel, results: TestResult[] | null, cfg: ReviewConfig, snap: string,
+                        hints: Hint[]): Promise<Hint[]> {
+  const explained = new Set(hints.flatMap((h) => h.files));
+  const files = unexplainedFiles(results, cfg, hints).filter((f) => !explained.has(f)).slice(0, MODEL_MAX);
+  // A link may dangle on the host (test_command links node_modules from the image): listed by name only.
+  const top = readdirSync(snap).filter((n) => !n.startsWith(".")).sort()
+    .map((n) => statSync(join(snap, n), { throwIfNoEntry: false })?.isDirectory() ? `${n}/` : n);
+  const asked = await Promise.all(files.map(async (file) => {
+    const t = (results ?? []).find((r) => r.fileAttr === file && (r.outcome === "failed" || r.outcome === "error"))!;
+    return { file, t, answer: await model(t.message, cfg, top) };
+  }));
+  const out = new Map<string, Hint>();
+  for (const { file, t, answer } of asked) {
+    if (!answer) continue;
+    const key = answer.kind;
+    const h = out.get(key) ?? { kind: answer.kind, detail: "", files: [], evidence: firstLine(t.message),
+      source: `judged by JEV (experimental), confidence ${answer.confidence.toFixed(2)}` };
+    h.files.push(file);
+    out.set(key, h);
+  }
+  return [...out.values()];
+}
+
+/** Generated tests go to tests_dir: prove the runner picks up a file placed there. Any probe reported passing is
+ * enough; the probes are removed afterwards. The probes are the run's only targets, so it also tells whether
+ * test_command runs only {targets} (see ignoredTargets). [picked up, end of the output, why it runs more] */
+function probe(session: Runner, snap: string, cfg: ReviewConfig): [boolean, string, string] {
+  const adapter = getAdapter(cfg.language);
+  const dir = writeDirOf(cfg);
+  const files = adapter.probes(cfg.runner).map((p) => ({ ...p, rel: posix.join(dir, p.file) }));
+  try {
+    for (const p of files) {
+      mkdirSync(join(snap, dir), { recursive: true });
+      writeFileSync(join(snap, p.rel), p.source);
+    }
+    const targets = files.map((p) => posix.relative(cfg.workdir, p.rel));
+    const [result, results] = runTests(session, snap, cfg, targets, "probe.xml", SUITE_TIMEOUT);
+    const seen = (results ?? []).some((t) => t.outcome === "passed" &&
+      ownerFile(t.fileAttr, files.map((p) => p.rel)) !== null);
+    return [seen, result.output.slice(-OUTPUT_TAIL), seen ? ignoredTargets(results, files.map((p) => p.rel), cfg) : ""];
+  } finally {
+    for (const p of files) rmSync(join(snap, p.rel), { force: true });
+  }
+}
+
+/** Tests a run reported from files other than its `targets` (paths relative to the repository). Tests reported
+ * without a file cannot be placed and never count. */
+export function outsideTargets(results: TestResult[] | null, targets: string[]): TestResult[] {
+  return (results ?? []).filter((t) => t.fileAttr && ownerFile(t.fileAttr, targets) === null);
+}
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** Why a run whose only targets were `targets` shows that test_command does not run only {targets} ("" when it
+ * does): `pytest {targets} integ_tests` runs the whole integration suite along with every review's generated tests,
+ * so each run takes minutes instead of seconds and a review can hit its time limit. */
+export function ignoredTargets(results: TestResult[] | null, targets: string[], cfg: ReviewConfig): string {
+  const others = outsideTargets(results, targets);
+  if (!others.length) return "";
+  const files = [...new Set(others.map((t) => t.fileAttr))].sort();
+  return `test_command does not run only {targets}: run with only arnx's one-line test in ${writeDirOf(cfg)}/ as ` +
+    `its target, it also ran ${plural(others.length, "test")} from ${plural(files.length, "other file")} ` +
+    `(${list(files, 5)}). Every review runs its generated tests with this command, so each run would run those ` +
+    "files too: minutes instead of seconds, and a review can hit its time limit. Remove what adds tests besides " +
+    "{targets} from test_command (a test directory or file after {targets}, an option that collects more), so it " +
+    "runs only the files it is given";
+}
+
+/** One project's proof: its suite counts and why tests were skipped. */
+export interface ProjectProof { name: string; summary: string; skips: string[] }
+
+export interface SetupResult {
+  ok: boolean;
+  yamlText: string | null;
+  summary: string;
+  costUsd: number;
+  stop: string;
+  notes: string;
+  /** The proof of each project in the accepted file, in file order ("approved earlier" for kept ones). */
+  projects: ProjectProof[];
+  /** Files left out of the snapshot because they hold key-shaped text the user has not allowed. */
+  withheld: Withheld[];
+  /** The failing tests (outside known_failing) of the last suite that ran with some tests passing: setup got the
+   * suite running, the current code fails them. Empty when the last run never got that far. */
+  failing: string[];
+  /** The project `failing` belongs to (null with none). */
+  failingProject: string | null;
+  /** Why the last attempt did not go through, in a few words (a refused proposal, a suite that does not run). */
+  problem: string;
+}
+
+/** Withheld files for a person or an agent: path, what looks like a key, and its line. */
+export const describeWithheld = (w: Withheld[]) => w.map((x) => `${x.path} (${x.label}, line ${x.line})`).join(", ");
+
+/** Up to `max` names, then "…". */
+const few = (xs: string[], max = 3) => xs.slice(0, max).join(", ") + (xs.length > max ? ", …" : "");
+
+/** What a person is told when propose refuses, in a few words (the agent gets the whole reason). */
+export function rejectedReason(p: { changed: string[]; overlaps: string[]; unexplained: string[]; ownTests: string[];
+  silent: string[]; failed: string[] }): string {
+  const out: string[] = [];
+  if (p.unexplained.length) {
+    out.push(`${plural(p.unexplained.length, "file")} unaccounted for (${few(p.unexplained)})`);
+  }
+  if (p.overlaps.length) out.push(`${plural(p.overlaps.length, "file")} owned by two projects (${few(p.overlaps)})`);
+  if (p.changed.length) out.push(`approved projects changed (${few(p.changed)})`);
+  if (p.ownTests.length) out.push(`own tests in tests_dir (${few(p.ownTests)})`);
+  if (p.silent.length) out.push(`${plural(p.silent.length, "known_failing entry", "known_failing entries")} with no ` +
+    `reason in notes (${few(p.silent)})`);
+  if (p.failed.length) out.push(`${plural(p.failed.length, "project")} do${p.failed.length === 1 ? "es" : ""} not run ` +
+    `(${few(p.failed)})`);
+  return out.join("; ");
+}
+
+const yamlSchema = (extra: Record<string, unknown> = {}, required: string[] = ["yaml"]) =>
+  ({ type: "object", properties: { yaml: { type: "string" }, ...extra }, required, additionalProperties: false });
+
+export const TRY_PROJECT: Tool = {
+  name: "try_project",
+  description: "Validate a review.yaml proposal, build one project's environment and run that project's existing test " +
+    "suite. Pass the whole file and the project's name (optional when the file has one project). Returns whether the " +
+    "suite runs, the counts and the end of the output.",
+  input_schema: yamlSchema({ project: { type: "string" } }),
+};
+
+export const PROPOSE: Tool = {
+  name: "propose",
+  description: "Submit the whole review.yaml. Accepted when no file is owned by two projects, every source file is " +
+    "owned, used or listed under uncovered, and every project runs: propose itself runs each project whose part of " +
+    "the file changed since try_project proved it (a project's part: its own entry and the services it uses).",
+  input_schema: yamlSchema(),
+};
+
+export interface Coverage {
+  /** `untracked`: how many of the counted files are not committed (absent when none). */
+  projects: { name: string; owned: number; used: number; untracked?: { owned: number; used: number } }[];
+  uncovered: { path: string; reason: string; files: number; untracked?: number }[];
+  /** Source files that no project owns or uses and no uncovered entry names. */
+  unexplained: string[];
+  /** Files owned by more than one project: "path (a, b)". */
+  overlaps: string[];
+}
+
+
+/** Which project owns or uses each file a snapshot holds (tracked, and with `untracked` untracked ones git does not
+ * ignore; minus .arnxignore and secret files), and what is left out. Only source files must be explained;
+ * documentation, configuration and data may stay unmentioned. Untracked files are counted (only when setup and reviews
+ * read them) but never refuse a proposal: a scratch file neither appears in unexplained nor in overlaps, so what is
+ * accepted depends on committed files alone. With no commits yet every file is the repository's (and the change a
+ * review looks at), so none counts as untracked. */
+export function coverageMap(repo: string, file: ReviewFile, untracked = false): Coverage {
+  const ignored = loadIgnore(repo);
+  const tree = workingTreeFiles(repo, untracked);
+  if (!hasCommits(repo)) tree.untracked.clear();
+  const files = tree.files.filter((p) => !ignored(p) && !isSecretPath(p));
+  const projects = file.projects.map((p) => ({ name: p.name, owns: matcher(p.owns.join("\n")),
+    uses: matcher(p.uses.join("\n")), owned: 0, used: 0, untracked: { owned: 0, used: 0 } }));
+  const uncovered = file.uncovered.map((u) => ({ ...u, test: matcher(u.path), files: 0, untracked: 0 }));
+  const unexplained: string[] = [];
+  const overlaps: string[] = [];
+  for (const f of files) {
+    const fresh = tree.untracked.has(f);
+    const owners = projects.filter((p) => p.owns(f));
+    const users = projects.filter((p) => !p.owns(f) && p.uses(f));
+    owners.forEach((p) => { p.owned += 1; p.untracked.owned += fresh ? 1 : 0; });
+    users.forEach((p) => { p.used += 1; p.untracked.used += fresh ? 1 : 0; });
+    if (owners.length > 1 && !fresh) overlaps.push(`${f} (${owners.map((p) => p.name).sort().join(", ")})`);
+    let listed = false;
+    for (const u of uncovered) {
+      if (u.test(f)) {
+        u.files += 1;
+        u.untracked += fresh ? 1 : 0;
+        listed = true;
+      }
+    }
+    if (!owners.length && !users.length && !listed && !fresh && SOURCE.test(f)) unexplained.push(f);
+  }
+  return { projects: projects.map(({ name, owned, used, untracked }) =>
+    ({ name, owned, used, ...(untracked.owned || untracked.used ? { untracked } : {}) })),
+  uncovered: uncovered.map(({ path, reason, files: n, untracked }) =>
+    ({ path, reason, files: n, ...(untracked ? { untracked } : {}) })), unexplained, overlaps };
+}
+
+/** What a project's suite needs to run, apart from which files are set aside: a retry that changes none of it can
+ * rerun just the files that failed. */
+export function envDigest(cfg: ReviewConfig): string {
+  return JSON.stringify([cfg.image, cfg.workdir, cfg.install, cfg.testCommand, cfg.services, cfg.env, cfg.testsDir,
+    cfg.installRoot]);
+}
+
+/** known_failing entries that no note explains (by path or file name): each hides a whole test file. */
+export function unexplainedFailing(cfg: ReviewConfig): string[] {
+  const notes = cfg.notes.join("\n");
+  return cfg.knownFailing.filter((k) => !notes.includes(k) && !notes.includes(posix.basename(k.replace(/\/+$/, ""))));
+}
+
+/** What a tool call does, in a few words, for progress lines. Setup's own tools report themselves. */
+export function describeTool(name: string, input: Record<string, unknown>): string | null {
+  const arg = (k: string) => (typeof input[k] === "string" ? input[k] as string : "").slice(0, 100);
+  switch (name) {
+    case "read_file": return `reads ${arg("path")}`;
+    case "list_dir": return `lists ${arg("path") || "."}`;
+    case "grep": return `searches ${arg("path") || "."} for ${JSON.stringify(arg("pattern"))}`;
+    default: return null;
+  }
+}
+
+/** The first sentence or so of a model reply, on one line. */
+export function gist(text: string, max = 140): string {
+  const one = text.replace(/\s+/g, " ").trim();
+  return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+}
+
+export function describeCoverage(c: Coverage): string {
+  const fresh = (n = 0) => (n ? ` (${n} untracked)` : "");
+  const lines = c.projects.map((p) =>
+    `- ${p.name}: owns ${p.owned} files${fresh(p.untracked?.owned)}, uses ${p.used}${fresh(p.untracked?.used)}`);
+  for (const u of c.uncovered) {
+    lines.push(`- not tested: ${u.path} (${u.files} files${u.untracked ? `, ${u.untracked} untracked` : ""}): ${u.reason}`);
+  }
+  if (c.unexplained.length) lines.push(`- not explained: ${c.unexplained.length} source files`);
+  return lines.join("\n");
+}
+
+const tempDir = (prefix: string) => mkdtempSync(join(tmpdir(), prefix));
+const list = (xs: string[], max = 20) => xs.slice(0, max).join(", ") + (xs.length > max ? ` (+${xs.length - max} more)` : "");
+
+/** The repository's files as a listing, secret files and .arnxignore matches left out (for a remote brain): the files
+ * the setup agent can read, so untracked ones only with `untracked`. */
+function treeOf(repo: string, untracked: boolean): string {
+  return filesAt(repo, null, untracked).filter((p) => !isSecretPath(p)).join("\n");
+}
+
+/** The detector's findings over the files the setup agent can read (untracked ones only with `untracked`). */
+function detectReadable(repo: string, untracked: boolean): Detection {
+  return detect(repo, filesAt(repo, null, untracked));
+}
+
+/** What the setup agent is told about the repository: the detector's findings and each present language's advice
+ * (exported for a brain that is sent the detection as data). */
+export function setupHintsFor(d: Detection): string {
+  const languages = [...new Set(d.candidates.map((c) => c.language))].filter((l) => LANGUAGES.includes(l as AdapterId));
+  const advice = (languages.length ? languages : ["python"]).flatMap((l) => {
+    try {
+      const a = getAdapter(l);
+      return [`Advice for ${a.words(a.defaultRunner).language} projects:\n${a.setupHints}`];
+    } catch {
+      return [];
+    }
+  });
+  return [describeDetection(d), ...advice, SHARED_ENV].join("\n\n");
+}
+
+/** Every project gets its own image unless told otherwise: a 14-crate Rust workspace was built 14 times. */
+const SHARED_ENV = "Advice for several projects: each project's install runs in its root and builds its own image " +
+  "(minutes each). Projects that install the same way (one lockfile at the repository root, a Cargo workspace) can " +
+  "share one image: give them the same image and install, and install_root: the directory the install runs in, " +
+  "relative to the repository root (usually .). Their tests still run in each project's root.";
+
+/** `untracked`: the agent reads untracked files too (--untracked, or `[review] untracked`), as reviews would; by
+ * default it reads tracked files only (every file with no commits yet). */
+type SetupOptions = { outDir: string; sessionFactory?: SessionFactory; project?: string; add?: boolean;
+  progress?: Say; failureModel?: FailureModel; untracked?: boolean;
+  /** The judgement side (default: LocalBrain over `agentModel`). */
+  brain?: Brain;
+  /** This machine's record of the accepted tests' pins (localPinsPath). */
+  localPins?: string | null };
+
+/** The allowed files of a review.yaml no setup has approved yet (a seed, or a failed setup's last attempt); none when
+ * it does not read as YAML: secret-looking files then stay out. */
+function seedPins(repo: string): SecretPin[] {
+  try {
+    return readSecretPins(repo);
+  } catch (e) {
+    if (!(e instanceof ArnxError) || !e.message.includes("is not valid YAML")) throw e;
+    return [];
+  }
+}
+
+/** A setup's events go to `<outDir>/<id>/events.jsonl`, the id made like a review's. */
+export async function runSetup(repo: string, settings: Settings, agentModel: AgentModel | null, o: SetupOptions)
+  : Promise<SetupResult> {
+  const id = new Date().toISOString().slice(0, 10).replaceAll("-", "") + "-" + randomHex(3);
+  const log = new EventLog(join(o.outDir, id, EVENTS_FILE), id);
+  return withEvents(log, () => setupBody(repo, settings, agentModel, o));
+}
+
+async function setupBody(repo: string, settings: Settings, agentModel: AgentModel | null, o: SetupOptions)
+  : Promise<SetupResult> {
+  const say = o.progress ?? (() => {});
+  mkdirSync(o.outDir, { recursive: true });
+  const existing = o.project || o.add ? loadReviewFile(repo, { requireApproved: false }) : null;
+  if (o.project && !existing!.projects.some((p) => p.name === o.project)) {
+    throw new ArnxError(`no project ${o.project} in .arnx/review.yaml`);
+  }
+  emit("setup.started", { arnx_version: VERSION, model: o.brain?.label ?? refString(settings.reviewer),
+    project: o.project ?? null, add: !!o.add });
+  const keep = new Map(existing ? existing.projects.filter((p) => p.name !== o.project)
+    .map((p) => [p.name, projectDigest(existing, p.name)] as const) : []);
+  const state = { accepted: null as string | null, lastTried: null as string | null, summary: "no project tried",
+    proven: new Map<string, string>(), attempts: 0, proofs: new Map<string, ProjectProof>(),
+    final: null as ReviewFile | null, lastFailing: new Map<string, { env: string; files: string[] }>(),
+    failing: [] as string[], failingProject: null as string | null, problem: "" };
+  const tmp = tempDir("arnx-setup-");
+  // Docker steps of this setup, with their durations.
+  dockerSteps.log = (line) => {
+    mkdirSync(o.outDir, { recursive: true });
+    appendFileSync(join(o.outDir, "docker.jsonl"), JSON.stringify(line) + "\n");
+  };
+  // A try's first line says whether an image is built for it: the build line of the project about to run takes its
+  // place; otherwise the line comes as the run starts.
+  let announce: { name: string; n: number } | null = null;
+  dockerSteps.say = (line) => {
+    const a = announce;
+    if (a && line.startsWith(`${a.name}: building its test image`)) {
+      announce = null;
+      return say(`${a.name}: building the test image, running its suite (try ${a.n})`);
+    }
+    say(line);
+  };
+  const factory: SessionFactory = <T>(cfg: ReviewConfig, snap: string, log: string, body: (r: Runner) => Promise<T>,
+    ...rest: [string?, string?]) => (o.sessionFactory ?? dockerSession)(cfg, snap, log, (session) => {
+      const a = announce;
+      announce = null;
+      if (a) say(`${a.name}: running its suite (try ${a.n})`);
+      return body(session);
+    }, ...rest);
+  try {
+    const snap = join(tmp, "repo");
+    // Files the user allowed although they look like secrets: the approved file's, or a seed's before the first setup.
+    const pins = existing ? secretPinsOf(existing.raw) : seedPins(repo);
+    const untracked = !!o.untracked;
+    const withheld = snapshot(repo, null, snap, pins, { untracked });
+    // Image keys come from the manifests as they were before any run wrote into the snapshot.
+    copyManifests(snap, join(tmp, "manifests"));
+    const keyOf = (cfg: ReviewConfig) => envKey(cfg, join(tmp, "manifests"));
+    const accepted = settings.acceptedTestsDir;
+    // Tests kept by `arnx accept` fail until their bugs are fixed: as pinned, they do not stop a project.
+    const trusted = acceptedPins(repo, o.localPins ?? null);
+    if (withheld.length) {
+      say(`left out as secret-looking: ${describeWithheld(withheld)}; if one is a test fixture, not a secret, allow ` +
+        "it with `arnx allow-secret PATH` and run setup again");
+      emit("setup.withheld", { files: withheld.map((w) => w.path) });
+    }
+    // The agent's file, with the user's allow-list added: the agent may not write one.
+    const parse = (args: Record<string, unknown>): { f: ReviewFile; text: string } | string => {
+      if (typeof args.yaml !== "string") return "invalid: yaml must be a string";
+      // Saved when setup fails: with the user's allow-list, so the file left behind keeps it.
+      state.lastTried = pins.length ? `${args.yaml.trimEnd()}\n${secretPinsYaml(pins)}` : args.yaml;
+      try {
+        const own = parseReviewFile(args.yaml);
+        if ("approved" in own.raw) return "invalid: remove the approved key; only the user approves";
+        if ("allow_secret_looking" in own.raw) {
+          return "invalid: remove allow_secret_looking; only the user allows secret-looking files, and setup adds " +
+            "their list itself";
+        }
+        const text = pins.length ? `${args.yaml.trimEnd()}\n${secretPinsYaml(pins)}` : args.yaml;
+        state.lastTried = text;
+        return { f: pins.length ? parseReviewFile(text) : own, text };
+      } catch (e) {
+        if (!(e instanceof ArnxError)) throw e;
+        return `invalid: ${e.message}`;
+      }
+    };
+    const tryProject = async (args: Record<string, unknown>): Promise<string> => {
+      const n = ++state.attempts;
+      const parsed = parse(args);
+      if (typeof parsed === "string") return parsed;
+      const { f } = parsed;
+      const name = typeof args.project === "string" ? args.project : f.projects.length === 1 ? f.projects[0]!.name : "";
+      const cfg = f.projects.find((p) => p.name === name);
+      if (!cfg) return `invalid: name the project to try; projects: ${f.projects.map((p) => p.name).join(", ")}`;
+      const t0 = performance.now();
+      const attempt = (a: { ok: boolean; reused: boolean; summary: string; failing: number; skips: number;
+        hints: string; error?: string }) => emit("setup.attempt", { n, project: name, ...a,
+        secs: Number(((performance.now() - t0) / 1000).toFixed(1)) });
+      // The snapshot does not change during setup, so a project whose part of the file is unchanged since it ran
+      // would run the same way again: its proof stands without Docker.
+      const proof = state.proofs.get(name);
+      if (proof && state.proven.get(name) === projectDigest(f, name)) {
+        say(`${name}: ✓ unchanged since it ran: ${proof.summary}`);
+        state.summary = f.legacy ? proof.summary : `${name}: ${proof.summary}`;
+        attempt({ ok: true, reused: true, summary: clip(proof.summary, 500), failing: 0, skips: proof.skips.length,
+          hints: "" });
+        return `the suite of ${name} runs: ${proof.summary} (unchanged since it last ran, so not run again). When ` +
+          "every project runs, submit the file with propose.";
+      }
+      const log = join(o.outDir, `build-${n}-${name}.log`);
+      // One line as the run starts: the image build, when there is one, is said in the same line.
+      announce = { name, n };
+      let ok: boolean, summary: string, tail: string, skips: string[], failing: string[], hints: string,
+        counts: SuiteCounts;
+      // A retry with the same environment runs only the files that failed last time (minus any now set aside);
+      // when they pass, the whole suite runs once to prove the project. A changed environment runs everything.
+      const env = envDigest(cfg);
+      const last = state.lastFailing.get(name);
+      const subset = last && last.env === env
+        ? last.files.filter((file) => !cfg.knownFailing.some((k) => file.startsWith(k))) : [];
+      try {
+        if (subset.length) {
+          say(`${name}: same environment as the last try; rerunning the ${subset.length} file(s) that failed`);
+          [ok, summary, tail, skips, failing, hints, counts] = await runSuite(cfg, snap, log, { sessionFactory: factory,
+            targets: subset, failureModel: o.failureModel, key: keyOf(cfg), acceptedTestsDir: accepted,
+            accepted: trusted });
+          if (ok) {
+            say(`${name}: they pass now; running the whole suite to prove the project`);
+            [ok, summary, tail, skips, failing, hints, counts] = await runSuite(cfg, snap, log, { sessionFactory: factory,
+            failureModel: o.failureModel, key: keyOf(cfg), acceptedTestsDir: accepted,
+            accepted: trusted });
+          } else {
+            summary = `rerun of the ${subset.length} file(s) that failed last time: ${summary}`;
+          }
+        } else {
+          [ok, summary, tail, skips, failing, hints, counts] = await runSuite(cfg, snap, log, { sessionFactory: factory,
+            failureModel: o.failureModel, key: keyOf(cfg), acceptedTestsDir: accepted,
+            accepted: trusted });
+        }
+        if (ok) state.lastFailing.delete(name);
+        else state.lastFailing.set(name, { env, files: failing.length ? failing : last?.files ?? [] });
+      } catch (e) {
+        if (!(e instanceof ArnxError)) throw e;
+        announce = null;
+        say(`${name}: ✗ ${gist(e.message)}`);
+        state.failing = [];
+        state.failingProject = null;
+        state.problem = `${name}: ${gist(e.message)}`;
+        attempt({ ok: false, reused: false, summary: "", failing: 0, skips: 0, hints: "",
+          error: clip(e.message, 500) });
+        return `failed: ${e.message}\n${existsSync(log) ? readFileSync(log, "utf8").slice(-OUTPUT_TAIL) : ""}`;
+      }
+      announce = null;
+      state.summary = f.legacy ? summary : `${name}: ${summary}`;
+      // The suite runs (some tests pass) and the current code fails others: a different failure from one that never ran.
+      const ran = !ok && counts.unexpected.length > 0 && /\b[1-9]\d* passed\b/.test(summary);
+      state.failing = ran ? counts.unexpected : [];
+      state.failingProject = ran ? name : null;
+      if (!ok) state.problem = `${name}: ${gist(summary)}`;
+      attempt({ ok, reused: false, summary: clip(summary, 500), failing: failing.length, skips: skips.length,
+        hints: clip(hints, 1000) });
+      const skipped = skips.length ? `\nSkipped tests and why: ${skips.join("; ")}. A test skipped because it needs ` +
+        "a database, a service or an environment variable is not tested in this environment: provide what it asks " +
+        "for (a service and env) unless it needs the internet." : "";
+      if (!ok) {
+        say(`${name}: ✗ does not run yet: ${gist(summary)}`);
+        return `the suite of ${name} does not run yet: ${summary}${skipped}${hints ? `\n${hints}` : ""}\n${tail}`;
+      }
+      say(`${name}: ✓ ${summary}${skips.length ? ` · skipped because ${skips.join("; ")}` : ""}`);
+      const red = counts.acceptedFailing ? ` ${plural(counts.acceptedFailing, "failure")} in accepted tests (bugs not ` +
+        "fixed yet) do not count; leave those tests as they are." : "";
+      if (red) say(stillRed(counts.acceptedFailing));
+      state.proven.set(name, projectDigest(f, name));
+      state.proofs.set(name, { name, summary, skips });
+      // A TypeScript project that can be type checked and has no typecheck yet: say so while the agent is here.
+      const read = (rel: string) => {
+        try {
+          return readFileSync(join(snap, rel), "utf8");
+        } catch {
+          return "";
+        }
+      };
+      const typed = cfg.language === "typescript" && !cfg.typecheck && typeCheckable(read, cfg.workdir)
+        ? ` ${name} has a tsconfig.json and typescript among its dependencies: add typecheck (for example ` +
+          `${TYPECHECK_EXAMPLE}, with the same node_modules link as test_command) and try it again.` : "";
+      return `the suite of ${name} runs: ${summary}.${red}${skipped}${typed} When every project runs, submit the file with ` +
+        "propose.";
+    };
+    const propose = async (args: Record<string, unknown>): Promise<string> => {
+      const parsed = parse(args);
+      if (typeof parsed === "string") return parsed;
+      const { f, text } = parsed;
+      const problems: string[] = [];
+      const ownTests: string[] = [];
+      const changed = [...keep].filter(([name, d]) => !f.projects.some((p) => p.name === name) ||
+        projectDigest(f, name) !== d).map(([name]) => name);
+      if (changed.length) problems.push(`must stay as approved: ${changed.join(", ")}`);
+      const unproven = f.projects.filter((p) => !keep.has(p.name) && state.proven.get(p.name) !== projectDigest(f, p.name))
+        .map((p) => p.name);
+      const map = coverageMap(repo, f, untracked);
+      if (map.overlaps.length) problems.push(`owned by more than one project: ${list(map.overlaps)}`);
+      if (map.unexplained.length) {
+        problems.push(`not explained: ${list(map.unexplained)}; add them to a project's owns or uses, or to uncovered ` +
+          "with a reason");
+      }
+      for (const p of f.projects.filter((x) => !keep.has(x.name))) {
+        const own = ownTestsIn(p, snap, accepted);
+        if (own.length) {
+          problems.push(`${f.legacy ? "" : `${p.name}: `}${ownTestsProblem(p, own)}`);
+          ownTests.push(p.name);
+        }
+      }
+      const silent = f.projects.filter((p) => !keep.has(p.name))
+        .flatMap((p) => unexplainedFailing(p).map((k) => f.legacy ? k : `${p.name}: ${k}`));
+      if (silent.length) {
+        problems.push(`known_failing without a reason in notes: ${list(silent)}; find out why each fails and say it ` +
+          "in notes (naming the file), or make it run");
+      }
+      if (problems.length) {
+        if (unproven.length) problems.push(`not proven yet: ${unproven.join(", ")} (propose runs them once the rest is right)`);
+        state.problem = rejectedReason({ changed, overlaps: map.overlaps, unexplained: map.unexplained, ownTests, silent,
+          failed: [] });
+        say(`Proposal rejected: ${state.problem}. Retrying...`);
+        return `refused:\n${problems.join("\n")}`;
+      }
+      // The rest is right: propose runs each project changed since it was proven, instead of a round trip per project.
+      const failed: string[] = [];
+      const failedNames: string[] = [];
+      for (const name of unproven) {
+        const r = await tryProject({ yaml: args.yaml, project: name });
+        if (!r.startsWith(`the suite of ${name} runs`)) {
+          failed.push(r);
+          failedNames.push(name);
+        }
+      }
+      if (failed.length) {
+        const why = rejectedReason({ changed: [], overlaps: [], unexplained: [], ownTests: [], silent: [],
+          failed: failedNames });
+        // The suite's own failure (state.problem, state.failing) stays what a failed setup reports.
+        say(`Proposal rejected: ${why}. Retrying...`);
+        return `refused: propose ran the projects changed since they were proven, and these do not run:\n` +
+          failed.join("\n\n");
+      }
+      state.accepted = text;
+      state.final = f;
+      return `accepted:\n${describeCoverage(map)}\nStop here and summarise.`;
+    };
+    const ws = new Workspace(snap, { extra: { try_project: [TRY_PROJECT, tryProject], propose: [PROPOSE, propose] } });
+    const current = existing ? readFileSync(reviewConfigPath(repo), "utf8") : "";
+    const detection = detectReadable(repo, untracked);
+    const brain: Brain = o.brain ?? new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings) });
+    // The agent reading files is one milestone, said once until a project runs or a proposal goes in; which files it
+    // read stays in the transcript.
+    let reading = false;
+    const tools = { tools: () => ws.tools(),
+      call: (name: string, args: Record<string, unknown>) => {
+        if (name === "try_project" || name === "propose") reading = false;
+        return ws.call(name, args);
+      },
+      onTool: (name: string, input: Record<string, unknown>) => {
+        if (reading || !describeTool(name, input)) return;
+        reading = true;
+        say("reading the repository");
+      } };
+    const { agent: result } = await withRole("setup", () => brain.agentRound("setup", { hints: setupHintsFor(detection),
+      withheld: withheld.length ? describeWithheld(withheld) : "", current, detection, tree: treeOf(repo, untracked),
+      withheldFiles: withheld,
+      ...(o.project ? { project: o.project } : {}), ...(o.add ? { add: true } : {}),
+      budgetUsd: settings.setupBudgetUsd, outDir: o.outDir }, Promise.resolve(tools)));
+    logUsage(repo, "setup", [agentUse(brain.label ? `${brain.label}/setup` : refString(settings.reviewer), result)],
+      new Date());
+    const projects = (state.final?.projects ?? []).map((p) => state.proofs.get(p.name) ??
+      { name: p.name, summary: keep.has(p.name) ? "approved earlier" : "not run", skips: [] });
+    emit("setup.completed", { ok: state.accepted !== null, stop: result.stop, cost_usd: result.costUsd,
+      attempts: state.attempts, projects: projects.map((p) => p.name), summary: clip(state.summary, 500) });
+    return { ok: state.accepted !== null, yamlText: state.accepted ?? state.lastTried, summary: state.summary,
+      costUsd: result.costUsd, stop: result.stop, notes: result.finalText, projects, withheld,
+      failing: state.accepted !== null ? [] : state.failing, failingProject: state.accepted !== null ? null
+        : state.failingProject, problem: state.problem };
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+    dockerSteps.log = null;
+    dockerSteps.say = null;
+  }
+}
+
+/** The configured settings; null when there is no config.toml yet or it cannot be read. */
+function settingsOf(repo: string): Settings | null {
+  try {
+    return existsSync(settingsPath(repo)) ? loadSettings(repo) : null;
+  } catch (e) {
+    if (e instanceof ArnxError) return null;
+    throw e;
+  }
+}
+
+/** One project's suite in an approval: whether it passed, its counts (or why it failed), its accepted tests that
+ * still fail, the failures that block it, and where its whole output is (relative to the repository). */
+export interface ApprovedSuite { name: string; ok: boolean; summary: string; acceptedFailing: number;
+  unexpected: string[]; log: string }
+
+/** Failing tests a failed approval names per project; the rest are counted. */
+const SHOWN_FAILURES = 5;
+
+/** A failed suite in approve's text: a ✗ line, a few failing tests, and where the whole output is. */
+function failedSuite(s: ApprovedSuite, legacy: boolean, repo: string): string {
+  const head = s.unexpected.length ? s.summary.replace(/; failing outside known_failing: .*$/s,
+    "; failing outside known_failing:") : s.summary;
+  const more = s.unexpected.length - SHOWN_FAILURES;
+  return [`✗ ${legacy ? "" : `${s.name}: `}${head}`, ...s.unexpected.slice(0, SHOWN_FAILURES).map((id) => `  ${id}`),
+    ...(more > 0 ? [`  and ${more} more`] : []),
+    ...(existsSync(join(repo, s.log)) ? [`  Full output: ${s.log}`] : [])].join("\n");
+}
+
+/** Run the suites again and stamp the file. With `project`, only that project runs, and only when every other
+ * project is unchanged since the last approval. The suites run on what reviews will see: tracked files, and untracked
+ * ones only with `untracked` (default: `[review] untracked`). Tests kept by `arnx accept` may fail while they match
+ * their pins (`localPins`: this machine's record, localPinsPath). [approved, text, each suite that ran] */
+export async function approveFile(repo: string, o: { by: string; at: string; project?: string;
+  sessionFactory?: SessionFactory; progress?: Say; untracked?: boolean; localPins?: string | null })
+  : Promise<[boolean, string, ApprovedSuite[]]> {
+  const say = o.progress ?? (() => {});
+  const f = loadReviewFile(repo, { requireApproved: false });
+  let run = f.projects;
+  if (o.project) {
+    const prev = (f.raw.approved as { projects?: Record<string, string> } | undefined)?.projects;
+    if (!f.projects.some((p) => p.name === o.project)) return [false, `no project ${o.project} in review.yaml`, []];
+    if (!prev) return [false, "no earlier approval with per-project hashes; run `arnx approve` without --project", []];
+    const changed = f.projects.filter((p) => p.name !== o.project && prev[p.name] !== projectDigest(f, p.name));
+    if (changed.length) {
+      return [false, `${changed.map((p) => p.name).join(", ")} changed since it was approved; run \`arnx approve\` ` +
+        "without --project", []];
+    }
+    run = f.projects.filter((p) => p.name === o.project);
+  }
+  const summaries: string[] = [];
+  const suites: ApprovedSuite[] = [];
+  const settings = settingsOf(repo);
+  const accepted = settings?.acceptedTestsDir;
+  const trusted = acceptedPins(repo, o.localPins ?? null);
+  const tmp = tempDir("arnx-approve-");
+  try {
+    const snap = join(tmp, "repo");
+    snapshot(repo, null, snap, secretPinsOf(f.raw), { untracked: o.untracked ?? settings?.untracked ?? false });
+    copyManifests(snap, join(tmp, "manifests"));
+    // Every project runs, so one approve names every project that needs fixing.
+    for (const cfg of run) {
+      const log = join(repo, ".arnx", "run", f.legacy ? "approve-build.log" : `approve-build-${cfg.name}.log`);
+      const output = posix.join(".arnx", "run", f.legacy ? "approve.log" : `approve-${cfg.name}.log`);
+      const [ok, summary, , skips, , , counts] = await runSuite(cfg, snap, log, { sessionFactory: o.sessionFactory,
+        key: envKey(cfg, join(tmp, "manifests")), acceptedTestsDir: accepted, accepted: trusted,
+        outputLog: join(repo, output) });
+      say(`${cfg.name}: ${ok ? "✓" : "✗"} ${gist(summary)}${skips.length ? ` · skipped because ${skips.join("; ")}` : ""}`);
+      suites.push({ name: cfg.name, ok, summary, ...counts, log: output });
+      if (ok) summaries.push(f.legacy ? summary : `${cfg.name}: ${summary}`);
+    }
+    const failed = suites.filter((s) => !s.ok);
+    if (failed.length) return [false, failed.map((s) => failedSuite(s, f.legacy, repo)).join("\n\n"), suites];
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  writeFileSync(reviewConfigPath(repo), f.legacy ? stamp(f.projects[0]!, o.by, o.at) : stampFile(f, o.by, o.at));
+  return [true, summaries.join("; "), suites];
+}
+
+export const approveConfig = approveFile;

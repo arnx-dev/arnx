@@ -1,0 +1,15 @@
+{
+  "name": "arnx",
+  "description": "arnx: tests every change your coding agent makes.",
+  "owner": {
+    "name": "arnx-dev",
+    "url": "https://github.com/arnx-dev"
+  },
+  "plugins": [
+    {
+      "name": "arnx",
+      "source": "./",
+      "description": "The arnx skill: review a finished change with arnx, fix confirmed findings, run arnx check until it passes."
+    }
+  ]
+}

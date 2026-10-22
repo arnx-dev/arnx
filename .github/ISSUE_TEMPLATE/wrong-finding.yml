@@ -1,0 +1,40 @@
+name: Wrong finding
+description: arnx reported a finding that is not a bug, or a test that checks the wrong thing.
+labels: [wrong-finding]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The most useful report we get. Paste only what you are allowed to share: the test and the finding's text
+        from review.md, with private names taken out.
+  - type: input
+    id: version
+    attributes:
+      label: arnx --version, and the models (or arnx cloud and its effort)
+    validations:
+      required: true
+  - type: dropdown
+    id: mark
+    attributes:
+      label: How you marked it
+      options: [intended, noise, rewrite, "not marked yet"]
+    validations:
+      required: true
+  - type: dropdown
+    id: verdict
+    attributes:
+      label: What arnx said about it
+      options: ["confirmed by the second opinion", "disputed by the second opinion", "not judged", "I don't know"]
+  - type: textarea
+    id: test
+    attributes:
+      label: What the test expected, and what the code is meant to do
+      description: Why is this not a bug, or why does the test check the wrong thing?
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: The finding (optional)
+      description: The issue's text from review.md and the test, if you can share them.
+      render: markdown

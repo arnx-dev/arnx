@@ -1,0 +1,32 @@
+name: Model or prompt experiment
+description: You tried other models, a model mix or changed prompts. Tell us how it went.
+labels: [experiment]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: arnx --version
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: What you changed
+      description: The [models] table (no keys), or what you changed in src/prompts.ts.
+      render: toml
+    validations:
+      required: true
+  - type: textarea
+    id: numbers
+    attributes:
+      label: The numbers
+      description: |
+        Per review: issues and findings, how you marked them (real / intended / noise / rewrite), the cost line.
+        `.arnx/precision.jsonl` has your marks with no code in it.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: What you noticed
+      description: Better, worse, cheaper, slower, failures, anything.

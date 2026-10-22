@@ -1,0 +1,1 @@
+{ "name": "feed", "private": true, "scripts": { "test": "node --test" } }

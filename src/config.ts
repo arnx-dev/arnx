@@ -1,0 +1,454 @@
+// `.arnx/review.yaml`: the test environment the user approved. A run refuses a config that is missing, unapproved,
+// or changed since approval (the stamp holds a hash of everything else in the file). The hash is the one Python
+// arnx computed (json.dumps with sorted keys over the parsed YAML), so files stamped by either version stay valid.
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { Document, parseDocument, visit } from "yaml";
+import type { ScalarTag, Tags } from "yaml";
+import { getAdapter } from "./adapters";
+import { python } from "./adapters/python";
+import type { Adapter, AdapterId } from "./adapters/types";
+import { ArnxError, SetupRequired } from "./errors";
+import { isSecretEnvName, type SecretPin } from "./secrets";
+import { purePosix, pyJson, pyStr, pyTruthy } from "./util";
+
+export const KEYS = new Set(["version", "image", "workdir", "install", "test_command", "services", "env", "notes",
+  "known_failing", "tests_dir", "allow_env_names", "approved", "language", "allow_secret_looking", "typecheck"]);
+export const SERVICE_KEYS = new Set(["image", "env", "ready"]);
+export const SERVICE_NAME = /^[a-z][a-z0-9-]{0,30}$/;
+
+export interface Service {
+  name: string;
+  image: string;
+  env: Record<string, string>;
+  ready: string | null;
+}
+
+export interface ReviewConfig {
+  raw: Record<string, unknown>;
+  language: AdapterId;
+  runner: string;
+  image: string;
+  workdir: string;
+  install: string[];
+  testCommand: string;
+  services: Service[];
+  env: Record<string, string>;
+  notes: string[];
+  knownFailing: string[];
+  testsDir: string;
+  /** The project's name ("main" for a file without projects). */
+  name: string;
+  /** Paths this project tests, and paths it depends on (.arnxignore-style patterns). */
+  owns: string[];
+  uses: string[];
+  /** Where the install commands run, whose manifests key the image (default: the project's root). Projects with the
+   * same image, install and install_root share one environment image. */
+  installRoot: string;
+  /** The project's type check (TypeScript only), run once per review apart from the tests; absent when not set. */
+  typecheck?: string;
+}
+
+type Raw = Record<string, unknown>;
+const isMap = (v: unknown): v is Raw => typeof v === "object" && v !== null && !Array.isArray(v) &&
+  !(v instanceof Date);
+const without = (raw: Raw, key: string): Raw => Object.fromEntries(Object.entries(raw).filter(([k]) => k !== key));
+
+export function digest(cfg: ReviewConfig): string {
+  let body: string;
+  try {
+    body = pyJson(without(cfg.raw, "approved"), { sortKeys: true, floatNumbers: true });
+  } catch (e) {
+    throw new ArnxError(`review.yaml: ${(e as Error).message}`);
+  }
+  return createHash("sha256").update(body).digest("hex");
+}
+
+export function isApproved(cfg: ReviewConfig): boolean {
+  const stamp_ = cfg.raw.approved;
+  return isMap(stamp_) && stamp_.sha256 === digest(cfg);
+}
+
+export function reviewConfigPath(repo: string): string {
+  return join(repo, ".arnx", "review.yaml");
+}
+
+function rel(value: unknown, name: string, problems: string[]): string {
+  if (typeof value !== "string" || !value) {
+    problems.push(`${name}: must be a relative path`);
+    return ".";
+  }
+  const p = purePosix(value);
+  if (p.absolute || p.parts.includes("..")) problems.push(`${name}: must stay inside the repository`);
+  return p.path;
+}
+
+function strList(value: unknown, name: string, problems: string[]): string[] {
+  if (value === null || value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((v) => typeof v === "string")) {
+    problems.push(`${name}: must be a list of strings`);
+    return [];
+  }
+  return [...value] as string[];
+}
+
+const scalar = (v: unknown) => typeof v === "string" || typeof v === "number" || typeof v === "bigint" ||
+  typeof v === "boolean";
+
+function strMap(value: unknown, name: string, problems: string[]): Record<string, string> {
+  if (value === null || value === undefined) return {};
+  if (!isMap(value) || !Object.values(value).every(scalar)) {
+    problems.push(`${name}: must map names to strings`);
+    return {};
+  }
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, pyStr(v)]));
+}
+
+function secretNames(env: Record<string, string>, where: string, allow: Set<string>): string[] {
+  return Object.keys(env).filter((k) => isSecretEnvName(k) && !allow.has(k)).map((k) =>
+    `${where}.${k}: looks like a secret; arnx passes no secrets to tests (list it under allow_env_names if it is a ` +
+    "throwaway value)");
+}
+
+/** Python's `== 1`: 1, 1.0 and True. */
+const isOne = (v: unknown) => v === 1n || v === 1 || v === true;
+
+/** PyYAML's SafeLoader resolvers for plain scalars. The yaml library's YAML 1.1 schema reads more as numbers
+ * (`.`, `1e-05`, `012`) and booleans (`y`, `n`) than PyYAML does; dates stay strings (PyYAML made dates that its
+ * own hash could not serialise). Same resolution means the same hash as Python arnx. */
+const PYYAML_TESTS: Record<string, RegExp> = {
+  "bool:true": /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON)$/,
+  "bool:false": /^(?:no|No|NO|false|False|FALSE|off|Off|OFF)$/,
+  "int:": /^[-+]?(?:0|[1-9][0-9_]*)$/,
+  "int:TIME": /^[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+$/,
+  "float:": /^(?:[-+]?[0-9][0-9_]*\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?)$/,
+  "float:EXP": /(?!)/,
+};
+
+function pyyamlTags(tags: Tags): Tags {
+  return tags.filter((t) => typeof t === "string" || t.tag !== "tag:yaml.org,2002:timestamp").map((t) => {
+    if (typeof t === "string" || !("test" in t) || !t.test) return t;
+    const kind = t.tag.replace("tag:yaml.org,2002:", "");
+    const key = kind === "bool" ? `bool:${t.test.source.includes("rue")}`
+      : t.test.source.includes("inf") ? "float:INF" : `${kind}:${t.format ?? ""}`;
+    const test = PYYAML_TESTS[key];
+    return test ? { ...(t as ScalarTag), test } : t;
+  });
+}
+
+function parseYaml(text: string): unknown {
+  const doc = parseDocument(text, { version: "1.1", customTags: pyyamlTags, intAsBigInt: true, uniqueKeys: false,
+    prettyErrors: false });
+  if (doc.errors.length) throw new ArnxError(`review.yaml is not valid YAML: ${doc.errors[0]!.message}`);
+  return doc.toJS();
+}
+
+export const FILE_KEYS = new Set(["version", "services", "allow_env_names", "projects", "uncovered", "approved",
+  "allow_secret_looking"]);
+/** Files the user allowed although they hold key-shaped text; written by `arnx allow-secret`. */
+const SECRET_KEY = "allow_secret_looking";
+const PIN = /^[0-9a-f]{16}$/;
+
+function parsePins(value: unknown, problems: string[]): SecretPin[] {
+  if (value === null || value === undefined) return [];
+  const out: SecretPin[] = [];
+  const ok = Array.isArray(value) && value.every((e) => isMap(e) && typeof e.path === "string" &&
+    Array.isArray(e.matches) && e.matches.length > 0 && e.matches.every((m) => typeof m === "string" && PIN.test(m)) &&
+    Object.keys(e).length === 2);
+  if (!ok) {
+    problems.push(`${SECRET_KEY}: must be a list of {path, matches}; add files with \`arnx allow-secret PATH\``);
+    return [];
+  }
+  for (const e of value as Raw[]) {
+    out.push({ path: rel(e.path, `${SECRET_KEY}.path`, problems), matches: [...e.matches as string[]] });
+  }
+  return out;
+}
+
+/** The allowed files of a parsed review.yaml (a project's `raw` is the whole file). */
+export const secretPinsOf = (raw: Raw): SecretPin[] => parsePins(raw[SECRET_KEY], []);
+
+/** A file that so far only allows secret-looking files (written by `arnx allow-secret` before setup). */
+export const isSeed = (raw: Raw) => SECRET_KEY in raw && Object.keys(raw).every((k) => k === "version" || k === SECRET_KEY);
+
+/** `.arnx/review.yaml` exists and is a seed: the test environment is not set up yet. */
+export function isSeedFile(repo: string): boolean {
+  const path = reviewConfigPath(repo);
+  if (!existsSync(path)) return false;
+  const raw = parseYaml(readFileSync(path, "utf8"));
+  return isMap(raw) && isSeed(raw);
+}
+
+/** The approval stamp of `.arnx/review.yaml` when it has one: who, when (the date), and whether the file is unchanged
+ * since. Null when there is no file, it does not read, or it was never approved (a seed, a failed setup's attempt). */
+export function approvalStamp(repo: string): { by: string; at: string; current: boolean } | null {
+  const path = reviewConfigPath(repo);
+  if (!existsSync(path)) return null;
+  const text = readFileSync(path, "utf8");
+  let raw: unknown;
+  try {
+    raw = parseYaml(text);
+  } catch {
+    return null;
+  }
+  if (!isMap(raw) || !isMap(raw.approved)) return null;
+  let current = false;
+  try {
+    current = isFileApproved(parseReviewFile(text));
+  } catch (e) {
+    if (!(e instanceof ArnxError)) throw e;
+  }
+  return { by: String(raw.approved.by ?? "unknown"), at: String(raw.approved.at ?? "").slice(0, 10), current };
+}
+
+/** The allowed files in `.arnx/review.yaml`, read without the rest of it (setup runs before the file is complete). */
+export function readSecretPins(repo: string): SecretPin[] {
+  const path = reviewConfigPath(repo);
+  if (!existsSync(path)) return [];
+  const raw = parseYaml(readFileSync(path, "utf8"));
+  const problems: string[] = [];
+  const pins = isMap(raw) ? parsePins(raw[SECRET_KEY], problems) : [];
+  if (problems.length) throw new ArnxError("review.yaml: " + problems.join("; "));
+  return pins;
+}
+
+/** `text` (null: a new seed file) with `pins` replacing the allowed files of the same paths. */
+export function withSecretPins(text: string | null, pins: SecretPin[]): string {
+  const raw = text === null ? { version: 1n } : parseYaml(text);
+  if (!isMap(raw)) throw new ArnxError("review.yaml must be a mapping");
+  const problems: string[] = [];
+  const kept = parsePins(raw[SECRET_KEY], problems).filter((p) => !pins.some((n) => n.path === p.path));
+  if (problems.length) throw new ArnxError("review.yaml: " + problems.join("; "));
+  const all = [...kept, ...pins].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  if (!all.length) return toYaml(without(raw, SECRET_KEY));
+  return toYaml({ ...raw, [SECRET_KEY]: all.map((p) => ({ path: p.path, matches: [...p.matches] })) });
+}
+
+/** The allow-list as YAML to append to a file that has none (setup adds the user's to the agent's file). */
+export const secretPinsYaml = (pins: SecretPin[]) =>
+  toYaml({ [SECRET_KEY]: pins.map((p) => ({ path: p.path, matches: [...p.matches] })) });
+export const PROJECT_KEYS = new Set(["root", "language", "runner", "image", "install", "test_command", "services", "env",
+  "owns", "uses", "notes", "known_failing", "tests_dir", "install_root", "typecheck"]);
+
+export interface Uncovered { path: string; reason: string }
+
+/** The whole review.yaml: one or more projects. A file without `projects` is one project named `main`. */
+export interface ReviewFile {
+  raw: Raw;
+  legacy: boolean;
+  projects: ReviewConfig[];
+  services: Service[];
+  uncovered: Uncovered[];
+}
+
+function parseServices(value: unknown, allow: Set<string>, problems: string[]): Service[] {
+  const services: Service[] = [];
+  let servicesRaw: unknown = pyTruthy(value) ? value : {};
+  if (!isMap(servicesRaw)) {
+    problems.push("services: must be a mapping");
+    servicesRaw = {};
+  }
+  for (const [name, spec] of Object.entries(servicesRaw as Raw)) {
+    const where = `services.${name}`;
+    if (!SERVICE_NAME.test(name)) {
+      problems.push(`${where}: names are lowercase letters, digits and dashes`);
+      continue;
+    }
+    if (!isMap(spec) || typeof spec.image !== "string") {
+      problems.push(`${where}: needs an image`);
+      continue;
+    }
+    const extra = Object.keys(spec).filter((k) => !SERVICE_KEYS.has(k)).sort();
+    if (extra.length) problems.push(`${where}: unknown keys: ${extra.join(", ")}`);
+    let ready = spec.ready ?? null;
+    if (ready !== null && typeof ready !== "string") {
+      problems.push(`${where}.ready: must be a shell command`);
+      ready = null;
+    }
+    const serviceEnv = strMap(spec.env, `${where}.env`, problems);
+    problems.push(...secretNames(serviceEnv, `${where}.env`, allow));
+    services.push({ name, image: spec.image, env: serviceEnv, ready: ready as string | null });
+  }
+  return services;
+}
+
+/** One project's settings. `at` prefixes problem names ("" for a legacy file, "projects.<name>." otherwise). */
+function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, services: Service[] | null,
+                      allow: Set<string>, problems: string[]): ReviewConfig {
+  let adapter: Adapter = python;
+  if ("language" in spec) {
+    try {
+      if (typeof spec.language !== "string") throw new ArnxError("must name a language");
+      adapter = getAdapter(spec.language);
+    } catch (e) {
+      problems.push(`${at}language: ${(e as Error).message}`);
+    }
+  }
+  let runner = adapter.defaultRunner;
+  if ("runner" in spec) {
+    if (typeof spec.runner === "string" && adapter.runners.includes(spec.runner)) runner = spec.runner;
+    else problems.push(`${at}runner: must be one of ${adapter.runners.join(", ")}`);
+  }
+  let image = spec.image;
+  if (typeof image !== "string" || !image) {
+    problems.push(`${at}image: required`);
+    image = "";
+  }
+  const rootKey = services === null ? "workdir" : "root";
+  const workdir = rel(rootKey in spec ? spec[rootKey] : ".", `${at}${rootKey}`, problems);
+  const testsDir = rel("tests_dir" in spec ? spec.tests_dir : adapter.defaultTestsDir, `${at}tests_dir`, problems);
+  const installRoot = services !== null && "install_root" in spec
+    ? rel(spec.install_root, `${at}install_root`, problems) : workdir;
+  const install = strList(spec.install, `${at}install`, problems);
+  if (install.some((c) => c.includes("\n"))) problems.push(`${at}install: one command per line; use && to chain`);
+  const commandProblems = adapter.validateCommand(spec.test_command, runner).map((p) => at + p);
+  problems.push(...commandProblems);
+  const command = commandProblems.length ? "" : spec.test_command as string;
+  let typecheck: string | undefined;
+  if ("typecheck" in spec) {
+    if (typeof spec.typecheck !== "string" || !spec.typecheck.trim() || spec.typecheck.includes("\n")) {
+      problems.push(`${at}typecheck: must be one shell command (use && to chain)`);
+    } else if (adapter.id !== "typescript") problems.push(`${at}typecheck: only for typescript projects`);
+    else typecheck = spec.typecheck;
+  }
+  const env = strMap(spec.env, `${at}env`, problems);
+  problems.push(...secretNames(env, `${at}env`, allow));
+  let own: Service[];
+  if (services === null) {
+    own = parseServices(spec.services, allow, problems);
+  } else {
+    const names = strList(spec.services, `${at}services`, problems);
+    const missing = names.filter((n) => !services.some((s) => s.name === n));
+    if (missing.length) problems.push(`${at}services: ${missing.join(", ")} not defined under services`);
+    own = services.filter((s) => names.includes(s.name));
+  }
+  const defaultOwns = workdir === "." ? ["**"] : [`/${workdir}/`];
+  const owns = services === null ? ["**"] : "owns" in spec ? strList(spec.owns, `${at}owns`, problems) : defaultOwns;
+  const uses = services === null ? [] : strList(spec.uses, `${at}uses`, problems);
+  const notes = strList(spec.notes, `${at}notes`, problems);
+  const knownFailing = strList(spec.known_failing, `${at}known_failing`, problems);
+  return { raw: fileRaw, name, language: adapter.id, runner, image: image as string, workdir, install,
+    testCommand: command, services: own, env, notes, knownFailing, testsDir, owns, uses, installRoot,
+    ...(typecheck === undefined ? {} : { typecheck }) };
+}
+
+export function parseReviewFile(text: string): ReviewFile {
+  const raw = parseYaml(text);
+  if (!isMap(raw)) throw new ArnxError("review.yaml must be a mapping");
+  const problems: string[] = [];
+  if (!isOne(raw.version)) problems.push("version: must be 1");
+  if (isSeed(raw)) {
+    throw new SetupRequired(".arnx/review.yaml only lists files allowed as secret-looking so far; run `arnx setup`");
+  }
+  const allow = new Set(strList(raw.allow_env_names, "allow_env_names", problems));
+  parsePins(raw[SECRET_KEY], problems);
+  if (!("projects" in raw)) {
+    const unknown = Object.keys(raw).filter((k) => !KEYS.has(k)).sort();
+    if (unknown.length) problems.push(`unknown keys: ${unknown.join(", ")}`);
+    const project = parseProject(raw, "main", "", raw, null, allow, problems);
+    if (problems.length) throw new ArnxError("review.yaml: " + problems.join("; "));
+    return { raw, legacy: true, projects: [project], services: project.services, uncovered: [] };
+  }
+  const unknown = Object.keys(raw).filter((k) => !FILE_KEYS.has(k)).sort();
+  if (unknown.length) problems.push(`unknown keys: ${unknown.join(", ")}`);
+  const services = parseServices(raw.services, allow, problems);
+  const projects: ReviewConfig[] = [];
+  if (!isMap(raw.projects) || !Object.keys(raw.projects).length) {
+    problems.push("projects: at least one project is required");
+  } else {
+    for (const [name, spec] of Object.entries(raw.projects)) {
+      const at = `projects.${name}`;
+      if (!SERVICE_NAME.test(name)) {
+        problems.push(`${at}: names are lowercase letters, digits and dashes`);
+        continue;
+      }
+      if (!isMap(spec)) {
+        problems.push(`${at}: must be a mapping`);
+        continue;
+      }
+      const extra = Object.keys(spec).filter((k) => !PROJECT_KEYS.has(k)).sort();
+      if (extra.length) problems.push(`${at}: unknown keys: ${extra.join(", ")}`);
+      projects.push(parseProject(spec, name, `${at}.`, raw, services, allow, problems));
+    }
+  }
+  const uncovered: Uncovered[] = [];
+  const list = raw.uncovered ?? [];
+  if (!Array.isArray(list)) problems.push("uncovered: must be a list of {path, reason}");
+  else for (const u of list) {
+    if (isMap(u) && typeof u.path === "string" && typeof u.reason === "string" && Object.keys(u).length === 2) {
+      uncovered.push({ path: u.path, reason: u.reason });
+    } else if (isMap(u) && typeof u.path === "string" && typeof u.reason === "string") {
+      // {path: a, reason: x (b, c)} parses "c)" as a key: a comma in an unquoted flow value ends it.
+      problems.push(`uncovered: ${u.path} has keys other than path and reason (${Object.keys(u).filter((k) =>
+        k !== "path" && k !== "reason").join(", ")}); quote a reason that holds a comma`);
+    } else problems.push("uncovered: each entry needs a path and a reason");
+  }
+  if (problems.length) throw new ArnxError("review.yaml: " + problems.join("; "));
+  return { raw, legacy: false, projects, services, uncovered };
+}
+
+/** A legacy (single-project) file as one ReviewConfig. */
+export function parseReviewConfig(text: string): ReviewConfig {
+  const f = parseReviewFile(text);
+  if (!f.legacy) throw new ArnxError("review.yaml has projects; read it with parseReviewFile");
+  return f.projects[0]!;
+}
+
+export const fileDigest = (f: ReviewFile) => digest(f.projects[0]!);
+export const isFileApproved = (f: ReviewFile) => isApproved(f.projects[0]!);
+
+function hash(value: unknown): string {
+  return createHash("sha256").update(pyJson(value, { sortKeys: true, floatNumbers: true })).digest("hex");
+}
+
+/** Hash of one project's settings and the services it lists: `approve --project` reruns only what changed. */
+export function projectDigest(f: ReviewFile, name: string): string {
+  const project = f.projects.find((p) => p.name === name);
+  if (!project) throw new ArnxError(`no project ${name} in review.yaml`);
+  const spec = f.legacy ? without(f.raw, "approved") : (f.raw.projects as Raw)[name];
+  const services = isMap(f.raw.services)
+    ? Object.fromEntries(Object.entries(f.raw.services).filter(([k]) => project.services.some((s) => s.name === k)))
+    : {};
+  // Every project's snapshot holds the allowed files. Files without the key keep the hash they had before it.
+  return hash(!f.legacy && SECRET_KEY in f.raw ? { project: spec, services, [SECRET_KEY]: f.raw[SECRET_KEY] }
+    : { project: spec, services });
+}
+
+export function loadReviewFile(repo: string, { requireApproved = true } = {}): ReviewFile {
+  const path = reviewConfigPath(repo);
+  if (!existsSync(path)) throw new SetupRequired("no .arnx/review.yaml; run `arnx setup`");
+  const f = parseReviewFile(readFileSync(path, "utf8"));
+  if (requireApproved && !isFileApproved(f)) {
+    throw new SetupRequired(".arnx/review.yaml is not approved, or changed since it was approved; run `arnx approve`");
+  }
+  return f;
+}
+
+export function loadReviewConfig(repo: string, { requireApproved = true } = {}): ReviewConfig {
+  const f = loadReviewFile(repo, { requireApproved });
+  if (!f.legacy) throw new ArnxError("review.yaml has projects; this command reads one project");
+  return f.projects[0]!;
+}
+
+function toYaml(raw: Raw): string {
+  const doc = new Document(raw, { version: "1.1", customTags: pyyamlTags });
+  visit(doc, {
+    Scalar(_key, node) {
+      if (typeof node.value === "number" && Number.isInteger(node.value)) node.minFractionDigits = 1;
+    },
+  });
+  return doc.toString({ lineWidth: 0 });
+}
+
+/** The file with an approval stamp. Floats keep a fraction so they read back as floats and the hash holds. A file
+ * with projects also records each project's digest. */
+export function stampFile(f: ReviewFile, by: string, at: string): string {
+  const approved: Raw = { by, at, sha256: fileDigest(f) };
+  if (!f.legacy) approved.projects = Object.fromEntries(f.projects.map((p) => [p.name, projectDigest(f, p.name)]));
+  return toYaml({ ...without(f.raw, "approved"), approved });
+}
+
+export function stamp(cfg: ReviewConfig, by: string, at: string): string {
+  return toYaml({ ...without(cfg.raw, "approved"), approved: { by, at, sha256: digest(cfg) } });
+}

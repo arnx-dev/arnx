@@ -1,0 +1,18 @@
+A change has just been made to this repository. The diff is below; the files you can read are the code after the change.
+
+<diff>
+diff --git a/x b/x
++$weird {braces}
+
+</diff>
+
+Write tests for this change that catch defects: defects in the change itself, and future changes that would break the behaviour it is meant to have. Use regression tests, and property-based tests (hypothesis) where they fit and hypothesis is installed. Put them in `app/tests/arnx_generated/` as pytest files named test_*.py. Run them with run_tests and revise until they run.
+
+Do not assume the current code is correct. Each test should assert the behaviour the code is supposed to have. If you conclude the code is wrong, keep the test asserting the correct behaviour (it will fail). A test that fails because of your own mistake (a wrong import, fixture or setup) is not a finding: fix it.
+
+When the code does not tell you what the intended behaviour is, do not guess in a test: ask a question instead. Write questions for the person who owns the product, who knows what it should do but may not read code: plain language, one decision per question, code names only when needed. At most 5.
+
+When you are done, reply with JSON only, no other text:
+{"tests": [{"test": "<file>::<test name>", "expects": "<one sentence: the behaviour this test asserts>"}],
+ "suspected_defects": [{"test": "<file>::<test name>", "explanation": "<plain language: what is wrong and why it matters>"}],
+ "questions": ["<question>"]}

@@ -1,0 +1,15 @@
+The owner of this repository answered a question about how the code should behave.
+
+Question: Should X?
+Answer: Yes.
+
+The change the question came from:
+<diff>
+diff --git a/x b/x
++$weird {braces}
+
+</diff>
+
+Write one or a few pytest tests in `app/tests/arnx_generated/answers/` that assert the behaviour the owner described, against the current code. Run them with run_tests and fix your own mistakes (imports, setup). If the code does not do what the owner said, keep the test asserting the owner's answer (it will fail). If the answer cannot be tested (for example it expresses no preference), write no test.
+
+When you are done, reply with JSON only: {"tests": [{"test": "<file>::<test name>", "expects": "<one sentence>"}]}

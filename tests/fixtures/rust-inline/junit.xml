@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="8" skipped="0" failures="1" errors="0" uuid="d4504796-aea6-4eac-9c0b-5e67fd5757a9" timestamp="2026-10-19T17:06:50.084+00:00" time="0.006">
+    <testsuite name="my-crate" tests="5" skipped="0" errors="0" failures="1">
+        <testcase name="util::tests::inline_mod" classname="my-crate" timestamp="2026-10-19T17:06:50.084+00:00" time="0.003"/>
+        <testcase name="tests::root_test" classname="my-crate" timestamp="2026-10-19T17:06:50.084+00:00" time="0.003"/>
+        <testcase name="net::net_tests::in_mod_rs" classname="my-crate" timestamp="2026-10-19T17:06:50.084+00:00" time="0.005"/>
+        <testcase name="net::http::tests::deep" classname="my-crate" timestamp="2026-10-19T17:06:50.084+00:00" time="0.005"/>
+        <testcase name="tests::root_fail" classname="my-crate" timestamp="2026-10-19T17:06:50.084+00:00" time="0.005">
+            <failure message="thread &apos;tests::root_fail&apos; (107) panicked at src/lib.rs:5:98" type="test failure with exit code 101">thread &apos;tests::root_fail&apos; (107) panicked at src/lib.rs:5:98:
+assertion `left == right` failed
+  left: 2
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</failure>
+            <system-out>
+running 1 test
+test tests::root_fail ... FAILED
+
+failures:
+
+failures:
+    tests::root_fail
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+</system-out>
+            <system-err>
+thread &apos;tests::root_fail&apos; (107) panicked at src/lib.rs:5:98:
+assertion `left == right` failed
+  left: 2
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+        </testcase>
+    </testsuite>
+    <testsuite name="my-crate::bin/my-crate" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="tests::main_bin" classname="my-crate::bin/my-crate" timestamp="2026-10-19T17:06:50.084+00:00" time="0.003"/>
+    </testsuite>
+    <testsuite name="my-crate::integ" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="integ" classname="my-crate::integ" timestamp="2026-10-19T17:06:50.084+00:00" time="0.005"/>
+    </testsuite>
+    <testsuite name="my-crate::bin/tool" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="tests::tool_bin" classname="my-crate::bin/tool" timestamp="2026-10-19T17:06:50.084+00:00" time="0.005"/>
+    </testsuite>
+</testsuites>

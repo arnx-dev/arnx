@@ -1,0 +1,49 @@
+{
+  "id": "20261011-a1b2c3",
+  "change": "uncommitted (base 1a2b3c4)",
+  "files_changed": 4,
+  "added": 140,
+  "removed": 3,
+  "reviewer": "anthropic:claude-sonnet-5-5",
+  "challenger": "openai:gpt-5.5-2026-04-23",
+  "prompt_version": "abc",
+  "findings": [
+    {
+      "id": "F1",
+      "test_id": "tests/g/test_i.py::test_member",
+      "func": "test_member",
+      "file": "app/tests/g/test_i.py",
+      "message": "Failed: DID NOT RAISE\nlong trace",
+      "explanation": "Any member can invite.",
+      "verdict": "confirmed",
+      "reason": "No role check."
+    },
+    {
+      "id": "F2",
+      "test_id": "tests/g/test_i.py::test_dup",
+      "func": "test_dup",
+      "file": "app/tests/g/test_i.py",
+      "message": "assert 2 == 1",
+      "explanation": "Duplicates.",
+      "verdict": "disputed",
+      "reason": "Duplicates are allowed by design."
+    }
+  ],
+  "questions": [
+    "Should invites expire?"
+  ],
+  "flaky": [
+    "tests/g/test_i.py::test_slow"
+  ],
+  "errors": [],
+  "passed": 3,
+  "tests_written": 6,
+  "missing_runs": 0,
+  "not_sent": [
+    ".env.local"
+  ],
+  "cost_usd": 0.34,
+  "seconds": 171.0,
+  "stop": "end_turn",
+  "write_dir": "app/tests/g"
+}

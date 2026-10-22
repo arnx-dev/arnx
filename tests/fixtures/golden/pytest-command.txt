@@ -1,0 +1,1 @@
+python -m pytest -q 'tests/x y.py' 'a'"'"'b' -p no:cacheprovider --continue-on-collection-errors -o junit_family=xunit1 --junitxml=/src/.arnx-run/final-1.xml

@@ -1,0 +1,155 @@
+// Hints for the setup agent about why a suite's tests fail, read from the failures themselves: a module that is not
+// installed or not importable, an environment variable read without a default, a host that does not resolve, a
+// connection refused, and tests that pass once the rest of the suite is left out. Each hint quotes the line it comes
+// from and is only a hint: the agent still reads the output and decides, and arnx changes nothing in the file.
+// A failure that matches no signature gets no hint, so the agent sees it as it did before; a wrong hint is worse than
+// none, which is why every signature here is narrow.
+import { existsSync } from "node:fs";
+import { join, posix } from "node:path";
+import type { TestResult } from "./adapters/types";
+import type { ReviewConfig } from "./config";
+
+export type HintKind = "missing-package" | "import-path" | "missing-variable" | "unresolved-host" |
+  "connection-refused" | "order-dependent" | "genuine-failure";
+
+/** source: who judged it when it is not a signature (the experimental JEV, with its confidence). */
+export interface Hint { kind: HintKind; detail: string; files: string[]; evidence: string; source?: string }
+
+const LOCAL = /^(?:localhost|127\.\d+\.\d+\.\d+|::1|\[::1\]|0\.0\.0\.0)$/;
+
+const failed = (t: TestResult) => t.outcome === "failed" || t.outcome === "error";
+
+/** The line of the message a signature matched, trimmed, as the hint's evidence. */
+function lineOf(text: string, index: number): string {
+  const start = text.lastIndexOf("\n", index) + 1;
+  const end = text.indexOf("\n", index);
+  return text.slice(start, end === -1 ? undefined : end).replace(/^[\sE>]+/, "").trim().slice(0, 200);
+}
+
+/** Whether a Python top-level module name is a file or folder of the repository, at its root or on the way to the
+ * project's workdir: then it exists and only the import path is wrong. */
+function inRepository(snap: string, workdir: string, top: string): boolean {
+  const dirs = [""];
+  for (const part of posix.normalize(workdir).split("/").filter((p) => p && p !== ".")) {
+    dirs.push(posix.join(dirs.at(-1)!, part));
+  }
+  return dirs.some((d) => existsSync(join(snap, d, top)) || existsSync(join(snap, d, `${top}.py`)));
+}
+
+/** The hint one failure supports, or null when no signature matches. */
+export function classify(message: string, cfg: ReviewConfig, snap: string): Omit<Hint, "files"> | null {
+  let m: RegExpExecArray | null;
+  if ((m = /ModuleNotFoundError: No module named '([\w.]+)'/.exec(message))) {
+    const top = m[1]!.split(".")[0]!;
+    return { kind: inRepository(snap, cfg.workdir, top) ? "import-path" : "missing-package", detail: m[1]!,
+      evidence: lineOf(message, m.index) };
+  }
+  if ((m = /Cannot find (?:package|module) '([^']+)'|Failed to resolve import "([^"]+)"/.exec(message))) {
+    const spec = (m[1] ?? m[2])!;
+    if (spec.startsWith(".") || spec.startsWith("/")) return { kind: "import-path", detail: spec, evidence: lineOf(message, m.index) };
+    const name = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!;
+    if (name.startsWith("node:")) return null;
+    return { kind: "missing-package", detail: name, evidence: lineOf(message, m.index) };
+  }
+  // os.environ["X"] raises from os.py; a KeyError on any other mapping is not about the environment.
+  if ((m = /KeyError: '([A-Za-z_][A-Za-z0-9_]*)'/.exec(message)) && /raise KeyError\(key\) from None/.test(message)) {
+    return { kind: "missing-variable", detail: m[1]!, evidence: lineOf(message, m.index) };
+  }
+  if (/'NoneType'/.test(message) &&
+      (m = /os\.(?:getenv|environ\.get)\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\)/.exec(message))) {
+    return { kind: "missing-variable", detail: m[1]!, evidence: lineOf(message, m.index) };
+  }
+  if ((m = /getaddrinfo (?:ENOTFOUND|EAI_AGAIN) ([^\s:'"]+)|Failed to resolve '([^']+)'|host='([^']+)'[^\n]*(?:NameResolutionError|Failed to resolve|Name or service not known|Temporary failure in name resolution)|Temporary failure in name resolution|Name or service not known|No address associated with hostname|nodename nor servname provided|DNS operation timed out|All nameservers failed to answer|The DNS query name does not exist/.exec(message))) {
+    const host = m[1] ?? m[2] ?? m[3] ?? "";
+    if (host && (LOCAL.test(host) || cfg.services.some((s) => s.name === host))) return null;
+    return { kind: "unresolved-host", detail: host, evidence: lineOf(message, m.index) };
+  }
+  if ((m = /ECONNREFUSED ([\w.:[\]-]+)|connection to server at "([^"]+)"[^\n]*(?:\n[^\n]*)?refused|Connection refused|\[Errno 111\]/.exec(message))) {
+    return { kind: "connection-refused", detail: m[1] ?? m[2] ?? "", evidence: lineOf(message, m.index) };
+  }
+  return null;
+}
+
+/** The first line of a failure message that says something, as evidence for a hint no signature produced. */
+export function firstLine(message: string): string {
+  return message.split("\n").map((l) => l.replace(/^[\sE>]+/, "").trim()).find(Boolean)?.slice(0, 200) ?? "";
+}
+
+/** Hints for the failures outside known_failing, one per kind and detail, with the files they come from. */
+export function diagnose(results: TestResult[] | null, cfg: ReviewConfig, snap: string): Hint[] {
+  const hints = new Map<string, Hint>();
+  for (const t of results ?? []) {
+    if (!failed(t) || cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))) continue;
+    const h = classify(t.message, cfg, snap);
+    if (!h) continue;
+    const key = `${h.kind}\0${h.detail}`;
+    const seen = hints.get(key) ?? { ...h, files: [] };
+    if (t.fileAttr && !seen.files.includes(t.fileAttr)) seen.files.push(t.fileAttr);
+    hints.set(key, seen);
+  }
+  return [...hints.values()];
+}
+
+/** Failing files (outside known_failing) none of whose failures has a hint: the ones worth running apart from the
+ * rest of the suite to see whether they depend on it. */
+export function unexplainedFiles(results: TestResult[] | null, cfg: ReviewConfig, hints: Hint[]): string[] {
+  const hinted = new Set(hints.filter((h) => h.kind !== "order-dependent").flatMap((h) => h.files));
+  return [...new Set((results ?? []).filter((t) => failed(t) && t.fileAttr && !hinted.has(t.fileAttr) &&
+    !cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))).map((t) => t.fileAttr))].sort();
+}
+
+/** Files whose tests all pass when run apart from the rest of the suite. */
+export function passingApart(files: string[], apart: TestResult[] | null): string[] {
+  if (!apart?.length) return [];
+  return files.filter((f) => {
+    const own = apart.filter((t) => t.fileAttr === f);
+    return own.length > 0 && own.every((t) => t.outcome === "passed" || t.outcome === "skipped");
+  });
+}
+
+const listed = (files: string[]) =>
+  files.slice(0, 5).join(", ") + (files.length > 5 ? `, and ${files.length - 5} more` : "");
+
+function sentence(h: Hint, cfg: ReviewConfig): string {
+  const service = cfg.services.find((s) => h.detail.split(":")[0] === s.name);
+  switch (h.kind) {
+    case "missing-package":
+      return cfg.language === "python"
+        ? `module \`${h.detail}\` is not installed: add the package that provides it to install`
+        : `package \`${h.detail}\` cannot be found: not installed, or installed where the tests do not see it ` +
+          "(the repository is mounted over /src, which hides anything install put there)";
+    case "import-path":
+      return cfg.language === "python"
+        ? `\`${h.detail}\` is in the repository but cannot be imported: an import path problem (working directory, ` +
+          "rootdir or PYTHONPATH), not a missing package"
+        : `the tests import \`${h.detail}\`, which is not there: a file a build step generates, or a wrong path`;
+    case "missing-variable":
+      return `variable \`${h.detail}\` is read without a default and is not set: give it a test value in env, ` +
+        "unless the code needs a real one from outside";
+    case "unresolved-host":
+      return `a host name does not resolve${h.detail ? ` (${h.detail})` : ""}. Declared services resolve in the ` +
+        "sandbox, so this host is not one: the test needs the internet (then known_failing, with that reason in " +
+        "notes) or a service the file does not declare";
+    case "connection-refused":
+      if (service) return `service \`${service.name}\` refuses connections: not ready yet (give it a ready check) or another port`;
+      if (LOCAL.test(h.detail.replace(/:\d+$/, "").replace(/^\[|\]$/g, ""))) {
+        return `nothing listens on ${h.detail}: the test expects a server on localhost, but in the sandbox services ` +
+          "are reached by their name";
+      }
+      return `a connection was refused${h.detail ? ` (${h.detail})` : ""}: a service the test expects is not running`;
+    case "genuine-failure":
+      return "the code runs and fails on its own result or data, not on the environment";
+    case "order-dependent":
+      return "these pass when run without the rest of the suite: another test file changes state they depend on " +
+        "(imports, environment, globals), or they are flaky";
+  }
+}
+
+/** The hints as lines for the agent, each with its files and the line it comes from. */
+export function describeHints(hints: Hint[], cfg: ReviewConfig): string {
+  if (!hints.length) return "";
+  const lines = hints.map((h) => `- ${sentence(h, cfg)}${h.source ? ` (${h.source})` : ""}. Files: ` +
+    `${listed(h.files)}.` + (h.evidence ? ` From: "${h.evidence}"` : ""));
+  return "Hints from the failures (each names the line it comes from; check it before acting on it):\n" +
+    lines.join("\n");
+}

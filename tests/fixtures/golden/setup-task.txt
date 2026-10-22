@@ -1,0 +1,20 @@
+Read the repository's manifests, CI configuration, compose files, test configuration and README. Then propose a test environment as YAML and try it with try_config. try_config builds a Docker image (network allowed while installing), starts the services, and runs the existing test suite with no internet apart from those services. Revise until the suite runs.
+
+The YAML has these keys:
+version: 1
+image: <base image, for example python:3.12-slim>
+workdir: <directory where pytest runs, relative to the repository root; "." for the root>
+install: [<shell commands run once while building, from workdir; for example pip install -r requirements.txt pytest>]
+test_command: <a pytest command with the placeholder {targets}, for example python -m pytest -q {targets}>
+services: {<name>: {image: <image>, env: {<NAME>: <value>}, ready: <command that succeeds once it accepts connections>}}
+env: {<NAME>: <value>}   # the only variables tests see; services are reachable with their name as host
+notes: [<short facts a test writer needs: how to point the code at the database, what must be stubbed>]
+known_failing: [<test files that fail for reasons the environment cannot fix, such as needing the internet>]
+allow_env_names: [<names that look like secrets but hold throwaway values, such as a test database password>]
+
+Rules:
+- Never put real secrets in env. A variable whose name contains KEY, TOKEN, SECRET, PASSWORD or CREDENTIAL is refused unless listed in allow_env_names, which is only for throwaway values.
+- Install pytest (and hypothesis if it installs cleanly) even if the project does not list them.
+- Prefer `python -m pytest` so the working directory is importable.
+- List a test file in known_failing only when it fails for a reason the environment cannot fix, and say why in notes.
+- Stop when try_config reports that the suite runs. Then reply with a short summary of what you chose and why.

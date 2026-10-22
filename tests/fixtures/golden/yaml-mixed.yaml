@@ -1,0 +1,13 @@
+version: 1
+image: "python:3.12-slim"
+workdir: .
+install: ["pip install -r requirements.txt", "echo café → done"]
+test_command: python -m pytest -q {targets}
+services:
+  db:
+    image: postgres:16-alpine
+    env: {PORT: 5432, RATIO: 1.0, SMALL: 1e-05, TENTH: 0.1, FLAG: yes}
+    ready: pg_isready
+env: {MODE: test, COUNT: 3, NAME: "Zoë"}
+notes: ["use café", "x: 1"]
+known_failing: []

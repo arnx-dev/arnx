@@ -1,0 +1,293 @@
+import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { python } from "../src/adapters/python";
+import { parseReviewConfig } from "../src/config";
+import { SetupRequired } from "../src/errors";
+import {
+  cleanupLiveSessions, DEFAULT_LIMITS, dockerfile, ensureEnv, envKey, requireDocker, runArgv, sandboxOptions, Session,
+  dockerSteps, networkRetry,
+} from "../src/sandbox";
+import { useTmp } from "./helpers/tmp";
+import { CFG } from "./helpers/yaml";
+
+const tmp = useTmp();
+
+async function withDockerAsync<T>(path: string, body: () => Promise<T>): Promise<T> {
+  const saved = sandboxOptions.docker;
+  sandboxOptions.docker = path;
+  try {
+    return await body();
+  } finally {
+    sandboxOptions.docker = saved;
+  }
+}
+
+function withDocker<T>(path: string, body: () => T): T {
+  const saved = sandboxOptions.docker;
+  sandboxOptions.docker = path;
+  try {
+    return body();
+  } finally {
+    sandboxOptions.docker = saved;
+  }
+}
+
+test("test_dockerfile", () => {
+  const text = dockerfile(parseReviewConfig(CFG));
+  expect(text.split("\n")[0]).toBe("FROM python:3.12-slim");
+  for (const part of ["COPY . /src", "WORKDIR /src/app", "RUN pip install pytest"]) expect(text).toContain(part);
+});
+
+test("on BuildKit every install step shares the language's download cache, kept out of the image", () => {
+  const text = dockerfile(parseReviewConfig(CFG), { cache: true });
+  expect(text).toContain("RUN --mount=type=cache,id=arnx-python,target=/arnx-cache,mode=0777 pip install pytest");
+  expect(text).toContain("ARG PIP_CACHE_DIR=/arnx-cache/pip");
+  expect(text).not.toContain("PIP_NO_CACHE_DIR");
+  const node = dockerfile(parseReviewConfig(CFG.replace("image: python:3.12-slim", "image: node:22\nlanguage: typescript")
+    .replace("pip install pytest", "npm ci").replace("python -m pytest -q {targets}", "npx vitest run {targets}")),
+  { cache: true });
+  expect(node).toContain("RUN --mount=type=cache,id=arnx-typescript,target=/arnx-cache,mode=0777 npm ci");
+  expect(node).toContain("ARG npm_config_cache=/arnx-cache/npm");
+});
+
+test("without BuildKit the Dockerfile is the one before the cache: no mount, pip keeps no cache", () => {
+  const text = dockerfile(parseReviewConfig(CFG));
+  expect(text).not.toContain("--mount");
+  expect(text).not.toContain("ARG ");
+  expect(text).toContain("PIP_NO_CACHE_DIR=1");
+});
+
+test("ensureEnv builds with the cache mount only when Docker has BuildKit", async () => {
+  const fake = join(tmp(), "docker");
+  const stdin = join(tmp(), "stdin");
+  // image inspect fails (no image yet); build saves the Dockerfile it was given.
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in image) exit 1;; build) cat > '${stdin}';; esac\nexit 0\n`);
+  chmodSync(fake, 0o755);
+  const cfg = parseReviewConfig(CFG);
+  const saved = sandboxOptions.buildkit;
+  try {
+    for (const bk of [true, false]) {
+      sandboxOptions.buildkit = bk;
+      await withDockerAsync(fake, () => ensureEnv(cfg, tmp(), join(tmp(), "build.log")));
+      expect(readFileSync(stdin, "utf8").includes("--mount=type=cache")).toBe(bk);
+    }
+  } finally {
+    sandboxOptions.buildkit = saved;
+  }
+});
+
+test("test_env_key_follows_manifests_not_notes", () => {
+  mkdirSync(join(tmp(), "app"));
+  writeFileSync(join(tmp(), "app", "requirements.txt"), "a\n");
+  const cfg = parseReviewConfig(CFG);
+  const key = envKey(cfg, tmp());
+  expect(envKey(parseReviewConfig(CFG + "notes: [x]\n"), tmp())).toBe(key);
+  writeFileSync(join(tmp(), "app", "requirements.txt"), "b\n");
+  expect(envKey(cfg, tmp())).not.toBe(key);
+});
+
+test("test_run_argv_is_locked_down", () => {
+  const argv = runArgv({ image: "img", name: "n", network: "none", snapshot: tmp(), workdir: "app",
+    env: { MODE: "test" }, command: "pytest -q", limits: DEFAULT_LIMITS, user: "1000:1000", runEnv: [] });
+  const joined = argv.join(" ");
+  for (const part of ["--network none", "--cap-drop ALL", "--security-opt no-new-privileges", "--pids-limit 512",
+    "--memory 4g", "--memory-swap 4g", "--user 1000:1000", "-w /src/app", "-e MODE=test", `-v ${tmp()}:/src`]) {
+    expect(joined).toContain(part);
+  }
+  expect(argv.slice(-4)).toEqual(["img", "sh", "-c", "pytest -q"]);
+  expect(argv.some((a) => a.startsWith("--env-file"))).toBe(false);
+});
+
+test("test_pytest_command", () => {
+  const cmd = python.command(parseReviewConfig(CFG).testCommand, ["tests/x y.py"], "/src/.arnx-run/final-1.xml", "pytest");
+  expect(cmd.startsWith("python -m pytest -q 'tests/x y.py' ")).toBe(true);
+  expect(cmd).toContain("--junitxml=/src/.arnx-run/final-1.xml");
+  expect(cmd).toContain("junit_family=xunit1");
+  expect(cmd).toContain("--continue-on-collection-errors");
+});
+
+test("test_no_docker_binary", () => {
+  withDocker("/nonexistent/docker", () => {
+    expect(() => requireDocker()).toThrow(SetupRequired);
+    expect(() => requireDocker()).toThrow(/Docker is not installed/);
+  });
+});
+
+test("test_docker_not_running", () => {
+  const fake = join(tmp(), "docker");
+  writeFileSync(fake, "#!/bin/sh\necho 'Cannot connect' >&2\nexit 1\n");
+  chmodSync(fake, 0o755);
+  withDocker(fake, () => expect(() => requireDocker()).toThrow(/start it/));
+});
+
+test("Docker refusing its socket is told apart from Docker not running: a coding agent's sandbox", () => {
+  const fake = join(tmp(), "docker");
+  writeFileSync(fake, "#!/bin/sh\necho 'permission denied while trying to connect to the Docker daemon socket at " +
+    "unix:///var/run/docker.sock' >&2\nexit 1\n");
+  chmodSync(fake, 0o755);
+  withDocker(fake, () => expect(() => requireDocker()).toThrow("Docker is not reachable (permission denied on its " +
+    "socket): if a coding agent ran arnx in its sandbox, run this command in your own terminal"));
+  writeFileSync(fake, "#!/bin/sh\necho 'context deadline exceeded' >&2\nexit 1\n");
+  withDocker(fake, () => expect(() => requireDocker()).toThrow("Docker is not answering: context deadline exceeded"));
+});
+
+test("cleanupLiveSessions removes registered sessions", async () => {
+  const fake = join(tmp(), "docker");
+  const log = join(tmp(), "log");
+  writeFileSync(fake, `#!/bin/sh\necho "$*" >> '${log}'\n`);
+  chmodSync(fake, 0o755);
+  const cfg = parseReviewConfig(CFG + "services:\n  db: {image: postgres:16-alpine}\n");
+  const saved = sandboxOptions.docker;
+  sandboxOptions.docker = fake;
+  try {
+    const s = await new Session("img", cfg, tmp()).start();
+    cleanupLiveSessions();
+    cleanupLiveSessions();
+    const lines = readFileSync(log, "utf8").trim().split("\n");
+    expect(lines.filter((l) => l === `rm -f arnx-${s.id}-db`)).toHaveLength(1);
+    expect(lines.filter((l) => l === `network rm ${s.network}`)).toHaveLength(1);
+  } finally {
+    sandboxOptions.docker = saved;
+  }
+});
+
+// ---- Docker integration: real containers. Run with ARNX_DOCKER_TESTS=1. ----
+
+const SVC = `
+version: 1
+image: python:3.12-slim
+install: []
+test_command: python -m pytest -q {targets}
+services:
+  db:
+    image: postgres:16-alpine
+    env: {POSTGRES_HOST_AUTH_METHOD: trust}
+    ready: pg_isready -U postgres
+env: {MODE: test}
+`;
+
+describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
+  const snap = () => {
+    const d = join(tmp(), "snap");
+    if (!existsSync(d)) {
+      mkdirSync(d);
+      writeFileSync(join(d, "probe.py"), "print('hello')\n");
+    }
+    return d;
+  };
+
+  test("test_env_and_network_and_limits", async () => {
+    process.env.ARNX_SENTINEL = "leak";
+    try {
+      const cfg = parseReviewConfig(CFG.replace("workdir: app", "workdir: ."));
+      const image = await ensureEnv(cfg, snap(), join(tmp(), "build.log"));
+      const s = await new Session(image, cfg, snap()).start();
+      try {
+        const env = s.run("env", 60).output;
+        expect(env).toContain("MODE=test");
+        expect(env).not.toContain("ARNX_SENTINEL");
+        expect(env).not.toContain("ANTHROPIC_API_KEY");
+        expect(s.run("python -c \"import socket; socket.create_connection(('1.1.1.1', 53), 3)\"", 60).exitCode)
+          .not.toBe(0);
+        expect(s.run("cat /sys/fs/cgroup/pids.max", 30).output.trim()).toBe("512");
+        expect(s.run("python probe.py", 30).output.trim()).toBe("hello");
+      } finally {
+        s.close();
+      }
+    } finally {
+      delete process.env.ARNX_SENTINEL;
+    }
+  }, 600_000);
+
+  test("test_timeout_kills_the_container", async () => {
+    const cfg = parseReviewConfig(CFG.replace("workdir: app", "workdir: ."));
+    const image = await ensureEnv(cfg, snap(), join(tmp(), "build.log"));
+    const s = await new Session(image, cfg, snap()).start();
+    let r;
+    try {
+      r = s.run("sleep 600", 5);
+    } finally {
+      s.close();
+    }
+    expect(r.timedOut).toBe(true);
+    expect(r.exitCode).toBeNull();
+    expect(r.seconds).toBeLessThan(60);
+  }, 600_000);
+
+  test("test_service_reachable_internet_not", async () => {
+    const cfg = parseReviewConfig(SVC);
+    const image = await ensureEnv(cfg, snap(), join(tmp(), "build.log"));
+    const s = await new Session(image, cfg, snap()).start();
+    try {
+      const ok = s.run("python -c \"import socket; socket.create_connection(('db', 5432), 5)\"", 60);
+      expect(ok.exitCode).toBe(0);
+      expect(s.run("python -c \"import socket; socket.create_connection(('1.1.1.1', 53), 3)\"", 60).exitCode)
+        .not.toBe(0);
+    } finally {
+      s.close();
+    }
+    const networks = spawnSync("docker", ["network", "ls", "--format", "{{.Name}}"], { encoding: "utf8" }).stdout;
+    expect(networks.split("\n")).not.toContain(s.network);
+  }, 600_000);
+});
+
+test("every Docker step is logged with its duration when a log is set", async () => {
+  const fake = join(tmp(), "fake-docker");
+  writeFileSync(fake, "#!/bin/sh\nexit 0\n");
+  chmodSync(fake, 0o755);
+  const lines: Record<string, unknown>[] = [];
+  dockerSteps.log = (l) => lines.push(l);
+  try {
+    await withDockerAsync(fake, async () => {
+      const cfg = parseReviewConfig(CFG);
+      const image = await ensureEnv(cfg, tmp(), join(tmp(), "build.log")); // "image inspect" succeeds: reused
+      new Session(image, cfg, tmp()).run("pytest -q", 60);
+    });
+  } finally {
+    dockerSteps.log = null;
+  }
+  expect(lines.map((l) => [l.step, l.built ?? null])).toEqual([["image", false], ["run", null]]);
+  // The tag says which image was reused or built, so a rebuild can be traced to a changed environment or a removed image.
+  expect(lines[0]!.tag).toMatch(/^arnx-env:[0-9a-f]{16}$/);
+  expect(lines[1]).toMatchObject({ command: "pytest -q", exit: 0 });
+  expect(typeof lines[1]!.secs).toBe("number");
+});
+
+test("a build that cannot reach the package index is tried once more, then reported as network trouble", async () => {
+  const fake = join(tmp(), "fake-docker-net");
+  const count = join(tmp(), "builds");
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in\n  image) exit 1;;\n  build) echo x >> ${count}; ` +
+    `echo "WARNING: Retrying after connection broken by 'ReadTimeoutError(\\"HTTPSConnectionPool(host='pypi.org', port=443): Read timed out.\\")'"; ` +
+    `echo "ERROR: No matching distribution found for aioredis==2.0.1"; exit 1;;\nesac\nexit 0\n`);
+  chmodSync(fake, 0o755);
+  const said: string[] = [];
+  dockerSteps.say = (m) => said.push(m);
+  const saved = networkRetry.waitSeconds;
+  networkRetry.waitSeconds = 0;
+  try {
+    await expect(withDockerAsync(fake, () => ensureEnv(parseReviewConfig(CFG), tmp(), join(tmp(), "build.log"))))
+      .rejects.toThrow(/network problem, not the install steps/);
+  } finally {
+    dockerSteps.say = null;
+    networkRetry.waitSeconds = saved;
+  }
+  expect(readFileSync(count, "utf8").trim().split("\n")).toHaveLength(2);
+  expect(said.some((m) => m.includes("trying again"))).toBe(true);
+});
+
+test("an image build does not block: timers (the progress spinner and clock) keep running during it", async () => {
+  const fake = join(tmp(), "slow-docker");
+  // image inspect fails (no image yet); the build takes 0.6 s.
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in image) exit 1;; build) cat > /dev/null; sleep 0.6;; esac\nexit 0\n`);
+  chmodSync(fake, 0o755);
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 50);
+  try {
+    await withDockerAsync(fake, () => ensureEnv(parseReviewConfig(CFG), tmp(), join(tmp(), "build.log")));
+  } finally {
+    clearInterval(timer);
+  }
+  expect(ticks).toBeGreaterThanOrEqual(5);
+});

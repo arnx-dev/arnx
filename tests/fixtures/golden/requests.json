@@ -1,0 +1,941 @@
+{
+ "anthropic/medium/reviewer": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":900,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"go\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"medium\"},\"cache_control\":{\"type\":\"ephemeral\"},\"tools\":[{\"name\":\"read_file\",\"description\":\"Read a file\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}],\"stream\":true}"
+  }
+ ],
+ "anthropic/medium/answer_model": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":900,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"go\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"medium\"},\"cache_control\":{\"type\":\"ephemeral\"},\"tools\":[{\"name\":\"read_file\",\"description\":\"Read a file\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}],\"stream\":true}"
+  }
+ ],
+ "anthropic/medium/hunter": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":16000,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"user\\n\\nReply with one JSON object matching this JSON Schema, and nothing else:\\n{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"verdict\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"verdict\\\"],\\\"additionalProperties\\\":false}\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"medium\"},\"cache_control\":{\"type\":\"ephemeral\"},\"stream\":true}"
+  }
+ ],
+ "anthropic/medium/challenger": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":16000,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"user\\n\\nReply with one JSON object matching this JSON Schema, and nothing else:\\n{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"verdict\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"verdict\\\"],\\\"additionalProperties\\\":false}\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"medium\"},\"cache_control\":{\"type\":\"ephemeral\"},\"stream\":true}"
+  }
+ ],
+ "anthropic/medium/challenger_fallback": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":16000,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"user\\n\\nReply with one JSON object matching this JSON Schema, and nothing else:\\n{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"verdict\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"verdict\\\"],\\\"additionalProperties\\\":false}\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"medium\"},\"cache_control\":{\"type\":\"ephemeral\"},\"stream\":true}"
+  }
+ ],
+ "anthropic/medium/second_hunter": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":16000,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"user\\n\\nReply with one JSON object matching this JSON Schema, and nothing else:\\n{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"verdict\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"verdict\\\"],\\\"additionalProperties\\\":false}\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"medium\"},\"cache_control\":{\"type\":\"ephemeral\"},\"stream\":true}"
+  }
+ ],
+ "anthropic/medium/second_hunter_effort": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":16000,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"user\\n\\nReply with one JSON object matching this JSON Schema, and nothing else:\\n{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"verdict\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"verdict\\\"],\\\"additionalProperties\\\":false}\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"none\"},\"cache_control\":{\"type\":\"ephemeral\"},\"stream\":true}"
+  }
+ ],
+ "anthropic/low/reviewer": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":900,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"go\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"low\"},\"cache_control\":{\"type\":\"ephemeral\"},\"tools\":[{\"name\":\"read_file\",\"description\":\"Read a file\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}],\"stream\":true}"
+  }
+ ],
+ "anthropic/low/answer_model": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":900,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"go\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"low\"},\"cache_control\":{\"type\":\"ephemeral\"},\"tools\":[{\"name\":\"read_file\",\"description\":\"Read a file\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}],\"stream\":true}"
+  }
+ ],
+ "anthropic/low/hunter": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":16000,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"user\\n\\nReply with one JSON object matching this JSON Schema, and nothing else:\\n{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"verdict\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"verdict\\\"],\\\"additionalProperties\\\":false}\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"low\"},\"cache_control\":{\"type\":\"ephemeral\"},\"stream\":true}"
+  }
+ ],
+ "anthropic/low/challenger": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":16000,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"user\\n\\nReply with one JSON object matching this JSON Schema, and nothing else:\\n{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"verdict\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"verdict\\\"],\\\"additionalProperties\\\":false}\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"low\"},\"cache_control\":{\"type\":\"ephemeral\"},\"stream\":true}"
+  }
+ ],
+ "anthropic/low/challenger_fallback": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":16000,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"user\\n\\nReply with one JSON object matching this JSON Schema, and nothing else:\\n{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"verdict\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"verdict\\\"],\\\"additionalProperties\\\":false}\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"low\"},\"cache_control\":{\"type\":\"ephemeral\"},\"stream\":true}"
+  }
+ ],
+ "anthropic/low/second_hunter": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":16000,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"user\\n\\nReply with one JSON object matching this JSON Schema, and nothing else:\\n{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"verdict\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"verdict\\\"],\\\"additionalProperties\\\":false}\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"low\"},\"cache_control\":{\"type\":\"ephemeral\"},\"stream\":true}"
+  }
+ ],
+ "anthropic/low/second_hunter_effort": [
+  {
+   "url": "https://api.anthropic.com/v1/messages",
+   "method": "POST",
+   "headers": {
+    "accept": "application/json",
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/JS 0.133.0",
+    "x-api-key": "test-anthropic",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600"
+   },
+   "body": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":16000,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"user\\n\\nReply with one JSON object matching this JSON Schema, and nothing else:\\n{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"verdict\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"verdict\\\"],\\\"additionalProperties\\\":false}\"}],\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"none\"},\"cache_control\":{\"type\":\"ephemeral\"},\"stream\":true}"
+  }
+ ],
+ "openai/medium/reviewer": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"medium\"},\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}],\"background\":true}"
+  }
+ ],
+ "openai/medium/answer_model": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"medium\"},\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}],\"background\":true}"
+  }
+ ],
+ "openai/medium/hunter": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"medium\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}},\"background\":true}"
+  }
+ ],
+ "openai/medium/challenger": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"medium\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}},\"background\":true}"
+  }
+ ],
+ "openai/medium/challenger_fallback": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"medium\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}},\"background\":true}"
+  }
+ ],
+ "openai/medium/second_hunter": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"medium\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}},\"background\":true}"
+  }
+ ],
+ "openai/medium/second_hunter_effort": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"none\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}},\"background\":true}"
+  }
+ ],
+ "openai/low/reviewer": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}],\"background\":true}"
+  }
+ ],
+ "openai/low/answer_model": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}],\"background\":true}"
+  }
+ ],
+ "openai/low/hunter": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"low\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}},\"background\":true}"
+  }
+ ],
+ "openai/low/challenger": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"low\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}},\"background\":true}"
+  }
+ ],
+ "openai/low/challenger_fallback": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"low\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}},\"background\":true}"
+  }
+ ],
+ "openai/low/second_hunter": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"low\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}},\"background\":true}"
+  }
+ ],
+ "openai/low/second_hunter_effort": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"none\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}},\"background\":true}"
+  }
+ ],
+ "river/medium/reviewer": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"high\"},\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "river/medium/answer_model": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"high\"},\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "river/medium/hunter": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"high\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "river/medium/challenger": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"high\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "river/medium/challenger_fallback": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"high\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "river/medium/second_hunter": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"high\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "river/medium/second_hunter_effort": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"none\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "river/low/reviewer": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "river/low/answer_model": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "river/low/hunter": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "river/low/challenger": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "river/low/challenger_fallback": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "river/low/second_hunter": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "river/low/second_hunter_effort": [
+  {
+   "url": "https://api.river.ai/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-river",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"zai-org/GLM-5.3-Flash\",\"stream\":true,\"reasoning\":{\"effort\":\"none\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compat/medium/reviewer": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"high\"},\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "compat/medium/answer_model": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"high\"},\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "compat/medium/hunter": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"high\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compat/medium/challenger": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"high\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compat/medium/challenger_fallback": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"high\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compat/medium/second_hunter": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"high\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compat/medium/second_hunter_effort": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"none\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compat/low/reviewer": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "compat/low/answer_model": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "compat/low/hunter": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compat/low/challenger": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compat/low/challenger_fallback": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compat/low/second_hunter": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compat/low/second_hunter_effort": [
+  {
+   "url": "https://llm.example.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"other-model\",\"stream\":true,\"reasoning\":{\"effort\":\"none\"},\"store\":false,\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compatenv/medium/reviewer": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "compatenv/medium/answer_model": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "compatenv/medium/hunter": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compatenv/medium/challenger": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compatenv/medium/challenger_fallback": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compatenv/medium/second_hunter": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compatenv/medium/second_hunter_effort": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"none\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compatenv/low/reviewer": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "compatenv/low/answer_model": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "compatenv/low/hunter": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compatenv/low/challenger": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compatenv/low/challenger_fallback": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compatenv/low/second_hunter": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"low\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "compatenv/low/second_hunter_effort": [
+  {
+   "url": "https://env.example/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-compat-env",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"some-model\",\"stream\":true,\"reasoning\":{\"effort\":\"none\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "openai/stream/reviewer": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "openai/stream/hunter": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "openai/fast/reviewer": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"medium\"},\"service_tier\":\"priority\",\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}],\"background\":true}"
+  }
+ ],
+ "openai/fast/hunter": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"medium\"},\"service_tier\":\"priority\",\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}},\"background\":true}"
+  }
+ ],
+ "openai/fast-stream/reviewer": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"service_tier\":\"priority\",\"instructions\":\"sys\",\"input\":[{\"role\":\"user\",\"content\":\"go\"}],\"max_output_tokens\":900,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}]}"
+  }
+ ],
+ "openai/fast-stream/hunter": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"service_tier\":\"priority\",\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}}}"
+  }
+ ],
+ "openai/background-poll/hunter": [
+  {
+   "url": "https://api.openai.com/v1/responses",
+   "method": "POST",
+   "headers": {
+    "authorization": "Bearer test-openai",
+    "content-type": "application/json"
+   },
+   "body": "{\"model\":\"gpt-6.1-sol\",\"reasoning\":{\"effort\":\"medium\"},\"input\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"user\"}],\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"output\",\"schema\":{\"type\":\"object\",\"properties\":{\"verdict\":{\"type\":\"string\"}},\"required\":[\"verdict\"],\"additionalProperties\":false},\"strict\":true}},\"background\":true}"
+  },
+  {
+   "url": "https://api.openai.com/v1/responses/resp_1",
+   "method": "GET",
+   "headers": {
+    "authorization": "Bearer test-openai"
+   },
+   "body": null
+  }
+ ]
+}

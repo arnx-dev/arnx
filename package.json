@@ -1,0 +1,46 @@
+{
+  "name": "@arnx-dev/arnx",
+  "version": "0.1.0",
+  "description": "Writes and runs tests for every change your coding agent makes, and asks what it cannot decide.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/arnx-dev/arnx#readme",
+  "bugs": {
+    "url": "https://github.com/arnx-dev/arnx/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arnx-dev/arnx.git"
+  },
+  "type": "module",
+  "bin": {
+    "arnx": "dist/cli.js"
+  },
+  "files": [
+    "dist/cli.js",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build:bin": "sh scripts/build.sh bin",
+    "build:node": "sh scripts/build.sh node",
+    "smoke": "sh scripts/smoke.sh",
+    "prepublishOnly": "node -e \"if (!process.env.GITHUB_ACTIONS) { console.error('arnx is published only by .github/workflows/release.yml'); process.exit(1) }\""
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.133.0",
+    "fast-xml-parser": "5.11.2",
+    "smol-toml": "1.9.1",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.9",
+    "@types/node": "24.19.2",
+    "typescript": "5.9.3"
+  }
+}

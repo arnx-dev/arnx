@@ -1,0 +1,34 @@
+name: Bug or setup failure
+description: arnx crashed, did the wrong thing, or setup could not run your tests.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Take private names, paths and code out of anything you paste. Do not attach a whole `.arnx/` folder:
+        transcripts and generated tests can quote your code.
+  - type: input
+    id: version
+    attributes:
+      label: arnx --version
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS, Docker version, language and test runner
+      placeholder: "macOS 15 arm64, Docker 28.1, TypeScript + vitest"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What you ran, what you expected, what happened
+      description: The command, and the output (private names taken out). Did it happen again on a second run?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: A small repository or steps you are allowed to share, if you have one.

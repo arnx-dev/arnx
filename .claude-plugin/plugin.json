@@ -1,0 +1,19 @@
+{
+  "name": "arnx",
+  "displayName": "arnx",
+  "version": "0.1.0",
+  "description": "Tests every change your coding agent makes: the agent runs arnx review once a change is done, fixes confirmed findings until arnx check passes, and leaves marking and accepting to you.",
+  "author": {
+    "name": "arnx-dev",
+    "url": "https://github.com/arnx-dev"
+  },
+  "homepage": "https://github.com/arnx-dev/arnx",
+  "repository": "https://github.com/arnx-dev/arnx",
+  "license": "Apache-2.0",
+  "keywords": [
+    "testing",
+    "code-review",
+    "coding-agents",
+    "sandbox"
+  ]
+}

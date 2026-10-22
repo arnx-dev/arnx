@@ -1,0 +1,9 @@
+arnx review 20261011-a1b2c3 · uncommitted (base 1a2b3c4) · 4 files, +140 −3
+1 issue confirmed, 1 disputed (2 findings).
+  ✗ 1  Any member can invite.  F1
+  · 2  Duplicates.             F2 disputed
+  ? Q1  Should invites expire?
+  1 flaky
+6 tests · $0.34 · 2m51s · .arnx/reviews/x/review.md
+Next: arnx triage
+Then: arnx accept

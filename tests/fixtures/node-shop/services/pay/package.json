@@ -1,0 +1,1 @@
+{ "name": "pay", "private": true, "scripts": { "test": "node --test" } }

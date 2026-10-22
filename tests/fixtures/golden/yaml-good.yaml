@@ -1,0 +1,17 @@
+
+version: 1
+image: python:3.12-slim
+workdir: app
+install:
+  - pip install -r requirements.txt pytest
+test_command: python -m pytest -q {targets}
+services:
+  postgres:
+    image: postgres:16-alpine
+    env: {POSTGRES_HOST_AUTH_METHOD: trust}
+    ready: pg_isready -U postgres
+env:
+  DATABASE_URL: postgresql://postgres@postgres:5432/postgres
+notes:
+  - set DATABASE_URL before importing db
+known_failing: [tests/test_network.py]

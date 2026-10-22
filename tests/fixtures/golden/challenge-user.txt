@@ -1,0 +1,19 @@
+The change:
+<diff>
+d
+</diff>
+
+The test file (app/t.py):
+<test>
+def test_1(): ...
+</test>
+
+The failing test: t.py::test_1
+The failure:
+<failure>
+assert 1 == 2
+</failure>
+
+The reviewer's explanation: (none given)
+
+Reply with JSON: {"verdict": "confirmed" or "disputed", "reason": "<one sentence>"}
