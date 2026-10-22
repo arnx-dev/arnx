@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">arnx favicon</title>
+  <rect width="64" height="64" rx="14" fill="#0F1115"/>
+  <ellipse cx="26" cy="30" rx="8.5" ry="12" fill="#FAF8F3" transform="rotate(-8 26 30)"/>
+  <ellipse cx="41" cy="28" rx="7.5" ry="11" fill="#FAF8F3" transform="rotate(-8 41 28)"/>
+  <ellipse cx="29" cy="32" rx="3.5" ry="5.5" fill="#0F1115" transform="rotate(-8 29 32)"/>
+  <ellipse cx="44" cy="30" rx="3" ry="5" fill="#0F1115" transform="rotate(-8 44 30)"/>
+</svg>
