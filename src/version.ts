@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 
 /** "<commit> <date>[ dirty]", replaced at build time; undefined when running from source. */
 declare const ARNX_BUILD: string | undefined;
