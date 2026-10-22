@@ -1,11 +1,13 @@
 // A model-free look at a repository's layout: candidate projects (from manifests), their runners and package
 // managers, workspaces, CI and compose files, and the service images they mention. It only gives hints: the setup
 // agent decides, and each project still has to prove itself by running its suite.
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import type { AdapterId } from "./adapters/types";
 import { workingTreeFiles } from "./change";
+import { loadReviewFile, reviewConfigPath } from "./config";
 import { loadIgnore } from "./ignore";
+import { notableOthers, onlyOtherLanguages, type OtherLanguage, surveyLanguages, type LanguageSurvey } from "./languages";
 
 export interface Candidate {
   root: string;
@@ -23,6 +25,8 @@ export interface Detection {
   compose: string[];
   services: string[];
   languages: Record<string, number>;
+  /** Languages arnx does not review that the repository has enough of to name (languages.ts). */
+  others?: OtherLanguage[];
 }
 
 const EXT_LANG: Record<string, string> = { py: "python", js: "typescript", jsx: "typescript", mjs: "typescript",
@@ -161,7 +165,8 @@ export function detect(repo: string, files?: string[]): Detection {
       if (!image.endsWith(":") && !image.includes("$")) services.add(image);
     }
   }
-  return { candidates, workspaces: [...workspaces].sort(), ci, compose, services: [...services].sort(), languages };
+  return { candidates, workspaces: [...workspaces].sort(), ci, compose, services: [...services].sort(), languages,
+    others: notableOthers(surveyLanguages(paths)) };
 }
 
 /** The detection as hints for the setup agent. */
@@ -185,6 +190,25 @@ export function describeDetection(d: Detection): string {
   if (d.services.length) lines.push(`Service images mentioned: ${d.services.join(", ")}`);
   const langs = Object.entries(d.languages).sort((a, b) => b[1] - a[1]).map(([l, n]) => `${l} ${n}`);
   if (langs.length) lines.push(`Source files by language: ${langs.join(", ")}`);
+  if (d.others?.length) {
+    lines.push(`Not reviewed by arnx (counted as uncovered without listing them): ${d.others.map((o) =>
+      `${o.name} ${o.files} files (${o.roots.join(", ")})`).join("; ")}`);
+  }
   return lines.join("\n");
 }
 
+/** The repository's languages, from the files a snapshot holds (minus .arnxignore), and whether arnx has nothing
+ * here it can review: only languages it does not review yet. Null when the files cannot be listed. */
+export function repoLanguages(repo: string): { survey: LanguageSurvey; onlyOthers: boolean } | null {
+  try {
+    const ignored = loadIgnore(repo);
+    const files = workingTreeFiles(repo).files.filter((p) => !ignored(p));
+    const survey = surveyLanguages(files);
+    // Projects in .arnx/review.yaml (approved or not) are what arnx reviews, whatever the files look like.
+    const configured = existsSync(reviewConfigPath(repo))
+      ? loadReviewFile(repo, { requireApproved: false }).projects.length : 0;
+    return { survey, onlyOthers: onlyOtherLanguages(survey, configured || detect(repo, files).candidates.length) };
+  } catch {
+    return null;
+  }
+}

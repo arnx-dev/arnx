@@ -29,6 +29,7 @@ import { copyManifests, dockerSteps, envKey, type Runner, type SessionFactory } 
 import { loadSettings, refString, type Settings, settingsPath } from "./settings";
 import { runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
 import { SOURCE } from "./untested";
+import { otherLanguageOf } from "./languages";
 import { agentUse, logUsage } from "./usage";
 import { randomHex } from "./util";
 import { VERSION } from "./version";
@@ -365,6 +366,8 @@ export function coverageMap(repo: string, file: ReviewFile, untracked = false): 
   const uncovered = file.uncovered.map((u) => ({ ...u, test: matcher(u.path), files: 0, untracked: 0 }));
   const unexplained: string[] = [];
   const overlaps: string[] = [];
+  // Files in languages arnx does not review need no explaining: they count as uncovered on their own, per language.
+  const others = new Map<string, { files: number; untracked: number }>();
   for (const f of files) {
     const fresh = tree.untracked.has(f);
     const owners = projects.filter((p) => p.owns(f));
@@ -380,8 +383,17 @@ export function coverageMap(repo: string, file: ReviewFile, untracked = false): 
         listed = true;
       }
     }
-    if (!owners.length && !users.length && !listed && !fresh && SOURCE.test(f)) unexplained.push(f);
+    const other = !owners.length && !users.length && !listed ? otherLanguageOf(f) : null;
+    if (other) {
+      const o = others.get(other) ?? { files: 0, untracked: 0 };
+      o.files += 1;
+      o.untracked += fresh ? 1 : 0;
+      others.set(other, o);
+    } else if (!owners.length && !users.length && !listed && !fresh && SOURCE.test(f)) unexplained.push(f);
   }
+  const auto = [...others].sort((a, b) => b[1].files - a[1].files).map(([name, o]) => ({ path: `${name} files`,
+    reason: `${name}: arnx does not review it yet`, files: o.files, test: () => false, untracked: o.untracked }));
+  uncovered.push(...auto);
   return { projects: projects.map(({ name, owned, used, untracked }) =>
     ({ name, owned, used, ...(untracked.owned || untracked.used ? { untracked } : {}) })),
   uncovered: uncovered.map(({ path, reason, files: n, untracked }) =>

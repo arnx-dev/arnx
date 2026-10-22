@@ -360,6 +360,7 @@ the copy under its old name is removed.
 |---|---|
 | `route.ts` | Which projects review a change; what no project covers |
 | `detect.ts` | Layout found without a model: candidate projects, runners, workspaces, services |
+| `languages.ts` | Languages found without a model (extensions, manifests, vendored folders left out): a repository written only in languages arnx does not review fails doctor's `Languages` check, so setup and review stop before any model call; in a mixed one their files count as uncovered on their own |
 | `cli.ts` | Argument parsing, prompts, printing, exit codes; all I/O is injectable for tests |
 | `main.ts` | Entry point for both builds; SIGINT and SIGTERM go to `interrupt.ts` |
 | `interrupt.ts` | On SIGINT/SIGTERM: tear down running sessions, cancel in-flight OpenAI background responses, exit 130/143 |

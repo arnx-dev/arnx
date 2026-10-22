@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { repoLanguages } from "./detect";
+import { unsupportedText } from "./languages";
 // arnx command line. Exit codes: 0 no confirmed findings, 1 confirmed findings, 2 incomplete or failed, 3 setup
 // required, 4 (check only) accepted tests changed since accept, 130 interrupted.
 import BANNER_ANSI from "../assets/banner.ans" with { type: "text" };
@@ -350,19 +352,22 @@ class Commands {
     if (!write && a.values.cloud && now && !cloud) {
       this.d.out("It uses your own keys; `arnx cloud on` switches it to arnx cloud.");
     }
+    const langs = repoLanguages(repo);
+    if (langs?.onlyOthers) this.d.out(`Note: ${unsupportedText(langs.survey)}`);
     this.d.out("");
     // The flow's next step; with arnx cloud and no login, the login first.
     const then = whatNext(repo).command;
-    const next = cloud && !tokenFor(this.d.env, cloudUrl(now, this.d.env)) && callsModels(then)
-      ? ["arnx login", then] : [then];
-    this.d.out(`Next: ${next[0]}`);
+    // Nothing to set up in a repository arnx cannot review: the note above says so instead.
+    const next = langs?.onlyOthers ? []
+      : cloud && !tokenFor(this.d.env, cloudUrl(now, this.d.env)) && callsModels(then) ? ["arnx login", then] : [then];
+    if (next[0]) this.d.out(`Next: ${next[0]}`);
     if (next[1]) this.d.out(`Then: ${next[1]}`);
     const skill = skillStates(repo).every((st) => st.state === "same");
     if (!skill) this.d.out("Optional: arnx skill install (coding agents)");
     const action = !existed ? "created" : force ? "replaced" : "kept";
     this.emit("ok", 0, { state: !existed ? "created" : force ? "replaced" : "already-initialized",
       files: [{ path: config, action }, { path: IGNORE_FILE, action: ignore ? "created" : "kept" }], cloud, next,
-      skill_installed: skill });
+      skill_installed: skill, ...langs?.onlyOthers ? { unsupported: unsupportedText(langs.survey) } : {} });
     return 0;
   }
 
@@ -519,6 +524,10 @@ class Commands {
     const [ok, detail] = this.d.dockerOk();
     // The label says Docker: "not running", not "Docker is not running".
     checks.push([ok, "Docker", detail.replace(/^Docker is /, "")]);
+    // Shown only when it fails: a repository written only in languages arnx does not review stops here, before any
+    // model is called.
+    const langs = repoLanguages(repo);
+    if (langs?.onlyOthers) checks.push([false, "Languages", unsupportedText(langs.survey)]);
     return { checks, file, mode, s };
   }
 

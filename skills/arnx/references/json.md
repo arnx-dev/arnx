@@ -39,8 +39,9 @@ Every other field is the command's own, in snake_case. Paths are relative to the
 | `state` | string | `created` (there was no `.arnx/config.toml`), `already-initialized` (it was there and is kept as it is) or `replaced` (`--force` rewrote it). |
 | `files` | array | The files init looks after, each `{ path, action }`: `.arnx/config.toml` and `.arnxignore`; `action` is `created`, `kept` or `replaced`. |
 | `cloud` | boolean | Models from arnx cloud. `false` after `--cloud` on an existing configuration means it kept your own keys: `arnx cloud on` switches. |
-| `next` | array of strings | The commands to run next, in order (`["arnx setup"]`, or `["arnx login", "arnx setup"]` with arnx cloud and no login). |
+| `next` | array of strings | The commands to run next, in order (`["arnx setup"]`, or `["arnx login", "arnx setup"]` with arnx cloud and no login); empty in a repository arnx cannot review. |
 | `skill_installed` | boolean | This arnx's skill is in every skill folder of the repository; `false`: `arnx skill install`. |
+| `unsupported` | string | Only in a repository written in languages arnx does not review: the note init prints, naming them. |
 
 | `result` | Exit | When |
 |---|---|---|
@@ -51,7 +52,7 @@ Every other field is the command's own, in snake_case. Paths are relative to the
 | Field | Type | Meaning |
 |---|---|---|
 | `ready` | boolean | A review can run now. |
-| `checks` | array | Every check, in doctor's order, each `{ name, ok, detail }`: `name` is `configuration`, `models`, `keys` (your own keys) or `login` and `credits` (arnx cloud), `docker`, `consent`, `environment`; `ok` is `true` (✓), `false` (✗) or `null` (·, not done yet: the flow does it next, not a problem); `detail` is the line's text. |
+| `checks` | array | Every check, in doctor's order, each `{ name, ok, detail }`: `name` is `configuration`, `models`, `keys` (your own keys) or `login` and `credits` (arnx cloud), `docker`, `languages` (only when it fails: the repository is written only in languages arnx does not review), `consent`, `environment`; `ok` is `true` (✓), `false` (✗) or `null` (·, not done yet: the flow does it next, not a problem); `detail` is the line's text. |
 | `next` | string or null | The command to run next; `null` while a check fails (fix the `ok: false` ones). |
 | `models` | string | `byom` (your own keys) or `cloud` (arnx cloud). Absent when the models in effect are unknown (no configuration, or a bad `ARNX_MODELS`). |
 | `providers` | array | The provider tables a role uses, each `{ name, api, host, key_env, key_set }` (`key_env` is the variable's name; its value is never shown). Empty when only built-in providers are used. |

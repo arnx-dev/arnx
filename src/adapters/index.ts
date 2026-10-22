@@ -10,7 +10,7 @@ const ADAPTERS: Partial<Record<AdapterId, Adapter>> = { python, typescript, rust
 
 export function getAdapter(id: string): Adapter {
   if (!(LANGUAGES as string[]).includes(id)) {
-    throw new ArnxError(`unknown language ${JSON.stringify(id)}; arnx knows ${LANGUAGES.join(", ")}`);
+    throw new ArnxError(`unknown language ${JSON.stringify(id)}; arnx reviews ${Object.keys(ADAPTERS).join(", ")}`);
   }
   const adapter = ADAPTERS[id as AdapterId];
   if (!adapter) {

@@ -178,7 +178,8 @@ broke and how long setup took.
 ## Known limits
 
 - Changes up to 200 KB per review; review a long branch in parts with `--range A..B`.
-- Python, JavaScript/TypeScript and Rust only. No Windows build: use WSL 2.
+- Python, JavaScript/TypeScript and Rust only (`arnx init` and `arnx doctor` say so for a repository in another
+  language, before anything is sent). No Windows build: use WSL 2.
 - Setup marks test files it cannot run as `known_failing`, with a reason that is a model's judgement: read those
   entries in `.arnx/review.yaml` before approving.
 - Model replies vary: two reviews of the same change can report different findings.
