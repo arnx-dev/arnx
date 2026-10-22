@@ -51,7 +51,7 @@ Every other field is the command's own, in snake_case. Paths are relative to the
 | Field | Type | Meaning |
 |---|---|---|
 | `ready` | boolean | A review can run now. |
-| `checks` | array | Every check, in doctor's order, each `{ name, ok, detail }`: `name` is `configuration`, `models`, `keys` (your own keys) or `login` and `credits` (arnx cloud), `docker`, `consent`, `environment`; `ok` is `true` (✓), `false` (✗) or `null` (·, not done yet: the flow does it next, not a problem); `detail` is the line's text. |
+| `checks` | array | Every check, in doctor's order, each `{ name, ok, detail }`: `name` is `configuration`, `models`, `keys` (your own keys) or `login` and `credits` (arnx cloud), `docker`, `languages` (only when it fails: the repository is written only in languages arnx does not review), `consent`, `environment`; `ok` is `true` (✓), `false` (✗) or `null` (·, not done yet: the flow does it next, not a problem); `detail` is the line's text. |
 | `next` | string or null | The command to run next; `null` while a check fails (fix the `ok: false` ones). |
 | `models` | string | `byom` (your own keys) or `cloud` (arnx cloud). Absent when the models in effect are unknown (no configuration, or a bad `ARNX_MODELS`). |
 | `providers` | array | The provider tables a role uses, each `{ name, api, host, key_env, key_set }` (`key_env` is the variable's name; its value is never shown). Empty when only built-in providers are used. |
