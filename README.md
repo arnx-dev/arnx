@@ -114,7 +114,8 @@ More in [docs/WORKFLOW.md](docs/WORKFLOW.md).
 ## The workflow
 
 1. **setup** reads the repository, proposes one project per unit whose tests run on their own, and checks each by
-   running its suite in Docker. You approve it once; a changed environment needs approving again.
+   running its suite in Docker (no tests yet? arnx's own one-line test checks it instead). You approve it once; a
+   changed environment needs approving again.
 2. **review** writes tests for the change, runs them 3 times, runs the failures on the code before the change, asks
    a second model, and writes `.arnx/reviews/<id>/review.md` with what was tested and what was not.
 3. **triage** (or edit review.md) marks each issue and answers arnx's questions; answers become tests too.

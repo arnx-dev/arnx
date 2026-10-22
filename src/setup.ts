@@ -1,8 +1,8 @@
 // Setup: an agent reads the repository and proposes `.arnx/review.yaml` as a list of projects, proving each one by
 // building its environment and running its existing suite. The user approves; approval runs the suites once more and
 // stamps the file.
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync }
-  from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync,
+  writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { Workspace } from "./agent";
@@ -15,7 +15,7 @@ import {
   loadReviewFile, parseReviewFile, projectDigest, readSecretPins, type ReviewConfig, reviewConfigPath, type ReviewFile,
   secretPinsOf, secretPinsYaml, stamp, stampFile,
 } from "./config";
-import { type Detection, describeDetection, detect, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
+import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
 import { describeHints, diagnose, firstLine, type Hint, passingApart, unexplainedFiles } from "./diagnose";
 import type { FailureModel } from "./jev";
 import { ArnxError } from "./errors";
@@ -129,6 +129,39 @@ function ownTestsIn(cfg: ReviewConfig, snap: string, acceptedTestsDir?: string):
     ? ownTestsInWriteDir(cfg, collect(snap, dir, getAdapter(cfg.language).writable), acceptedTestsDir) : [];
 }
 
+/** Folders that hold other people's code, never the project's own tests (build output is rarely committed, and a
+ * test there is still a test). */
+const NOT_OWN = new Set(["node_modules", ".git", ".venv", "venv", "__pycache__", ".arnx-run"]);
+/** Runner configuration that names its own test files (pytest python_files, jest testMatch/testRegex, a vitest
+ * test.include): file names alone cannot tell such a project has no tests. */
+const CUSTOM_TESTS = /\bpython_files\b|\btestMatch\b|\btestRegex\b|\btest\s*:\s*\{[^}]*\binclude\b/s;
+const RUNNER_CONFIG = /^(?:pytest\.ini|pyproject\.toml|setup\.cfg|tox\.ini|package\.json|(?:jest|vitest|vite)\.config\.[cm]?[jt]s)$/;
+
+/** Whether a Python or JavaScript/TypeScript project has test files of its own in the snapshot (the folder arnx writes
+ * its tests to left out), or may have: runner configuration naming its own test files counts too. Rust is never
+ * asked: its tests sit inside source files. */
+export function hasOwnTests(cfg: ReviewConfig, snap: string): boolean {
+  const root = join(snap, cfg.workdir);
+  if (existsSync(root) && readdirSync(root).some((n) => RUNNER_CONFIG.test(n) &&
+    CUSTOM_TESTS.test(readFileSync(join(root, n), "utf8")))) return true;
+  const generated = writeDirOf(cfg);
+  const visit = (rel: string): boolean => {
+    const abs = join(snap, rel);
+    for (const name of readdirSync(abs)) {
+      const r = rel === "." ? name : `${rel}/${name}`;
+      // lstat: a link a run made (node_modules from the image) is not the project's.
+      const st = lstatSync(join(abs, name));
+      if (r === generated) continue;
+      if (st.isDirectory() ? !NOT_OWN.has(name) && visit(r) : st.isFile() && isTestPath(r)) return true;
+    }
+    return false;
+  };
+  return existsSync(join(snap, cfg.workdir)) && visit(cfg.workdir);
+}
+
+/** The summary of a project with no tests of its own whose environment arnx's one-line test proved. */
+export const NO_OWN_TESTS = "no tests of its own; arnx's one-line test runs";
+
 /** Most failing files run apart from the rest of the suite to look for order dependence (one extra run). */
 const APART_MAX = 20;
 
@@ -159,6 +192,11 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
   return sessionFactory(cfg, snap, buildLog, async (session) => {
     type Out = [boolean, string, string, string[], string[], string, SuiteCounts];
     const [result, all] = runTests(session, snap, cfg, targets, "suite.xml", SUITE_TIMEOUT);
+    // A project with no tests of its own has no suite to run: arnx's one-line test, which reviews depend on anyway,
+    // proves the environment instead (dexdash's setup took 16 tries and wrote a placeholder test into test_command).
+    if (!targets.length && !all?.length && cfg.language !== "rust" && !hasOwnTests(cfg, snap)) {
+      return noOwnTests(session, snap, cfg, all === null, tailOf);
+    }
     const [ok, summary, counts] = suiteOk(all, cfg, accepted, acceptedTestsDir);
     // Accepted tests that fail as pinned are not the environment's to fix: diagnosis and retries leave them out.
     const results = withoutAccepted(all, cfg, accepted, acceptedTestsDir);
@@ -201,6 +239,34 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
         "option in test_command). Either set tests_dir to a new folder the runner includes, or fix test_command",
         tailOf(tail), skips, failing, "", counts] as Out;
   }, undefined, key);
+}
+
+/** runSuite's answer for a project with no tests of its own: its environment proven by arnx's one-line test (and the
+ * type check), or why that test did not run. `silent`: the whole-suite run wrote no report. */
+function noOwnTests(session: Runner, snap: string, cfg: ReviewConfig, silent: boolean, tailOf: (s: string) => string)
+  : [boolean, string, string, string[], string[], string, SuiteCounts] {
+  const none: SuiteCounts = { acceptedFailing: 0, unexpected: [] };
+  const [probed, tail, ignored] = probe(session, snap, cfg);
+  if (!probed) {
+    return [false, `the project has no tests of its own${silent ? " (the suite wrote no report)" : ""}, and arnx's ` +
+      `one-line test placed in ${writeDirOf(cfg)}/ did not run either: install the runner in install (the project may ` +
+      "not list it; installing it outside the repository, for example under /opt/deps, keeps the manifests as they " +
+      "are) and give a test_command that runs it on {targets}. Do not write tests in test_command: arnx writes them",
+      tailOf(tail), [], [], "", none];
+  }
+  if (ignored) return [false, `${NO_OWN_TESTS}; but ${ignored}`, tailOf(tail), [], [], "", none];
+  if (cfg.typecheck) {
+    const t = runTypecheck(session, cfg);
+    if (t.status === "failed" || t.status === "timed-out") {
+      return [false, `${NO_OWN_TESTS}; but the type check (typecheck) ${t.status === "failed" ? "failed without " +
+        "reporting a type error: it could not start, or its output is not tsc's" : `timed out after ` +
+        `${TYPECHECK_TIMEOUT} s`}`, tailOf(t.output), [], [], "", none];
+    }
+    const errors = t.errors.length;
+    return [true, `${NO_OWN_TESTS}; type check: ${errors ? plural(errors, "type error") : "no type errors"}`,
+      tailOf(tail), [], [], "", none];
+  }
+  return [true, NO_OWN_TESTS, tailOf(tail), [], [], "", none];
 }
 
 /** Most failing files asked of the experimental failure model per run. */
@@ -680,8 +746,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const typed = cfg.language === "typescript" && !cfg.typecheck && typeCheckable(read, cfg.workdir)
         ? ` ${name} has a tsconfig.json and typescript among its dependencies: add typecheck (for example ` +
           `${TYPECHECK_EXAMPLE}, with the same node_modules link as test_command) and try it again.` : "";
-      return `the suite of ${name} runs: ${summary}.${red}${skipped}${typed} When every project runs, submit the file with ` +
-        "propose.";
+      const bare = summary.startsWith(NO_OWN_TESTS) ? ` ${name} has no tests of its own, which is fine: reviews run the ` +
+        "tests arnx writes with this test_command. Do not write tests for it." : "";
+      return `the suite of ${name} runs: ${summary}.${bare}${red}${skipped}${typed} When every project runs, submit the ` +
+        "file with propose.";
     };
     const propose = async (args: Record<string, unknown>): Promise<string> => {
       const parsed = parse(args);

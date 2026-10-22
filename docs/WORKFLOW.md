@@ -21,6 +21,11 @@ more later; `arnx setup --project NAME` redoes one project. Projects that instal
 one lockfile at the root) share one environment image when they have the same `image`, `install` and
 `install_root` (the directory the install runs in); otherwise each project builds its own.
 
+A project with no tests of its own (common in apps a coding agent built) is fine: setup checks its environment with
+arnx's own one-line test instead of a suite, and says so in the table (`no tests of its own; arnx's one-line test
+runs`). Reviews then run only the tests arnx writes. A `test_command` that deletes or writes files (`rm`, `mv`, `cp`,
+`sed -i`, `tee`, `> file`) is refused: every run must see the repository as it is.
+
 Before it starts, setup says what it will do and gives a rough time and cost estimate. While it runs, it shows on
 stderr each model reply, each file it reads and each suite it runs (`--quiet` turns this off; `approve` does the
 same). It then shows one line per project and what to check before approving: tests skipped for want of a service

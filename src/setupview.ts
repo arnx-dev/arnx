@@ -19,8 +19,11 @@ export function setupPreview(repo: string, s: Settings, untracked = s.untracked)
   const found = detect(repo, filesAt(repo, null, untracked)).candidates;
   const n = Math.max(found.filter((c) => !/^0 test files/.test(c.evidence[0] ?? "")).length, 1);
   const minutes = MIN_PER_PROJECT.map((m) => m * n + 1);
+  // Said before anything runs: with no tests of its own, a project is checked with arnx's tests, not a suite.
+  const bare = found.length > 0 && found.every((c) => c.language !== "rust" && /^0 test files/.test(c.evidence[0] ?? ""));
   return `Setup${s.cloud?.models ? " with arnx cloud" : ""}: finding how to run your tests in Docker (about ` +
-    `${minutes[0]}–${minutes[1]} min, stops at $${s.setupBudgetUsd.toFixed(2)}).`;
+    `${minutes[0]}–${minutes[1]} min, stops at $${s.setupBudgetUsd.toFixed(2)}).` +
+    (bare ? " No tests of your own were found: arnx checks the environment with its own one-line test." : "");
 }
 
 const pad = (rows: string[][]): string[] => {

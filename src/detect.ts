@@ -35,6 +35,9 @@ const EXT_LANG: Record<string, string> = { py: "python", js: "typescript", jsx: 
 const TEST_FILE = /(^|\/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*\.(test|spec)\.[cm]?[jt]sx?|tests\/[^/]+\.rs)$|(^|\/)(test|tests|__tests__)\/(.+\/)?[^/]+\.[cm]?[jt]sx?$/;
 /** Rust unit tests live inside src/ files. */
 const RUST_TEST = /#\[(cfg\(test\)|test|tokio::test)\]/;
+
+/** Whether a path (relative to anywhere) names a Python or JavaScript/TypeScript test file by the usual conventions. */
+export const isTestPath = (p: string) => TEST_FILE.test(p) && !p.endsWith(".rs");
 const LOCKS: [string, string][] = [["pnpm-lock.yaml", "pnpm"], ["yarn.lock", "yarn"], ["bun.lock", "bun"],
   ["bun.lockb", "bun"], ["package-lock.json", "npm"], ["npm-shrinkwrap.json", "npm"]];
 /** Manifests under these directories are test data (fixtures, sample apps of a test suite), not projects. */
@@ -43,6 +46,8 @@ const MAX_LISTED = 40;
 const LANGUAGE_NAMES: Record<string, string> = { python: "Python", typescript: "JavaScript/TypeScript", rust: "Rust" };
 
 const dirOf = (p: string) => posix.dirname(p);
+const list = (xs: string[], max = 10) =>
+  xs.slice(0, max).join(", ") + (xs.length > max ? `, … (${xs.length} in all)` : "");
 const ancestors = (dir: string): string[] => {
   const out = [dir];
   while (dir !== ".") {
@@ -181,6 +186,13 @@ export function describeDetection(d: Detection): string {
     lines.push(`- ${c.root}: ${parts.join(", ")} (${c.evidence.join("; ")})`);
   }
   if (!d.candidates.length) lines.push("- no manifests found");
+  const bare = d.candidates.filter((c) => c.language !== "rust" && c.language !== "other" &&
+    /^0 test files/.test(c.evidence[0] ?? "")).map((c) => c.root);
+  if (bare.length) {
+    lines.push(`No test files of their own: ${list(bare)}. That is fine: try_project proves such a project with ` +
+      "arnx's one-line test instead of a suite. Install its runner in install when the project does not list it, " +
+      "and never write tests in test_command.");
+  }
   if (d.candidates.length > MAX_LISTED) {
     lines.push(`... ${d.candidates.length - MAX_LISTED} more candidates (fewer tests; list directories to see them)`);
   }
