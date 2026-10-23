@@ -215,14 +215,14 @@ export function bakedKey(key: string, copies: BakedCopy[], snap: string): string
   return `${key}-src-${h.digest("hex").slice(0, 12)}`;
 }
 
-const few = (xs: string[]) => xs.slice(0, 3).join(", ") + (xs.length > 3 ? `, and ${xs.length - 3} more` : "");
 const where = (b: Baked) => [...new Set(b.copies.map((c) => c.root))].join(", ");
 
 /** Said when the image holds an older copy of the code, so an image of this code is used (built if missing). */
 export const rebuildText = (cfg: ReviewConfig, b: Baked) =>
   `${cfg.name}: the test image holds an older copy of the code (${where(b)}); using one made from this code`;
 
-/** Why a run on code the image's copy does not match is refused. */
-export const bakedError = (cfg: ReviewConfig, b: Baked) => new ArnxError(`${cfg.name}: the test image holds a copy ` +
-  `of the code at ${where(b)} that differs from the code to test in ${b.differ.length} ` +
-  `file${b.differ.length === 1 ? "" : "s"} (${few(b.differ)}); tests would run that copy`);
+/** Why a run on code the image's copy does not match is refused (one short line: the before/after check quotes it in
+ * each finding). */
+export const bakedError = (cfg: ReviewConfig, b: Baked) => new ArnxError(`${cfg.name}: the tests run the image's own ` +
+  `copy of the code at ${where(b)}, which differs from this code in ${b.differ.length} ` +
+  `file${b.differ.length === 1 ? "" : "s"}`);
