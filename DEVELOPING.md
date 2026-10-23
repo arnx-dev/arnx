@@ -83,6 +83,7 @@ fields are in `skills/arnx/references/json.md` and `check-json.md`; `tests/json-
         snapshot           change.ts     copy of the code at the change's head, secrets removed
         agentRound         localbrain.ts the brain's round starts; with --hunt the tool-less hunters start now
         dockerSession      sandbox.ts    build the env image once, start services, internal network
+          bakedIn          baked.ts      an older copy of the code in the image: use an image made from this code
           (tools)          testround.ts  the brain gets the tools; after each final reply, the facts
           runAgent         agent.ts      the model reads, writes tests, runs them (tools only, no shell)
         runTests x3        outcomes.ts   the adapter's command and report -> passed / failed / error, per run
@@ -138,8 +139,9 @@ snapshot of the base gets the round's generated files exactly as they ran and no
 files with findings run, `runs` times, each with the final runs' timeout, in the change's image (`SessionFactory`'s
 `envFrom`). A same failure is the same first line of the message (addresses evened out); when the change also alters
 what keys the image (its dependencies), a same failure proves nothing and is `unknown`. A check that cannot run (no
-base, out of time, an error) never stops the review; "out of time" is testRound's `before.deadline`, which nothing sets
-yet (a review has no overall time limit today). Each finding in review.json carries `before: {status, detail, runs,
+base, out of time, an error, an image holding a copy of the code that differs from the base: `baked.ts`) never stops
+the review; "out of time" is testRound's `before.deadline`, which nothing sets yet (a review has no overall time
+limit today). Each finding in review.json carries `before: {status, detail, runs,
 message?}` (`runs`: its outcome in each run there); `timings.before_check_secs` is the check's time summed over projects
 (they run side by side, so it can exceed the wall time it added). When the check had nothing to compare against (a first
 commit or no commits yet, or a base holding none of the changed source files), review.json has `before_base_empty`
@@ -370,6 +372,7 @@ the copy under its old name is removed.
 | `ignore.ts` | `.arnxignore` matching, and the proposal of data-like files for `init` |
 | `change.ts` | Resolve the change; build the snapshot |
 | `sandbox.ts` | Docker: env image, locked-down runs, services, timeouts, cleanup of live sessions |
+| `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, compared with the code to test |
 | `outcomes.ts` | Run tests through the adapter; classify results across runs |
 | `before.ts` | The before/after check's comparison: a finding's runs on the code before the change against its failure |
 | `typecheck.ts` | The project's own type check: tsc's output read, errors on the change against those before it, in words |
