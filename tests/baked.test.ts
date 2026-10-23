@@ -131,8 +131,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: code baked into the ima
       cpSync(write(join(tmp(), `src-${value}`), code(value)), before, { recursive: true });
     };
     await expect(read(before, head, fill(v - 1))).rejects.toThrow(
-      "main: the test image holds a copy of the code at /opt/app that differs from the code to test in 1 file " +
-      "(app/a.py); tests would run that copy");
+      "main: the tests run the image's own copy of the code at /opt/app, which differs from this code in 1 file");
     const same = join(tmp(), "same");
     expect(await dockerSession(parseReviewConfig(BAKED), same, join(tmp(), "build.log"), async (s) => {
       cpSync(head, same, { recursive: true });
