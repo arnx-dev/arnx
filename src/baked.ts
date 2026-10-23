@@ -1,8 +1,10 @@
 // Copies of the project's code baked into an environment image. Each run mounts the code under test at /src, but an
 // install step can copy the project somewhere else first (`cp -r . /opt/web && next build`): tests that run there
 // test that copy, as it was when the image was built, not the change. The image key holds only the manifests, so the
-// copy is never refreshed. arnx finds such copies by path and content; when they differ from the code under test it
-// builds the image again from that code, or, when that code is not there yet (the before/after check), refuses.
+// copy is never refreshed. arnx finds such copies by path and content, keeps those the tests reach (a path the commands
+// name, or a symlink under one); when they differ from the code under test it builds the image again from that code,
+// or, when that code is not there yet (the before/after check), refuses. A copy made only to install from
+// (`cp -r packages /opt/deps && bun install`, its links pointing back to /src) is left alone.
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
@@ -90,6 +92,26 @@ export function findCopies(imagePaths: string[], scopes: { scope: string; files:
   return copies.sort((a, b) => a.root.localeCompare(b.root));
 }
 
+/** The absolute paths the project's test command, type check and environment name, outside /src (the code under
+ * test is mounted there): where its runs can reach into the image. */
+export function commandPaths(cfg: Pick<ReviewConfig, "testCommand" | "typecheck" | "env">): string[] {
+  const text = [cfg.testCommand, cfg.typecheck ?? "", ...Object.values(cfg.env)].join("\n");
+  const paths = [...text.matchAll(/(?<![\w.~$}/-])\/[^\s'"`;&|()<>:,=]*/g)].map((m) => m[0].replace(/\/+$/, ""));
+  return [...new Set(paths)].filter((p) => p && p !== "/src" && !p.startsWith("/src/")).sort();
+}
+
+const under = (p: string, dir: string) => dir === "/" || p === dir || p.startsWith(`${dir}/`);
+/** `p` inside `root` without passing through a dependency folder (a copy's node_modules is not its code). */
+const into = (p: string, root: string) =>
+  under(p, root) && !p.slice(root.length).split("/").some((s) => PRUNED_NAMES.includes(s));
+
+/** Whether runs reach a copy at `root`: a path the commands name leads into it or holds it, or a symlink under such a
+ * path (a workspace link in node_modules) resolves into it. `links` are [symlink, resolved target]. */
+export function reached(root: string, paths: string[], links: [string, string][]): boolean {
+  return paths.some((p) => into(p, root) || under(root, p)) ||
+    links.some(([link, target]) => paths.some((p) => under(link, p)) && into(target, root));
+}
+
 const inScope = (scope: string, f: string) => (scope ? `${scope}/${f}` : f);
 const sha256 = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
 
@@ -134,6 +156,20 @@ function imageFiles(image: string): string[] {
   return paths;
 }
 
+/** The symlinks under `paths` in the image, each with the path it resolves to; none when the image cannot say. */
+function imageLinks(image: string, paths: string[]): [string, string][] {
+  if (!paths.length) return [];
+  try {
+    const r = docker(["run", "--rm", "--network", "none", image, "sh", "-c", `for p; do [ -e "$p" ] || [ -L "$p" ] ` +
+      `|| continue; find "$p" -type l 2>/dev/null; done | while IFS= read -r l; do ` +
+      `printf '%s\\t%s\\n' "$l" "$(readlink -f "$l")"; done; true`, "sh", ...paths], { timeout: 300 });
+    return r.stdout.split("\n").map((l) => l.split("\t")).filter((p): p is [string, string] =>
+      p.length === 2 && p[0]!.startsWith("/") && p[1]!.startsWith("/"));
+  } catch {
+    return [];
+  }
+}
+
 /** sha256 of each path in the image; null when the image cannot say (no sha256sum). */
 function imageHashes(image: string, paths: string[]): Map<string, string> | null {
   let stdout: string;
@@ -151,9 +187,12 @@ function imageHashes(image: string, paths: string[]): Map<string, string> | null
   return out.size ? out : null;
 }
 
-/** What `image` holds of the snapshot's code; null when it holds no copy, or the image cannot tell. */
+/** What `image` holds of the snapshot's code that runs reach; null when it holds no such copy, or cannot tell. */
 export function bakedIn(cfg: ReviewConfig, image: string, snap: string): Baked | null {
-  const copies = findCopies(imageFiles(image), scopesOf(cfg, snap));
+  const paths = commandPaths(cfg);
+  let links: [string, string][] | undefined;
+  const copies = findCopies(imageFiles(image), scopesOf(cfg, snap)).filter((c) =>
+    reached(c.root, paths, []) || reached(c.root, paths, links ??= imageLinks(image, paths)));
   if (!copies.length) return null;
   const hashes = imageHashes(image, copies.flatMap((c) => c.files.map((f) => inRoot(c.root, f))));
   if (!hashes) {

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { bakedKey, differing, findCopies, scopeFiles } from "../src/baked";
+import { bakedKey, commandPaths, differing, findCopies, reached, scopeFiles } from "../src/baked";
 import { parseReviewConfig } from "../src/config";
 import { dockerSteps } from "../src/sandbox";
 import { dockerSession } from "../src/testround";
@@ -54,6 +54,27 @@ test("files whose copy has other contents, or no hash, differ", () => {
   expect(differing(copies, hashes, snap)).toEqual(["web/c.ts", "web/src/a.ts"]);
 });
 
+test("the paths runs reach are those the commands and environment name, outside /src", () => {
+  expect(commandPaths({ testCommand: "cd /opt/web && node --test {targets}", typecheck: "ln -sfn " +
+    "/opt/web/node_modules node_modules && npx tsc -p ./tsconfig.json", env: { PYTHONPATH: "/opt/lib:/src/app",
+    DIR: "${HOME}/x" } })).toEqual(["/opt/lib", "/opt/web", "/opt/web/node_modules"]);
+});
+
+test("a copy counts only when runs reach it: by a named path, or a symlink under one", () => {
+  // an app built into a copy: the tests run inside it
+  expect(reached("/opt/web", ["/opt/web"], [])).toBe(true);
+  expect(reached("/opt/app", ["/opt"], [])).toBe(true);
+  // a copy made to install from: only its dependencies are named, its workspace links point back to /src
+  const deps = ["/opt/deps/node_modules", "/opt/deps/node_modules/.bin/tsc"];
+  const links: [string, string][] = [["/opt/deps/node_modules/@x/api", "/src/packages/api"],
+    ["/opt/deps/packages/api/node_modules/@x/shared", "/opt/deps/packages/shared"]];
+  expect(reached("/opt/deps", deps, links)).toBe(false);
+  // the same install whose workspace links lead into the copy
+  expect(reached("/opt/deps", deps, [["/opt/deps/node_modules/@x/api", "/opt/deps/packages/api"]])).toBe(true);
+  expect(reached("/opt/deps", deps, [["/opt/deps/node_modules/.bin/tsc", "/opt/deps/node_modules/ts/tsc"]]))
+    .toBe(false);
+});
+
 test("the rebuilt image's key follows the code it holds", () => {
   const snap = write(tmp(), { "web/src/a.ts": "1", "web/b.ts": "b", "web/package.json": "{}" });
   const copies = [{ root: "/opt/web", scope: "web", files: ["b.ts", "src/a.ts"] }];
@@ -79,10 +100,10 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: code baked into the ima
   let image = 0;
   const code = (value: number) => ({ "app/requirements.txt": `# ${image}\n`, "app/a.py": `VALUE = ${value}\n`,
     "app/b.py": "B = 1\n", "app/c.py": "C = 1\n" });
-  const read = (snap: string, envFrom?: string, fill?: () => void) =>
-    dockerSession(parseReviewConfig(BAKED), snap, join(tmp(), "build.log"), async (s) => {
+  const read = (snap: string, envFrom?: string, fill?: () => void, config = BAKED, file = "/opt/app/a.py") =>
+    dockerSession(parseReviewConfig(config), snap, join(tmp(), "build.log"), async (s) => {
       fill?.();
-      return s.run("cat /opt/app/a.py", 60).output.trim();
+      return s.run(`cat ${file}`, 60).output.trim();
     }, envFrom);
 
   test("a copy older than the code is built again for it; a copy that matches is used as it is", async () => {
@@ -117,5 +138,25 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: code baked into the ima
       cpSync(head, same, { recursive: true });
       return s.run("cat /opt/app/a.py", 60).output.trim();
     }, head)).toBe(`VALUE = ${v}`);
+  }, 600_000);
+
+  test("a copy the runs do not reach is left alone", async () => {
+    const said: string[] = [];
+    const saved = dockerSteps.say;
+    dockerSteps.say = (m) => said.push(m);
+    try {
+      const unused = BAKED.replace("cd /opt/app && ", "");
+      const v = image = Date.now();
+      const head = write(join(tmp(), "head"), code(v));
+      expect(await read(head, undefined, undefined, unused, "/src/app/a.py")).toBe(`VALUE = ${v}`);
+      expect(await read(write(join(tmp(), "next"), code(v + 1)), undefined, undefined, unused, "/src/app/a.py"))
+        .toBe(`VALUE = ${v + 1}`);
+      const before = join(tmp(), "before");
+      const fill = () => cpSync(write(join(tmp(), "old"), code(v - 1)), before, { recursive: true });
+      expect(await read(before, head, fill, unused, "/src/app/a.py")).toBe(`VALUE = ${v - 1}`);
+      expect(said.filter((m) => m.includes("older copy"))).toEqual([]);
+    } finally {
+      dockerSteps.say = saved;
+    }
   }, 600_000);
 });
