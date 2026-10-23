@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { type AgentResult, Workspace } from "./agent";
 import { adapterFor } from "./adapters";
+import { bakedError, bakedIn, bakedKey, rebuildText } from "./baked";
 import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
   fixText, judgeBefore, judgeFix, notChecked, SKIP_REASONS } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
@@ -15,7 +16,8 @@ import { snapshot } from "./change";
 import { type ReviewConfig, secretPinsOf } from "./config";
 import { clip, emit, testMessage } from "./events";
 import { type Classified, classify, describeRun, funcOf, ownerFile, runTests, type TestResult } from "./outcomes";
-import { ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, Session, type SessionFactory } from "./sandbox";
+import { dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, Session, type SessionFactory }
+  from "./sandbox";
 import type { Say } from "./progress";
 import { describeTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
   typeCheckOf } from "./typecheck";
@@ -43,10 +45,32 @@ export interface Round {
 
 export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, envFrom, key) => {
   requireDocker();
-  const image = await ensureEnv(cfg, envFrom ?? snap, buildLog, key);
+  let image = await ensureEnv(cfg, envFrom ?? snap, buildLog, key);
+  // An image holding an older copy of the code (baked.ts) is built again for the code in the snapshot. The before/after
+  // check copies its code in once the session is up: a copy that differs from it then refuses the first run.
+  let guard: ((s: Session) => Runner) | null = null;
+  if (existsSync(snap) && readdirSync(snap).length) {
+    const baked = bakedIn(cfg, image, snap);
+    if (baked?.differ.length) {
+      dockerSteps.say?.(rebuildText(cfg, baked));
+      image = await ensureEnv(cfg, snap, buildLog, bakedKey(image.slice(image.indexOf(":") + 1), baked.copies, snap));
+    }
+  } else {
+    guard = (s) => {
+      let checked = false;
+      return { run: (command, timeout) => {
+        if (!checked) {
+          checked = true;
+          const baked = bakedIn(cfg, image, snap);
+          if (baked?.differ.length) throw bakedError(cfg, baked);
+        }
+        return s.run(command, timeout);
+      } };
+    };
+  }
   const session = await new Session(image, cfg, snap).start();
   try {
-    return await body(session);
+    return await body(guard ? guard(session) : session);
   } finally {
     session.close();
   }
