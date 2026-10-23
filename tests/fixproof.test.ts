@@ -55,6 +55,13 @@ describe("judgeFix", () => {
       .toBe("new-code");
   });
 
+  test("a source file the code before the change lacks: new code, even when the dependencies changed too", () => {
+    const m = "ENOENT: no such file or directory, open '/src/web/src/components/KeySignup.tsx'";
+    expect(judgeFix(passing, GEN, three(run(t("test_add", "failed", m))), true).status).toBe("new-code");
+    expect(judgeFix(passing, GEN, three(run(t("test_add", "failed",
+      "ENOENT: no such file or directory, open '/tmp/cache.json'")))).status).toBe("fixed");
+  });
+
   test("an undefined value before the change: new code when the whole file hits it, else unknown", () => {
     const m = "Cannot read properties of undefined (reading 'address')";
     const one = judgeFix(passing, GEN, three(run(t("test_add", "failed", m))));
