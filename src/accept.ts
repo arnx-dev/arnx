@@ -18,7 +18,7 @@ import { baseName, funcOf, ownerFile, type TestResult } from "./outcomes";
 import { fixPrompt } from "./fixprompt";
 import { LocalBrain } from "./localbrain";
 import { defaultMarks, firstLine, groupsOf, load, type Marks, parseMarks, type Review, wrapMarkdown } from "./report";
-import type { SessionFactory } from "./sandbox";
+import { sayingDocker, type SessionFactory } from "./sandbox";
 import { refString, type Settings } from "./settings";
 import { agentUse, logUsage } from "./usage";
 import { collect, dockerSession, readCopies, testRound, writeDirOf } from "./testround";
@@ -427,7 +427,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   const outcomes: (AnswerOutcome | undefined)[] = [];
   if (o.answerRunner) {
     // Answer rounds run ANSWER_CONCURRENCY at a time, each in its own sandbox copy; tests are copied in round order.
-    await inPool(rounds.map((_x, k) => k), ANSWER_CONCURRENCY, async (k) => {
+    await sayingDocker(o.progress, () => inPool(rounds.map((_x, k) => k), ANSWER_CONCURRENCY, async (k) => {
       const { id, question, answer, project, key, rewrite } = rounds[k]!;
       // An answer already turned into tests (an earlier accept, same answer) is reused, not paid for again.
       const cache = join(rdir, "answers", id, "outcome.json");
@@ -442,7 +442,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
       say(`${id}: done${outcome.disagree.length ? ` · the code does not do what ` +
         `${rewrite ? "your reason says" : "you answered"} (${outcome.disagree.length} failing)` : ""}`);
       outcomes[k] = outcome;
-    });
+    }));
   }
   // Set aside: a finding marked real that assumed an answer to a question the owner answered, when that answer kept a
   // test (one that kept none settled nothing, so the finding's test stays); and a finding marked rewrite, when its

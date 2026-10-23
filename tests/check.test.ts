@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { check, checkSummary } from "../src/check";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
-import type { SessionFactory } from "../src/sandbox";
+import { dockerSteps, type SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { FakeSession } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
@@ -56,6 +56,19 @@ test("check runs the accepted tests and lists what still fails (exit 1), or says
   expect(okCode).toBe(0);
   expect(ok).toBe(["✓ All 2 accepted tests pass", "✓ Accepted tests unchanged since arnx accept",
     "Commit the fixes, the accepted tests and .arnx/accepted-tests.json together."].join("\n"));
+});
+
+test("check shows an image build in its progress, and leaves Docker's progress line unset after", async () => {
+  const repo = repoWithAccepted();
+  const said: string[] = [];
+  const building: SessionFactory = async (c, snap, _l, body) => {
+    dockerSteps.say?.(`${c.name}: building its test image (minutes on a first build)`);
+    return body(new FakeSession(snap, () => [junitXml([["tests/arnx/r1/test_r1_calc.py", "test_ok", "passed", ""]]),
+      "", false]));
+  };
+  await check(repo, SETTINGS, { sessionFactory: building, progress: (m) => said.push(m) });
+  expect(said).toContain("svc: building its test image (minutes on a first build)");
+  expect(dockerSteps.say).toBeNull();
 });
 
 test("check with nothing accepted says to accept first (exit 3)", async () => {

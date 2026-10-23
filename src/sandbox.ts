@@ -35,6 +35,16 @@ export const dockerSteps: { log: ((line: Record<string, unknown>) => void) | nul
   /** Told what Docker is doing when it takes long (an image build), for the progress line. */
   say: ((message: string) => void) | null } = { log: null, say: null };
 
+/** Runs `fn` with `say` told what Docker is doing when it takes long, for a command that sets no other Docker step. */
+export async function sayingDocker<T>(say: ((message: string) => void) | undefined, fn: () => Promise<T>): Promise<T> {
+  dockerSteps.say = say ?? null;
+  try {
+    return await fn();
+  } finally {
+    dockerSteps.say = null;
+  }
+}
+
 /** Signs in a build log that the build could not reach a package index or registry: a network problem, not a wrong
  * install step. */
 export const NETWORK_TROUBLE = /Read timed out|ReadTimeoutError|Connection (?:reset|refused|broken)|connection broken|Temporary failure in name resolution|Could not resolve host|Name or service not known|Network is unreachable|ETIMEDOUT|ECONNRESET|EAI_AGAIN|ENOTFOUND|TLS handshake timeout|i\/o timeout|socket hang up/i;
