@@ -28,12 +28,14 @@ export interface BeforeCheck {
 export interface BeforeRun { results: TestResult[] | null; output: string; timedOut: boolean }
 
 /** Signs that the code a test uses does not exist yet: an import or a name that fails, a symbol the compiler cannot
- * find. Seen at the base only (and not at the change), they make a test `new-code`. */
+ * find, a file of the repository (/src) the test opens by path. Seen at the base only (and not at the change), they
+ * make a test `new-code`. */
 const MISSING = new RegExp([
   "ModuleNotFoundError", "ImportError", "cannot import name", "has no attribute", "NameError", "is not defined",
   "is not a function", "is not a constructor", "does not provide an export named", "Cannot find module",
   "Failed to (?:load|resolve) (?:url|import)", "cannot find (?:function|value|struct|type|macro|trait|module)",
   "unresolved import", "no (?:function|method|associated item|field) named", "error\\[E0(?:412|425|432|433|599|609)\\]",
+  "ENOENT: no such file or directory, \\w+ '/src/", "No such file or directory: '/src/",
 ].join("|"));
 
 /** Signs that a test hit an undefined value (JS undefined or null, Python None): V8, JSC and CPython wording. On the

@@ -13,7 +13,7 @@ import { placed } from "./fixprompt";
 import { baseName, runTests, type TestResult } from "./outcomes";
 import { load, type Review } from "./report";
 import type { Say } from "./progress";
-import type { SessionFactory } from "./sandbox";
+import { sayingDocker, type SessionFactory } from "./sandbox";
 import type { Env, Settings } from "./settings";
 import { dockerSession, keptTestFiles } from "./testround";
 
@@ -124,10 +124,10 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       // committed): no model sees what a check runs.
       snapshot(repo, null, snap, secretPinsOf(file.raw), { untracked: true });
       // The build log is kept where a failed build's error can point to it (the snapshot is removed below).
-      const [run, results] = await (o.sessionFactory ?? dockerSession)(cfg, snap,
+      const [run, results] = await sayingDocker(o.progress, () => (o.sessionFactory ?? dockerSession)(cfg, snap,
         join(repo, ".arnx", "run", `check-${cfg.name}-build.log`), async (session) =>
           runTests(session, snap, cfg, files.map((f) => posix.relative(cfg.workdir, f) || f), "check.xml",
-            CHECK_TIMEOUT));
+            CHECK_TIMEOUT)));
       const log = checkLog(cfg.name);
       rmSync(join(repo, log), { force: true });
       let reason: string | undefined;

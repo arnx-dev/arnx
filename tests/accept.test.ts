@@ -5,6 +5,7 @@ import { type AnswerOutcome, accept, findReview, precisionOf } from "../src/acce
 import { python } from "../src/adapters/python";
 import { ArnxError } from "../src/errors";
 import { save } from "../src/report";
+import { dockerSteps } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { gitRepo } from "./helpers/gitutil";
 import { finding, sampleReview, blankMarks } from "./helpers/review";
@@ -102,6 +103,20 @@ test("test_answers_become_tests", async () => {
   expect(existsSync(kept)).toBe(true);
   expect(readFileSync(kept, "utf8")).toContain("skip(reason=");
   expect(result.answers[0]!.disagree).toEqual([`${WD}/answers/test_strings.py::test_other`]);
+});
+
+test("answer rounds show an image build in accept's progress", async () => {
+  const repo = gitRepo(tmp());
+  const rdir = savedReview(repo);
+  mark(rdir, null, null, "No, numbers only.");
+  const said: string[] = [];
+  const runner = async (qid: string): Promise<AnswerOutcome> => {
+    dockerSteps.say?.("main: building its test image (minutes on a first build)");
+    return { qid, files: {}, keep: {}, skip: {}, disagree: [], costUsd: 0, stop: "end_turn", base: `${WD}/answers` };
+  };
+  await accept(repo, rdir, SETTINGS, { answerRunner: runner, progress: (m) => said.push(m) });
+  expect(said).toContain("main: building its test image (minutes on a first build)");
+  expect(dockerSteps.say).toBeNull();
 });
 
 test("test_find_review", () => {

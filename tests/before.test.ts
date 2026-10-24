@@ -61,6 +61,20 @@ describe("judgeBefore", () => {
     expect(b.detail).toContain("cannot find function");
   });
 
+  test("a test that reads a source file the code before the change lacks: new code", () => {
+    // Messages as node and pytest record them when a test opens a file of the repository (/src) by path.
+    const assertion = t("test_add", "failed", "AssertionError: expected 402, got 200");
+    for (const m of ["ENOENT: no such file or directory, open '/src/web/src/app/api/credits/route.ts'",
+      "FileNotFoundError: [Errno 2] No such file or directory: '/src/app/routes.py'"]) {
+      const b = judgeBefore(assertion, GEN, three(run(t("test_add", "failed", m))));
+      expect(b.status).toBe("new-code");
+      expect(b.detail).toContain(m.slice(0, 40));
+    }
+    // A missing file outside the repository says nothing about the code: still a different failure.
+    expect(judgeBefore(assertion, GEN, three(run(t("test_add", "failed",
+      "ENOENT: no such file or directory, open '/tmp/cache.json'")))).status).toBe("changed");
+  });
+
   test("fails before the change, differently: changed, with the earlier failure", () => {
     const b = judgeBefore(failing, GEN, three(run(t("test_add", "failed", "assert 1 == 5"))));
     expect(b.status).toBe("changed");
