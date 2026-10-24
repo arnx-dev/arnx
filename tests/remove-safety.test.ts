@@ -66,6 +66,26 @@ test("S3 an uncommitted, edited accepted test is not silently deleted by --tests
   expect(existsSync(join(repo, t))).toBe(true);
 });
 
+test("accepted tests in .arnx/tests/ stay when .arnx/ goes, unless --tests (an edited uncommitted one stays even then)",
+  async () => {
+  const sha = (text: string) => new Bun.CryptoHasher("sha256").update(text).digest("hex");
+  for (const tests of [false, true]) {
+    const repo = gitRepo(join(tmp(), `w-${tests}`));
+    const env = { XDG_CONFIG_HOME: join(tmp(), `xdg-${tests}`) };
+    const ok = ".arnx/tests/tests/arnx/r1/test_a.py", edited = ".arnx/tests/tests/arnx/r1/test_b.py";
+    put(join(repo, ok), "def test_a(): pass\n");
+    put(join(repo, edited), "# hand edited\n");
+    put(join(repo, ".arnx", "reviews", "r1", "review.md"));
+    put(join(repo, ".arnx", "accepted-tests.json"), record({ [ok]: { sha256: sha("def test_a(): pass\n") },
+      [edited]: { sha256: "different" } }));
+    const cli = new Cli({ cwd: repo, env });
+    await withDocker("/nonexistent/docker", () => cli.run("remove", "--yes", ...(tests ? ["--tests"] : [])));
+    expect(existsSync(join(repo, ".arnx", "reviews", "r1", "review.md"))).toBe(false);
+    expect(existsSync(join(repo, ok))).toBe(!tests);
+    expect(existsSync(join(repo, edited))).toBe(true);
+  }
+});
+
 test("S4 a symlinked ancestor folder does not lead to deleting files outside the repository", async () => {
   const { base, repo, env } = setup();
   const outside = join(base, "outside");

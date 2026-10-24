@@ -246,10 +246,10 @@ function endpoint(o: { delayMs?: number; status?: number } = {}) {
 let repos = 0;
 function readyRepo(): string {
   const repo = gitRepo(join(tmp(), `r${++repos}`));
-  mkdirSync(join(repo, "svc/tests/arnx/r1"), { recursive: true });
+  mkdirSync(join(repo, ".arnx/tests/svc/tests/arnx/r1"), { recursive: true });
+  mkdirSync(join(repo, "svc"));
   writeFileSync(join(repo, "svc/calc.py"), "X = 1\n");
-  writeFileSync(join(repo, "svc/tests/arnx/r1/test_r1_calc.py"), "def test_ok(): pass\ndef test_bug(): assert 0\n");
-  mkdirSync(join(repo, ".arnx"));
+  writeFileSync(join(repo, ".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py"), "def test_ok(): pass\ndef test_bug(): assert 0\n");
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(`version: 1
 projects:
   svc:

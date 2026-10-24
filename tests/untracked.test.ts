@@ -284,13 +284,13 @@ test("[review] untracked: config.toml reads and writes it; the flags parse, and 
 test("check runs on the working tree with its untracked files (accepted tests are untracked); an answer round, " +
   "which a model writes, sees tracked files only", async () => {
   const repo = gitRepo(tmp());
-  mkdirSync(join(repo, "svc/tests/arnx/r1"), { recursive: true });
+  mkdirSync(join(repo, ".arnx/tests/svc/tests/arnx/r1"), { recursive: true });
+  mkdirSync(join(repo, "svc"));
   writeFileSync(join(repo, "svc/calc.py"), "X = 1\n");
-  mkdirSync(join(repo, ".arnx"));
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile("version: 1\nprojects:\n  svc:\n    root: svc\n" +
     "    image: python:3.12-slim\n    test_command: python -m pytest {targets}\n"), "Dev", "2026-10-20"));
   commit(repo, "layout");
-  writeFileSync(join(repo, "svc/tests/arnx/r1/test_r1_calc.py"), "def test_ok(): pass\n"); // accepted, uncommitted
+  writeFileSync(join(repo, ".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py"), "def test_ok(): pass\n"); // accepted, uncommitted
   const held: boolean[] = [];
   await check(repo, SETTINGS, { sessionFactory: async (_c, snap, _l, body) => {
     held.push(existsSync(join(snap, "svc/tests/arnx/r1/test_r1_calc.py")));
@@ -298,19 +298,21 @@ test("check runs on the working tree with its untracked files (accepted tests ar
       "1 passed", false]));
   } });
   expect(held).toEqual([true]);
+  // An answer round sees the owner's untracked files only when sent, and never the accepted tests (in .arnx/).
+  writeFileSync(join(repo, "svc/draft.py"), "Y = 2\n");
   const round = async (untracked?: boolean) => {
-    const seen: boolean[] = [];
+    const seen: boolean[][] = [];
     await testRound(repo, null, parseReviewConfig(YAML), {
       ...answerRound(new ScriptedAgent([[text("{\"tests\": []}")]]), parseReviewConfig(YAML)),
       writeDir: "tests/arnx_generated", budgetUsd: 1, runs: 1,
       outDir: join(tmp(), `round-${untracked}`), sessionFactory: async (_c, snap, _l, body) => {
-        seen.push(existsSync(join(snap, "svc/tests/arnx/r1/test_r1_calc.py")));
+        seen.push([existsSync(join(snap, "svc/draft.py")), existsSync(join(snap, "svc/tests/arnx/r1/test_r1_calc.py"))]);
         return body(new FakeSession(snap, () => [null, "", false]));
       }, ...(untracked !== undefined ? { untracked } : {}) });
     return seen;
   };
-  expect(await round()).toEqual([false]);
-  expect(await round(true)).toEqual([true]);
+  expect(await round()).toEqual([[false, false]]);
+  expect(await round(true)).toEqual([[true, false]]);
 });
 
 test("accepted tests not committed yet stay in a tracked-only snapshot: they are arnx's own, not the owner's files", () => {

@@ -18,7 +18,7 @@ const tmp = useTmp();
 const RID = "20261011-a1b2c3";
 const WD = "tests/arnx_generated";
 const GEN = `${WD}/test_add.py`;
-const DEST = "tests/arnx/r20261011_a1b2c3";
+const DEST = ".arnx/tests/tests/arnx/r20261011_a1b2c3";
 const SETTINGS = { ...defaultSettings(), consentAt: "2026-10-11T00:00:00Z" };
 const SRC = "def test_a():\n    assert False\n\ndef test_b():\n    assert False\n";
 
@@ -161,7 +161,8 @@ test("rewrite marked on one finding: only its test is set aside, and leaves the 
     "main"]]);
   const kept = readFileSync(join(repo, DEST, "test_add_subtracts.py"), "utf8");
   expect(kept).not.toContain("def test_b");
-  expect(kept).toContain(`reason='arnx review ${RID}: F1 not fixed yet')\ndef test_a`);
+  expect(kept).toContain("def test_a");
+  expect(kept).not.toContain("xfail");
   expect(record(repo)[`${DEST}/test_add_subtracts.py`].tests).toEqual(["test_a"]);
   // Its test passes on the code: kept to lock it, not an accepted (failing) test.
   expect(record(repo)[`${DEST}/answers/test_r1.py`].tests).toEqual([]);

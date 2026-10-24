@@ -180,7 +180,7 @@ test("review: findings against the empty tree, the before/after note said once; 
   writeFileSync(join(rdir, "review.md"), blankMarks(md).replace("Mark: [ ] real", "Mark: [x] real"));
   const result = await accept(repo, rdir, SETTINGS);
   expect(result.kept).toHaveLength(1);
-  expect(result.kept[0]!.startsWith(join(repo, "tests/arnx/r"))).toBe(true);
+  expect(result.kept[0]!.startsWith(join(repo, ".arnx/tests/tests/arnx/r"))).toBe(true);
   expect(existsSync(result.kept[0]!)).toBe(true);
 });
 

@@ -84,8 +84,7 @@ Then, in both cases:
     # ... let your agent change something ...
     arnx review                         # writes tests for the change and runs them: 2 issues confirmed (4 findings)
     arnx triage                         # mark real / intended / noise / rewrite, answer questions
-    arnx accept                         # tests of real issues are copied into your tests (expected to fail until
-                                        # fixed, so your suite stays green)
+    arnx accept                         # tests of real issues are kept in .arnx/tests/ (never in your own suite)
     arnx prompt                         # the fix prompt for your coding agent
     arnx check                          # runs the accepted tests; green means they pass now
 
@@ -120,12 +119,11 @@ More in [docs/WORKFLOW.md](docs/WORKFLOW.md).
 2. **review** writes tests for the change, runs them 3 times, runs the failures on the code before the change, asks
    a second model, and writes `.arnx/reviews/<id>/review.md` with what was tested and what was not.
 3. **triage** (or edit review.md) marks each issue and answers arnx's questions; answers become tests too.
-4. **accept** copies tests of real issues into your test folders (`tests/arnx/r<id>/` by default) and pins each
-   file's sha256 in `.arnx/accepted-tests.json`. Tests of other issues are left out. A bug's test is marked
-   expected to fail until the fix, so your suite stays green.
-5. **prompt** gives the fix prompt; **check** runs the accepted tests, markers off, and removes a test's marker once
-   it passes. A pinned test that was edited makes `check` refuse (exit 4): a test changed until it passes shows
-   nothing. arnx never edits your code.
+4. **accept** keeps tests of real issues in `.arnx/tests/`, where your own test run never collects them, and pins
+   each file's sha256 in `.arnx/accepted-tests.json`. Tests of other issues are left out.
+5. **prompt** gives the fix prompt; **check** puts the accepted tests in place in a throwaway copy and runs them: a
+   bug's test fails until the fix. A pinned test that was edited makes `check` refuse (exit 4): a test changed until
+   it passes shows nothing. arnx never edits your code or your tests.
 
 Details, exit codes, `--json` and the before/after check: [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
@@ -164,7 +162,7 @@ Secret files, files with key-shaped text and paths in `.arnxignore` are never se
   code, and image builds have network access to install dependencies.
 - Your model keys stay in the arnx process, never in a container. The secrets filter is a heuristic: extend
   `.arnxignore` for anything else private.
-- Accepted tests are code a model wrote, and once committed they run in your own test runner: read them first.
+- Accepted tests are code a model wrote: read them before you commit them. Only `arnx check` runs them.
 - Telemetry is off unless you set `telemetry = true` in `.arnx/config.toml` (anonymous counts, never code or file
   names). `arnx remove` lists and deletes everything arnx added.
 

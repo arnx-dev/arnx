@@ -68,9 +68,9 @@ answers are theirs: do not write them, and do not treat a mark you suggested as 
 
 After the user says they accepted:
 
-1. `arnx check --json` runs the accepted tests (`tests/arnx/`, or `accepted_tests_dir`) on your working tree. Those
-   of the issues just marked real fail: expected, and the list to fix (the project's own runner sees them marked
-   expected to fail; check removes a marker once its test passes). Fields: [references/check-json.md](references/check-json.md).
+1. `arnx check --json` runs the accepted tests (kept in `.arnx/tests/`, out of the project's own runner) on your
+   working tree. Those of the issues just marked real fail: expected, and the list to fix. Fields:
+   [references/check-json.md](references/check-json.md).
 2. `arnx prompt <id>` prints the fix prompt (also `.arnx/reviews/<id>/fix-prompt.md`): the failing tests, each bug,
    the user's answers as intended behaviour, and the rules. Fix from it, and only what it lists. Fix the **code
    under test**, never the tests. If a fix depends on what the code is meant to do and no answer says, do not guess:
@@ -87,8 +87,7 @@ After the user says they accepted:
 
 ## 5. Run the full suites
 
-A passing `arnx check` covers only the accepted tests. Accepted tests run in the project's own runner too, in the
-same process as its other tests, and can break them (a module imported or patched at load time). For each project
+A passing `arnx check` covers only the accepted tests; the project's own runner never runs them. For each project
 the change touched (its `root` in `.arnx/review.yaml`), run its whole suite the way the project runs it (README, CI,
 Makefile; `test_command` in review.yaml names the runner and `image` the environment), accepted tests included.
 
@@ -116,7 +115,7 @@ this change`) or lists paths in `uncovered` or `untested`:
 ## 6. Never
 
 - Never fix code before the user has triaged and accepted the review.
-- Never edit, move or delete accepted tests: files under `tests/arnx/` (or `accepted_tests_dir`), files listed in
+- Never edit, move, copy or delete accepted tests: files under `.arnx/tests/`, files listed in
   `.arnx/accepted-tests.json`, and that file itself. `arnx check` refuses edited tests, and a test edited together
   with its sha256 there or with its entry removed (exit 4).
 - Never edit anything under `.arnx/`: the marks in `review.md`, `review.yaml`, `config.toml`.

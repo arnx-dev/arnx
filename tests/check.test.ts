@@ -16,10 +16,10 @@ const SETTINGS = { ...defaultSettings(), consentAt: "2026-10-12T00:00:00Z" };
 
 function repoWithAccepted(): string {
   const repo = gitRepo(tmp());
-  mkdirSync(join(repo, "svc/tests/arnx/r1"), { recursive: true });
+  mkdirSync(join(repo, ".arnx/tests/svc/tests/arnx/r1"), { recursive: true });
+  mkdirSync(join(repo, "svc"));
   writeFileSync(join(repo, "svc/calc.py"), "X = 1\n");
-  writeFileSync(join(repo, "svc/tests/arnx/r1/test_r1_calc.py"), "def test_ok(): pass\ndef test_bug(): assert 0\n");
-  mkdirSync(join(repo, ".arnx"));
+  writeFileSync(join(repo, ".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py"), "def test_ok(): pass\ndef test_bug(): assert 0\n");
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(`version: 1
 projects:
   svc:
@@ -43,7 +43,7 @@ test("check runs the accepted tests and lists what still fails (exit 1), or says
   };
   const results = await check(repo, SETTINGS, { sessionFactory: failing });
   expect(results.map((r) => [r.project, r.files, r.passed.length, r.failed.length])).toEqual([
-    ["svc", ["svc/tests/arnx/r1/test_r1_calc.py"], 1, 1]]);
+    ["svc", [".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py"], 1, 1]]);
   expect(seen.join(" ")).toContain("tests/arnx/r1/test_r1_calc.py");
   const [text, code] = checkSummary(results);
   expect(code).toBe(1);

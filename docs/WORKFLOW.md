@@ -112,31 +112,26 @@ its own, under "Type check": it never fails a test, turns a run into no report, 
    `.arnx/precision.jsonl` (on your machine, not committed) keeps every mark, and whether you chose it (changed it, or
    picked it in `arnx triage`) or left it as it came.
 2. `arnx accept <id>` (without an id: the review started last). Tests behind findings marked real are copied into
-   `tests/arnx/r<id>/` under the project's root (`accepted_tests_dir` in `.arnx/config.toml`; at that default a
-   TypeScript project uses `__tests__/arnx/r<id>/`, beside its generated tests in `__tests__/arnx_generated/`, and a
-   Rust crate `tests/arnx_<id>_<name>.rs`, as cargo builds only `tests/*.rs`), each file named after the problem it
+   `.arnx/tests/`, at the path each runs from: `.arnx/tests/<project root>/tests/arnx/r<id>/` (`accepted_tests_dir`
+   in `.arnx/config.toml`; at that default a TypeScript project uses `__tests__/arnx/r<id>/`, and a Rust crate
+   `tests/arnx_<id>_<name>.rs`). Your own test run never collects them there, so they cannot change it; only
+   `arnx check` puts them in place, in a throwaway copy. Each file is named after the problem it
    protects (`test_deep_json_recursion.py`); answered questions become tests of the behaviour you described (one model
    round each, run in parallel; `answer_model` in `.arnx/config.toml` can pick a cheaper model; `--no-answers` skips
    them). Only the tests you keep go in: those of findings marked intended or noise, flaky ones and those set aside
    are cut out of the copied files (they stay in `.arnx/reviews/<id>/`). A real bug whose test is wrong is marked
    rewrite, with a `Rewrite:` line saying why: its test is left out and the reason becomes a new test, like an answer.
    A test that assumed an answer you gave differently is left out too when your answer got a test of its own. The test
-   of a bug not fixed yet is marked expected to fail (pytest `xfail`, vitest `test.fails`, jest `test.failing`, node
-   and bun `todo`, Rust `#[should_panic]`), so your own test run stays green; a test run once per variant
-   (`parametrize`, `.each`, rstest cases) keeps no marker, as variants that pass would fail under it. Before it records
-   anything, accept runs each project's own suite with the kept files in: accepted tests share a process with your
-   other tests and can break them (a conftest that patches a module at import). When tests that pass without the
-   kept files fail with them, accept refuses, names them, and leaves the repository as it was. Accept then runs the
-   accepted tests and lists the ones that fail now (`--no-check` skips both runs). Your code is not changed and
-   nothing is committed.
+   of a bug not fixed yet is kept as it is: it fails in `arnx check` until the fix. Accept then runs the accepted tests
+   and lists the ones that fail now (`--no-check` skips the run). Your code is not changed and nothing is committed.
+   `arnx setup` proves the place: its run of your suite carries a one-line test in `.arnx/tests/`, and setup stops
+   if your runner collects it (a pytest `norecursedirs`, say, that drops the default hidden-folder rule).
 3. Fix the code, or hand `arnx prompt` (also in `.arnx/reviews/<id>/fix-prompt.md`; `accept --copy` puts it on the
    clipboard) to your coding agent: the failing tests, what each bug is, your answers, and the rules. `arnx check`
-   runs the accepted tests in the approved sandbox, services included, on your working tree, without their
-   expected-fail markers, and lists what still fails. A test that passes loses its marker in the file: from then on it
-   guards the fix in your own runner.
-4. When `arnx check` passes, commit the fixes together with the accepted tests and `.arnx/accepted-tests.json`: they
-   now guard against the bugs coming back. Read them first: they are code a model wrote, and from then on they run in
-   your own test runner.
+   runs the accepted tests in the approved sandbox, services included, on your working tree, and lists what still
+   fails.
+4. When `arnx check` passes, commit the fixes together with `.arnx/tests/` and `.arnx/accepted-tests.json`: they now
+   guard against the bugs coming back, each time `arnx check` runs. Read them first: they are code a model wrote.
 
 Accepted tests are pinned. `accept` records the sha256 of each file it writes in `.arnx/accepted-tests.json`, with
 the file's accepted tests (so `arnx check` tells them from the other tests the review wrote into it), and
@@ -146,11 +141,12 @@ test does not help either: a sha256 there counts only when it is the committed o
 machine (it keeps a copy in `~/.config/arnx/pins/`, outside the repository); a changed or removed entry exits 4 too.
 Changed by mistake: `arnx accept --again <id>` copies the review's tests back (your edits are lost); `arnx check`
 also names `git checkout -- <file>` when the committed copy is the accepted one. Changed on purpose:
-`arnx accept --keep-edits` records the accepted tests as they are now. The one change arnx makes to them itself:
-`arnx check` removes a passing test's expected-fail marker and pins the file again. `arnx approve` and `setup` let
-accepted tests fail while their bugs are not fixed, and say how many still fail. `arnx check --json` prints the
-result as JSON (each project's passed and failed tests, the overall result, the changed files, the tests it unmarked)
-for programs and coding agents.
+`arnx accept --keep-edits` records the accepted tests as they are now. `arnx check --json` prints the result as JSON
+(each project's passed and failed tests, the overall result, the changed files) for programs and coding agents.
+
+Tests an older arnx kept inside your projects (`tests/arnx/`, with expected-fail markers) are in your own test run:
+`arnx check` runs nothing until `arnx accept --move` moves them to `.arnx/tests/`, removes their markers and pins
+them there. Commit the move.
 
 Accept before fixing: a test you saw fail before the fix and pass after it is good evidence that the fix changed the
 behaviour it checks, provided the test checks the right thing (that is what your mark says).

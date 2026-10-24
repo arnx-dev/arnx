@@ -18,10 +18,10 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   never sent to a model. A file left out this way is named at setup and in each review. When its key-shaped text
   is test fixtures (a secret detector's own tests), `arnx allow-secret PATH` pins each such string in
   `.arnx/review.yaml`, which then needs approving again; a new key-shaped string in that file withholds it again.
-- arnx never edits your code. `accept` writes only into the accepted tests folders (`tests/arnx/` by default) and
-  `.arnx/`.
-- Accepted tests are code a model wrote, and from then on they run on your machine through your own test runner,
-  outside the sandbox. Read them before you commit them.
+- arnx never edits your code or your tests. `accept` writes only into `.arnx/` (accepted tests in `.arnx/tests/`,
+  where your own test run never collects them).
+- Accepted tests are code a model wrote. They run only through `arnx check`, in the approved sandbox. Read them
+  before you commit them.
 - Data files (CSV and other exports, dumps, databases, images) are kept out by `.arnxignore`, which `arnx init`
   writes: patterns for them, the test fixture folders (`tests/`, `fixtures/`, `testdata/`, …) kept with `!` lines,
   and any other data-like file the repository has, by name. An existing `.arnxignore` is left as it is. A `!` line

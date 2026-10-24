@@ -66,7 +66,7 @@ test("accept: the owner's example (one file, all marks pre-filled, no questions)
   expect(cli.stdout.slice(cli.stdout.indexOf("✓ Accepted"))).toBe([
     "✓ Accepted 4 tests from 2 issues (4 findings)",
     "  4 marks were pre-filled (not reviewed in triage)",
-    `  kept: ${DIR}/test_r20261011_a1b2c3.py`,
+    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py`,
     "",
     "4 fail, as expected until the bugs are fixed; 5 pass:",
     "  ✗ test_s1_discount_over_100_rejected  Failed: DID NOT RAISE ValueError",
@@ -126,7 +126,7 @@ test("accept: all accepted tests pass: nothing to fix, commit them", async () =>
     [`${DIR}/test_r20261011_a1b2c3.py`, "test_s2", "passed", ""]] });
   expect(await cli.run("accept", "--no-answers")).toBe(0);
   expect(cli.stdout.slice(cli.stdout.indexOf(`  kept: `))).toBe([
-    `  kept: ${DIR}/test_r20261011_a1b2c3.py`,
+    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py`,
     "",
     "All 2 accepted tests pass: the bugs they prove look fixed already.",
     "",
@@ -145,7 +145,7 @@ test("accept --no-check: the accepted tests fail until the fix, not run", async 
   const { cli } = await reviewed({ cases: OWNER });
   expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
   expect(cli.stdout.slice(cli.stdout.indexOf(`  kept: `))).toBe([
-    `  kept: ${DIR}/test_r20261011_a1b2c3.py`,
+    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py`,
     "",
     "4 accepted tests fail until the fix (not run: --no-check).",
     "",

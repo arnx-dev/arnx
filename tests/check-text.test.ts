@@ -17,7 +17,9 @@ import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
 const RID = "20261011-a1b2c3";
-const KEPT = "tests/arnx/r20261011_a1b2c3/test_r20261011_a1b2c3.py";
+/** Where the accepted file runs from (the runner reports it), and where accept keeps it. */
+const RUN = "tests/arnx/r20261011_a1b2c3/test_r20261011_a1b2c3.py";
+const KEPT = `.arnx/tests/${RUN}`;
 const IDS = ["F1", "F2", "F3", "F4"];
 const group = (findings: string[], title: string): Group =>
   ({ findings, title, input: "", actual: "", expected: "", consequence: "" });
@@ -59,12 +61,12 @@ projects:
 }
 
 const ACCEPTED: Case[] = [
-  [KEPT, "test_F1", "failed", "Failed: DID NOT RAISE ValueError\ntrace"],
-  [KEPT, "test_F2", "failed", "Failed: DID NOT RAISE ValueError"],
-  [KEPT, "test_F3", "failed", "assert 50.0 == 45.0"],
-  [KEPT, "test_F4", "failed", "assert 100.0 == 90.0"],
+  [RUN, "test_F1", "failed", "Failed: DID NOT RAISE ValueError\ntrace"],
+  [RUN, "test_F2", "failed", "Failed: DID NOT RAISE ValueError"],
+  [RUN, "test_F3", "failed", "assert 50.0 == 45.0"],
+  [RUN, "test_F4", "failed", "assert 100.0 == 90.0"],
 ];
-const OTHERS = (n: number): Case[] => [1, 2, 3, 4, 5].slice(0, n).map((i) => [KEPT, `test_other${i}`, "passed", ""]);
+const OTHERS = (n: number): Case[] => [1, 2, 3, 4, 5].slice(0, n).map((i) => [RUN, `test_other${i}`, "passed", ""]);
 const pass = (cs: Case[]): Case[] => cs.map(([f, n]) => [f, n, "passed", ""]);
 
 test("check: accepted tests still failing, the other tests in their file passing", async () => {
@@ -91,8 +93,8 @@ test("check: accepted tests still failing, the other tests in their file passing
 
 test("check: other tests in the accepted files that fail are their own line, not called expected", async () => {
   const { cli, cases } = await accepted();
-  cases.now = [ACCEPTED[0]!, ...pass(ACCEPTED.slice(1)), ...OTHERS(3), [KEPT, "test_other4", "failed", "assert 1 == 2"],
-    [KEPT, "test_other5", "failed", "KeyError: 'x'"]];
+  cases.now = [ACCEPTED[0]!, ...pass(ACCEPTED.slice(1)), ...OTHERS(3), [RUN, "test_other4", "failed", "assert 1 == 2"],
+    [RUN, "test_other5", "failed", "KeyError: 'x'"]];
   expect(await cli.run("check")).toBe(1);
   expect(cli.stdout).toBe([
     "✗ 1 accepted test still fails (bug not fixed yet)",
@@ -102,7 +104,6 @@ test("check: other tests in the accepted files that fail are their own line, not
     "✗ 2 other tests in the accepted files fail",
     "  ✗ test_other4  assert 1 == 2",
     "  ✗ test_other5  KeyError: 'x'",
-    "✓ Expected-fail marker removed from 3 tests that pass now",
     "Fix the code, not the accepted tests. A real bug whose test is wrong: mark it rewrite in review.md with a " +
       "`Rewrite:` line saying why (noise only when there is no bug), then `arnx accept --again 20261011-a1b2c3`.",
     "The 2 other tests that fail are not findings: marks do not cover them. Fix the code, or fix or delete them in " +
@@ -110,13 +111,12 @@ test("check: other tests in the accepted files that fail are their own line, not
     "Next: arnx check",
   ].join("\n"));
   cli.out.length = 0;
-  cases.now = [...pass(ACCEPTED), [KEPT, "test_other1", "failed", "assert 1 == 2"]];
+  cases.now = [...pass(ACCEPTED), [RUN, "test_other1", "failed", "assert 1 == 2"]];
   expect(await cli.run("check")).toBe(1);
   expect(cli.stdout).toBe([
     "✓ All 4 accepted tests pass",
     "✗ 1 other test in the accepted files fails",
     "  ✗ test_other1  assert 1 == 2",
-    "✓ Expected-fail marker removed from 1 test that passes now",
     "The 1 other test that fails is not a finding: marks do not cover it. Fix the code, or fix or delete it in the " +
       "file (then `arnx accept --keep-edits`).",
     "Next: arnx check",
@@ -129,7 +129,7 @@ test("check: all pass", async () => {
   expect(await cli.run("check")).toBe(0);
   expect(cli.stdout).toBe([
     "✓ All 4 accepted tests pass (5 other tests in their files too)",
-    "✓ Expected-fail marker removed from 4 tests that pass now",
+    "✓ Accepted tests unchanged since arnx accept",
     "Commit the fixes, the accepted tests and .arnx/accepted-tests.json together.",
   ].join("\n"));
   // Unmarked and pinned again: the next check finds them as arnx left them.

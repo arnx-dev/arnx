@@ -182,32 +182,7 @@ function drop(source: string, names: Set<string>): { text: string; left: Set<str
   return { text: cuts.length ? endOnce(lines.join("")) : source, left };
 }
 
-/** Each runner's expected-fail form: strict where the runner has one (a fix fails the test until check removes it);
- * node:test and bun run a todo test and never fail the run on it. A .each test is left unmarked. */
-const EXPECT_FAIL: Record<string, string> = { vitest: "fails", jest: "failing", node: "todo", bun: "todo" };
-
-function expectFail(source: string, names: Set<string>, reason: string, runner: string)
-  : { text: string; left: Set<string> } {
-  let out = source;
-  const left = new Set<string>();
-  for (const name of names) {
-    const title = titleOf(name);
-    const rx = new RegExp(`^([ \\t]*)(.*?\\b)(test|it)(?:\\.only)?\\((\\s*)(['"\`])${escapeRx(title)}\\5`, "m");
-    const kind = EXPECT_FAIL[runner];
-    // One line runs every variant of a .each test, and those that pass would fail under a strict marker.
-    const each = new RegExp(String.raw`\.(?:each|for)\b[^\n]*` + `(['"\`])${escapeRx(title)}\\1`);
-    const variants = /\b(?:describe|suite)\.(?:each|for)\b/.test(out) || each.test(out);
-    if (!kind || variants || title.includes("${") || !rx.test(out)) {
-      left.add(name);
-      continue;
-    }
-    out = out.replace(rx, (_m, indent: string, before: string, fn: string, space: string, q: string) =>
-      `${indent}// ${reason}\n${indent}${before}${fn}.${kind}(${space}${q}${title}${q}`);
-  }
-  return { text: out, left };
-}
-
-/** Remove arnx's expected-fail marker (its `// arnx` comment and the call's .fails, .failing or .todo). */
+/** Remove an older arnx's expected-fail marker (its `// arnx` comment and the call's .fails, .failing or .todo). */
 function unmark(source: string, names?: Set<string>): { text: string; names: string[] } {
   const lines = source.split(/(?<=\n)/);
   const out: string[] = [];
@@ -335,7 +310,6 @@ export const typescript: Adapter = {
   },
   skip,
   drop,
-  expectFail,
   unmark,
   acceptedPath,
   testStem: (fileName) => TEST_NAME.exec(fileName)?.[1] ?? fileName,

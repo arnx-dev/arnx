@@ -4,8 +4,8 @@
 // join(import.meta.dir, "..", "..", "package.json") and failed in arnx check with ENOENT on /src/__tests__/package.json.
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { accept } from "../src/accept";
 import { relocate } from "../src/adapters/typescript";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
@@ -57,15 +57,17 @@ test("a kept test reading package.json through import.meta.dir still finds it af
   writeFileSync(join(rdir, "review.md"), blankMarks(readFileSync(join(rdir, "review.md"), "utf8"))
     .replace("Mark: [ ] real", "Mark: [x] real"));
   const result = await accept(repo, rdir, SETTINGS);
-  const kept = join(repo, "__tests__", "arnx", "r20261022_0a1b2c", "pkg_wrong.test.ts");
+  const kept = join(repo, ".arnx", "tests", "__tests__", "arnx", "r20261022_0a1b2c", "pkg_wrong.test.ts");
   expect(result.kept).toEqual([kept]);
   expect(readFileSync(kept, "utf8")).toContain('join(import.meta.dir, "../../../package.json")');
-  // Run where it now is: the helper test passes, and the bug's test, marked todo until it is fixed, keeps the
-  // project's own run green.
-  const run = spawnSync(process.execPath, ["test", kept], { cwd: repo, encoding: "utf8" });
+  // Run from the path it runs from (where check puts it): the helper test passes, and the bug's test fails until it is
+  // fixed.
+  const at = join(repo, "__tests__", "arnx", "r20261022_0a1b2c", "pkg_wrong.test.ts");
+  mkdirSync(dirname(at), { recursive: true });
+  copyFileSync(kept, at);
+  const run = spawnSync(process.execPath, ["test", at], { cwd: repo, encoding: "utf8" });
   const out = run.stdout + run.stderr;
-  expect(out).toContain(" 1 pass\n 1 todo\n 0 fail\n");
-  expect(run.status).toBe(0);
+  expect(out).toContain(" 1 pass\n 1 fail\n");
   expect(out).not.toContain("ENOENT");
 });
 

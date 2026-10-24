@@ -310,7 +310,6 @@ stop it with an `error` object (`arnx consent` first, or `--no-answers`).
 | `marks` | object | The findings' marks, as numbers: `real`, `intended`, `noise`, `rewrite`, `unmarked`, and `left_as_prefilled` (marks review.md came with that nobody changed; also counted in the first four). |
 | `answers` | array | One entry per answered question, then one per rewrite: see below. Empty with `--no-answers`. |
 | `check` | object or null | The accepted tests run on the code as it is now: `failing`, each `{ project, test_id, message }` (the runner's failure message), and `passing`, a number. null with `--no-check`. |
-| `not_marked` | array of strings | Bug tests no expected-fail marker fits (a test run once per variant, a Rust test returning a Result), as `file::test`: they fail in the project's own run until fixed. Empty when every one was marked. |
 | `fix_prompt` | string | The fix prompt for the coding agent (`.arnx/reviews/<id>/fix-prompt.md`); `arnx prompt --json` gives its text. |
 | `next` | array of strings | The next steps, as the text says them: `give the fix prompt to your coding agent`, then `arnx check`, while accepted tests fail (or were not run); else `commit the fix and the accepted tests together` (or `commit the accepted tests`); empty when nothing was kept. |
 

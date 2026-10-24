@@ -43,11 +43,11 @@ test("accept keeps each project's tests under that project's root", async () => 
   writeFileSync(join(rdir, "review.md"), parts[0] + "Mark: [ ] real  [ ] intended  [x] noise" + parts[1] +
     "Mark: [x] real  [ ] intended  [ ] noise" + parts[2]);
   const result = await accept(repo, rdir, SETTINGS);
-  const kept = join(repo, "services", "pay", "tests", "arnx", "r20261012_abcdef", "test_pay_wrong.py");
+  const kept = join(repo, ".arnx", "tests", "services", "pay", "tests", "arnx", "r20261012_abcdef", "test_pay_wrong.py");
   expect(result.kept).toEqual([kept]);
-  expect(readFileSync(kept, "utf8")).toBe("import pytest\n@pytest.mark.xfail(strict=True, reason='arnx review " +
-    `20261012-abcdef: F2 not fixed yet')\n${SRC}`);
+  expect(readFileSync(kept, "utf8")).toBe(SRC); // no marker: it is red in check only
   expect(existsSync(join(repo, "services", "feed", "tests", "arnx"))).toBe(false);
+  expect(existsSync(join(repo, "services", "pay", "tests", "arnx"))).toBe(false); // out of the project's own run
 });
 
 test("answers run in the project the question came from", async () => {
@@ -111,8 +111,8 @@ test("a configured accepted_tests_dir holds every project's accepted tests, a Ty
   const { repo, rdir } = mixed();
   const result = await accept(repo, rdir, { ...SETTINGS, acceptedTestsDir: "test/locks" });
   const rel = result.kept.map((p) => p.slice(repo.length + 1)).sort();
-  expect(rel).toEqual(["services/pay/test/locks/r20261012_abcdef/test_pay_wrong.py",
-    "solana-parser/test/locks/r20261012_abcdef/parser_wrong.test.ts"]);
+  expect(rel).toEqual([".arnx/tests/services/pay/test/locks/r20261012_abcdef/test_pay_wrong.py",
+    ".arnx/tests/solana-parser/test/locks/r20261012_abcdef/parser_wrong.test.ts"]);
   // Its import is moved with it.
   expect(readFileSync(join(repo, rel[1]!), "utf8")).toContain("require('../../../index')");
 });
@@ -121,8 +121,8 @@ test("with the default accepted_tests_dir, a TypeScript project keeps them under
   const { repo, rdir } = mixed();
   const result = await accept(repo, rdir, SETTINGS);
   expect(result.kept.map((p) => p.slice(repo.length + 1)).sort()).toEqual([
-    "services/pay/tests/arnx/r20261012_abcdef/test_pay_wrong.py",
-    "solana-parser/__tests__/arnx/r20261012_abcdef/parser_wrong.test.ts"]);
+    ".arnx/tests/services/pay/tests/arnx/r20261012_abcdef/test_pay_wrong.py",
+    ".arnx/tests/solana-parser/__tests__/arnx/r20261012_abcdef/parser_wrong.test.ts"]);
 });
 
 test("accept lists where each accepted test went, under its project's root", async () => {
@@ -130,6 +130,6 @@ test("accept lists where each accepted test went, under its project's root", asy
   const cli = new Cli({ cwd: repo });
   await cli.run("init");
   expect(await cli.run("accept", RID, "--no-answers")).toBe(0);
-  expect(cli.stdout).toContain("  kept: solana-parser/__tests__/arnx/r20261012_abcdef/parser_wrong.test.ts");
+  expect(cli.stdout).toContain("  kept: .arnx/tests/solana-parser/__tests__/arnx/r20261012_abcdef/parser_wrong.test.ts");
   expect(cli.stdout).not.toContain("accepted_tests_dir"); // the path says it
 });

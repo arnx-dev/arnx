@@ -56,19 +56,19 @@ function mark(rdir: string, f1: string | null, f2: string | null, answer?: strin
   writeFileSync(join(rdir, "review.md"), md);
 }
 
-test("test_accept_copies_real_tests_marks_their_bugs_and_removes_the_rest", async () => {
+test("test_accept_copies_real_tests_and_removes_the_rest", async () => {
   const repo = gitRepo(tmp());
   const rdir = savedReview(repo);
   mark(rdir, "real", "noise");
   const result = await accept(repo, rdir, SETTINGS);
-  const dest = join(repo, "tests", "arnx", "r20261011_a1b2c3");
+  const dest = join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3");
   const testFile = join(dest, "test_add_subtracts.py");
   expect(readdirSync(dest).sort()).toEqual(["conftest.py", "test_add_subtracts.py"]);
-  // The confirmed bug's test is expected to fail, so the project's own run stays green; the noise (F2) and the flaky
-  // test are not in the repository at all (they stay in the review), and neither is the class F2's test left empty.
-  expect(readFileSync(testFile, "utf8")).toBe('"""Generated."""\nfrom __future__ import annotations\nimport pytest\n\n' +
-    "from app import add\n\n\n@pytest.mark.xfail(strict=True, reason='arnx review 20261011-a1b2c3: F1 not fixed yet')\n" +
-    "def test_add():\n    assert add(2, 3) == 5\n");
+  // The confirmed bug's test is kept as it is (red in check until fixed; the project's own run never sees it); the
+  // noise (F2) and the flaky test are not kept at all (they stay in the review), nor is the class F2's test left empty.
+  expect(readFileSync(testFile, "utf8")).toBe('"""Generated."""\nfrom __future__ import annotations\n\n' +
+    "from app import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n");
+  expect(existsSync(join(repo, "tests", "arnx"))).toBe(false);
   const lines = readFileSync(join(repo, ".arnx", "precision.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   expect(lines.map((l) => [l.item, l.mark ?? null])).toEqual([["F1", "real"], ["F2", "noise"], ["Q1", null], ["Q2", null]]);
   expect(lines[0].verdict).toBe("confirmed");
@@ -102,10 +102,9 @@ test("test_answers_become_tests", async () => {
   };
   const result = await accept(repo, rdir, SETTINGS, { answerRunner: runner });
   expect(seen).toEqual([["Q1", "Should add accept strings?", "No, numbers only.", "diff --git a/app.py b/app.py\n"]]);
-  const kept = join(repo, "tests", "arnx", "r20261011_a1b2c3", "answers", "test_strings.py");
+  const kept = join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3", "answers", "test_strings.py");
   expect(existsSync(kept)).toBe(true);
-  expect(readFileSync(kept, "utf8")).toBe("import pytest\ndef test_rejects_strings():\n    pass\n\n" +
-    "@pytest.mark.xfail(strict=True, reason='arnx review 20261011-a1b2c3: Q1 not done yet')\ndef test_other():\n    pass\n");
+  expect(readFileSync(kept, "utf8")).toBe("def test_rejects_strings():\n    pass\n\ndef test_other():\n    pass\n");
   expect(result.answers[0]!.disagree).toEqual([`${WD}/answers/test_strings.py::test_other`]);
 });
 
