@@ -59,7 +59,7 @@ Also written, for arnx and people: `prompt_version`, `write_dir`, `write_dirs`, 
 | `reason` | string | The second opinion's reason. |
 | `test_id` | string | The test, as the runner names it (`path::name`). |
 | `func` | string | The test function's name. |
-| `file` | string or null | The generated test file, relative to `.arnx/reviews/<id>/projects/<project>/tests/` (or `.arnx/reviews/<id>/tests/` when `projects` is `["main"]`). Read it; do not copy it into the repository. |
+| `file` | string or null | The generated test file, relative to `.arnx/reviews/<id>/projects/<project>/tests/` (or `.arnx/reviews/<id>/tests/` when `projects` is `["main"]`). On disk its name ends in `.arnx-copy` (`test_x.py.arnx-copy`), so no test runner picks it up there; reviews by arnx before 0.1.1 have the plain name. Read it; do not copy it into the repository. |
 | `message` | string | The failure, as the runner reported it. The first line is the assertion. |
 | `explanation` | string | The reviewer's explanation of the bug. |
 | `project` | string | The project whose round found it. |
