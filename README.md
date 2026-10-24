@@ -129,10 +129,10 @@ Details, exit codes, `--json` and the before/after check: [docs/WORKFLOW.md](doc
 ## Coding agents
 
 The arnx skill lets Claude Code (and other agents that read Agent Skills) close the loop: after a change it runs
-`arnx review` once, after saying what it may cost, fixes the code behind confirmed findings until
-`arnx check --review` shows their tests passing, and hands back what it fixed and what is left for you. Marking
-findings, answering questions, `arnx accept`, `arnx init` and logins stay yours: the skill tells the agent never to
-run them or edit accepted tests (`arnx check` would refuse those anyway).
+`arnx review` once, after saying what it may cost, and hands the findings to you. Once you have triaged and accepted,
+it fixes the code from `arnx prompt` until `arnx check` passes, runs each touched project's full suite, and reports.
+Setup, approve, marking findings, answering questions, `arnx accept`, `arnx init`, logins and commits stay yours: the
+skill tells the agent never to run them or edit accepted tests (`arnx check` would refuse those anyway).
 
     arnx skill install                  # writes .agents/skills/arnx/ and .claude/skills/arnx/: commit them
     arnx skill install --user           # or under ~/, for every repository on this machine
