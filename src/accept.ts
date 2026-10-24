@@ -8,7 +8,7 @@
 // Every mark is appended to .arnx/precision.jsonl.
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative, sep } from "node:path";
-import { getAdapter } from "./adapters";
+import { adapterFor, getAdapter } from "./adapters";
 import { type Adapter, DEFAULT_ACCEPTED_DIR } from "./adapters/types";
 import { TS_ACCEPTED_DIR } from "./adapters/typescript";
 import type { Brain } from "./brain";
@@ -18,7 +18,8 @@ import { type AgentModel, allPrices } from "./llm";
 import { baseName, funcOf, ownerFile, type TestResult } from "./outcomes";
 import { fixPrompt } from "./fixprompt";
 import { LocalBrain } from "./localbrain";
-import { defaultMarks, firstLine, groupsOf, load, type Marks, parseMarks, type Review, wrapMarkdown } from "./report";
+import { defaultMarks, firstLine, groupsOf, load, type Marks, parseMarks, parseReports, type Review, wrapMarkdown }
+  from "./report";
 import { sayingDocker, type SessionFactory } from "./sandbox";
 import { refString, type Settings } from "./settings";
 import { agentUse, logUsage } from "./usage";
@@ -354,6 +355,20 @@ function projectsOf(repo: string, rdir: string, review: Review, settings: Settin
   });
 }
 
+/** The files of an answer round that its final reply names (`{"tests": [{"test": "<file>::<name>"}]}`), with every
+ * support file; all of them when the reply names none it wrote. A file written along the way (a scratch test while
+ * debugging) is not the answer's test, and kept, a test that checks nothing would pass for a lock. */
+export function reportedFiles(files: Record<string, string>, replies: string[], adapter: Adapter)
+  : Record<string, string> {
+  const named = new Set(parseReports(replies).tests.flatMap((t) => {
+    const id = typeof t === "string" ? t : (t as { test?: unknown } | null)?.test;
+    return typeof id === "string" ? [posix.normalize(id.split("::")[0]!)] : [];
+  }));
+  const isTest = (p: string) => adapter.isTestFile(posix.basename(p));
+  if (!Object.keys(files).some((p) => isTest(p) && named.has(posix.normalize(p)))) return files;
+  return Object.fromEntries(Object.entries(files).filter(([p]) => !isTest(p) || named.has(posix.normalize(p))));
+}
+
 /** Answer rounds run against the current working tree, in the project the question came from. `brain` (default:
  * LocalBrain over `agentModel`) turns each answer into tests. */
 export function makeAnswerRunner(repo: string, file: ReviewFile, settings: Settings, agentModel: AgentModel | null,
@@ -377,10 +392,12 @@ export function makeAnswerRunner(repo: string, file: ReviewFile, settings: Setti
     logUsage(repo, "accept", [agentUse(brain.label ? `${brain.label}/answer` : `anthropic:${agentModel!.model}`,
       rnd.agent)], new Date(), qid);
     const c = rnd.classified;
+    const files = reportedFiles(rnd.files, [...rnd.agent.earlierTexts ?? [], rnd.agent.finalText], adapterFor(cfg));
+    const ours = (t: TestResult) => ownerFile(t.fileAttr, Object.keys(files)) !== null;
     // A test that fails in every run says the code does not do what the owner answered: it is kept, red, like a
     // finding marked real. Flaky or erroring tests are skipped.
-    return { qid, files: rnd.files, keep: group([...c.passed, ...c.findings], rnd.files),
-      skip: group([...c.flaky, ...c.errors], rnd.files), disagree: c.findings.map((t) => t.testId),
+    return { qid, files, keep: group([...c.passed, ...c.findings], files),
+      skip: group([...c.flaky, ...c.errors], files), disagree: c.findings.filter(ours).map((t) => t.testId),
       costUsd: rnd.agent.costUsd, stop: rnd.agent.stop, base };
   };
 }
