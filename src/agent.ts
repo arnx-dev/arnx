@@ -315,6 +315,10 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
       if (!(e instanceof ModelError)) throw e;
       stop = `api_error: ${e.message}`;
       unknown += e.unknownCalls;
+      // What the failed call was billed (a reply cut short, a retry after a partial one) is spent all the same.
+      cost += e.costUsd || 0;
+      spend.add(e.costUsd || 0);
+      if (e.usage) usage = addUsage(usage, e.usage);
       recordCall({ provider: model.provider ?? "unknown", ok: false, ...(e.fault ? { fault: e.fault } : {}),
         ...(tried(e.attempts?.length ?? e.tries)) });
       emitModelCall({ provider: model.provider ?? "unknown", model: model.model, ok: false, error: clip(e.message, 300),
