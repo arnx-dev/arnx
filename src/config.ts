@@ -304,7 +304,11 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
   if (install.some((c) => c.includes("\n"))) problems.push(`${at}install: one command per line; use && to chain`);
   const commandProblems = [...adapter.validateCommand(spec.test_command, runner),
     ...typeof spec.test_command === "string" && fileWrite(spec.test_command) !== null
-      ? [writes(fileWrite(spec.test_command)!)] : []].map((p) => at + p);
+      ? [writes(fileWrite(spec.test_command)!)] : [],
+    ...typeof spec.test_command === "string" && runner !== "node" && afterTargets(spec.test_command) !== null
+      ? [`test_command: \`${afterTargets(spec.test_command)}\` comes after {targets}: arnx adds the runner's report ` +
+        "options at the end, so they would go to that command and no report is written. End test_command with the " +
+        "runner's own options"] : []].map((p) => at + p);
   problems.push(...commandProblems);
   const command = commandProblems.length ? "" : spec.test_command as string;
   let typecheck: string | undefined;
@@ -439,6 +443,17 @@ export function fileWrite(command: string): string | null {
     if (!(target === "/dev/null" || /^&\d?-?$/.test(target) && m[0].includes(">&"))) return m[0].trim();
   }
   return null;
+}
+
+/** What follows the last {targets} in a test command and starts another command (`| tail`, `; echo`): arnx appends
+ * its report options to the end of the command (node's go in at --test), which would then go to that command, and the
+ * runner writes no report. Redirects (2>&1, &>/dev/null) are not commands; null: nothing follows. */
+export function afterTargets(command: string): string | null {
+  const i = command.lastIndexOf("{targets}");
+  if (i < 0) return null;
+  const rest = command.slice(i + "{targets}".length);
+  const m = /\|\|?|;|&&?/.exec(rest.replace(/\d?>&\d?-?|&>>?/g, (r) => " ".repeat(r.length)));
+  return m ? rest.slice(m.index).trim() : null;
 }
 
 /** Why a test_command that writes is refused, naming what writes. A setup approved before the rule fails here on any

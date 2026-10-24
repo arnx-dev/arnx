@@ -118,3 +118,23 @@ test("tests named by the runner's configuration, or under build/, count as the p
   expect(hasOwnTests(cfg, app({ "build/tests/test_x.py": "def test_x():\n    pass\n" }))).toBe(true);
   expect(hasOwnTests(cfg, app({ "node_modules/x/test_y.py": "" }))).toBe(false);
 });
+
+test("a test_command that starts another command after {targets} is refused before it runs: no report could come", () => {
+  const said = (c: string, yaml = YAML) => {
+    try {
+      parseReviewFile(yaml.replace("python -m pytest -q {targets}", c));
+      return "";
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  for (const [c, part] of [["python -m pytest {targets} 2>&1 | tail -c 1500", "| tail -c 1500"],
+    ["python -m pytest {targets} | grep FAIL", "| grep FAIL"], ["python -m pytest {targets}; echo done", "; echo done"],
+    ["python -m pytest {targets} && echo ok", "&& echo ok"]]) {
+    expect(said(c!)).toContain(`\`${part}\` comes after {targets}`);
+  }
+  for (const c of ["python -m pytest {targets}", "python -m pytest {targets} 2>&1", "cd app && python -m pytest {targets}",
+    "echo y | python -m pytest -q {targets} -x", "python -m pytest {targets} &>/dev/null"]) {
+    expect([c, said(c)]).toEqual([c, ""]);
+  }
+});
