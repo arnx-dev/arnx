@@ -10,7 +10,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSy
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { accept, findAccepted, findReview, makeAnswerRunner, recordChosen } from "./accept";
+import { accept, findAccepted, findReview, makeAnswerRunner, notMarkedLine, recordChosen } from "./accept";
 import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, failingList, keepEdits,
   localPinsPath, TESTS_CHANGED } from "./check";
 import { colorFor, colorLines, paint } from "./color";
@@ -1161,6 +1161,7 @@ class Commands {
     }
     for (const [qid, ids] of byAnswer) this.d.out(`${ids.join(", ")} set aside: your answer to ${qid} has its own test`);
     for (const p of tests) this.d.out(`  kept: ${relative(repo, p)}`);
+    if (result.notMarked.length) this.d.out(notMarkedLine(result.notMarked));
     const answers: { question: string; result: string; tests: string[]; cost_usd: number; rewrite_of: string[] | null }[]
       = [];
     for (const ans of result.answers) {
@@ -1247,6 +1248,7 @@ class Commands {
       : tests.length ? [real.length ? "commit the fix and the accepted tests together" : "commit the accepted tests"] : [];
     this.emit("ok", 0, { review_id: result.review.id, kept: tests.map(rel),
       dest: tests.length ? rel(result.dest) || "." : null, issues, marks, answers, check: checked,
+      not_marked: result.notMarked,
       fix_prompt: rel(promptPath), next });
     await this.sendTelemetry("accept", () => acceptData(result, tests.length));
     return 0;

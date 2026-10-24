@@ -6,7 +6,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { accept } from "../src/accept";
+import { accept, notMarkedLine } from "../src/accept";
 import { ACCEPTED_RECORD, check } from "../src/check";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { baseName } from "../src/outcomes";
@@ -168,4 +168,13 @@ test("a test's parameters: pytest's are dropped, a bracket in a JavaScript title
   expect(baseName("topup generated [memory] > S1: pays")).toBe("topup generated [memory] > S1: pays");
   expect(baseName("handles [x]")).toBe("handles [x]");
   expect(baseName("plain")).toBe("plain");
+});
+
+test("accept names the bug tests no expected-fail marker fits, and says they fail in the project's own run", async () => {
+  const { repo, rdir } = setup(MARKS);
+  const result = await accept(repo, rdir, SETTINGS);
+  // S1 runs once per describe.each variant, so it is left unmarked; S2 is marked todo.
+  expect(result.notMarked).toEqual([`${keptEach}::${NAMES.memS1}`, `${keptEach}::${NAMES.pgS1}`]);
+  expect(notMarkedLine(result.notMarked)).toBe("Fails in your own test run until fixed (no expected-fail marker " +
+    `fits it): ${keptEach}::${NAMES.memS1}, ${keptEach}::${NAMES.pgS1}`);
 });

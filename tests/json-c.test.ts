@@ -68,7 +68,8 @@ test("accept --json: the review, kept files, marks, answers, the check, the fix 
     issues: 1, marks: { real: 1, intended: 0, noise: 1, rewrite: 0, unmarked: 0, left_as_prefilled: 1 }, // F1 real as pre-filled
     answers: [{ question: "Q1", result: "locked", tests: ["test_rounds_down"], cost_usd: 0, rewrite_of: null }],
     check: { failing: [{ project: "app", test_id: `${KEPT}::test_a`, message: "assert False\ntrace" }], passing: 0 },
-    fix_prompt: `.arnx/reviews/${RID}/fix-prompt.md`, next: ["give the fix prompt to your coding agent", "arnx check"] });
+    not_marked: [], fix_prompt: `.arnx/reviews/${RID}/fix-prompt.md`,
+    next: ["give the fix prompt to your coding agent", "arnx check"] });
   // The text a person reads goes to stderr, as without --json.
   expect(run.stderr).toContain(`✓ Accepted 1 test from 1 issue (1 finding)\n  1 mark was pre-filled (not reviewed in ` +
     `triage)\n  kept: ${KEPT}\n  kept: tests/arnx/r20261011_a1b2c3/answers/test_round.py\nQ1: `);

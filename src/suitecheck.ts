@@ -26,8 +26,12 @@ export async function suiteBreaks(repo: string, files: string[],
   if (!existsSync(reviewConfigPath(repo))) return [];
   const file = loadReviewFile(repo, { requireApproved: false });
   const out: SuiteBreak[] = [];
+  // Each file is its deepest project's: a project's root holding another project's does not run that one's files.
+  const under = (f: string, dir: string) => dir === "." || f.startsWith(`${dir}/`);
+  const ownerOf = (f: string) => file.projects.filter((p) => under(f, p.workdir))
+    .sort((a, b) => b.workdir.length - a.workdir.length)[0]?.name;
   for (const cfg of file.projects) {
-    const own = files.filter((f) => cfg.workdir === "." || f.startsWith(`${cfg.workdir}/`));
+    const own = files.filter((f) => ownerOf(f) === cfg.name);
     if (!own.length) continue;
     o.progress?.(`${cfg.name}: running its own tests with the accepted ones`);
     const tmp = mkdtempSync(join(tmpdir(), "arnx-suite-"));
