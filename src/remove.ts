@@ -1,7 +1,8 @@
 // arnx remove: what arnx put in this repository, listed (nothing deleted), then deleted with --yes: .arnx/,
 // .arnxignore, the skill in the repository, this repository's environment images and the pins arnx keeps for it
 // outside the repository. Files git tracks are never deleted here: arnx prints the `git rm` that removes them, so the
-// removal shows in a commit. Accepted tests are the repository's own tests once committed: kept unless --tests.
+// removal shows in a commit. Accepted tests (.arnx/tests/) are the repository's own tests once committed: kept
+// unless --tests.
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, rmdirSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
@@ -12,6 +13,7 @@ import { ArnxError } from "./errors";
 import { FILE as IGNORE_FILE } from "./ignore";
 import { docker } from "./sandbox";
 import { SKILL_DIRS } from "./skill";
+import { DOME } from "./testround";
 
 export interface RemovePlan {
   /** What `targets` names, as shown: a folder with a slash. */
@@ -101,15 +103,20 @@ function trackedIn(repo: string, paths: string[]): Set<string> {
 export function planRemove(repo: string, o: { tests: boolean; pins: string | null }): RemovePlan {
   const record = acceptedRecord(repo);
   const accepted = [...record.keys()].filter((p) => existsSync(join(repo, p)));
-  const roots = [".arnx", IGNORE_FILE, ...SKILL_DIRS, ...(o.tests ? accepted : [])];
+  // Accepted tests in .arnx/tests/ are under .arnx already; an older arnx's are in the project.
+  const roots = [".arnx", IGNORE_FILE, ...SKILL_DIRS, ...(o.tests ? accepted.filter((p) => !p.startsWith(".arnx/")) : [])];
   let targets = roots.map((path) => ({ path, files: filesUnder(repo, path).map(posix) })).filter((t) => t.files.length);
   let tracked = trackedIn(repo, targets.map((t) => t.path));
   // --tests: an uncommitted accepted test whose content changed since accept holds the user's edits: kept.
   const edited = o.tests ? accepted.filter((p) => !tracked.has(p) && record.get(p) !== sha256(join(repo, p))) : [];
+  // The accepted tests in .arnx/tests/ stay with .arnx/ going, unless --tests (and then the edited ones still stay).
+  const stays = (p: string) => p.startsWith(`${DOME}/`) && (!o.tests || edited.includes(p));
+  targets = targets.map((t) => ({ ...t, files: t.files.filter((p) => !stays(p)) })).filter((t) => t.files.length);
   if (edited.length) {
     targets = targets.filter((t) => !edited.includes(t.path));
     tracked = new Set([...tracked].filter((p) => !edited.includes(p)));
   }
+  tracked = new Set([...tracked].filter((p) => !stays(p)));
   const all = [...new Set(targets.flatMap((t) => t.files))];
   let images: EnvImage[] | null = null;
   let docker: string | null = null;

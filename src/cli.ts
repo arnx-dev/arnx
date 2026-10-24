@@ -10,8 +10,9 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSy
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { accept, findAccepted, findReview, makeAnswerRunner, notMarkedLine, recordChosen } from "./accept";
+import { accept, findAccepted, findReview, makeAnswerRunner, recordChosen } from "./accept";
 import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, failingList, keepEdits,
+  legacyAccepted, moveOut,
   localPinsPath, TESTS_CHANGED } from "./check";
 import { colorFor, colorLines, paint } from "./color";
 import { applyMarks, type Key, markInteractive, terminalKeys } from "./mark";
@@ -54,7 +55,6 @@ import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, next
 import { isoSeconds } from "./util";
 import { spend } from "./spend";
 import { installSkills, SKILL_DIRS, skillDirsShown, skillStates, userSkillRoot } from "./skill";
-import { suiteBreaks } from "./suitecheck";
 import { recheckJson, recheckReview, recheckSummary } from "./recheck";
 import { applyRemove, planRemove } from "./remove";
 import { versionLine } from "./version";
@@ -113,7 +113,8 @@ Review, after each change
 Decide
   triage [id]                           mark findings and answer questions
   accept [id] [--again] [--no-answers] [--no-check] [--copy] [--keep-edits]
-                                        keep the tests behind real findings
+                                        keep the tests behind real findings (in .arnx/tests/)
+  accept --move                         move tests an older arnx kept in your test folders to .arnx/tests/
 
 Fix
   prompt [id]                           the fix prompt for your coding agent
@@ -183,7 +184,7 @@ const COMMANDS: Record<string, { options: Options; positionals: number }> = Obje
     resume: { type: "boolean" }, untracked: { type: "boolean" }, "no-untracked": { type: "boolean" }, ...MODELS },
     positionals: 0 },
   accept: { options: { again: { type: "boolean" }, "no-answers": { type: "boolean" }, quiet: { type: "boolean" },
-    "no-check": { type: "boolean" }, copy: { type: "boolean" }, "keep-edits": { type: "boolean" }, ...MODELS },
+    "no-check": { type: "boolean" }, copy: { type: "boolean" }, "keep-edits": { type: "boolean" }, move: { type: "boolean" }, ...MODELS },
     positionals: 1 },
   check: { options: { quiet: { type: "boolean" }, review: { type: "boolean" } },
     positionals: 1 },
@@ -1098,6 +1099,7 @@ class Commands {
 
   async accept(a: Args): Promise<number> {
     if (a.values["keep-edits"]) return this.keepEdits(a);
+    if (a.values.move) return this.moveOut(a);
     const repo = this.repo();
     const { s: file, mode } = this.settings(repo, a);
     let s = file;
@@ -1122,12 +1124,8 @@ class Commands {
     progress.start();
     let result;
     try {
-      // The project's own tests run with the accepted ones (skipped with the check, by --no-check).
-      const suiteCheck = a.values["no-check"] || this.d.check === false ? null
-        : (files: string[]) => suiteBreaks(repo, files, { progress: progress.say,
-          ...(this.d.checkSessions ? { sessionFactory: this.d.checkSessions } : {}) });
       result = await accept(repo, rdir, s, { again: a.values.again as boolean, answerRunner: runner,
-        progress: progress.say, pins: localPinsPath(this.d.env, repo), suiteCheck });
+        progress: progress.say, pins: localPinsPath(this.d.env, repo) });
     } finally {
       progress.stop();
     }
@@ -1161,7 +1159,6 @@ class Commands {
     }
     for (const [qid, ids] of byAnswer) this.d.out(`${ids.join(", ")} set aside: your answer to ${qid} has its own test`);
     for (const p of tests) this.d.out(`  kept: ${relative(repo, p)}`);
-    if (result.notMarked.length) this.d.out(notMarkedLine(result.notMarked));
     const answers: { question: string; result: string; tests: string[]; cost_usd: number; rewrite_of: string[] | null }[]
       = [];
     for (const ans of result.answers) {
@@ -1218,11 +1215,6 @@ class Commands {
       } else if (passing) {
         this.d.out(c.green(passing === 1 ? "The accepted test passes." : `All ${passing} accepted tests pass.`));
       }
-      const unmarked = results.flatMap((r) => r.unmarked ?? []);
-      if (unmarked.length) {
-        this.d.out(`Expected-fail marker removed from ${n(unmarked.length, "test")} that ` +
-          `${unmarked.length === 1 ? "passes" : "pass"} now.`);
-      }
     } else if (realTests) {
       this.d.out("");
       this.d.out(`${n(realTests, "accepted test")} fail${realTests === 1 ? "s" : ""} until the fix (not run: --no-check).`);
@@ -1248,7 +1240,6 @@ class Commands {
       : tests.length ? [real.length ? "commit the fix and the accepted tests together" : "commit the accepted tests"] : [];
     this.emit("ok", 0, { review_id: result.review.id, kept: tests.map(rel),
       dest: tests.length ? rel(result.dest) || "." : null, issues, marks, answers, check: checked,
-      not_marked: result.notMarked,
       fix_prompt: rel(promptPath), next });
     await this.sendTelemetry("accept", () => acceptData(result, tests.length));
     return 0;
@@ -1272,6 +1263,23 @@ class Commands {
       this.d.out(`  kept the accepted test list arnx wrote for ${p} (its edit in ${ACCEPTED_RECORD} is not trusted)`);
     }
     this.d.out(`Commit ${ACCEPTED_RECORD} with the tests.`);
+    return 0;
+  }
+
+  /** Tests an older arnx kept in the projects' own test folders, moved to .arnx/tests/. */
+  private moveOut(a: Args): number {
+    if (a.positionals.length || a.values.again) throw new ArnxError("--move takes no review id and no --again");
+    const repo = this.repo();
+    const moved = moveOut(repo, loadSettings(repo), localPinsPath(this.d.env, repo));
+    this.emit("ok", 0, { moved });
+    const n = Object.keys(moved).length;
+    if (!n) {
+      this.d.out("No accepted tests in your test folders; nothing to move.");
+      return 0;
+    }
+    this.d.out(`Moved ${n} accepted file${n === 1 ? "" : "s"} to .arnx/tests/, out of your own test run:`);
+    for (const [from, to] of Object.entries(moved)) this.d.out(`  ${from} → ${to}`);
+    this.d.out(`Commit the move with ${ACCEPTED_RECORD}.`);
     return 0;
   }
 
@@ -1402,6 +1410,14 @@ class Commands {
       if (json) this.emitRaw(checkJson([], TESTS_CHANGED, changed));
       else this.d.out(colorLines(changedSummary(changed, repo), paint(!!this.d.color)));
       return TESTS_CHANGED;
+    }
+    // Accepted tests an older arnx kept in the projects' own test folders: their runs collect them.
+    const legacy = [...legacyAccepted(repo, s).keys()];
+    if (legacy.length) {
+      throw new ArnxError(`${legacy.length} accepted file${legacy.length === 1 ? " is" : "s are"} in your own test ` +
+        `folders, where your test run picks ${legacy.length === 1 ? "it" : "them"} up:\n` +
+        legacy.slice(0, 5).map((p) => `  ${p}`).join("\n") + (legacy.length > 5 ? `\n  … and ${legacy.length - 5} more` : "") +
+        "\nMove them to .arnx/tests/: arnx accept --move");
     }
     const progress = new Progress(this.progressLine, { quiet: a.values.quiet as boolean | undefined,
       live: this.d.live ?? null });

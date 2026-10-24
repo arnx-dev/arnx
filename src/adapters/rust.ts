@@ -145,28 +145,7 @@ function drop(source: string, names: Set<string>): { text: string; left: Set<str
   return { text: cuts.length ? endOnce(lines.join("")) : source, left };
 }
 
-/** `#[should_panic]` right above each named test fn (after #[tokio::test] and the like, which keep it there), under a
- * comment with the reason. A test returning a Result cannot take it, nor an rstest with cases: those are left. */
-function expectFail(source: string, names: Set<string>, reason: string): { text: string; left: Set<string> } {
-  const lines = source.split(/(?<=\n)/);
-  const fns = fnsOf(lines, names);
-  const left = new Set([...names].filter((n) => !fns.some((f) => f.name === n)));
-  const inserts: [number, string][] = [];
-  for (const f of fns) {
-    const brace = lines.findIndex((l, j) => j >= f.at && l.includes("{"));
-    // rstest's cases run under one fn, and those that pass would fail under #[should_panic].
-    const cases = lines.slice(f.first, f.at).some((l) => /^\s*#\[(?:rstest|case)\b/.test(l));
-    if (cases || brace < 0 || lines.slice(f.at, brace + 1).join("").split("{")[0]!.includes("->")) {
-      left.add(f.name);
-      continue;
-    }
-    inserts.push([f.at, `${f.indent}// ${reason}\n${f.indent}#[should_panic]\n`]);
-  }
-  for (const [at, text] of inserts.sort((a, b) => b[0] - a[0])) lines.splice(at, 0, text);
-  return { text: lines.join(""), left };
-}
-
-/** Remove arnx's expected-fail marker: its `// arnx` comment and the #[should_panic] under it. */
+/** Remove an older arnx's expected-fail marker: its `// arnx` comment and the #[should_panic] under it. */
 function unmark(source: string, names?: Set<string>): { text: string; names: string[] } {
   const lines = source.split(/(?<=\n)/);
   const out: string[] = [];
@@ -211,7 +190,6 @@ export const rust: Adapter = {
   parseReport: (text, _runner, _root, exists = () => false) => parseNextest(text, exists),
   skip,
   drop,
-  expectFail,
   unmark,
   // Cargo builds only tests/*.rs as integration tests, so no folder: the review id is the prefix (a file named after
   // the review, r<tag>, is that prefix alone).

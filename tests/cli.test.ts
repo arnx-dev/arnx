@@ -225,9 +225,9 @@ test("test_accept_command", async () => {
   writeFileSync(join(rdir, "tests", "tests", "g", "test_a.py"), "def test_a():\n    assert False\n");
   writeFileSync(join(rdir, "review.md"), blankMarks(readFileSync(join(rdir, "review.md"), "utf8")).replace("Mark: [ ] real", "Mark: [x] real"));
   expect(await cli.run("accept", "--no-answers")).toBe(0);
-  expect(existsSync(join(repo, "tests", "arnx", "r20261011_a1b2c3", "test_y.py"))).toBe(true);
+  expect(existsSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3", "test_y.py"))).toBe(true);
   expect(cli.stdout).toContain("✓ Accepted 1 test from 1 issue (1 finding)\n" +
-    "  1 mark was pre-filled (not reviewed in triage)\n  kept: tests/arnx/r20261011_a1b2c3/test_y.py\n\n1 accepted test fails until the fix (not run: --no-check).");
+    "  1 mark was pre-filled (not reviewed in triage)\n  kept: .arnx/tests/tests/arnx/r20261011_a1b2c3/test_y.py\n\n1 accepted test fails until the fix (not run: --no-check).");
 });
 
 test("test_accept_with_answers_requires_consent", async () => {
@@ -287,8 +287,9 @@ test("accept counts kept Rust tests (their kept names differ from generated ones
   writeFileSync(join(rdir, "tests", "tests", "arnx_generated_x.rs"), "#[test]\nfn adds() { assert!(false); }\n");
   writeFileSync(join(rdir, "review.md"), blankMarks(readFileSync(join(rdir, "review.md"), "utf8")).replace("Mark: [ ] real", "Mark: [x] real"));
   expect(await cli.run("accept", "--no-answers")).toBe(0);
-  expect(cli.stdout).toContain("  kept: tests/arnx_20261011_a1b2c3_y.rs\n");
-  expect(existsSync(join(repo, "tests", "arnx_20261011_a1b2c3_y.rs"))).toBe(true);
+  expect(cli.stdout).toContain("  kept: .arnx/tests/tests/arnx_20261011_a1b2c3_y.rs\n");
+  expect(existsSync(join(repo, ".arnx", "tests", "tests", "arnx_20261011_a1b2c3_y.rs"))).toBe(true);
+  expect(existsSync(join(repo, "tests", "arnx_20261011_a1b2c3_y.rs"))).toBe(false); // cargo never compiles it
 });
 
 test("accept across projects names no empty directory", async () => {
@@ -305,7 +306,7 @@ test("accept across projects names no empty directory", async () => {
   writeFileSync(join(rdir, "projects", "pay", "tests", gen, "test_x.py"), "def test_x():\n    assert False\n");
   writeFileSync(join(rdir, "review.md"), blankMarks(readFileSync(join(rdir, "review.md"), "utf8")).replace("Mark: [ ] real", "Mark: [x] real"));
   expect(await cli.run("accept", "--no-answers")).toBe(0);
-  expect(cli.stdout).toMatch(/\n  kept: services\/pay\/tests\/arnx\/r20261011_a1b2c3\/[^\n]+\.py\n/);
+  expect(cli.stdout).toMatch(/\n  kept: \.arnx\/tests\/services\/pay\/tests\/arnx\/r20261011_a1b2c3\/[^\n]+\.py\n/);
 });
 
 test("triage records the marks chosen there; accept counts the pre-filled ones apart", async () => {

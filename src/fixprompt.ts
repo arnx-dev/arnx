@@ -2,7 +2,6 @@
 // the tests that define "fixed"; it does not write the fix. The prompt gives the agent the failing tests, each bug's
 // expected and actual result, the reviewer's likely cause, the owner's answers as intended behaviour, the questions still open, and the
 // rules: change the product code, never the accepted tests, and run `arnx check` until it passes.
-import { posix } from "node:path";
 import type { AcceptResult } from "./accept";
 import { groupsOf } from "./report";
 import { SHALLOW_NOTE } from "./shallow";
@@ -61,22 +60,17 @@ function testsOf(fs: AcceptResult["review"]["findings"], moved: Record<string, s
 }
 
 export function fixPrompt(r: Pick<AcceptResult, "review" | "marks" | "answers" | "moved"> &
-  Partial<Pick<AcceptResult, "rewrites" | "setAside">>, settings: Settings): string {
+  Partial<Pick<AcceptResult, "rewrites" | "setAside">>, _settings?: Settings): string {
   const { review, marks, moved } = r;
   const setAside = r.setAside ?? {};
   const rewrites = r.rewrites ?? [];
-  const dirs = [...new Set(Object.values(moved).map((p) => {
-    const i = p.indexOf(`/${settings.acceptedTestsDir}/`);
-    return i >= 0 ? p.slice(0, i + settings.acceptedTestsDir.length + 2) : `${posix.dirname(p)}/`;
-  }))].sort();
   const out: string[] = [`# Fix the bugs proven by arnx review ${review.id}`, "",
     `Change: ${review.change}.`, "",
     "You are fixing bugs in this repository. Each one was proven by a test that fails on the current code, and its " +
     "owner marked it real. The tests define what \"fixed\" means; the descriptions below say what each one shows.", "",
     "## Rules", "",
-    `- Change the product code, not the tests. Never edit, skip, delete or weaken the accepted tests in ` +
-    `${dirs.map((d) => `\`${d}\``).join(", ") || "`tests/arnx/`"}, nor remove their expected-fail markers: ` +
-    "`arnx check` removes each once its test passes.",
+    "- Change the product code, not the tests. Never edit, skip, delete, weaken or copy the accepted tests in " +
+    "`.arnx/tests/`. They are not part of the project's own test run: only `arnx check` runs them.",
     "- Fix the cause. Special-casing a test's exact input is not a fix.",
     "- Fix the behaviour, not the test's view of it. Where an accepted test checks the code's text, only that " +
     "something exists, or relies on a mock that behaves unlike the real service, make the behaviour right and say " +

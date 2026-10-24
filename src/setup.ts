@@ -34,7 +34,7 @@ import { agentUse, logUsage } from "./usage";
 import { randomHex } from "./util";
 import { VERSION } from "./version";
 import { acceptedPins, type AcceptedPins } from "./check";
-import { collect, dockerSession, isKeptPath, ownTestsInWriteDir, ownTestsProblem, writeDirOf } from "./testround";
+import { collect, DOME, dockerSession, isKeptPath, ownTestsInWriteDir, ownTestsProblem, writeDirOf } from "./testround";
 
 export const SUITE_TIMEOUT = 1800;
 export const OUTPUT_TAIL = 6000;
@@ -191,7 +191,26 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
   };
   return sessionFactory(cfg, snap, buildLog, async (session) => {
     type Out = [boolean, string, string, string[], string[], string, SuiteCounts];
-    const [result, all] = runTests(session, snap, cfg, targets, "suite.xml", SUITE_TIMEOUT);
+    // A whole-suite run carries a canary: one-line tests where arnx keeps accepted tests (.arnx/tests/), which the
+    // project's own run must never collect.
+    const canary = targets.length ? [] : getAdapter(cfg.language).probes(cfg.runner)
+      .map((p) => ({ path: join(snap, DOME, writeDirOf(cfg), p.file), source: p.source }));
+    for (const c of canary) {
+      mkdirSync(dirname(c.path), { recursive: true });
+      writeFileSync(c.path, c.source);
+    }
+    let result, all;
+    try {
+      [result, all] = runTests(session, snap, cfg, targets, "suite.xml", SUITE_TIMEOUT);
+    } finally {
+      for (const c of canary) rmSync(c.path, { force: true });
+    }
+    if ((all ?? []).some((t) => [t.fileAttr, t.testId].some((x) => x && /(?:^|\/)\.arnx\//.test(x)))) {
+      return [false, "the project's test run collects files under .arnx/ (a test arnx placed in .arnx/tests/ ran). " +
+        "arnx keeps its accepted tests there so your own run never runs them: make the runner leave .arnx/ out " +
+        "(pytest: norecursedirs or testpaths; vitest, jest: exclude), then run setup again", tailOf(result.output), [],
+        [], "", none] as Out;
+    }
     // A project with no tests of its own has no suite to run: arnx's one-line test, which reviews depend on anyway,
     // proves the environment instead (dexdash's setup took 16 tries and wrote a placeholder test into test_command).
     if (!targets.length && !all?.length && cfg.language !== "rust" && !hasOwnTests(cfg, snap)) {

@@ -17,14 +17,16 @@ import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
 const RID = "20261011-a1b2c3";
-const KEPT = "tests/arnx/r20261011_a1b2c3/test_y.py";
+/** Where the accepted test runs from, and where accept keeps it (.arnx/tests/, out of the project's own run). */
+const RUN = "tests/arnx/r20261011_a1b2c3/test_y.py";
+const KEPT = `.arnx/tests/${RUN}`;
 
 /** A fake sandbox where the accepted test fails, counting its runs. */
 function failing(): { sessions: SessionFactory; runs: () => number } {
   let runs = 0;
   const sessions: SessionFactory = async (_c, snap, _l, body) => {
     runs++;
-    return body(new FakeSession(snap, () => [junitXml([[KEPT, "test_a", "failed", "assert False"]]), "1 failed",
+    return body(new FakeSession(snap, () => [junitXml([[RUN, "test_a", "failed", "assert False"]]), "1 failed",
       false]));
   };
   return { sessions, runs: () => runs };
@@ -118,9 +120,8 @@ test("check --json gives each project's passed and failed tests and the overall 
   const j = JSON.parse(cli.stdout);
   expect(j).toEqual({ schema_version: 1, command: "check", result: "fail", exit_code: 1, changed: [], projects: [{ project: "app",
     files: [KEPT], no_report: false, no_report_reason: null, log: null, passed: [], skipped: 0,
-    accepted: [`${KEPT}::test_a`],
-    failed: [{ test_id: `${KEPT}::test_a`, outcome: "failed", message: "assert False\ntrace", accepted: true }],
-    unmarked: [] }] });
+    accepted: [`${RUN}::test_a`],
+    failed: [{ test_id: `${RUN}::test_a`, outcome: "failed", message: "assert False\ntrace", accepted: true }] }] });
 });
 
 // --- the record itself: a test edited together with its pin, or its entry removed ---------------------------------------

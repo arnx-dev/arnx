@@ -7,8 +7,9 @@ holds the error object every arnx command gives ([json.md](json.md)): `schema_ve
 `result: "error"`, `error` (the message, also on stderr) and `exit_code` 2 or 3; a wrong option is
 `result: "usage-error"`.
 
-`arnx check` runs the accepted tests (what `arnx accept` copied into `tests/arnx/`, or `accepted_tests_dir` in
-`.arnx/config.toml`) of every project in the approved sandbox, on the working tree as it is now.
+`arnx check` runs the accepted tests (what `arnx accept` kept in `.arnx/tests/`, each at the path it runs from) of
+every project in the approved sandbox, on the working tree as it is now. Test ids are relative to the project, at
+the path each test runs from; `files` are where they are kept.
 `arnx check --review [id] --json` runs a review's confirmed tests instead: see [With --review](#with---review).
 
 ## Fields
@@ -35,7 +36,6 @@ holds the error object every arnx command gives ([json.md](json.md)): `schema_ve
 | `accepted` | array of strings | The ids, of those that passed or failed, that are accepted tests: the tests behind findings marked real (and answers the code disagrees with). The rest are other tests the review wrote into the same files. Read from `.arnx/accepted-tests.json` (committed, so a fresh clone or CI tells them apart too); for a file recorded by an older arnx, from its review in `.arnx/reviews/`; with neither, every test in the file counts as accepted. |
 | `failed` | array | Tests that failed: see [Each failed test](#each-failed-test). |
 | `skipped` | number | Tests skipped: one accept could not cut out of a kept file, or (accepted by an arnx before 0.1.2) not confirmed, marked intended or noise, or set aside. |
-| `unmarked` | array of strings | Tests that passed whose expected-fail marker check removed from the repository (accept marks a bug's test so until it is fixed); the files are pinned again. Commit them with the fix. |
 
 ## Each failed test
 
@@ -69,7 +69,7 @@ each test's name after `file::`, parameters dropped; empty for a support file or
 tests):
 
 ```json
-{ "schema_version": 1, "files": { "tests/arnx/r20261011_a1b2c3/test_discount_over_100.py": {
+{ "schema_version": 1, "files": { ".arnx/tests/tests/arnx/r20261011_a1b2c3/test_discount_over_100.py": {
   "sha256": "9f2c…", "review": "20261011-a1b2c3", "tests": ["test_F1", "test_F2"] } } }
 ```
 

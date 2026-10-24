@@ -38,11 +38,12 @@ test("check finds the tests accept kept in a Rust crate and runs only them", asy
   mkdirSync(join(repo, "calc/tests/common"), { recursive: true });
   writeFileSync(join(repo, "calc/Cargo.toml"), "[package]\nname = \"calc\"\nversion = \"0.1.0\"\n");
   writeFileSync(join(repo, "calc/src/lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }\n");
-  for (const f of [KEPT, KEPT_REVIEW]) writeFileSync(join(repo, f), "#[test]\nfn t() {}\n");
+  // Kept in .arnx/tests/ at the path each runs from: cargo never builds them there.
+  mkdirSync(join(repo, ".arnx/tests/calc/tests"), { recursive: true });
+  for (const f of [KEPT, KEPT_REVIEW]) writeFileSync(join(repo, ".arnx/tests", f), "#[test]\nfn t() {}\n");
   writeFileSync(join(repo, "calc/tests/integration.rs"), "#[test]\nfn own() {}\n"); // the crate's own
   writeFileSync(join(repo, "calc/tests/arnx_generated_left.rs"), "#[test]\nfn g() {}\n"); // a round's leftover
   writeFileSync(join(repo, "calc/tests/common/arnx_helper.rs"), "pub fn h() {}\n"); // not built by cargo
-  mkdirSync(join(repo, ".arnx"));
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(CONFIG), "Dev", "2026-10-12"));
   commit(repo, "layout");
   const seen: string[] = [];
@@ -54,7 +55,7 @@ test("check finds the tests accept kept in a Rust crate and runs only them", asy
     return r;
   };
   const results = await check(repo, SETTINGS, { sessionFactory: session });
-  expect(results.map((r) => [r.project, r.files])).toEqual([["calc", [KEPT_REVIEW, KEPT]]]);
+  expect(results.map((r) => [r.project, r.files])).toEqual([["calc", [`.arnx/tests/${KEPT_REVIEW}`, `.arnx/tests/${KEPT}`]]]);
   expect(seen.join(" ")).not.toContain("integration");
   expect(seen.join(" ")).not.toContain("arnx_generated_left");
 });

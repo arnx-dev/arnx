@@ -103,15 +103,34 @@ export function isKeptPath(cfg: ReviewConfig, path: string, acceptedTestsDir?: s
     kept.dirs.some((d) => posix.dirname(path) === posix.normalize(posix.join(cfg.workdir, d)).replace(/\/$/, ""));
 }
 
-/** The test files `arnx accept` kept for this project that exist, relative to the repository. */
+/** Where `arnx accept` keeps tests: each at the path it runs from (`api/tests/arnx/r…/test_x.py`) under this
+ * folder, which test runners leave out (setup proves it), so the project's own test run never imports, collects or runs
+ * one. Only `arnx check` puts them in place, in its throwaway copy of the repository. */
+export const DOME = ".arnx/tests";
+
+/** The path a kept file runs from (repository-relative): its path under DOME. */
+export const runPath = (p: string): string => p.startsWith(`${DOME}/`) ? p.slice(DOME.length + 1) : p;
+
+/** The test files `arnx accept` kept for this project that exist, relative to the repository (under DOME). */
 export function keptTestFiles(repo: string, cfg: ReviewConfig, acceptedTestsDir?: string): string[] {
+  return keptIn(join(repo, DOME), cfg, acceptedTestsDir).map((p) => `${DOME}/${p}`);
+}
+
+/** Files an arnx before the DOME kept inside the project, where its own test run collects them: every file in its
+ * accepted folders (support files too), and Rust's kept files. */
+export function legacyKeptFiles(repo: string, cfg: ReviewConfig, acceptedTestsDir?: string): string[] {
+  return keptIn(repo, cfg, acceptedTestsDir, true);
+}
+
+function keptIn(root: string, cfg: ReviewConfig, acceptedTestsDir?: string, all = false): string[] {
   const adapter = adapterFor(cfg);
-  const inRoots = acceptedRoots(cfg, acceptedTestsDir).filter((d) => existsSync(join(repo, d)))
-    .flatMap((d) => collect(repo, d, adapter.writable)).filter((p) => adapter.isTestFile(posix.basename(p)));
+  const inRoots = acceptedRoots(cfg, acceptedTestsDir).filter((d) => existsSync(join(root, d)))
+    .flatMap((d) => collect(root, d, all ? /./ : adapter.writable))
+    .filter((p) => all || adapter.isTestFile(posix.basename(p)));
   const own = (adapter.kept?.dirs ?? []).map((d) => posix.normalize(posix.join(cfg.workdir, d)).replace(/\/$/, ""))
-    .filter((d) => existsSync(join(repo, d)))
-    .flatMap((d) => readdirSync(join(repo, d)).filter((n) => adapter.kept!.name.test(n) &&
-      lstatSync(join(repo, d, n)).isFile()).map((n) => posix.join(d, n)));
+    .filter((d) => existsSync(join(root, d)))
+    .flatMap((d) => readdirSync(join(root, d)).filter((n) => adapter.kept!.name.test(n) &&
+      lstatSync(join(root, d, n)).isFile()).map((n) => posix.join(d, n)));
   return [...new Set([...inRoots, ...own])].sort();
 }
 

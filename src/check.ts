@@ -1,13 +1,12 @@
-// check: run the accepted tests (tests/arnx/ and the like) of every project in its approved sandbox, on the
-// working tree as it is now, and say which still fail. After `arnx accept` the tests behind findings marked real
+// check: run the accepted tests (kept in .arnx/tests/, out of the project's own test run) of every project in its
+// approved sandbox, on the working tree as it is now, and say which still fail. After `arnx accept` the tests behind findings marked real
 // fail; fixing the code turns them green, and this is how to see it without setting up the services by hand.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
-import type { Adapter } from "./adapters/types";
 import { git, hasCommits, snapshot } from "./change";
 import { loadReviewFile, type ReviewConfig, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
@@ -17,17 +16,16 @@ import { load, type Review } from "./report";
 import type { Say } from "./progress";
 import { sayingDocker, type SessionFactory } from "./sandbox";
 import type { Env, Settings } from "./settings";
-import { dockerSession, keptTestFiles } from "./testround";
+import { DOME, dockerSession, keptTestFiles, legacyKeptFiles, runPath } from "./testround";
 
 export const CHECK_TIMEOUT = 900;
 
 /** `accepted`: the ids among passed and failed that are accepted tests (behind findings marked real; absent: all are).
  * `reason` and `log`, with noReport: why there is no report, and the runner's output (repository-relative).
- * `reviews`: a failed test → the review that accepted its file, when known. `unmarked`: the tests (`file::test`,
- * repository-relative) that passed, whose expected-fail marker check removed from the repository. */
+ * `reviews`: a failed test → the review that accepted its file, when known. */
 export interface ProjectCheck { project: string; files: string[]; passed: string[]; failed: TestResult[];
   skipped: number; noReport: boolean; accepted?: string[]; reason?: string; log?: string | null;
-  reviews?: Record<string, string>; unmarked?: string[] }
+  reviews?: Record<string, string> }
 
 /** The accepted tests, as `file::test` (repository-relative, parameters dropped): those accept recorded per file in
  * ACCEPTED_RECORD, else (a record by an older arnx) from each accepted review's marks. `files`: the kept files the
@@ -62,7 +60,9 @@ export function testsByFile(paths: string[], ids: string[]): Record<string, stri
 
 function acceptedIds(repo: string): AcceptedIds {
   const out: AcceptedIds = { ids: new Set(), files: new Set(), reviews: new Map() };
-  for (const [p, e] of Object.entries(readRecord(repo).files)) {
+  // By the path each file runs from (runPath): the runner reports that one.
+  for (const [stored, e] of Object.entries(readRecord(repo).files)) {
+    const p = runPath(stored);
     if (typeof e.review === "string") out.reviews.set(posix.normalize(p), e.review);
     if (!Array.isArray(e.tests)) continue;
     out.files.add(posix.normalize(p));
@@ -81,9 +81,9 @@ function acceptedIds(repo: string): AcceptedIds {
       const marks = Object.fromEntries(Object.entries(done.marks ?? {}).filter(([id]) => !done.set_aside?.[id]));
       for (const id of acceptedTestIds(load(rdir).findings, marks, moved, done.disagree ?? {})) {
         const [file, rest] = splitId(id);
-        if (!recorded.has(posix.normalize(file))) out.ids.add(testKey(file, rest));
+        if (!recorded.has(posix.normalize(runPath(file)))) out.ids.add(testKey(runPath(file), rest));
       }
-      for (const f of Object.values(moved)) {
+      for (const f of Object.values(moved).map(runPath)) {
         out.files.add(posix.normalize(f));
         if (!out.reviews.has(posix.normalize(f))) out.reviews.set(posix.normalize(f), name);
       }
@@ -111,31 +111,63 @@ function isAccepted(known: AcceptedIds, workdir: string, testId: string): boolea
 /** Where check keeps a project's runner output when the tests gave no report. */
 export const checkLog = (project: string) => `.arnx/run/check-${project}.log`;
 
-/** The marked tests that passed (each run of them: a parametrized test's variants all), unmarked in the repository and
- * pinned again (`local`: localPinsPath); their ids, `file::test`. A file that changed while the tests ran is left. */
-function unmarkFixed(repo: string, workdir: string, adapter: Adapter, marked: Record<string, string[]>,
-  results: TestResult[], local: string | null): string[] {
-  const out: string[] = [];
-  const name = (t: TestResult) => baseName(splitId(t.testId)[1]).split("::").at(-1)!;
-  for (const file of Object.keys(marked)) {
-    const own = results.filter((t) => posix.normalize(posix.join(workdir, splitId(t.testId)[0])) === file);
-    const red = new Set(own.filter((t) => t.outcome !== "passed").map(name));
-    const fixed = new Set(own.filter((t) => t.outcome === "passed").map(name).filter((n) => !red.has(n)));
-    const pin = readRecord(repo).files[file];
-    const full = join(repo, file);
-    if (!fixed.size || !pin || !existsSync(full) || sha256(full) !== pin.sha256) continue;
-    const u = adapter.unmark(readFileSync(full, "utf8"), fixed);
-    if (!u.names.length) continue;
-    writeFileSync(full, u.text);
-    repin(repo, file, local);
-    out.push(...u.names.map((n) => `${file}::${n}`));
+/** Accepted files an arnx before .arnx/tests/ kept inside the projects, where their own test runs collect them, each
+ * with its project (the deepest holding it): check runs nothing until `arnx accept --move` moved them. */
+export function legacyAccepted(repo: string, settings: Settings): Map<string, ReviewConfig> {
+  const file = loadReviewFile(repo, { requireApproved: false });
+  const projects = [...file.projects].sort((a, b) => posix.normalize(a.workdir).length - posix.normalize(b.workdir).length);
+  const out = new Map<string, ReviewConfig>();
+  for (const cfg of projects) for (const p of legacyKeptFiles(repo, cfg, settings.acceptedTestsDir)) out.set(p, cfg);
+  const holds = (cfg: ReviewConfig, p: string) => posix.normalize(cfg.workdir) === "." ||
+    p.startsWith(`${posix.normalize(cfg.workdir)}/`);
+  for (const p of Object.keys(readRecord(repo).files)) {
+    if (p.startsWith(`${DOME}/`) || out.has(p) || !existsSync(join(repo, p))) continue;
+    const cfg = projects.filter((c) => holds(c, p)).at(-1);
+    if (cfg) out.set(p, cfg);
   }
-  return out;
+  return new Map([...out].sort(([a], [b]) => (a < b ? -1 : 1)));
 }
 
-/** Run each project's accepted tests. A confirmed bug's test runs without its expected-fail marker (accept marks it
- * so the project's own run stays green): red while the bug is open; once it passes, its marker is removed from the
- * repository (`pins`: this machine's record, localPinsPath). */
+/** `arnx accept --move`: move the accepted files an older arnx kept inside the projects (legacyAccepted) to the same
+ * path under .arnx/tests/, out of the projects' own test runs, without their expected-fail markers (a red test is
+ * red only in check now), and pin them there (`local`: this machine's record, localPinsPath). Folders left empty are
+ * removed. Accepted files changed since accept are not moved: they block (ArnxError) until restored or kept. */
+export function moveOut(repo: string, settings: Settings, local: string | null = null): Record<string, string> {
+  const files = legacyAccepted(repo, settings);
+  const changed = changedAccepted(repo, local).filter((c) => files.has(c.path));
+  if (changed.length) throw new ArnxError(changedSummary(changed, repo));
+  const rec = readRecord(repo);
+  const pins: Record<string, Pin | null> = {};
+  const review: Record<string, string> = {};
+  const moved: Record<string, string> = {};
+  for (const [p, cfg] of files) {
+    const to = `${DOME}/${p}`;
+    const text = readFileSync(join(repo, p), "utf8");
+    mkdirSync(dirname(join(repo, to)), { recursive: true });
+    writeFileSync(join(repo, to), adapterFor(cfg).unmark(text).text);
+    rmSync(join(repo, p));
+    for (let d = dirname(p); d !== "." && d !== posix.normalize(cfg.workdir); d = dirname(d)) {
+      if (readdirSync(join(repo, d)).length) break;
+      rmSync(join(repo, d), { recursive: true });
+    }
+    moved[p] = to;
+    const pin = rec.files[p];
+    if (!pin) continue;
+    delete rec.files[p];
+    rec.files[to] = { ...pin, sha256: sha256(join(repo, to)) };
+    pins[p] = null;
+    pins[to] = rec.files[to]!;
+    review[p] = review[to] = pin.review;
+  }
+  if (Object.keys(pins).length) {
+    writeLocal(local, repo, (p) => review[p]!, pins);
+    writeRecord(repo, rec);
+  }
+  return moved;
+}
+
+/** Run each project's accepted tests: each is copied from .arnx/tests/ to the path it runs from in a throwaway copy
+ * of the working tree, and run there; a confirmed bug's test is red while the bug is open. */
 export async function check(repo: string, settings: Settings, o: { sessionFactory?: SessionFactory;
   progress?: Say; what?: string; pins?: string | null } = {}): Promise<ProjectCheck[]> {
   const file = loadReviewFile(repo);
@@ -151,18 +183,12 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       // The working tree as it is now, fixes included, untracked files too (accepted tests are untracked until
       // committed): no model sees what a check runs.
       snapshot(repo, null, snap, secretPinsOf(file.raw), { untracked: true });
-      const adapter = adapterFor(cfg);
-      const marked: Record<string, string[]> = {};
-      for (const f of files) {
-        const u = existsSync(join(snap, f)) ? adapter.unmark(readFileSync(join(snap, f), "utf8")) : null;
-        if (!u?.names.length) continue;
-        writeFileSync(join(snap, f), u.text);
-        marked[f] = u.names;
-      }
+      // The accepted tests and their support files, in place in this copy only.
+      cpSync(join(repo, DOME), snap, { recursive: true });
       // The build log is kept where a failed build's error can point to it (the snapshot is removed below).
       const [run, results] = await sayingDocker(o.progress, () => (o.sessionFactory ?? dockerSession)(cfg, snap,
         join(repo, ".arnx", "run", `check-${cfg.name}-build.log`), async (session) =>
-          runTests(session, snap, cfg, files.map((f) => posix.relative(cfg.workdir, f) || f), "check.xml",
+          runTests(session, snap, cfg, files.map((f) => posix.relative(cfg.workdir, runPath(f)) || runPath(f)), "check.xml",
             CHECK_TIMEOUT)));
       const log = checkLog(cfg.name);
       rmSync(join(repo, log), { force: true });
@@ -183,7 +209,6 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
         passed: ran.filter((t) => t.outcome === "passed").map((t) => t.testId), failed, reviews,
         skipped: (results ?? []).filter((t) => t.outcome === "skipped").length,
         accepted: ran.filter((t) => isAccepted(known!, cfg.workdir, t.testId)).map((t) => t.testId),
-        unmarked: results ? unmarkFixed(repo, cfg.workdir, adapter, marked, results, o.pins ?? null) : [],
         ...(reason ? { reason, log } : { log: null }) });
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -237,7 +262,6 @@ export function checkSummary(results: ProjectCheck[]): [string, number] {
   const othPass = passed.length - accPass;
   const accTotal = accFail.length + accPass;
   const skipped = ran.reduce((n, r) => n + r.skipped, 0);
-  const unmarked = ran.reduce((n, r) => n + (r.unmarked?.length ?? 0), 0);
   // With no accepted test among them (an answer's tests alone), the rest are not "other".
   const other = accTotal ? "other " : "";
   const where = "in the accepted files";
@@ -260,10 +284,6 @@ export function checkSummary(results: ProjectCheck[]): [string, number] {
     if (othFail.length) {
       lines.push(`✗ ${count(othFail.length, `${other}test`)} ${where} fail${othFail.length === 1 ? "s" : ""}`,
         ...failingList(othFail, multi));
-    }
-    if (unmarked) {
-      lines.push(`✓ Expected-fail marker removed from ${count(unmarked, "test")} that ` +
-        `${unmarked === 1 ? "passes" : "pass"} now`);
     }
   }
   if (missing.length) {
@@ -292,8 +312,7 @@ export function checkSummary(results: ProjectCheck[]): [string, number] {
     lines.push("Next: arnx check");
     return [lines.join("\n"), 1];
   }
-  // A marker check removed is the one change to them, made by arnx and pinned again.
-  if (!unmarked) lines.push("✓ Accepted tests unchanged since arnx accept");
+  lines.push("✓ Accepted tests unchanged since arnx accept");
   lines.push(`Commit the fixes, the accepted tests and ${ACCEPTED_RECORD} together.`);
   return [lines.join("\n"), 0];
 }
@@ -435,14 +454,6 @@ export function recordAccepted(repo: string, review: string, tests: Record<strin
   writeRecord(repo, rec);
 }
 
-/** Pin a file arnx changed itself (check removing a fixed test's expected-fail marker) as it is now. */
-function repin(repo: string, path: string, local: string | null): void {
-  const rec = readRecord(repo);
-  const pin = { ...rec.files[path]!, sha256: sha256(join(repo, path)) };
-  rec.files[path] = pin;
-  writeLocal(local, repo, () => pin.review, { [path]: pin });
-  writeRecord(repo, rec);
-}
 
 /** Paths that some commit of `revs` touched. */
 function touched(repo: string, revs: string[], paths: string[]): Set<string> {
@@ -591,7 +602,7 @@ export function checkJson(results: ProjectCheck[], code: number, changed: Change
         log: r.log ?? null, passed: r.passed, accepted: [...r.passed, ...r.failed.map((t) => t.testId)].filter(acc),
         failed: r.failed.map((t) => ({ test_id: t.testId, outcome: t.outcome, message: t.message,
           accepted: acc(t.testId) })),
-        skipped: r.skipped, unmarked: r.unmarked ?? [] };
+        skipped: r.skipped };
     }),
     changed }, null, 2);
 }

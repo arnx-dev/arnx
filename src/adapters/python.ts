@@ -144,12 +144,8 @@ function dropEmptyClasses(lines: string[]): string {
   return lines.join("");
 }
 
-/** arnx's expected-fail marker: strict, so a fix turns the project's own run red until check removes it; not strict
- * on a parametrized test, whose variants that pass must not fail the run. */
+/** The expected-fail marker an older arnx wrote: `@pytest.mark.xfail(strict=…, reason='arnx …')`. */
 const XFAIL = /^\s*@pytest\.mark\.xfail\(strict=(?:True|False), reason=(['"])arnx\b.*\)\s*$/;
-const pythonExpectFail = (source: string, names: Set<string>, reason: string) => pythonMark(source, names,
-  (decorators) => `@pytest.mark.xfail(strict=${/\bparametrize\b/.test(decorators) ? "False" : "True"}, ` +
-    `reason=${pyRepr(reason)})`);
 
 /** Remove arnx's expected-fail marker from the named tests (all, without names). */
 function pythonUnmark(source: string, names?: Set<string>): { text: string; names: string[] } {
@@ -198,7 +194,6 @@ export const python: Adapter = {
   parseReport: (text) => parseJunit(text, (f) => f.endsWith(".py") ? f.slice(0, -3).replaceAll("/", ".") : ""),
   skip: pythonSkip,
   drop: pythonDrop,
-  expectFail: pythonExpectFail,
   unmark: pythonUnmark,
   acceptedPath: (original, tag, acceptedDir, name) => {
     const own = posix.basename(original);

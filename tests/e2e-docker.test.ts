@@ -4,7 +4,11 @@ import { blankMarks } from "./helpers/review";
 import { appendFileSync, cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { accept } from "../src/accept";
-import { isApproved, parseReviewConfig, reviewConfigPath } from "../src/config";
+import { snapshot } from "../src/change";
+import { check } from "../src/check";
+import { isApproved, loadReviewFile, parseReviewConfig, reviewConfigPath } from "../src/config";
+import { runTests } from "../src/outcomes";
+import { dockerSession } from "../src/testround";
 import { EVENTS_FILE } from "../src/events";
 import { exitCode } from "../src/report";
 import { runReview } from "../src/reviewer";
@@ -105,6 +109,18 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     // named after what it protects: the finding's explanation
     expect(result.kept.map((p) => basename(p))).toContain("test_any_member_can_invite_only_admins_should.py");
     expect(isApproved(parseReviewConfig(readFileSync(reviewConfigPath(repo), "utf8")))).toBe(true);
+    // The project's own pytest run, with .arnx/tests/ there as in the repository, never collects the kept test; arnx
+    // check puts it in place in its copy and runs it: red until the bug is fixed.
+    const cfg = loadReviewFile(repo).projects[0]!;
+    const snap = join(tmp(), "own");
+    snapshot(repo, null, snap, [], { untracked: true });
+    cpSync(join(repo, ".arnx", "tests"), join(snap, ".arnx", "tests"), { recursive: true });
+    const own = await dockerSession(cfg, snap, join(tmp(), "build.log"),
+      async (s) => runTests(s, snap, cfg, [], "own.xml", 600)[1]);
+    expect(own?.length).toBeGreaterThan(0);
+    expect(own!.filter((t) => t.testId.includes(".arnx"))).toEqual([]);
+    const [r] = await check(repo, settings);
+    expect(r!.failed.map((t) => t.testId.split("::").at(-1))).toContain("test_member_cannot_invite");
   }, 900_000);
 
   test("before/after check: a regression, a pre-existing failure and new code, told apart in Docker", async () => {
