@@ -54,6 +54,7 @@ import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, next
 import { isoSeconds } from "./util";
 import { spend } from "./spend";
 import { installSkills, SKILL_DIRS, skillDirsShown, skillStates, userSkillRoot } from "./skill";
+import { suiteBreaks } from "./suitecheck";
 import { recheckJson, recheckReview, recheckSummary } from "./recheck";
 import { applyRemove, planRemove } from "./remove";
 import { versionLine } from "./version";
@@ -1121,8 +1122,12 @@ class Commands {
     progress.start();
     let result;
     try {
+      // The project's own tests run with the accepted ones (skipped with the check, by --no-check).
+      const suiteCheck = a.values["no-check"] || this.d.check === false ? null
+        : (files: string[]) => suiteBreaks(repo, files, { progress: progress.say,
+          ...(this.d.checkSessions ? { sessionFactory: this.d.checkSessions } : {}) });
       result = await accept(repo, rdir, s, { again: a.values.again as boolean, answerRunner: runner,
-        progress: progress.say, pins: localPinsPath(this.d.env, repo) });
+        progress: progress.say, pins: localPinsPath(this.d.env, repo), suiteCheck });
     } finally {
       progress.stop();
     }

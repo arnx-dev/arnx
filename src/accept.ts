@@ -27,6 +27,7 @@ import { isoSeconds } from "./util";
 import { inPool } from "./challenge";
 import { sliceDiff, workingTreeFiles } from "./change";
 import { route } from "./route";
+import type { SuiteBreak } from "./suitecheck";
 
 /** Answer rounds at once (each a model round and three sandbox runs). */
 export const ANSWER_CONCURRENCY = 3;
@@ -292,7 +293,8 @@ function namesOf(review: Review, marks: Marks, project: string, tag: string): Re
 function exportTests(adapter: Adapter, files: Record<string, string>, base: string, d: Destination, tag: string,
                      keep: Record<string, Set<string>>, skip: Record<string, Set<string>>,
                      red: Record<string, Map<string, string>>, reason: string | ((path: string, name: string) => string),
-                     names: Record<string, string>, taken: Set<string>, moved?: Record<string, string>): string[] {
+                     names: Record<string, string>, taken: Set<string>, moved?: Record<string, string>,
+                     prior?: Prior): string[] {
   if (!Object.keys(files).some((f) => keep[f]?.size)) return [];
   const written: string[] = [];
   for (const path of Object.keys(files).sort()) {
@@ -329,12 +331,35 @@ function exportTests(adapter: Adapter, files: Record<string, string>, base: stri
     }
     text = adapter.relocate(text, posix.dirname(posix.relative(d.rootRel, path)), posix.dirname(target));
     const out = join(d.root, target);
+    if (prior && !prior.files.has(out)) prior.files.set(out, existsSync(out) ? readFileSync(out) : null);
+    let made = dirname(out);
+    while (prior && !existsSync(dirname(made))) made = dirname(made);
+    if (prior && !existsSync(made)) prior.dirs.add(made);
     mkdirSync(dirname(out), { recursive: true });
     writeFileSync(out, text);
     written.push(out);
     if (moved) moved[path] = posix.join(d.rootRel, target);
   }
   return written;
+}
+
+/** What accept changed in the repository, to put back when it refuses: each file it wrote → what the file held
+ * before (null: none), and the topmost folders it created. */
+interface Prior { files: Map<string, Buffer | null>; dirs: Set<string> }
+
+/** Why accept refused: the project tests the kept files break, at most 10 named. */
+function brokenText(breaks: SuiteBreak[], rid: string, again: boolean): string {
+  const lines: string[] = [];
+  for (const b of breaks) {
+    lines.push(`Not accepted: the accepted tests break ${b.broken.length} of ${b.project}'s own tests, which pass ` +
+      "without them:",
+    ...b.broken.slice(0, 10).map((t) => `  ✗ ${t.testId}${t.message ? `  ${firstLine(t.message)}` : ""}`),
+    ...(b.broken.length > 10 ? [`  … and ${b.broken.length - 10} more`] : []),
+    `Accepted files: ${b.files.join(", ")}`);
+  }
+  lines.push("A test that patches a module or global at import time breaks the tests run after it. Mark its issue " +
+    `rewrite (Rewrite: patch in a fixture) or noise, then: arnx accept ${again ? "--again " : ""}${rid}`);
+  return lines.join("\n");
 }
 
 /** The projects of a review: language and root of each. A review of a file without projects needs no review.yaml. */
@@ -390,7 +415,8 @@ export function makeAnswerRunner(repo: string, file: ReviewFile, settings: Setti
 
 export async function accept(repo: string, rdir: string, settings: Settings,
                              o: { again?: boolean; answerRunner?: AnswerRunner | null; now?: Date; progress?: Say;
-                                  pins?: string | null } = {})
+                                  pins?: string | null;
+                                  suiteCheck?: ((files: string[]) => Promise<SuiteBreak[]>) | null } = {})
   : Promise<AcceptResult> {
   const review = load(rdir);
   const done = join(rdir, "accepted.json");
@@ -413,6 +439,17 @@ export async function accept(repo: string, rdir: string, settings: Settings,
     ? JSON.parse(readFileSync(done, "utf8")) as { moved?: Record<string, string>; kept?: string[] } : {};
   const earlier = before.moved ?? {};
   const kept: string[] = [];
+  const prior: Prior = { files: new Map(), dirs: new Set() };
+  /** This review's own folders left empty, removed up to the first that is not its own. */
+  const removeEmpty = (from: string) => {
+    for (let d = from; d !== "." && own(d + "/x"); d = dirname(d)) {
+      try {
+        if (existsSync(join(repo, d)) && !readdirSync(join(repo, d)).length) rmdirSync(join(repo, d));
+      } catch {
+        break;
+      }
+    }
+  };
   /** Generated test file → where accept put it (repository-relative). */
   const moved: Record<string, string> = {};
   const diff = existsSync(join(rdir, "change.diff")) ? readFileSync(join(rdir, "change.diff"), "utf8") : "";
@@ -489,7 +526,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
     const written = exportTests(p.adapter, p.files, p.writeDir, { root: p.root, rootRel: p.rootRel,
       acceptedDir: p.acceptedDir, sub: "", runner: p.runner }, tag, keep, skip, red,
       (path, name) => `arnx review ${review.id}: ${reasons[`${path}::${name}`] ?? "not confirmed"}`,
-      namesOf(review, keeps, p.name, tag), taken, moved);
+      namesOf(review, keeps, p.name, tag), taken, moved, prior);
     kept.push(...written);
   }
   rounds.forEach(({ id, project, rewrite }, k) => {
@@ -506,21 +543,30 @@ export async function accept(repo: string, rdir: string, settings: Settings,
     kept.push(...exportTests(p.adapter, outcome.files, outcome.base, { root: p.root, rootRel: p.rootRel,
       acceptedDir: p.acceptedDir, sub: "answers", runner: p.runner }, tag, outcome.keep, outcome.skip, red,
       `arnx review ${review.id}: flaky or erroring while checking ${rewrite ? "the rewrite" : "the answer to"} ${id}`,
-      {}, taken, moved));
+      {}, taken, moved, prior));
   });
+  // The project's own run with the kept files in (this review's earlier ones too, when accepting again): files that
+  // break the project's other tests are not accepted, and the repository is put back as it was.
+  const rel = (p: string) => relative(repo, p).split(sep).join("/");
+  const mine = [...new Set([...kept.map(rel), ...[...(before.kept ?? []), ...Object.values(earlier)]
+    .filter((p) => own(p) && existsSync(join(repo, p)))])].sort();
+  const breaks = o.suiteCheck && kept.length ? (await o.suiteCheck(mine)).filter((b) => b.broken.length) : [];
+  if (breaks.length) {
+    for (const [path, text] of prior.files) {
+      if (text) writeFileSync(path, text);
+      else rmSync(path, { force: true });
+    }
+    for (const path of prior.files.keys()) removeEmpty(rel(dirname(path)));
+    for (const d of prior.dirs) rmSync(d, { recursive: true, force: true });
+    throw new ArnxError(brokenText(breaks, review.id, existsSync(done)));
+  }
   // Accepting again: a file this review kept before and keeps no longer (its findings are no longer marked real, or
   // it is now kept under another name) is removed, so arnx check stops running it; then the folders it leaves empty.
   const now = new Set(kept.map((k) => relative(repo, k).split(sep).join("/")));
   for (const was of new Set([...(before.kept ?? []), ...Object.values(earlier)])) {
     if (!own(was) || now.has(was)) continue;
     rmSync(join(repo, was), { force: true });
-    for (let d = dirname(was); d !== "." && own(d + "/x"); d = dirname(d)) {
-      try {
-        if (existsSync(join(repo, d)) && !readdirSync(join(repo, d)).length) rmdirSync(join(repo, d));
-      } catch {
-        break;
-      }
-    }
+    removeEmpty(dirname(was));
   }
   // Where the kept files went: the deepest directory they share (the repository when nothing was kept).
   const dest = kept.length ? kept.map(dirname).reduce((a, b) => {

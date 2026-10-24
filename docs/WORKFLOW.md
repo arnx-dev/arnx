@@ -123,9 +123,12 @@ its own, under "Type check": it never fails a test, turns a run into no report, 
    A test that assumed an answer you gave differently is left out too when your answer got a test of its own. The test
    of a bug not fixed yet is marked expected to fail (pytest `xfail`, vitest `test.fails`, jest `test.failing`, node
    and bun `todo`, Rust `#[should_panic]`), so your own test run stays green; a test run once per variant
-   (`parametrize`, `.each`, rstest cases) keeps no marker, as variants that pass would fail under it. Accept then runs
-   the accepted tests and lists the ones that fail now (`--no-check` skips that). Your code is not changed and nothing
-   is committed.
+   (`parametrize`, `.each`, rstest cases) keeps no marker, as variants that pass would fail under it. Before it records
+   anything, accept runs each project's own suite with the kept files in: accepted tests share a process with your
+   other tests and can break them (a conftest that patches a module at import). When tests that pass without the
+   kept files fail with them, accept refuses, names them, and leaves the repository as it was. Accept then runs the
+   accepted tests and lists the ones that fail now (`--no-check` skips both runs). Your code is not changed and
+   nothing is committed.
 3. Fix the code, or hand `arnx prompt` (also in `.arnx/reviews/<id>/fix-prompt.md`; `accept --copy` puts it on the
    clipboard) to your coding agent: the failing tests, what each bug is, your answers, and the rules. `arnx check`
    runs the accepted tests in the approved sandbox, services included, on your working tree, without their
