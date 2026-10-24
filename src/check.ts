@@ -166,8 +166,16 @@ export function moveOut(repo: string, settings: Settings, local: string | null =
   return moved;
 }
 
+/** The review a kept file came from: its r<tag>/ folder, or Rust's arnx_<tag>[_name].rs ("" for neither). check runs
+ * each review's files in a run of their own, so one review's conftest or setup code cannot reach another's tests. */
+export function reviewGroup(path: string): string {
+  const rust = /(?:^|\/)arnx_(\d{8}_[0-9a-f]{6})(?:_[^/]*)?\.rs$/.exec(path);
+  return /(?:^|\/)(r\d{8}_[0-9a-f]{6})\//.exec(path)?.[1] ?? (rust ? `r${rust[1]}` : "");
+}
+
 /** Run each project's accepted tests: each is copied from .arnx/tests/ to the path it runs from in a throwaway copy
- * of the working tree, and run there; a confirmed bug's test is red while the bug is open. */
+ * of the working tree, and run there, each review's files in a run of their own; a confirmed bug's test is red while
+ * the bug is open. */
 export async function check(repo: string, settings: Settings, o: { sessionFactory?: SessionFactory;
   progress?: Say; what?: string; pins?: string | null } = {}): Promise<ProjectCheck[]> {
   const file = loadReviewFile(repo);
@@ -185,29 +193,36 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       snapshot(repo, null, snap, secretPinsOf(file.raw), { untracked: true });
       // The accepted tests and their support files, in place in this copy only.
       cpSync(join(repo, DOME), snap, { recursive: true });
-      // The build log is kept where a failed build's error can point to it (the snapshot is removed below).
-      const [run, results] = await sayingDocker(o.progress, () => (o.sessionFactory ?? dockerSession)(cfg, snap,
+      // Each review's files run apart (reviewGroup); the build log is kept where a failed build's error can point to
+      // it (the snapshot is removed below).
+      const groups = [...new Set(files.map(reviewGroup))];
+      const target = (f: string) => posix.relative(cfg.workdir, runPath(f)) || runPath(f);
+      const runs = await sayingDocker(o.progress, () => (o.sessionFactory ?? dockerSession)(cfg, snap,
         join(repo, ".arnx", "run", `check-${cfg.name}-build.log`), async (session) =>
-          runTests(session, snap, cfg, files.map((f) => posix.relative(cfg.workdir, runPath(f)) || runPath(f)), "check.xml",
-            CHECK_TIMEOUT)));
+          groups.map((g, i) => [g, ...runTests(session, snap, cfg, files.filter((f) => reviewGroup(f) === g).map(target),
+            groups.length > 1 ? `check-${i + 1}.xml` : "check.xml", CHECK_TIMEOUT)] as const)));
+      const results = runs.flatMap(([, , r]) => r ?? []);
+      const missing = runs.filter(([, , r]) => r === null);
       const log = checkLog(cfg.name);
       rmSync(join(repo, log), { force: true });
       let reason: string | undefined;
-      if (results === null) {
-        reason = run.timedOut ? `the tests timed out after ${CHECK_TIMEOUT} s`
+      if (missing.length) {
+        const [g, run] = missing[0]!;
+        reason = (run.timedOut ? `the tests timed out after ${CHECK_TIMEOUT} s`
           : run.exitCode === 126 || run.exitCode === 127 ? `the runner could not start (exit ${run.exitCode})`
-          : `the runner wrote no report${run.exitCode === null ? "" : ` (exit ${run.exitCode})`}`;
+          : `the runner wrote no report${run.exitCode === null ? "" : ` (exit ${run.exitCode})`}`) +
+          (groups.length > 1 && g ? ` (the tests of review ${g.slice(1).replace("_", "-")})` : "");
         mkdirSync(dirname(join(repo, log)), { recursive: true });
-        writeFileSync(join(repo, log), run.output);
+        writeFileSync(join(repo, log), missing.map(([, r]) => r.output).join("\n"));
       }
       known ??= acceptedIds(repo);
-      const ran = (results ?? []).filter((t) => t.outcome !== "skipped");
+      const ran = results.filter((t) => t.outcome !== "skipped");
       const failed = ran.filter((t) => t.outcome === "failed" || t.outcome === "error");
       const reviews = Object.fromEntries(failed.map((t) => [t.testId, reviewOf(known!, cfg.workdir, t.testId)])
         .filter(([, r]) => r));
-      out.push({ project: cfg.name, files, noReport: results === null,
+      out.push({ project: cfg.name, files, noReport: missing.length > 0,
         passed: ran.filter((t) => t.outcome === "passed").map((t) => t.testId), failed, reviews,
-        skipped: (results ?? []).filter((t) => t.outcome === "skipped").length,
+        skipped: results.filter((t) => t.outcome === "skipped").length,
         accepted: ran.filter((t) => isAccepted(known!, cfg.workdir, t.testId)).map((t) => t.testId),
         ...(reason ? { reason, log } : { log: null }) });
     } finally {

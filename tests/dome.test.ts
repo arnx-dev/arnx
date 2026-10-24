@@ -165,3 +165,31 @@ test("setup refuses a project whose own test run collects .arnx/ (a canary place
     }
   }
 });
+
+test("check runs each review's files in a run of their own: one review's conftest cannot reach another's tests",
+  async () => {
+  const { reviewGroup } = await import("../src/check");
+  expect(reviewGroup(".arnx/tests/api/tests/arnx/r20261011_a1b2c3/test_x.py")).toBe("r20261011_a1b2c3");
+  expect(reviewGroup(".arnx/tests/calc/tests/arnx_20261011_a1b2c3_add.rs")).toBe("r20261011_a1b2c3");
+  expect(reviewGroup(".arnx/tests/calc/tests/arnx_20261011_a1b2c3.rs")).toBe("r20261011_a1b2c3");
+  expect(reviewGroup(".arnx/tests/tests/arnx/test_x.py")).toBe("");
+  const commands: string[] = [];
+  const { repo, cli } = await repoWithReview([]);
+  const other = "tests/arnx/r20261012_bbbbbb/test_z.py";
+  const sessions: SessionFactory = async (_c, snap, _l, body) => body(new FakeSession(snap, (command: string) => {
+    commands.push(command);
+    return [junitXml([[command.includes("test_z") ? other : RUN, command.includes("test_z") ? "test_z" : "test_a",
+      "failed", "x"]]), "", false];
+  }));
+  expect(await new Cli({ cwd: repo, checkSessions: sessions }).run("accept", "--no-answers", "--no-check")).toBe(0);
+  mkdirSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261012_bbbbbb"), { recursive: true });
+  writeFileSync(join(repo, ".arnx", "tests", other), "def test_z():\n    assert False\n");
+  const c = new Cli({ cwd: repo, checkSessions: sessions });
+  expect(await c.run("check")).toBe(1);
+  const runs = commands.filter((x) => x.includes("test_y") || x.includes("test_z"));
+  expect(runs.length).toBe(2);
+  expect(runs.some((x) => x.includes("test_y") && x.includes("test_z"))).toBe(false);
+  expect(c.stdout).toContain("test_a");
+  expect(c.stdout).toContain("test_z");
+  void cli;
+});
