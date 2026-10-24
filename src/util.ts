@@ -99,6 +99,9 @@ export function splitLines(s: string): string[] {
 }
 
 /** Python's truthiness for values read from YAML or JSON. */
+/** Text ending in one newline, the blank lines a cut left at its end removed. */
+export const endOnce = (s: string): string => s.replace(/\n(?:[ \t]*\n)+$/, "\n");
+
 export function pyTruthy(v: unknown): boolean {
   if (v === null || v === undefined || v === false || v === "" || v === 0 || v === 0n) return false;
   if (Array.isArray(v)) return v.length > 0;

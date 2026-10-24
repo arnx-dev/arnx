@@ -45,7 +45,8 @@ test("accept keeps each project's tests under that project's root", async () => 
   const result = await accept(repo, rdir, SETTINGS);
   const kept = join(repo, "services", "pay", "tests", "arnx", "r20261012_abcdef", "test_pay_wrong.py");
   expect(result.kept).toEqual([kept]);
-  expect(readFileSync(kept, "utf8")).toBe(SRC);
+  expect(readFileSync(kept, "utf8")).toBe("import pytest\n@pytest.mark.xfail(strict=True, reason='arnx review " +
+    `20261012-abcdef: F2 not fixed yet')\n${SRC}`);
   expect(existsSync(join(repo, "services", "feed", "tests", "arnx"))).toBe(false);
 });
 

@@ -34,7 +34,8 @@ holds the error object every arnx command gives ([json.md](json.md)): `schema_ve
 | `passed` | array of strings | Test ids that passed. |
 | `accepted` | array of strings | The ids, of those that passed or failed, that are accepted tests: the tests behind findings marked real (and answers the code disagrees with). The rest are other tests the review wrote into the same files. Read from `.arnx/accepted-tests.json` (committed, so a fresh clone or CI tells them apart too); for a file recorded by an older arnx, from its review in `.arnx/reviews/`; with neither, every test in the file counts as accepted. |
 | `failed` | array | Tests that failed: see [Each failed test](#each-failed-test). |
-| `skipped` | number | Tests skipped (not confirmed, marked intended or noise, or set aside: marked rewrite, or replaced by the test of an answer). |
+| `skipped` | number | Tests skipped: one accept could not cut out of a kept file, or (accepted by an arnx before 0.1.2) not confirmed, marked intended or noise, or set aside. |
+| `unmarked` | array of strings | Tests that passed whose expected-fail marker check removed from the repository (accept marks a bug's test so until it is fixed); the files are pinned again. Commit them with the fix. |
 
 ## Each failed test
 

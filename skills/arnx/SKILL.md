@@ -68,9 +68,9 @@ answers are theirs: do not write them, and do not treat a mark you suggested as 
 
 After the user says they accepted:
 
-1. `arnx check --json` runs the accepted tests (under `tests/arnx/`, or `accepted_tests_dir` in
-   `.arnx/config.toml`) on your working tree. The tests of the issues just marked real fail now: that is expected,
-   and it is the list to fix. Fields: [references/check-json.md](references/check-json.md).
+1. `arnx check --json` runs the accepted tests (`tests/arnx/`, or `accepted_tests_dir`) on your working tree. Those
+   of the issues just marked real fail: expected, and the list to fix (the project's own runner sees them marked
+   expected to fail; check removes a marker once its test passes). Fields: [references/check-json.md](references/check-json.md).
 2. `arnx prompt <id>` prints the fix prompt (also `.arnx/reviews/<id>/fix-prompt.md`): the failing tests, each bug,
    the user's answers as intended behaviour, and the rules. Fix from it, and only what it lists. Fix the **code
    under test**, never the tests. If a fix depends on what the code is meant to do and no answer says, do not guess:

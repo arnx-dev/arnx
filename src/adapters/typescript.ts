@@ -3,7 +3,7 @@
 // extra reporter package).
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
-import { shQuote } from "../util";
+import { endOnce, shQuote } from "../util";
 import { junitCases, MESSAGE_LIMIT } from "./junit";
 import { type Adapter, DEFAULT_ACCEPTED_DIR, type TestResult, type Words } from "./types";
 
@@ -136,6 +136,94 @@ function skip(source: string, names: Set<string>, reason: string): string {
   return out;
 }
 
+/** A test's last title: the part of its name after the last " > ". */
+const titleOf = (name: string) => name.split(" > ").at(-1)!;
+
+/** The line where a test call with this title starts a statement of its own, when exactly one does. */
+function callLine(lines: string[], title: string): number {
+  const rx = new RegExp(`^[ \\t]*(?:test|it)(?:\\.only)?\\(\\s*(['"\`])${escapeRx(title)}\\1`);
+  const at = lines.flatMap((l, i) => rx.test(l) ? [i] : []);
+  return at.length === 1 ? at[0]! : -1;
+}
+
+const parens = (line: string) => [...line].reduce((n, c) => n + (c === "(" ? 1 : c === ")" ? -1 : 0), 0);
+
+/** Remove each named test: the comment lines right above it, the call to its closing `})` (at the call's indent, or
+ * on the same line), and the blank lines after it. A title built with `${}`, shared by two tests, or a call that does
+ * not start its own statement or close as written is left for the caller. */
+function drop(source: string, names: Set<string>): { text: string; left: Set<string> } {
+  const lines = source.split(/(?<=\n)/);
+  const cuts: [number, number][] = [];
+  const left = new Set<string>();
+  for (const name of names) {
+    const title = titleOf(name);
+    const at = title.includes("${") ? -1 : callLine(lines, title);
+    if (at < 0) {
+      left.add(name);
+      continue;
+    }
+    const indent = /^[ \t]*/.exec(lines[at]!)![0];
+    let end = -1;
+    if (parens(lines[at]!) === 0 && /\)\s*;?\s*$/.test(lines[at]!)) end = at + 1;
+    else {
+      const close = new RegExp(`^${indent}\\}.*\\)\\s*;?\\s*$`);
+      for (let j = at + 1; j < lines.length && end < 0; j++) if (close.test(lines[j]!)) end = j + 1;
+    }
+    if (end < 0) {
+      left.add(name);
+      continue;
+    }
+    let first = at;
+    while (first > 0 && lines[first - 1]!.startsWith(`${indent}//`)) first -= 1;
+    while (end < lines.length && !lines[end]!.trim()) end += 1;
+    cuts.push([first, end]);
+  }
+  for (const [from, to] of cuts.sort((a, b) => b[0] - a[0])) lines.splice(from, to - from);
+  return { text: cuts.length ? endOnce(lines.join("")) : source, left };
+}
+
+/** Each runner's expected-fail form: strict where the runner has one (a fix fails the test until check removes it);
+ * node:test and bun run a todo test and never fail the run on it. A .each test is left unmarked. */
+const EXPECT_FAIL: Record<string, string> = { vitest: "fails", jest: "failing", node: "todo", bun: "todo" };
+
+function expectFail(source: string, names: Set<string>, reason: string, runner: string)
+  : { text: string; left: Set<string> } {
+  let out = source;
+  const left = new Set<string>();
+  for (const name of names) {
+    const title = titleOf(name);
+    const rx = new RegExp(`^([ \\t]*)(.*?\\b)(test|it)(?:\\.only)?\\((\\s*)(['"\`])${escapeRx(title)}\\5`, "m");
+    const kind = EXPECT_FAIL[runner];
+    // One line runs every variant of a .each test, and those that pass would fail under a strict marker.
+    const each = new RegExp(String.raw`\.(?:each|for)\b[^\n]*` + `(['"\`])${escapeRx(title)}\\1`);
+    const variants = /\b(?:describe|suite)\.(?:each|for)\b/.test(out) || each.test(out);
+    if (!kind || variants || title.includes("${") || !rx.test(out)) {
+      left.add(name);
+      continue;
+    }
+    out = out.replace(rx, (_m, indent: string, before: string, fn: string, space: string, q: string) =>
+      `${indent}// ${reason}\n${indent}${before}${fn}.${kind}(${space}${q}${title}${q}`);
+  }
+  return { text: out, left };
+}
+
+/** Remove arnx's expected-fail marker (its `// arnx` comment and the call's .fails, .failing or .todo). */
+function unmark(source: string, names?: Set<string>): { text: string; names: string[] } {
+  const lines = source.split(/(?<=\n)/);
+  const out: string[] = [];
+  for (let i = lines.length - 2; i >= 0; i--) {
+    if (!/^\s*\/\/ arnx\b/.test(lines[i]!)) continue;
+    const m = /^(.*?\b(?:test|it))\.(?:fails|failing|todo)\((\s*(['"`])(.*?)\3)/.exec(lines[i + 1]!);
+    if (!m) continue;
+    const name = names ? [...names].find((n) => titleOf(n) === m[4]) : m[4];
+    if (name === undefined) continue;
+    lines[i + 1] = lines[i + 1]!.replace(m[0], `${m[1]}(${m[2]}`);
+    lines.splice(i, 1);
+    out.unshift(name);
+  }
+  return { text: lines.join(""), names: out };
+}
+
 const SPECIFIER = /((?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+|\b(?:jest|vi)\.mock\s*\(\s*))(['"])(\.{1,2}\/[^'"]*)\2/g;
 
 /** Rewrite relative specifiers so they reach the same files from the kept test's new directory. arnx-helpers files
@@ -246,6 +334,9 @@ export const typescript: Adapter = {
     writeFileSync(join(snapshot, ".arnx-run", "arnx-node-reporter.mjs"), NODE_REPORTER);
   },
   skip,
+  drop,
+  expectFail,
+  unmark,
   acceptedPath,
   testStem: (fileName) => TEST_NAME.exec(fileName)?.[1] ?? fileName,
   relocate,

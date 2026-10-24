@@ -84,7 +84,8 @@ Then, in both cases:
     # ... let your agent change something ...
     arnx review                         # writes tests for the change and runs them: 2 issues confirmed (4 findings)
     arnx triage                         # mark real / intended / noise / rewrite, answer questions
-    arnx accept                         # tests of real issues are copied into your tests (red until fixed)
+    arnx accept                         # tests of real issues are copied into your tests (expected to fail until
+                                        # fixed, so your suite stays green)
     arnx prompt                         # the fix prompt for your coding agent
     arnx check                          # runs the accepted tests; green means they pass now
 
@@ -120,9 +121,11 @@ More in [docs/WORKFLOW.md](docs/WORKFLOW.md).
    a second model, and writes `.arnx/reviews/<id>/review.md` with what was tested and what was not.
 3. **triage** (or edit review.md) marks each issue and answers arnx's questions; answers become tests too.
 4. **accept** copies tests of real issues into your test folders (`tests/arnx/r<id>/` by default) and pins each
-   file's sha256 in `.arnx/accepted-tests.json`. Tests of intended or noise issues are kept but skipped.
-5. **prompt** gives the fix prompt; **check** runs the accepted tests. A pinned test that was edited makes `check`
-   refuse (exit 4): a test changed until it passes shows nothing. arnx never edits your code.
+   file's sha256 in `.arnx/accepted-tests.json`. Tests of other issues are left out. A bug's test is marked
+   expected to fail until the fix, so your suite stays green.
+5. **prompt** gives the fix prompt; **check** runs the accepted tests, markers off, and removes a test's marker once
+   it passes. A pinned test that was edited makes `check` refuse (exit 4): a test changed until it passes shows
+   nothing. arnx never edits your code.
 
 Details, exit codes, `--json` and the before/after check: [docs/WORKFLOW.md](docs/WORKFLOW.md).
 

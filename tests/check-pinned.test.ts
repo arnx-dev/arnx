@@ -119,7 +119,8 @@ test("check --json gives each project's passed and failed tests and the overall 
   expect(j).toEqual({ schema_version: 1, command: "check", result: "fail", exit_code: 1, changed: [], projects: [{ project: "app",
     files: [KEPT], no_report: false, no_report_reason: null, log: null, passed: [], skipped: 0,
     accepted: [`${KEPT}::test_a`],
-    failed: [{ test_id: `${KEPT}::test_a`, outcome: "failed", message: "assert False\ntrace", accepted: true }] }] });
+    failed: [{ test_id: `${KEPT}::test_a`, outcome: "failed", message: "assert False\ntrace", accepted: true }],
+    unmarked: [] }] });
 });
 
 // --- the record itself: a test edited together with its pin, or its entry removed ---------------------------------------

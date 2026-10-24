@@ -238,8 +238,8 @@ function readOutcome(path: string, answer: string): AnswerOutcome | null {
 /** Where accept keeps tests and why, said when a kept file is not right under accepted_tests_dir at the repository
  * root (a project in a subdirectory, a TypeScript project or a Rust crate at the default). */
 /** Where kept files go: the project's root (absolute and relative to the repository) and the configured directory
- * for accepted tests; `sub` places answer tests apart ("answers"). */
-interface Destination { root: string; rootRel: string; acceptedDir: string; sub: string }
+ * for accepted tests; `sub` places answer tests apart ("answers"). `runner`: the project's, for its expected-fail form. */
+interface Destination { root: string; rootRel: string; acceptedDir: string; sub: string; runner: string }
 
 export const NAME_MAX = 50;
 
@@ -284,11 +284,14 @@ function namesOf(review: Review, marks: Marks, project: string, tag: string): Re
   return out;
 }
 
-/** Copy the kept files. A test file is named from `names` (an answer's file: its generated name, without the
- * test-file affixes); a name whose file name is `taken` gets _2, _3, and is then taken itself. */
+/** Copy the kept files. Tests not kept are removed from them (skipped, with `reason`, when one cannot be cut out
+ * cleanly); a kept test that fails today (`red`: file → test → why) is marked expected to fail, so the project's own
+ * run stays green until check sees it pass and removes the marker. A test file is named from `names` (an answer's file:
+ * its generated name, without the test-file affixes); a name whose file name is `taken` gets _2, _3, and is then taken
+ * itself. */
 function exportTests(adapter: Adapter, files: Record<string, string>, base: string, d: Destination, tag: string,
                      keep: Record<string, Set<string>>, skip: Record<string, Set<string>>,
-                     reason: string | ((path: string, name: string) => string),
+                     red: Record<string, Map<string, string>>, reason: string | ((path: string, name: string) => string),
                      names: Record<string, string>, taken: Set<string>, moved?: Record<string, string>): string[] {
   if (!Object.keys(files).some((f) => keep[f]?.size)) return [];
   const written: string[] = [];
@@ -305,10 +308,13 @@ function exportTests(adapter: Adapter, files: Record<string, string>, base: stri
       const marked = (n: string) => adapter.skip(source, new Set([n]), "");
       const keptLines = new Set([...keep[path]!].map(marked).filter((t) => t !== source));
       const names = [...(skip[path] ?? [])].filter((n) => !keep[path]!.has(n) && !keptLines.has(marked(n)));
-      // Skipped once per reason: a test set aside says why, apart from the ones not confirmed.
+      const dropped = adapter.drop(source, new Set(names));
+      text = dropped.text;
+      // What could not be cut out is skipped, once per reason: a test set aside says why, apart from those not confirmed.
+      const left = names.filter((n) => dropped.left.has(n));
       const why = (n: string) => typeof reason === "string" ? reason : reason(path, n);
-      text = source;
-      for (const r of new Set(names.map(why))) text = adapter.skip(text, new Set(names.filter((n) => why(n) === r)), r);
+      for (const r of new Set(left.map(why))) text = adapter.skip(text, new Set(left.filter((n) => why(n) === r)), r);
+      for (const [n, r] of red[path] ?? []) text = adapter.expectFail(text, new Set([n]), r, d.runner).text;
     } else {
       continue;
     }
@@ -332,8 +338,8 @@ function exportTests(adapter: Adapter, files: Record<string, string>, base: stri
 }
 
 /** The projects of a review: language and root of each. A review of a file without projects needs no review.yaml. */
-interface ProjectInfo { name: string; adapter: Adapter; root: string; rootRel: string; acceptedDir: string;
-                        files: Record<string, string>; writeDir: string }
+interface ProjectInfo { name: string; adapter: Adapter; runner: string; root: string; rootRel: string;
+                        acceptedDir: string; files: Record<string, string>; writeDir: string }
 
 function projectsOf(repo: string, rdir: string, review: Review, settings: Settings): ProjectInfo[] {
   const legacy = review.projects.length === 1 && review.projects[0] === "main";
@@ -345,7 +351,8 @@ function projectsOf(repo: string, rdir: string, review: Review, settings: Settin
     const testsRoot = legacy ? join(rdir, "tests") : join(rdir, "projects", name, "tests");
     const files = readCopies(testsRoot, adapter.writable);
     const rootRel = cfg ? cfg.workdir : ".";
-    return { name, adapter, root: join(repo, rootRel), rootRel, acceptedDir: settings.acceptedTestsDir, files,
+    return { name, adapter, runner: cfg?.runner ?? adapter.defaultRunner, root: join(repo, rootRel), rootRel,
+      acceptedDir: settings.acceptedTestsDir, files,
       writeDir: review.writeDirs[name] ?? review.writeDir };
   });
 }
@@ -466,11 +473,13 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   for (const p of projects) {
     const keep: Record<string, Set<string>> = {};
     const skip: Record<string, Set<string>> = {};
+    const red: Record<string, Map<string, string>> = {};
     const reasons: Record<string, string> = {};
     for (const f of review.findings) {
       if (!f.file || f.project !== p.name) continue;
       const func = funcOfFinding(f);
       add(keeps.findings[f.id] === "real" ? keep : skip, f.file, func);
+      if (keeps.findings[f.id] === "real") (red[f.file] ??= new Map()).set(func, `arnx review ${review.id}: ${f.id} not fixed yet`);
       if (setAside[f.id]) reasons[`${f.file}::${func}`] = why(f.id);
     }
     for (const testId of [...review.flaky, ...review.errors]) {
@@ -478,7 +487,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
       if (owner) add(skip, owner, funcOfId(testId));
     }
     const written = exportTests(p.adapter, p.files, p.writeDir, { root: p.root, rootRel: p.rootRel,
-      acceptedDir: p.acceptedDir, sub: "" }, tag, keep, skip,
+      acceptedDir: p.acceptedDir, sub: "", runner: p.runner }, tag, keep, skip, red,
       (path, name) => `arnx review ${review.id}: ${reasons[`${path}::${name}`] ?? "not confirmed"}`,
       namesOf(review, keeps, p.name, tag), taken, moved);
     kept.push(...written);
@@ -488,8 +497,14 @@ export async function accept(repo: string, rdir: string, settings: Settings,
     if (!outcome) return;
     const p = projects.find((x) => x.name === project) ?? projects[0]!;
     answers.push(outcome);
+    // A test the code disagrees with fails until the code does what the answer (or the reason) says.
+    const red: Record<string, Map<string, string>> = {};
+    for (const t of outcome.disagree) {
+      const owner = ownerFile(t.split("::")[0]!, Object.keys(outcome.files));
+      if (owner) (red[owner] ??= new Map()).set(funcOfId(t), `arnx review ${review.id}: ${id} not done yet`);
+    }
     kept.push(...exportTests(p.adapter, outcome.files, outcome.base, { root: p.root, rootRel: p.rootRel,
-      acceptedDir: p.acceptedDir, sub: "answers" }, tag, outcome.keep, outcome.skip,
+      acceptedDir: p.acceptedDir, sub: "answers", runner: p.runner }, tag, outcome.keep, outcome.skip, red,
       `arnx review ${review.id}: flaky or erroring while checking ${rewrite ? "the rewrite" : "the answer to"} ${id}`,
       {}, taken, moved));
   });

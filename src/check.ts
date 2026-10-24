@@ -6,6 +6,8 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix } from "node:path";
+import { adapterFor } from "./adapters";
+import type { Adapter } from "./adapters/types";
 import { git, hasCommits, snapshot } from "./change";
 import { loadReviewFile, type ReviewConfig, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
@@ -21,10 +23,11 @@ export const CHECK_TIMEOUT = 900;
 
 /** `accepted`: the ids among passed and failed that are accepted tests (behind findings marked real; absent: all are).
  * `reason` and `log`, with noReport: why there is no report, and the runner's output (repository-relative).
- * `reviews`: a failed test → the review that accepted its file, when known. */
+ * `reviews`: a failed test → the review that accepted its file, when known. `unmarked`: the tests (`file::test`,
+ * repository-relative) that passed, whose expected-fail marker check removed from the repository. */
 export interface ProjectCheck { project: string; files: string[]; passed: string[]; failed: TestResult[];
   skipped: number; noReport: boolean; accepted?: string[]; reason?: string; log?: string | null;
-  reviews?: Record<string, string> }
+  reviews?: Record<string, string>; unmarked?: string[] }
 
 /** The accepted tests, as `file::test` (repository-relative, parameters dropped): those accept recorded per file in
  * ACCEPTED_RECORD, else (a record by an older arnx) from each accepted review's marks. `files`: the kept files the
@@ -108,8 +111,33 @@ function isAccepted(known: AcceptedIds, workdir: string, testId: string): boolea
 /** Where check keeps a project's runner output when the tests gave no report. */
 export const checkLog = (project: string) => `.arnx/run/check-${project}.log`;
 
+/** The marked tests that passed (each run of them: a parametrized test's variants all), unmarked in the repository and
+ * pinned again (`local`: localPinsPath); their ids, `file::test`. A file that changed while the tests ran is left. */
+function unmarkFixed(repo: string, workdir: string, adapter: Adapter, marked: Record<string, string[]>,
+  results: TestResult[], local: string | null): string[] {
+  const out: string[] = [];
+  const name = (t: TestResult) => baseName(splitId(t.testId)[1]).split("::").at(-1)!;
+  for (const file of Object.keys(marked)) {
+    const own = results.filter((t) => posix.normalize(posix.join(workdir, splitId(t.testId)[0])) === file);
+    const red = new Set(own.filter((t) => t.outcome !== "passed").map(name));
+    const fixed = new Set(own.filter((t) => t.outcome === "passed").map(name).filter((n) => !red.has(n)));
+    const pin = readRecord(repo).files[file];
+    const full = join(repo, file);
+    if (!fixed.size || !pin || !existsSync(full) || sha256(full) !== pin.sha256) continue;
+    const u = adapter.unmark(readFileSync(full, "utf8"), fixed);
+    if (!u.names.length) continue;
+    writeFileSync(full, u.text);
+    repin(repo, file, local);
+    out.push(...u.names.map((n) => `${file}::${n}`));
+  }
+  return out;
+}
+
+/** Run each project's accepted tests. A confirmed bug's test runs without its expected-fail marker (accept marks it
+ * so the project's own run stays green): red while the bug is open; once it passes, its marker is removed from the
+ * repository (`pins`: this machine's record, localPinsPath). */
 export async function check(repo: string, settings: Settings, o: { sessionFactory?: SessionFactory;
-  progress?: Say; what?: string } = {}): Promise<ProjectCheck[]> {
+  progress?: Say; what?: string; pins?: string | null } = {}): Promise<ProjectCheck[]> {
   const file = loadReviewFile(repo);
   const out: ProjectCheck[] = [];
   let known: AcceptedIds | undefined;
@@ -123,6 +151,14 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       // The working tree as it is now, fixes included, untracked files too (accepted tests are untracked until
       // committed): no model sees what a check runs.
       snapshot(repo, null, snap, secretPinsOf(file.raw), { untracked: true });
+      const adapter = adapterFor(cfg);
+      const marked: Record<string, string[]> = {};
+      for (const f of files) {
+        const u = existsSync(join(snap, f)) ? adapter.unmark(readFileSync(join(snap, f), "utf8")) : null;
+        if (!u?.names.length) continue;
+        writeFileSync(join(snap, f), u.text);
+        marked[f] = u.names;
+      }
       // The build log is kept where a failed build's error can point to it (the snapshot is removed below).
       const [run, results] = await sayingDocker(o.progress, () => (o.sessionFactory ?? dockerSession)(cfg, snap,
         join(repo, ".arnx", "run", `check-${cfg.name}-build.log`), async (session) =>
@@ -147,6 +183,7 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
         passed: ran.filter((t) => t.outcome === "passed").map((t) => t.testId), failed, reviews,
         skipped: (results ?? []).filter((t) => t.outcome === "skipped").length,
         accepted: ran.filter((t) => isAccepted(known!, cfg.workdir, t.testId)).map((t) => t.testId),
+        unmarked: results ? unmarkFixed(repo, cfg.workdir, adapter, marked, results, o.pins ?? null) : [],
         ...(reason ? { reason, log } : { log: null }) });
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -200,6 +237,7 @@ export function checkSummary(results: ProjectCheck[]): [string, number] {
   const othPass = passed.length - accPass;
   const accTotal = accFail.length + accPass;
   const skipped = ran.reduce((n, r) => n + r.skipped, 0);
+  const unmarked = ran.reduce((n, r) => n + (r.unmarked?.length ?? 0), 0);
   // With no accepted test among them (an answer's tests alone), the rest are not "other".
   const other = accTotal ? "other " : "";
   const where = "in the accepted files";
@@ -222,6 +260,10 @@ export function checkSummary(results: ProjectCheck[]): [string, number] {
     if (othFail.length) {
       lines.push(`✗ ${count(othFail.length, `${other}test`)} ${where} fail${othFail.length === 1 ? "s" : ""}`,
         ...failingList(othFail, multi));
+    }
+    if (unmarked) {
+      lines.push(`✓ Expected-fail marker removed from ${count(unmarked, "test")} that ` +
+        `${unmarked === 1 ? "passes" : "pass"} now`);
     }
   }
   if (missing.length) {
@@ -250,8 +292,9 @@ export function checkSummary(results: ProjectCheck[]): [string, number] {
     lines.push("Next: arnx check");
     return [lines.join("\n"), 1];
   }
-  lines.push("✓ Accepted tests unchanged since arnx accept",
-    `Commit the fixes, the accepted tests and ${ACCEPTED_RECORD} together.`);
+  // A marker check removed is the one change to them, made by arnx and pinned again.
+  if (!unmarked) lines.push("✓ Accepted tests unchanged since arnx accept");
+  lines.push(`Commit the fixes, the accepted tests and ${ACCEPTED_RECORD} together.`);
   return [lines.join("\n"), 0];
 }
 
@@ -389,6 +432,15 @@ export function recordAccepted(repo: string, review: string, tests: Record<strin
     pins[p] = rec.files[p]!;
   }
   writeLocal(local, repo, () => review, pins);
+  writeRecord(repo, rec);
+}
+
+/** Pin a file arnx changed itself (check removing a fixed test's expected-fail marker) as it is now. */
+function repin(repo: string, path: string, local: string | null): void {
+  const rec = readRecord(repo);
+  const pin = { ...rec.files[path]!, sha256: sha256(join(repo, path)) };
+  rec.files[path] = pin;
+  writeLocal(local, repo, () => pin.review, { [path]: pin });
   writeRecord(repo, rec);
 }
 
@@ -539,7 +591,7 @@ export function checkJson(results: ProjectCheck[], code: number, changed: Change
         log: r.log ?? null, passed: r.passed, accepted: [...r.passed, ...r.failed.map((t) => t.testId)].filter(acc),
         failed: r.failed.map((t) => ({ test_id: t.testId, outcome: t.outcome, message: t.message,
           accepted: acc(t.testId) })),
-        skipped: r.skipped };
+        skipped: r.skipped, unmarked: r.unmarked ?? [] };
     }),
     changed }, null, 2);
 }

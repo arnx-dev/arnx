@@ -1190,6 +1190,7 @@ class Commands {
       let results;
       try {
         results = await check(repo, s, { progress: cp.say, what: "the accepted tests",
+          pins: localPinsPath(this.d.env, repo),
           ...(this.d.checkSessions ? { sessionFactory: this.d.checkSessions } : {}) });
       } finally {
         cp.stop();
@@ -1210,6 +1211,11 @@ class Commands {
           : `All ${passing} accepted tests pass: the bugs they prove look fixed already.`));
       } else if (passing) {
         this.d.out(c.green(passing === 1 ? "The accepted test passes." : `All ${passing} accepted tests pass.`));
+      }
+      const unmarked = results.flatMap((r) => r.unmarked ?? []);
+      if (unmarked.length) {
+        this.d.out(`Expected-fail marker removed from ${n(unmarked.length, "test")} that ` +
+          `${unmarked.length === 1 ? "passes" : "pass"} now.`);
       }
     } else if (realTests) {
       this.d.out("");
@@ -1396,7 +1402,7 @@ class Commands {
     progress.start();
     let results;
     try {
-      results = await check(repo, s, { progress: progress.say,
+      results = await check(repo, s, { progress: progress.say, pins: localPinsPath(this.d.env, repo),
         ...(this.d.checkSessions ? { sessionFactory: this.d.checkSessions } : {}) });
     } finally {
       progress.stop();

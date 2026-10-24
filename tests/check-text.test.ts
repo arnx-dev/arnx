@@ -102,6 +102,7 @@ test("check: other tests in the accepted files that fail are their own line, not
     "✗ 2 other tests in the accepted files fail",
     "  ✗ test_other4  assert 1 == 2",
     "  ✗ test_other5  KeyError: 'x'",
+    "✓ Expected-fail marker removed from 3 tests that pass now",
     "Fix the code, not the accepted tests. A real bug whose test is wrong: mark it rewrite in review.md with a " +
       "`Rewrite:` line saying why (noise only when there is no bug), then `arnx accept --again 20261011-a1b2c3`.",
     "The 2 other tests that fail are not findings: marks do not cover them. Fix the code, or fix or delete them in " +
@@ -115,6 +116,7 @@ test("check: other tests in the accepted files that fail are their own line, not
     "✓ All 4 accepted tests pass",
     "✗ 1 other test in the accepted files fails",
     "  ✗ test_other1  assert 1 == 2",
+    "✓ Expected-fail marker removed from 1 test that passes now",
     "The 1 other test that fails is not a finding: marks do not cover it. Fix the code, or fix or delete it in the " +
       "file (then `arnx accept --keep-edits`).",
     "Next: arnx check",
@@ -124,6 +126,14 @@ test("check: other tests in the accepted files that fail are their own line, not
 test("check: all pass", async () => {
   const { cli, cases } = await accepted();
   cases.now = [...pass(ACCEPTED), ...OTHERS(5)];
+  expect(await cli.run("check")).toBe(0);
+  expect(cli.stdout).toBe([
+    "✓ All 4 accepted tests pass (5 other tests in their files too)",
+    "✓ Expected-fail marker removed from 4 tests that pass now",
+    "Commit the fixes, the accepted tests and .arnx/accepted-tests.json together.",
+  ].join("\n"));
+  // Unmarked and pinned again: the next check finds them as arnx left them.
+  cli.out.length = 0;
   expect(await cli.run("check")).toBe(0);
   expect(cli.stdout).toBe([
     "✓ All 4 accepted tests pass (5 other tests in their files too)",
