@@ -159,11 +159,12 @@ there when one fails).
 ## Coding agents
 
 The arnx skill lets a coding agent (Claude Code, and others that read Agent Skills) close the loop itself: when it has
-finished a change it runs `arnx review` once, after saying what it may cost, fixes the code behind confirmed findings
-until `arnx check --review` shows their tests passing, and runs `arnx check --json` to see that nothing you accepted
-earlier broke. Then it hands back to you with what it fixed, the findings and questions left for you, and the cost.
-Marking findings, answering questions, `arnx accept`, `arnx init` and any login stay yours: the skill tells the agent
-never to run them, and never to edit accepted tests (`arnx check` would refuse them anyway). Without arnx installed, the
+finished a change it runs `arnx review` once, after saying what it may cost, and hands you the findings, questions and
+cost, changing no code. Once you have run `arnx triage` and `arnx accept`, it runs `arnx check`, fixes the code from
+`arnx prompt` until `arnx check` passes, then runs each touched project's full suite with the accepted tests in it (a
+passing `arnx check` covers only the accepted tests), and reports. Setup, approve, marking findings, answering
+questions, `arnx accept`, `arnx init`, any login and commits stay yours: the skill tells the agent never to run them,
+and never to edit accepted tests (`arnx check` would refuse them anyway). Without arnx installed, the
 agent shows you the install line and runs it only when you say yes. Code no project covers is reported as "Not reviewed
 by arnx", never as checked; the agent asks whether to add unit tests for it (self-contained, saved fixtures, no
 network), and after your yes writes them so `arnx setup --add`, which you run, can cover that code.
