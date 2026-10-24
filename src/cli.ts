@@ -10,7 +10,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSy
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { accept, findAccepted, findReview, makeAnswerRunner, recordChosen } from "./accept";
+import { accept, findAccepted, findReview, makeAnswerRunner, notMarkedLine, recordChosen } from "./accept";
 import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, failingList, keepEdits,
   localPinsPath, TESTS_CHANGED } from "./check";
 import { colorFor, colorLines, paint } from "./color";
@@ -54,6 +54,7 @@ import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, next
 import { isoSeconds } from "./util";
 import { spend } from "./spend";
 import { installSkills, SKILL_DIRS, skillDirsShown, skillStates, userSkillRoot } from "./skill";
+import { suiteBreaks } from "./suitecheck";
 import { recheckJson, recheckReview, recheckSummary } from "./recheck";
 import { applyRemove, planRemove } from "./remove";
 import { versionLine } from "./version";
@@ -1121,8 +1122,12 @@ class Commands {
     progress.start();
     let result;
     try {
+      // The project's own tests run with the accepted ones (skipped with the check, by --no-check).
+      const suiteCheck = a.values["no-check"] || this.d.check === false ? null
+        : (files: string[]) => suiteBreaks(repo, files, { progress: progress.say,
+          ...(this.d.checkSessions ? { sessionFactory: this.d.checkSessions } : {}) });
       result = await accept(repo, rdir, s, { again: a.values.again as boolean, answerRunner: runner,
-        progress: progress.say, pins: localPinsPath(this.d.env, repo) });
+        progress: progress.say, pins: localPinsPath(this.d.env, repo), suiteCheck });
     } finally {
       progress.stop();
     }
@@ -1156,6 +1161,7 @@ class Commands {
     }
     for (const [qid, ids] of byAnswer) this.d.out(`${ids.join(", ")} set aside: your answer to ${qid} has its own test`);
     for (const p of tests) this.d.out(`  kept: ${relative(repo, p)}`);
+    if (result.notMarked.length) this.d.out(notMarkedLine(result.notMarked));
     const answers: { question: string; result: string; tests: string[]; cost_usd: number; rewrite_of: string[] | null }[]
       = [];
     for (const ans of result.answers) {
@@ -1190,6 +1196,7 @@ class Commands {
       let results;
       try {
         results = await check(repo, s, { progress: cp.say, what: "the accepted tests",
+          pins: localPinsPath(this.d.env, repo),
           ...(this.d.checkSessions ? { sessionFactory: this.d.checkSessions } : {}) });
       } finally {
         cp.stop();
@@ -1210,6 +1217,11 @@ class Commands {
           : `All ${passing} accepted tests pass: the bugs they prove look fixed already.`));
       } else if (passing) {
         this.d.out(c.green(passing === 1 ? "The accepted test passes." : `All ${passing} accepted tests pass.`));
+      }
+      const unmarked = results.flatMap((r) => r.unmarked ?? []);
+      if (unmarked.length) {
+        this.d.out(`Expected-fail marker removed from ${n(unmarked.length, "test")} that ` +
+          `${unmarked.length === 1 ? "passes" : "pass"} now.`);
       }
     } else if (realTests) {
       this.d.out("");
@@ -1236,6 +1248,7 @@ class Commands {
       : tests.length ? [real.length ? "commit the fix and the accepted tests together" : "commit the accepted tests"] : [];
     this.emit("ok", 0, { review_id: result.review.id, kept: tests.map(rel),
       dest: tests.length ? rel(result.dest) || "." : null, issues, marks, answers, check: checked,
+      not_marked: result.notMarked,
       fix_prompt: rel(promptPath), next });
     await this.sendTelemetry("accept", () => acceptData(result, tests.length));
     return 0;
@@ -1396,7 +1409,7 @@ class Commands {
     progress.start();
     let results;
     try {
-      results = await check(repo, s, { progress: progress.say,
+      results = await check(repo, s, { progress: progress.say, pins: localPinsPath(this.d.env, repo),
         ...(this.d.checkSessions ? { sessionFactory: this.d.checkSessions } : {}) });
     } finally {
       progress.stop();

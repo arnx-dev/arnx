@@ -1,12 +1,12 @@
 // Tests inside describe blocks (and describe.each variants, whose names carry the block's parameter in brackets:
-// "topup generated [memory] > S1: ..."): accept keeps and skips each test by its own full name, records it by that
+// "topup generated [memory] > S1: ..."): accept keeps and removes each test by its own full name, records it by that
 // name, and check counts it so. Before, a JavaScript name was cut at its first "[", as pytest's parameters are, so
 // every test of a describe.each block was recorded as the block ("topup generated ") and a noise finding's test there
 // was neither skipped nor told apart from the real ones.
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { accept } from "../src/accept";
+import { accept, notMarkedLine } from "../src/accept";
 import { ACCEPTED_RECORD, check } from "../src/check";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { baseName } from "../src/outcomes";
@@ -101,17 +101,18 @@ const keptEach = `__tests__/arnx/${TAG}/topup_each.test.ts`;
 const keptPlain = `__tests__/arnx/${TAG}/topup_plain.test.ts`;
 
 for (const oldFunc of [false, true]) {
-  test(`accept skips a noise finding's test inside a describe block and records each kept test by its name${
+  test(`accept removes a noise finding's test inside a describe block and records each kept test by its name${
     oldFunc ? " (a review saved by an older arnx)" : ""}`, async () => {
     const { repo, rdir } = setup(MARKS, oldFunc);
     const result = await accept(repo, rdir, SETTINGS);
     expect(result.kept.map((p) => p.slice(repo.length + 1)).sort()).toEqual([keptEach, keptPlain]);
     const each = readFileSync(join(repo, keptEach), "utf8");
-    expect(each).toContain(`  // arnx review ${RID}: not confirmed\n  test.skip("S8/S14: a refund after a top-up"`);
-    expect(each).toContain('  test("S1: a top-up credits the balance once"');
+    expect(each).not.toContain("S8/S14");
+    // One line runs both variants, so the real bug's test there carries no expected-fail marker.
+    expect(each).toContain('(store) => {\n  test("S1: a top-up credits the balance once"');
     const plain = readFileSync(join(repo, keptPlain), "utf8");
-    expect(plain).toContain('  test.skip("S9: a zero top-up"');
-    expect(plain).toContain('  test("S2: a second top-up adds up"');
+    expect(plain).not.toContain("S9");
+    expect(plain).toContain(`  // arnx review ${RID}: F5 not fixed yet\n  test.todo("S2: a second top-up adds up"`);
     const rec = JSON.parse(readFileSync(join(repo, ACCEPTED_RECORD), "utf8"));
     expect(rec.files[keptEach].tests).toEqual([NAMES.memS1, NAMES.pgS1]);
     expect(rec.files[keptPlain].tests).toEqual([NAMES.s2]);
@@ -126,22 +127,25 @@ test("a describe.each test kept for one variant is not skipped for the other", a
   expect(each).not.toContain("test.skip(");
 });
 
-/** A fake bun run: the kept files' tests as bun's JUnit report names them (skipped ones reported skipped). */
+/** A fake bun run: the kept files' tests as bun's JUnit report names them, those still in the files. */
 const bunRun = (repo: string): SessionFactory => async (_c, snap, _l, body) => body({
   run(command: string) {
     const out = /--reporter-outfile='?\/src\/([^\s']+)/.exec(command)![1]!;
     const suite = (file: string, cases: [string, string, boolean][]) => `<testsuite name="${file}" file="${file}">${
       cases.map(([d, t, skipped]) => `<testsuite name="${d}"><testcase name="${t}">${
         skipped ? "<skipped/>" : '<failure message="expected 0"/>'}</testcase></testsuite>`).join("")}</testsuite>`;
-    const eachSrc = readFileSync(join(repo, keptEach), "utf8");
-    const s8 = eachSrc.includes('test.skip("S8');
-    const xml = `<testsuites>${suite(keptEach, [
-      ["topup generated [memory]", "S1: a top-up credits the balance once", false],
-      ["topup generated [memory]", "S8/S14: a refund after a top-up", s8],
-      ["topup generated [postgres]", "S1: a top-up credits the balance once", false],
-      ["topup generated [postgres]", "S8/S14: a refund after a top-up", s8]])}${suite(keptPlain, [
-      ["topup generated", "S2: a second top-up adds up", false],
-      ["topup generated", "S9: a zero top-up", true]])}</testsuites>`;
+    const there = (file: string, cases: [string, string][]) => {
+      const src = readFileSync(join(snap, file), "utf8");
+      return cases.filter(([, t]) => src.includes(t)).map(([d, t]): [string, string, boolean] =>
+        [d, t, src.includes(`test.skip("${t}"`)]);
+    };
+    const xml = `<testsuites>${suite(keptEach, there(keptEach, [
+      ["topup generated [memory]", "S1: a top-up credits the balance once"],
+      ["topup generated [memory]", "S8/S14: a refund after a top-up"],
+      ["topup generated [postgres]", "S1: a top-up credits the balance once"],
+      ["topup generated [postgres]", "S8/S14: a refund after a top-up"]]))}${suite(keptPlain, there(keptPlain, [
+      ["topup generated", "S2: a second top-up adds up"],
+      ["topup generated", "S9: a zero top-up"]]))}</testsuites>`;
     mkdirSync(dirname(join(snap, out)), { recursive: true });
     writeFileSync(join(snap, out), xml);
     return { exitCode: 1, output: "", timedOut: false, seconds: 0.1 };
@@ -152,7 +156,7 @@ test("check counts the kept describe tests as accepted and the noise ones not at
   const { repo, rdir } = setup(MARKS);
   await accept(repo, rdir, SETTINGS);
   const [r] = await check(repo, SETTINGS, { sessionFactory: bunRun(repo) });
-  expect(r!.skipped).toBe(3);
+  expect(r!.skipped).toBe(0);
   expect(r!.accepted!.sort()).toEqual([`${keptEach}::${NAMES.memS1}`, `${keptEach}::${NAMES.pgS1}`,
     `${keptPlain}::${NAMES.s2}`]);
 });
@@ -164,4 +168,13 @@ test("a test's parameters: pytest's are dropped, a bracket in a JavaScript title
   expect(baseName("topup generated [memory] > S1: pays")).toBe("topup generated [memory] > S1: pays");
   expect(baseName("handles [x]")).toBe("handles [x]");
   expect(baseName("plain")).toBe("plain");
+});
+
+test("accept names the bug tests no expected-fail marker fits, and says they fail in the project's own run", async () => {
+  const { repo, rdir } = setup(MARKS);
+  const result = await accept(repo, rdir, SETTINGS);
+  // S1 runs once per describe.each variant, so it is left unmarked; S2 is marked todo.
+  expect(result.notMarked).toEqual([`${keptEach}::${NAMES.memS1}`, `${keptEach}::${NAMES.pgS1}`]);
+  expect(notMarkedLine(result.notMarked)).toBe("Fails in your own test run until fixed (no expected-fail marker " +
+    `fits it): ${keptEach}::${NAMES.memS1}, ${keptEach}::${NAMES.pgS1}`);
 });

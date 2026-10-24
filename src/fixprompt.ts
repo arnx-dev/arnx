@@ -75,7 +75,8 @@ export function fixPrompt(r: Pick<AcceptResult, "review" | "marks" | "answers" |
     "owner marked it real. The tests define what \"fixed\" means; the descriptions below say what each one shows.", "",
     "## Rules", "",
     `- Change the product code, not the tests. Never edit, skip, delete or weaken the accepted tests in ` +
-    `${dirs.map((d) => `\`${d}\``).join(", ") || "`tests/arnx/`"}.`,
+    `${dirs.map((d) => `\`${d}\``).join(", ") || "`tests/arnx/`"}, nor remove their expected-fail markers: ` +
+    "`arnx check` removes each once its test passes.",
     "- Fix the cause. Special-casing a test's exact input is not a fix.",
     "- Fix the behaviour, not the test's view of it. Where an accepted test checks the code's text, only that " +
     "something exists, or relies on a mock that behaves unlike the real service, make the behaviour right and say " +

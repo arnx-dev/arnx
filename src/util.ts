@@ -98,6 +98,9 @@ export function splitLines(s: string): string[] {
   return parts;
 }
 
+/** Text ending in one newline, the blank lines a cut left at its end removed. */
+export const endOnce = (s: string): string => s.replace(/\n(?:[ \t]*\n)+$/, "\n");
+
 /** Python's truthiness for values read from YAML or JSON. */
 export function pyTruthy(v: unknown): boolean {
   if (v === null || v === undefined || v === false || v === "" || v === 0 || v === 0n) return false;

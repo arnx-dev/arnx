@@ -54,6 +54,14 @@ export interface Adapter {
   reportSetup?(snapshot: string, runner: string): void;
   /** Mark the named tests as skipped in a test file's source, with a reason. */
   skip(source: string, names: Set<string>, reason: string): string;
+  /** Remove the named tests from a test file's source; `left`: the names it could not remove cleanly (accept skips
+   * those instead). */
+  drop(source: string, names: Set<string>): { text: string; left: Set<string> };
+  /** Mark the named tests expected to fail until their bug is fixed, so the project's own run stays green; `reason`
+   * starts with "arnx". `left`: the names it could not mark (accept leaves those failing). */
+  expectFail(source: string, names: Set<string>, reason: string, runner: string): { text: string; left: Set<string> };
+  /** Remove arnx's expected-fail marker from the named tests (every test, without names); `names`: those unmarked. */
+  unmark(source: string, names?: Set<string>): { text: string; names: string[] };
   /** Where a kept file goes, relative to the project root (original is relative to the generated-tests directory;
    * acceptedDir is the configured accepted_tests_dir). A test file is named `name` (what it protects, as accept
    * chose it: [a-z0-9_]) in the adapter's test-file form; a support file keeps its name. The review id (`tag`) stays

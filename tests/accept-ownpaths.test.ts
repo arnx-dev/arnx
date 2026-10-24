@@ -60,11 +60,12 @@ test("a kept test reading package.json through import.meta.dir still finds it af
   const kept = join(repo, "__tests__", "arnx", "r20261022_0a1b2c", "pkg_wrong.test.ts");
   expect(result.kept).toEqual([kept]);
   expect(readFileSync(kept, "utf8")).toContain('join(import.meta.dir, "../../../package.json")');
-  // Run where it now is: the helper test passes, the bug's test stays red.
+  // Run where it now is: the helper test passes, and the bug's test, marked todo until it is fixed, keeps the
+  // project's own run green.
   const run = spawnSync(process.execPath, ["test", kept], { cwd: repo, encoding: "utf8" });
   const out = run.stdout + run.stderr;
-  expect(out).toContain(" 1 pass\n 1 fail\n");
-  expect(out).toContain("(fail) the bug");
+  expect(out).toContain(" 1 pass\n 1 todo\n 0 fail\n");
+  expect(run.status).toBe(0);
   expect(out).not.toContain("ENOENT");
 });
 

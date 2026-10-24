@@ -6,8 +6,10 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { basename, join, relative } from "node:path";
 import { accept } from "../src/accept";
+import { getAdapter } from "../src/adapters";
 import { snapshot } from "../src/change";
 import { parseReviewFile, reviewConfigPath } from "../src/config";
+import { runTests } from "../src/outcomes";
 import { exitCode } from "../src/report";
 import { runReview } from "../src/reviewer";
 import { defaultSettings } from "../src/settings";
@@ -189,16 +191,25 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: projects", () => {
     const kept = result.kept.find((p) => basename(p).endsWith(".test.js"))!;
     expect(relative(repo, kept)).toMatch(/^services\/pay\/__tests__\/arnx\/r[0-9_a-f]+\/floor_drops_a_cent\.test\.js$/);
     expect(readFileSync(kept, "utf8")).toContain('require("../../../pay")');
-    // The kept test runs from its new place and still fails on the defect (and nothing fails to load).
+    // Marked todo until the fix: node:test runs it and the project's own run stays green. Without the marker, as
+    // arnx check runs it, it still fails on the defect from its new place (and nothing fails to load).
+    expect(readFileSync(kept, "utf8")).toContain(`// arnx review ${review.id}: F1 not fixed yet\n`);
     const cfg = parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")).projects.find((p) => p.name === "pay")!;
     const snap = join(mkdtempSync(join(tmpdir(), "arnx-kept-")), "repo");
     try {
       snapshot(repo, null, snap);
-      const run = await dockerSession(cfg, snap, join(tmp(), "build.log"),
-        async (s) => s.run(`node --test ${relative(join(repo, "services/pay"), kept)}`, 120));
-      expect(run.output).toContain("charges cents exactly");
-      expect(run.output).not.toContain("Cannot find module");
-      expect(run.exitCode).not.toBe(0);
+      const inSnap = join(snap, relative(repo, kept));
+      const [marked, plain] = await dockerSession(cfg, snap, join(tmp(), "build.log"), async (s) => {
+        const command = `node --test ${relative(join(repo, "services/pay"), kept)}`;
+        const first = s.run(command, 120);
+        writeFileSync(inSnap, getAdapter("typescript").unmark(readFileSync(inSnap, "utf8")).text);
+        return [first, s.run(command, 120)];
+      });
+      expect(marked.output).toContain("charges cents exactly");
+      expect(marked.exitCode).toBe(0);
+      expect(plain.output).toContain("charges cents exactly");
+      expect(plain.output).not.toContain("Cannot find module");
+      expect(plain.exitCode).not.toBe(0);
     } finally {
       rmSync(join(snap, ".."), { recursive: true, force: true });
     }
@@ -228,8 +239,28 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: projects", () => {
     markReal(rdir);
     const result = await accept(repo, rdir, SETTINGS);
     expect(result.kept.map((p) => relative(repo, p))).toEqual([expect.stringMatching(/^tests\/arnx_\d{8}_[0-9a-f]{6}_add_subtracts\.rs$/)]);
-    // adds_zero passed in every run, so nothing is skipped; the kept file is the generated one
-    expect(readFileSync(result.kept[0]!, "utf8")).toBe(RUST_TEST);
+    // adds_zero passed in every run, so nothing is cut out; the bug's test is marked expected to fail
+    const kept = readFileSync(result.kept[0]!, "utf8");
+    expect(kept).toBe(RUST_TEST.replace("#[test]\nfn adds_two_numbers", `#[test]\n// arnx review ${review.id}: F1 ` +
+      "not fixed yet\n#[should_panic]\nfn adds_two_numbers"));
+    // On nextest: marked, it passes (the project's own run stays green); unmarked, as check runs it, it fails.
+    const cfg = parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")).projects.find((p) => p.name === "calc")!;
+    const snap = join(mkdtempSync(join(tmpdir(), "arnx-kept-")), "repo");
+    try {
+      snapshot(repo, null, snap, [], { untracked: true });
+      const rel = relative(repo, result.kept[0]!);
+      const outcome = (r: Awaited<ReturnType<typeof runTests>>[1]) =>
+        r?.find((t) => t.testId.endsWith("adds_two_numbers"))?.outcome;
+      const [marked, plain] = await dockerSession(cfg, snap, join(tmp(), "build.log"), async (s) => {
+        const first = runTests(s, snap, cfg, [rel], "marked.xml", 900)[1];
+        writeFileSync(join(snap, rel), getAdapter("rust").unmark(kept).text);
+        return [first, runTests(s, snap, cfg, [rel], "plain.xml", 900)[1]];
+      });
+      expect(outcome(marked)).toBe("passed");
+      expect(outcome(plain)).toBe("failed");
+    } finally {
+      rmSync(join(snap, ".."), { recursive: true, force: true });
+    }
   }, 1_800_000);
 
   test("Rust: a change committed before the image was built is tested as changed, not as the image's prebuilt binary", async () => {

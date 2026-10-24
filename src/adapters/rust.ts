@@ -4,7 +4,7 @@
 // reported by the source file that holds them and can be targets: a file runs the tests of its module.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
-import { shQuote } from "../util";
+import { endOnce, shQuote } from "../util";
 import { junitCases } from "./junit";
 import type { Adapter, TestResult, Words } from "./types";
 
@@ -103,6 +103,82 @@ function skip(source: string, names: Set<string>, reason: string): string {
   return lines.join("");
 }
 
+const FN = /^(\s*)(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[(<]/;
+
+/** Each named test fn: its line, its indent and the first line of the attributes above it. */
+function fnsOf(lines: string[], names: Set<string> | null) {
+  const out: { at: number; first: number; indent: string; name: string }[] = [];
+  lines.forEach((line, i) => {
+    const m = FN.exec(line);
+    if (!m || (names && !names.has(m[2]!))) return;
+    let first = i;
+    // Comments among the attributes (arnx's marker sits under #[test]) belong to the test.
+    for (let k = i - 1; k >= 0 && /^\s*(?:#\[|\/\/)/.test(lines[k]!); k--) if (/^\s*#\[/.test(lines[k]!)) first = k;
+    out.push({ at: i, first, indent: m[1]!, name: m[2]! });
+  });
+  return out;
+}
+
+const braces = (line: string) => [...line].reduce((n, c) => n + (c === "{" ? 1 : c === "}" ? -1 : 0), 0);
+
+/** Remove each named test: its doc comments and attributes, the fn to its closing `}` (at the fn's indent, or on the
+ * same line), and the blank lines after it. */
+function drop(source: string, names: Set<string>): { text: string; left: Set<string> } {
+  const lines = source.split(/(?<=\n)/);
+  const fns = fnsOf(lines, names);
+  const left = new Set([...names].filter((n) => !fns.some((f) => f.name === n)));
+  const cuts: [number, number][] = [];
+  for (const f of fns) {
+    let end = -1;
+    if (lines[f.at]!.includes("{") && braces(lines[f.at]!) === 0) end = f.at + 1;
+    else for (let j = f.at + 1; j < lines.length && end < 0; j++) if (lines[j]!.trimEnd() === `${f.indent}}`) end = j + 1;
+    if (end < 0) {
+      left.add(f.name);
+      continue;
+    }
+    let first = f.first;
+    while (first > 0 && lines[first - 1]!.startsWith(`${f.indent}//`)) first -= 1;
+    while (end < lines.length && !lines[end]!.trim()) end += 1;
+    cuts.push([first, end]);
+  }
+  for (const [from, to] of cuts.sort((a, b) => b[0] - a[0])) lines.splice(from, to - from);
+  return { text: cuts.length ? endOnce(lines.join("")) : source, left };
+}
+
+/** `#[should_panic]` right above each named test fn (after #[tokio::test] and the like, which keep it there), under a
+ * comment with the reason. A test returning a Result cannot take it, nor an rstest with cases: those are left. */
+function expectFail(source: string, names: Set<string>, reason: string): { text: string; left: Set<string> } {
+  const lines = source.split(/(?<=\n)/);
+  const fns = fnsOf(lines, names);
+  const left = new Set([...names].filter((n) => !fns.some((f) => f.name === n)));
+  const inserts: [number, string][] = [];
+  for (const f of fns) {
+    const brace = lines.findIndex((l, j) => j >= f.at && l.includes("{"));
+    // rstest's cases run under one fn, and those that pass would fail under #[should_panic].
+    const cases = lines.slice(f.first, f.at).some((l) => /^\s*#\[(?:rstest|case)\b/.test(l));
+    if (cases || brace < 0 || lines.slice(f.at, brace + 1).join("").split("{")[0]!.includes("->")) {
+      left.add(f.name);
+      continue;
+    }
+    inserts.push([f.at, `${f.indent}// ${reason}\n${f.indent}#[should_panic]\n`]);
+  }
+  for (const [at, text] of inserts.sort((a, b) => b[0] - a[0])) lines.splice(at, 0, text);
+  return { text: lines.join(""), left };
+}
+
+/** Remove arnx's expected-fail marker: its `// arnx` comment and the #[should_panic] under it. */
+function unmark(source: string, names?: Set<string>): { text: string; names: string[] } {
+  const lines = source.split(/(?<=\n)/);
+  const out: string[] = [];
+  for (const f of fnsOf(lines, names ?? null).reverse()) {
+    const at = f.at - 2;
+    if (at < 0 || !/^\s*\/\/ arnx\b/.test(lines[at]!) || lines[at + 1]!.trim() !== "#[should_panic]") continue;
+    lines.splice(at, 2);
+    out.unshift(f.name);
+  }
+  return { text: lines.join(""), names: out };
+}
+
 export const rust: Adapter = {
   id: "rust",
   runners: ["nextest"],
@@ -134,6 +210,9 @@ export const rust: Adapter = {
     `cp /src/.arnx-run/nextest/arnx/junit.xml ${shQuote(reportPath)} 2>/dev/null; exit $s`,
   parseReport: (text, _runner, _root, exists = () => false) => parseNextest(text, exists),
   skip,
+  drop,
+  expectFail,
+  unmark,
   // Cargo builds only tests/*.rs as integration tests, so no folder: the review id is the prefix (a file named after
   // the review, r<tag>, is that prefix alone).
   acceptedPath: (_original, tag, _acceptedDir, name) => posix.join("tests",

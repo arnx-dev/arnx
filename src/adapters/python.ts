@@ -1,6 +1,6 @@
 // The Python adapter: pytest, JUnit XML (xunit1), test_*.py files.
 import { posix } from "node:path";
-import { pyRepr, shQuote } from "../util";
+import { endOnce, pyRepr, shQuote } from "../util";
 import { parseJunit } from "./junit";
 import type { Adapter } from "./types";
 
@@ -51,35 +51,120 @@ function afterFutureImports(lines: string[], inString: boolean[]): number {
   return at;
 }
 
-/** Python's ast-based marker, done on text: `@pytest.mark.skip(reason=...)` goes above each named test's
- * decorators, and `import pytest` is added after any `__future__` imports when the module does not import it. */
-export function pythonSkip(source: string, names: Set<string>, reason: string): string {
-  if (names.size === 0) return source;
-  const lines = source.split(/(?<=\n)/);
-  const inString = stringLines(lines);
-  const inserts: [number, string][] = [];
+/** The first line of a test's decorator stack (comments among it included), from its def at line `i`. */
+function blockStart(lines: string[], inString: boolean[], i: number, indent: string): number {
+  let first = i;
+  for (let k = i - 1; k >= 0; k--) {
+    const t = lines[k]!, body = t.trim();
+    if (body === "" || inString[k]) break;
+    const ind = t.length - t.trimStart().length;
+    if (ind === indent.length && body.startsWith("@")) first = k;
+    else if (ind === indent.length && body.startsWith("#")) continue;
+    else if (ind > indent.length || (ind === indent.length && /^[)\]}]/.test(body))) continue;
+    else break;
+  }
+  return first;
+}
+
+/** Each named test's def: its line, its indent and the first line of its decorators. */
+function defsOf(lines: string[], inString: boolean[], names: Set<string> | null) {
+  const out: { at: number; first: number; indent: string; name: string }[] = [];
   lines.forEach((line, i) => {
     const m = inString[i] ? null : DEF.exec(line);
-    if (!m || !names.has(m[2]!)) return;
-    const indent = m[1]!;
-    let first = i;
-    for (let k = i - 1; k >= 0; k--) {
-      const t = lines[k]!, body = t.trim();
-      if (body === "" || inString[k]) break;
-      const ind = t.length - t.trimStart().length;
-      if (ind === indent.length && body.startsWith("@")) first = k;
-      else if (ind === indent.length && body.startsWith("#")) continue;
-      else if (ind > indent.length || (ind === indent.length && /^[)\]}]/.test(body))) continue;
-      else break;
-    }
-    inserts.push([first, `${indent}@pytest.mark.skip(reason=${pyRepr(reason)})\n`]);
+    if (!m || (names && !names.has(m[2]!))) return;
+    out.push({ at: i, first: blockStart(lines, inString, i, m[1]!), indent: m[1]!, name: m[2]! });
   });
-  if (inserts.length === 0) return source;
+  return out;
+}
+
+/** A marker (from the test's decorators) above each named test's decorators, and `import pytest` after any `__future__` imports when the module
+ * does not import it; `left`: the names no test has. */
+function pythonMark(source: string, names: Set<string>, marker: (decorators: string) => string)
+  : { text: string; left: Set<string> } {
+  if (names.size === 0) return { text: source, left: new Set() };
+  const lines = source.split(/(?<=\n)/);
+  const inString = stringLines(lines);
+  const defs = defsOf(lines, inString, names);
+  const inserts: [number, string][] = defs.map((d) =>
+    [d.first, `${d.indent}${marker(lines.slice(d.first, d.at).join(""))}\n`]);
+  const left = new Set([...names].filter((n) => !defs.some((d) => d.name === n)));
+  if (inserts.length === 0) return { text: source, left };
   if (!lines.some((l, i) => !inString[i] && IMPORT_PYTEST.test(l.trimEnd()))) {
     inserts.push([afterFutureImports(lines, inString), "import pytest\n"]);
   }
   for (const [at, text] of inserts.sort((a, b) => b[0] - a[0])) lines.splice(at, 0, text);
+  return { text: lines.join(""), left };
+}
+
+/** Python's ast-based marker, done on text: `@pytest.mark.skip(reason=...)` goes above each named test's
+ * decorators, and `import pytest` is added after any `__future__` imports when the module does not import it. */
+export function pythonSkip(source: string, names: Set<string>, reason: string): string {
+  return pythonMark(source, names, () => `@pytest.mark.skip(reason=${pyRepr(reason)})`).text;
+}
+
+/** Remove each named test: its decorators, its def and body, and the blank lines after it. */
+function pythonDrop(source: string, names: Set<string>): { text: string; left: Set<string> } {
+  const lines = source.split(/(?<=\n)/);
+  const inString = stringLines(lines);
+  const defs = defsOf(lines, inString, names);
+  const cuts: [number, number][] = defs.map((d) => {
+    let end = d.at + 1;
+    for (; end < lines.length; end++) {
+      const t = lines[end]!, body = t.trim();
+      if (inString[end] || body === "") continue;
+      const ind = t.length - t.trimStart().length;
+      if (ind > d.indent.length || (ind === d.indent.length && /^[)\]}]/.test(body))) continue;
+      break;
+    }
+    return [d.first, end];
+  });
+  for (const [from, to] of cuts.sort((a, b) => b[0] - a[0])) lines.splice(from, to - from);
+  const left = new Set([...names].filter((n) => !defs.some((d) => d.name === n)));
+  return { text: cuts.length ? endOnce(dropEmptyClasses(lines)) : source, left };
+}
+
+/** Remove the classes a cut left with no body (they would not parse), with their decorators and the blank lines
+ * after them; a class emptied that way can empty the one around it. */
+function dropEmptyClasses(lines: string[]): string {
+  for (let cut = true; cut;) {
+    cut = false;
+    const inString = stringLines(lines);
+    for (let i = 0; i < lines.length && !cut; i++) {
+      const m = inString[i] ? null : /^(\s*)class\s+\w[^#]*:\s*(?:#.*)?$/.exec(lines[i]!.trimEnd());
+      if (!m) continue;
+      let next = i + 1;
+      while (next < lines.length && (!lines[next]!.trim() || inString[next])) next += 1;
+      const body = next < lines.length ? lines[next]!.length - lines[next]!.trimStart().length : -1;
+      if (body > m[1]!.length) continue;
+      const first = blockStart(lines, inString, i, m[1]!);
+      lines.splice(first, next - first);
+      cut = true;
+    }
+  }
   return lines.join("");
+}
+
+/** arnx's expected-fail marker: strict, so a fix turns the project's own run red until check removes it; not strict
+ * on a parametrized test, whose variants that pass must not fail the run. */
+const XFAIL = /^\s*@pytest\.mark\.xfail\(strict=(?:True|False), reason=(['"])arnx\b.*\)\s*$/;
+const pythonExpectFail = (source: string, names: Set<string>, reason: string) => pythonMark(source, names,
+  (decorators) => `@pytest.mark.xfail(strict=${/\bparametrize\b/.test(decorators) ? "False" : "True"}, ` +
+    `reason=${pyRepr(reason)})`);
+
+/** Remove arnx's expected-fail marker from the named tests (all, without names). */
+function pythonUnmark(source: string, names?: Set<string>): { text: string; names: string[] } {
+  const lines = source.split(/(?<=\n)/);
+  const inString = stringLines(lines);
+  const drop: number[] = [];
+  const out: string[] = [];
+  for (const d of defsOf(lines, inString, names ?? null)) {
+    const at = lines.slice(d.first, d.at).findIndex((l) => XFAIL.test(l));
+    if (at < 0) continue;
+    drop.push(d.first + at);
+    out.push(d.name);
+  }
+  for (const at of drop.sort((a, b) => b - a)) lines.splice(at, 1);
+  return { text: lines.join(""), names: out };
 }
 
 const WORDS = {
@@ -112,6 +197,9 @@ export const python: Adapter = {
     ` --junitxml=${shQuote(reportPath)}`,
   parseReport: (text) => parseJunit(text, (f) => f.endsWith(".py") ? f.slice(0, -3).replaceAll("/", ".") : ""),
   skip: pythonSkip,
+  drop: pythonDrop,
+  expectFail: pythonExpectFail,
+  unmark: pythonUnmark,
   acceptedPath: (original, tag, acceptedDir, name) => {
     const own = posix.basename(original);
     const renamed = own.startsWith("test_") ? `test_${name}.py` : own;

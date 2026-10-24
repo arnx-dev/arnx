@@ -19,7 +19,8 @@ test("the fix prompt lists the bugs marked real, the owner's answers, open quest
   moved: { "app/tests/g/test_i.py": "app/tests/arnx/r1/g/test_1_i.py",
     "app/tests/g/answers/test_expiry.py": "app/tests/arnx/r1/answers/test_1_expiry.py" } }, SETTINGS);
   expect(p).toContain("# Fix the bugs proven by arnx review 20261011-a1b2c3");
-  expect(p).toContain("- Change the product code, not the tests. Never edit, skip, delete or weaken the accepted tests in `app/tests/arnx/`.");
+  expect(p).toContain("- Change the product code, not the tests. Never edit, skip, delete or weaken the accepted tests in " +
+    "`app/tests/arnx/`, nor remove their expected-fail markers: `arnx check` removes each once its test passes.");
   expect(p).toContain("Run `arnx check` after the fixes.");
   expect(p).toContain(["### 1. Any member can invite (F1)", "",
     "- Expected: refused",
@@ -39,7 +40,8 @@ test("the fix prompt lists the bugs marked real, the owner's answers, open quest
 const RULES = `## Rules
 
 - Change the product code, not the tests. Never edit, skip, delete or weaken the accepted tests in
-  \`tests/arnx/r20261021_5f8937/\`.
+  \`tests/arnx/r20261021_5f8937/\`, nor remove their expected-fail markers: \`arnx check\` removes each
+  once its test passes.
 - Fix the cause. Special-casing a test's exact input is not a fix.
 - Fix the behaviour, not the test's view of it. Where an accepted test checks the code's text, only
   that something exists, or relies on a mock that behaves unlike the real service, make the

@@ -71,10 +71,9 @@ test("a test that assumed an answer is set aside when the owner's answer has its
   const result = await accept(repo, rdir, SETTINGS, { answerRunner: runner(seen, { fails: true }) });
   expect(seen).toEqual([["Q1", "Should add round?", "no, it truncates", "answers/Q1", "main"]]);
   expect(result.setAside).toEqual({ F2: "Q1" });
-  // F2's test stays in the kept file, skipped and saying why; it is no accepted test.
+  // F2's test leaves the kept file (the answer's test replaces it); it is no accepted test.
   const kept = readFileSync(join(repo, DEST, "test_add_subtracts.py"), "utf8");
-  expect(kept).toContain(`@pytest.mark.skip(reason='arnx review ${RID}: set aside: your answer to Q1 has its own ` +
-    "test')\ndef test_b");
+  expect(kept).not.toContain("def test_b");
   expect(kept).not.toContain("not confirmed");
   expect(record(repo)[`${DEST}/test_add_subtracts.py`].tests).toEqual(["test_a"]);
   expect(record(repo)[`${DEST}/answers/test_q1.py`].tests).toEqual(["test_q1"]);
@@ -151,7 +150,7 @@ test("rewrite: the issue's test is set aside and one answer round writes a test 
   expect(readFileSync(join(rdir, "fix-prompt.md"), "utf8")).not.toContain("R1");
 });
 
-test("rewrite marked on one finding: only its test is set aside, with its own skip reason", async () => {
+test("rewrite marked on one finding: only its test is set aside, and leaves the kept file", async () => {
   const repo = gitRepo(tmp());
   const rdir = savedReview(repo);
   edit(rdir, marks(mark("real"), `${mark("rewrite")}\nRewrite: compare the sum, not the message`));
@@ -161,7 +160,8 @@ test("rewrite marked on one finding: only its test is set aside, with its own sk
   expect(seen).toEqual([["R1", "add drops one.", `${REWRITE_PREFIX}compare the sum, not the message`, "answers/R1",
     "main"]]);
   const kept = readFileSync(join(repo, DEST, "test_add_subtracts.py"), "utf8");
-  expect(kept).toContain(`@pytest.mark.skip(reason='arnx review ${RID}: rewritten from your reason')\ndef test_b`);
+  expect(kept).not.toContain("def test_b");
+  expect(kept).toContain(`reason='arnx review ${RID}: F1 not fixed yet')\ndef test_a`);
   expect(record(repo)[`${DEST}/test_add_subtracts.py`].tests).toEqual(["test_a"]);
   // Its test passes on the code: kept to lock it, not an accepted (failing) test.
   expect(record(repo)[`${DEST}/answers/test_r1.py`].tests).toEqual([]);
@@ -185,8 +185,7 @@ test("a review.md with three boxes accepts as it did before rewrite existed", as
   const result = await accept(repo, rdir, SETTINGS);
   expect(result.setAside).toEqual({});
   expect(result.rewrites).toEqual([]);
-  expect(readFileSync(join(repo, DEST, "test_add_subtracts.py"), "utf8"))
-    .toContain(`skip(reason='arnx review ${RID}: not confirmed')\ndef test_b`);
+  expect(readFileSync(join(repo, DEST, "test_add_subtracts.py"), "utf8")).not.toContain("def test_b");
   expect(record(repo)[`${DEST}/test_add_subtracts.py`].tests).toEqual(["test_a"]);
 });
 

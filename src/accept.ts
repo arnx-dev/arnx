@@ -27,6 +27,7 @@ import { isoSeconds } from "./util";
 import { inPool } from "./challenge";
 import { sliceDiff, workingTreeFiles } from "./change";
 import { route } from "./route";
+import type { SuiteBreak } from "./suitecheck";
 
 /** Answer rounds at once (each a model round and three sandbox runs). */
 export const ANSWER_CONCURRENCY = 3;
@@ -92,6 +93,9 @@ export interface AcceptResult {
   sources: Record<string, MarkSource>;
   /** Over every review in precision.jsonl, after this one was recorded (see precisionOf). */
   precision: Precision;
+  /** Bug tests no expected-fail marker fits (`file::test`, repository-relative): they fail in the project's own run
+   * until fixed. */
+  notMarked: string[];
 }
 
 export type MarkSource = "default" | "chosen";
@@ -238,8 +242,8 @@ function readOutcome(path: string, answer: string): AnswerOutcome | null {
 /** Where accept keeps tests and why, said when a kept file is not right under accepted_tests_dir at the repository
  * root (a project in a subdirectory, a TypeScript project or a Rust crate at the default). */
 /** Where kept files go: the project's root (absolute and relative to the repository) and the configured directory
- * for accepted tests; `sub` places answer tests apart ("answers"). */
-interface Destination { root: string; rootRel: string; acceptedDir: string; sub: string }
+ * for accepted tests; `sub` places answer tests apart ("answers"). `runner`: the project's, for its expected-fail form. */
+interface Destination { root: string; rootRel: string; acceptedDir: string; sub: string; runner: string }
 
 export const NAME_MAX = 50;
 
@@ -284,12 +288,16 @@ function namesOf(review: Review, marks: Marks, project: string, tag: string): Re
   return out;
 }
 
-/** Copy the kept files. A test file is named from `names` (an answer's file: its generated name, without the
- * test-file affixes); a name whose file name is `taken` gets _2, _3, and is then taken itself. */
+/** Copy the kept files. Tests not kept are removed from them (skipped, with `reason`, when one cannot be cut out
+ * cleanly); a kept test that fails today (`red`: file → test → why) is marked expected to fail, so the project's own
+ * run stays green until check sees it pass and removes the marker. A test file is named from `names` (an answer's file:
+ * its generated name, without the test-file affixes); a name whose file name is `taken` gets _2, _3, and is then taken
+ * itself. */
 function exportTests(adapter: Adapter, files: Record<string, string>, base: string, d: Destination, tag: string,
                      keep: Record<string, Set<string>>, skip: Record<string, Set<string>>,
-                     reason: string | ((path: string, name: string) => string),
-                     names: Record<string, string>, taken: Set<string>, moved?: Record<string, string>): string[] {
+                     red: Record<string, Map<string, string>>, reason: string | ((path: string, name: string) => string),
+                     names: Record<string, string>, taken: Set<string>, moved?: Record<string, string>,
+                     prior?: Prior, notMarked?: string[]): string[] {
   if (!Object.keys(files).some((f) => keep[f]?.size)) return [];
   const written: string[] = [];
   for (const path of Object.keys(files).sort()) {
@@ -297,6 +305,8 @@ function exportTests(adapter: Adapter, files: Record<string, string>, base: stri
     const name = posix.basename(path);
     const rel = posix.join(d.sub, posix.relative(base, path));
     let text: string;
+    /** This file's bug tests no expected-fail marker fits (run once per variant, a Rust test returning a Result). */
+    const unmarked: string[] = [];
     if (adapter.isSupportFile(name)) {
       text = source;
     } else if (adapter.isTestFile(name) && keep[path]?.size) {
@@ -305,10 +315,17 @@ function exportTests(adapter: Adapter, files: Record<string, string>, base: stri
       const marked = (n: string) => adapter.skip(source, new Set([n]), "");
       const keptLines = new Set([...keep[path]!].map(marked).filter((t) => t !== source));
       const names = [...(skip[path] ?? [])].filter((n) => !keep[path]!.has(n) && !keptLines.has(marked(n)));
-      // Skipped once per reason: a test set aside says why, apart from the ones not confirmed.
+      const dropped = adapter.drop(source, new Set(names));
+      text = dropped.text;
+      // What could not be cut out is skipped, once per reason: a test set aside says why, apart from those not confirmed.
+      const left = names.filter((n) => dropped.left.has(n));
       const why = (n: string) => typeof reason === "string" ? reason : reason(path, n);
-      text = source;
-      for (const r of new Set(names.map(why))) text = adapter.skip(text, new Set(names.filter((n) => why(n) === r)), r);
+      for (const r of new Set(left.map(why))) text = adapter.skip(text, new Set(left.filter((n) => why(n) === r)), r);
+      for (const [n, r] of red[path] ?? []) {
+        const m = adapter.expectFail(text, new Set([n]), r, d.runner);
+        text = m.text;
+        unmarked.push(...m.left);
+      }
     } else {
       continue;
     }
@@ -321,8 +338,13 @@ function exportTests(adapter: Adapter, files: Record<string, string>, base: stri
       }
       taken.add(posix.basename(target));
     }
+    if (adapter.isTestFile(name)) notMarked?.push(...unmarked.map((n) => `${posix.join(d.rootRel, target)}::${n}`));
     text = adapter.relocate(text, posix.dirname(posix.relative(d.rootRel, path)), posix.dirname(target));
     const out = join(d.root, target);
+    if (prior && !prior.files.has(out)) prior.files.set(out, existsSync(out) ? readFileSync(out) : null);
+    let made = dirname(out);
+    while (prior && !existsSync(dirname(made))) made = dirname(made);
+    if (prior && !existsSync(made)) prior.dirs.add(made);
     mkdirSync(dirname(out), { recursive: true });
     writeFileSync(out, text);
     written.push(out);
@@ -331,9 +353,33 @@ function exportTests(adapter: Adapter, files: Record<string, string>, base: stri
   return written;
 }
 
+/** What accept changed in the repository, to put back when it refuses: each file it wrote → what the file held
+ * before (null: none), and the topmost folders it created. */
+interface Prior { files: Map<string, Buffer | null>; dirs: Set<string> }
+
+/** The line accept prints for the bug tests no expected-fail marker fits. */
+export const notMarkedLine = (ids: string[]): string =>
+  `Fails in your own test run until fixed (no expected-fail marker fits it): ${ids.join(", ")}`;
+
+/** Why accept refused: the project tests the kept files break, at most 10 named. */
+function brokenText(breaks: SuiteBreak[], rid: string, again: boolean): string {
+  const lines: string[] = [];
+  for (const b of breaks) {
+    lines.push(`Not accepted: the accepted tests break ${b.broken.length} of ${b.project}'s own tests, which pass ` +
+      "without them:",
+    ...b.broken.slice(0, 10).map((t) => `  ✗ ${t.testId}${t.message ? `  ${firstLine(t.message)}` : ""}`),
+    ...(b.broken.length > 10 ? [`  … and ${b.broken.length - 10} more`] : []),
+    `Accepted files: ${b.files.join(", ")}`);
+  }
+  lines.push("Find why they fail with the accepted tests in (a test that patches a module or global at import, a rule " +
+    "of the project's own tests), then mark its issue rewrite (Rewrite: what to change) or noise, and run: arnx " +
+    `accept ${again ? "--again " : ""}${rid}`);
+  return lines.join("\n");
+}
+
 /** The projects of a review: language and root of each. A review of a file without projects needs no review.yaml. */
-interface ProjectInfo { name: string; adapter: Adapter; root: string; rootRel: string; acceptedDir: string;
-                        files: Record<string, string>; writeDir: string }
+interface ProjectInfo { name: string; adapter: Adapter; runner: string; root: string; rootRel: string;
+                        acceptedDir: string; files: Record<string, string>; writeDir: string }
 
 function projectsOf(repo: string, rdir: string, review: Review, settings: Settings): ProjectInfo[] {
   const legacy = review.projects.length === 1 && review.projects[0] === "main";
@@ -345,7 +391,8 @@ function projectsOf(repo: string, rdir: string, review: Review, settings: Settin
     const testsRoot = legacy ? join(rdir, "tests") : join(rdir, "projects", name, "tests");
     const files = readCopies(testsRoot, adapter.writable);
     const rootRel = cfg ? cfg.workdir : ".";
-    return { name, adapter, root: join(repo, rootRel), rootRel, acceptedDir: settings.acceptedTestsDir, files,
+    return { name, adapter, runner: cfg?.runner ?? adapter.defaultRunner, root: join(repo, rootRel), rootRel,
+      acceptedDir: settings.acceptedTestsDir, files,
       writeDir: review.writeDirs[name] ?? review.writeDir };
   });
 }
@@ -383,7 +430,8 @@ export function makeAnswerRunner(repo: string, file: ReviewFile, settings: Setti
 
 export async function accept(repo: string, rdir: string, settings: Settings,
                              o: { again?: boolean; answerRunner?: AnswerRunner | null; now?: Date; progress?: Say;
-                                  pins?: string | null } = {})
+                                  pins?: string | null;
+                                  suiteCheck?: ((files: string[]) => Promise<SuiteBreak[]>) | null } = {})
   : Promise<AcceptResult> {
   const review = load(rdir);
   const done = join(rdir, "accepted.json");
@@ -406,6 +454,19 @@ export async function accept(repo: string, rdir: string, settings: Settings,
     ? JSON.parse(readFileSync(done, "utf8")) as { moved?: Record<string, string>; kept?: string[] } : {};
   const earlier = before.moved ?? {};
   const kept: string[] = [];
+  /** Bug tests left unmarked: they fail in the project's own run until fixed. */
+  const notMarked: string[] = [];
+  const prior: Prior = { files: new Map(), dirs: new Set() };
+  /** This review's own folders left empty, removed up to the first that is not its own. */
+  const removeEmpty = (from: string) => {
+    for (let d = from; d !== "." && own(d + "/x"); d = dirname(d)) {
+      try {
+        if (existsSync(join(repo, d)) && !readdirSync(join(repo, d)).length) rmdirSync(join(repo, d));
+      } catch {
+        break;
+      }
+    }
+  };
   /** Generated test file → where accept put it (repository-relative). */
   const moved: Record<string, string> = {};
   const diff = existsSync(join(rdir, "change.diff")) ? readFileSync(join(rdir, "change.diff"), "utf8") : "";
@@ -466,11 +527,13 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   for (const p of projects) {
     const keep: Record<string, Set<string>> = {};
     const skip: Record<string, Set<string>> = {};
+    const red: Record<string, Map<string, string>> = {};
     const reasons: Record<string, string> = {};
     for (const f of review.findings) {
       if (!f.file || f.project !== p.name) continue;
       const func = funcOfFinding(f);
       add(keeps.findings[f.id] === "real" ? keep : skip, f.file, func);
+      if (keeps.findings[f.id] === "real") (red[f.file] ??= new Map()).set(func, `arnx review ${review.id}: ${f.id} not fixed yet`);
       if (setAside[f.id]) reasons[`${f.file}::${func}`] = why(f.id);
     }
     for (const testId of [...review.flaky, ...review.errors]) {
@@ -478,9 +541,9 @@ export async function accept(repo: string, rdir: string, settings: Settings,
       if (owner) add(skip, owner, funcOfId(testId));
     }
     const written = exportTests(p.adapter, p.files, p.writeDir, { root: p.root, rootRel: p.rootRel,
-      acceptedDir: p.acceptedDir, sub: "" }, tag, keep, skip,
+      acceptedDir: p.acceptedDir, sub: "", runner: p.runner }, tag, keep, skip, red,
       (path, name) => `arnx review ${review.id}: ${reasons[`${path}::${name}`] ?? "not confirmed"}`,
-      namesOf(review, keeps, p.name, tag), taken, moved);
+      namesOf(review, keeps, p.name, tag), taken, moved, prior, notMarked);
     kept.push(...written);
   }
   rounds.forEach(({ id, project, rewrite }, k) => {
@@ -488,24 +551,42 @@ export async function accept(repo: string, rdir: string, settings: Settings,
     if (!outcome) return;
     const p = projects.find((x) => x.name === project) ?? projects[0]!;
     answers.push(outcome);
+    // A test the code disagrees with fails until the code does what the answer (or the reason) says.
+    const red: Record<string, Map<string, string>> = {};
+    for (const t of outcome.disagree) {
+      const owner = ownerFile(t.split("::")[0]!, Object.keys(outcome.files));
+      if (owner) (red[owner] ??= new Map()).set(funcOfId(t), `arnx review ${review.id}: ${id} not done yet`);
+    }
     kept.push(...exportTests(p.adapter, outcome.files, outcome.base, { root: p.root, rootRel: p.rootRel,
-      acceptedDir: p.acceptedDir, sub: "answers" }, tag, outcome.keep, outcome.skip,
+      acceptedDir: p.acceptedDir, sub: "answers", runner: p.runner }, tag, outcome.keep, outcome.skip, red,
       `arnx review ${review.id}: flaky or erroring while checking ${rewrite ? "the rewrite" : "the answer to"} ${id}`,
-      {}, taken, moved));
+      {}, taken, moved, prior, notMarked));
   });
   // Accepting again: a file this review kept before and keeps no longer (its findings are no longer marked real, or
   // it is now kept under another name) is removed, so arnx check stops running it; then the folders it leaves empty.
-  const now = new Set(kept.map((k) => relative(repo, k).split(sep).join("/")));
+  const rel = (p: string) => relative(repo, p).split(sep).join("/");
+  const now = new Set(kept.map(rel));
   for (const was of new Set([...(before.kept ?? []), ...Object.values(earlier)])) {
-    if (!own(was) || now.has(was)) continue;
-    rmSync(join(repo, was), { force: true });
-    for (let d = dirname(was); d !== "." && own(d + "/x"); d = dirname(d)) {
-      try {
-        if (existsSync(join(repo, d)) && !readdirSync(join(repo, d)).length) rmdirSync(join(repo, d));
-      } catch {
-        break;
-      }
+    const full = join(repo, was);
+    if (!own(was) || now.has(was) || !existsSync(full)) continue;
+    if (!prior.files.has(full)) prior.files.set(full, readFileSync(full));
+    rmSync(full, { force: true });
+    removeEmpty(dirname(was));
+  }
+  // The project's own run with the kept files in, as they will be: files that break the project's other tests are
+  // not accepted, and the repository is put back as it was.
+  const breaks = o.suiteCheck && kept.length ? (await o.suiteCheck([...now].sort())).filter((b) => b.broken.length)
+    : [];
+  if (breaks.length) {
+    for (const [path, text] of prior.files) {
+      if (text) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, text);
+      } else rmSync(path, { force: true });
     }
+    for (const path of prior.files.keys()) if (!prior.files.get(path)) removeEmpty(rel(dirname(path)));
+    for (const d of prior.dirs) rmSync(d, { recursive: true, force: true });
+    throw new ArnxError(brokenText(breaks, review.id, existsSync(done)));
   }
   // Where the kept files went: the deepest directory they share (the repository when nothing was kept).
   const dest = kept.length ? kept.map(dirname).reduce((a, b) => {
@@ -550,7 +631,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   const red = review.findings.filter((f) => keeps.findings[f.id] === "real")
     .map((f) => ({ id: f.id, testId: f.testId, project: f.project, explanation: f.explanation }));
   const result = { review, marks, kept, answers, rewrites, setAside, dest, red, moved, sources,
-    precision: precisionOf(log) };
+    precision: precisionOf(log), notMarked };
   writeFileSync(join(rdir, "fix-prompt.md"), wrapMarkdown(fixPrompt(result, settings)));
   return result;
 }
