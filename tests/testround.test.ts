@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseReviewConfig } from "../src/config";
 import { PROMPT_VERSION, reviewSystem, reviewTask } from "../src/prompts";
@@ -61,8 +61,9 @@ test("test_round_end_to_end_with_fakes", async () => {
   expect(r.classified.findings).toEqual([]);
   expect(r.classified.flaky.map((t) => t.name)).toEqual(["test_x"]);
   const commands = sessions[0]!.commands;
-  expect(commands[0]).toContain("tests/arnx_generated");
-  expect(commands).toHaveLength(4); // one agent run, three final runs
+  expect(commands[0]).toContain("test_arnx_probe.py"); // the environment runs a test before the agent writes any
+  expect(commands[1]).toContain("tests/arnx_generated");
+  expect(commands).toHaveLength(5); // the probe, one agent run, three final runs
   expect(existsSync(join(repo, "app", "tests", "arnx_generated", "test_stale.py"))).toBe(true); // user's tree untouched
 });
 
@@ -75,7 +76,26 @@ test("test_round_without_tests_skips_runs", async () => {
     runs: 3, outDir: join(tmp(), "o"), sessionFactory: fakeFactory(script, sessions) });
   expect(r.files).toEqual({});
   expect(r.classified.totalRuns).toBe(0);
-  expect(sessions[0]!.commands).toEqual([]);
+  expect(sessions[0]!.commands.map((c) => c.includes("test_arnx_probe.py"))).toEqual([true]); // the probe only
+});
+
+// An image whose build differed from the commit under review rebuilt a build script that downloads,
+// offline. Every run failed to build; the review wrote and billed tests that never ran and said "No findings".
+test("a round whose environment runs no test stops before the agent writes one", async () => {
+  const repo = gitRepo(tmp());
+  const model = new ScriptedAgent([
+    [tool("write_file", { path: "app/" + GEN, content: "def test_x(): pass\n" })],
+    [text('{"tests": []}')],
+  ]);
+  const sessions: FakeSession[] = [];
+  const broken = (): [string | null, string, boolean] =>
+    [null, "error: failed to run custom build command for `fetcher v1.0.0`", false];
+  const out = join(tmp(), "o");
+  await expect(testRound(repo, null, CFG, { ...answerRound(model, CFG), writeDir: writeDirOf(CFG), budgetUsd: 1.0,
+    runs: 3, outDir: out, sessionFactory: fakeFactory(broken, sessions, { probe: "ignore" }) }))
+    .rejects.toThrow(/the test environment runs no test at this commit[\s\S]*custom build command for `fetcher/);
+  expect(sessions[0]!.commands).toHaveLength(1);
+  expect(readFileSync(join(out, "probe.log"), "utf8")).toContain("fetcher v1.0.0");
 });
 
 test("a round clears only generated files, never the project's own tests", async () => {
@@ -107,7 +127,7 @@ test("runs target the generated test files, never the whole tests directory", as
   const cfg = parseReviewConfig("version: 1\nimage: i\ntest_command: pytest {targets}\ntests_dir: tests\n");
   await testRound(repo, null, cfg, { ...answerRound(model, cfg), writeDir: "tests",
     budgetUsd: 1.0, runs: 3, outDir: join(tmp(), "o"), sessionFactory: fakeFactory(script, sessions) });
-  const commands = sessions[0]!.commands;
+  const commands = sessions[0]!.commands.slice(1); // after the probe
   expect(commands).toHaveLength(4);
   for (const c of commands) expect(c.startsWith("pytest tests/test_new.py ")).toBe(true);
 });
