@@ -70,6 +70,31 @@ export function classify(message: string, cfg: ReviewConfig, snap: string): Omit
   return null;
 }
 
+// A line saying a module or a file is not there, in the words of pytest, node, vitest and the OS.
+const MISSING = /Cannot find (?:module|package)|Failed to (?:resolve import|load url)|Could not resolve|No module named|ModuleNotFoundError|ENOENT|FileNotFoundError|No such file or directory|does not exist/;
+const CODE = /\.(?:py|[cm]?[jt]sx?)$/;
+const escaped = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** The files of `leftOut` (repository paths the snapshot left out) a missing-module or missing-file line names: a
+ * code file by its module name (`creds`, `creds.js`, `core.auth.creds`), any other file by its whole name. A name
+ * that another file of `all` (the repository's files) shares counts only with its folder in front. */
+export function missingLeftOut(texts: string[], leftOut: string[], all: string[]): string[] {
+  const lines = texts.flatMap((t) => t.split("\n")).filter((l) => MISSING.test(l));
+  if (!lines.length) return [];
+  const nameOf = (p: string) => posix.basename(p).replace(CODE, "");
+  const count = new Map<string, number>();
+  for (const p of all) count.set(nameOf(p), (count.get(nameOf(p)) ?? 0) + 1);
+  return leftOut.filter((p) => {
+    const name = nameOf(p);
+    const ext = CODE.test(p) ? String.raw`(?:\.(?:py|[cm]?[jt]sx?))?` : "";
+    const dir = posix.basename(posix.dirname(p));
+    const before = (count.get(name) ?? 0) > 1 && dir !== "." ? String.raw`${escaped(dir)}[/.\\]`
+      : String.raw`(?:^|[\s'"\x60/.\\(])`;
+    const rx = new RegExp(`${before}${escaped(name)}${ext}(?=$|[\\s'"\\x60):,])`);
+    return lines.some((l) => rx.test(l));
+  });
+}
+
 /** The first line of a failure message that says something, as evidence for a hint no signature produced. */
 export function firstLine(message: string): string {
   return message.split("\n").map((l) => l.replace(/^[\sE>]+/, "").trim()).find(Boolean)?.slice(0, 200) ?? "";

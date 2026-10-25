@@ -48,7 +48,8 @@ import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSetting
 import { providerLines, unusedKeysNote } from "./settings";
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
-import { approveFile, coverageMap, describeCoverage, describeWithheld, runSetup, type SetupResult, stillRed }
+import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, runSetup, type SetupResult,
+  stillRed }
   from "./setup";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, REVIEW_FILE, setupPreview }
   from "./setupview";
@@ -764,12 +765,16 @@ class Commands {
       const failure = setupFailure(result, s.setupBudgetUsd);
       this.d.out(failure.text);
       this.d.out(`${cost} · last attempt: ${saved ? `${saved} (not approved)` : "none"} · logs: .arnx/setup/`);
-      const next = !saved ? "arnx setup --force" : saved === REVIEW_FILE ? `fix ${REVIEW_FILE}, then arnx approve`
+      // Files the tests need and the snapshot left out: only letting them in helps, then the same setup again.
+      const again = `arnx setup${project ? ` --project ${project}` : add ? " --add" : ""}`;
+      const letIn = neededSteps(result.needed ?? []);
+      const next = letIn.length ? `${letIn.join("; ")}, then ${again}` : !saved ? "arnx setup --force"
+        : saved === REVIEW_FILE ? `fix ${REVIEW_FILE}, then arnx approve`
         : `fix ${saved}, copy it to ${REVIEW_FILE}, then arnx approve`;
       this.d.out(`Next: ${next}`);
       this.emit("fail", 2, setupJson({ file: tryParse(result.yamlText), result, approved: false, auto: false,
         files: null, warnings: [], reviewYaml: saved, record: null, seconds: seconds(), failure: failure.json,
-        next: [saved ? "arnx approve" : "arnx setup --force"] }));
+        next: letIn.length ? [...letIn, again] : [saved ? "arnx approve" : "arnx setup --force"] }));
       return finish(2, false);
     }
     this.replaceFile(repo, result.yamlText!);
@@ -1445,6 +1450,14 @@ export const APPROVAL_RECORD = ".arnx/setup/approval.md";
 const SHOWN_FAILING = 5;
 
 /** Why a setup failed, told apart: the environment never ran, or it runs and the current code fails tests. */
+/** What lets in the files a stopped setup needs: secret-looking ones are allowed, .arnxignore'd ones excepted. */
+export function neededSteps(needed: NeededFile[]): string[] {
+  const secret = needed.filter((f) => f.secret).map((f) => f.path);
+  const ignored = needed.filter((f) => !f.secret).map((f) => `!${f.path}`);
+  return [...secret.length ? [`arnx allow-secret ${secret.join(" ")}`] : [],
+    ...ignored.length ? [`add ${ignored.join(" ")} to .arnxignore`] : []];
+}
+
 export function setupFailure(r: SetupResult, budgetUsd: number)
   : { text: string; json: { kind: "environment" | "tests"; reason: string; failing: string[] } } {
   if (r.failing.length) {
@@ -1454,6 +1467,9 @@ export function setupFailure(r: SetupResult, budgetUsd: number)
     return { text: `Setup got your suite running, but ${n} test${n === 1 ? " fails" : "s fail"} on the current code: ` +
       `${ids}.`, json: { kind: "tests", reason: `${r.failingProject}: ${n} failing outside known_failing`,
       failing: r.failing } };
+  }
+  if (r.needed?.length) {
+    return { text: `Setup stopped: ${r.problem}.`, json: { kind: "environment", reason: r.problem, failing: [] } };
   }
   const stop = r.stop === "budget" ? `the $${budgetUsd.toFixed(2)} budget ran out`
     : r.stop === "max_turns" ? "the agent ran out of turns" : r.stop === "refusal" ? "the model refused" : "";
