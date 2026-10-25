@@ -115,6 +115,27 @@ export function firstLine(message: string): string {
   return message.split("\n").map((l) => l.replace(MARKS, "").trim()).find(Boolean)?.slice(0, 200) ?? "";
 }
 
+/** Most failing files whose first error the setup agent is shown. */
+const FIRST_ERRORS_MAX = 10;
+
+/** The first error of each failing file outside known_failing, one line each, for the setup agent: a runner that writes
+ * its results only to arnx's report (vitest, bun) leaves the console without them. "" when there is none. */
+export function firstErrors(results: TestResult[] | null, cfg: ReviewConfig): string {
+  const first = new Map<string, string>();
+  for (const t of results ?? []) {
+    if (!failed(t) || !t.fileAttr || first.has(t.fileAttr) || cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))) {
+      continue;
+    }
+    const line = firstLine(t.message);
+    if (line) first.set(t.fileAttr, line);
+  }
+  const files = [...first.keys()].sort();
+  if (!files.length) return "";
+  const more = files.length > FIRST_ERRORS_MAX ? ` (${FIRST_ERRORS_MAX} of ${files.length})` : "";
+  return `First error in each failing file${more}:\n` +
+    files.slice(0, FIRST_ERRORS_MAX).map((f) => `- ${f}: ${first.get(f)}`).join("\n");
+}
+
 /** Hints for the failures outside known_failing, one per kind and detail, with the files they come from. */
 export function diagnose(results: TestResult[] | null, cfg: ReviewConfig, snap: string): Hint[] {
   const hints = new Map<string, Hint>();
