@@ -95,6 +95,18 @@ export function missingLeftOut(texts: string[], leftOut: string[], all: string[]
   });
 }
 
+/** The package npx tried to download because it is not installed where the command ran ("@scope/name" decoded), or
+ * null. The sandbox has no network, so npx gives up after a while and the run writes no report. */
+export function npxDownload(output: string): string | null {
+  const m = /request to https?:\/\/registry\.[^/\s]+\/((?:@[^/\s]+(?:\/|%2[fF]))?[^/\s]+) failed/.exec(output);
+  return m ? decodeURIComponent(m[1]!) : null;
+}
+
+/** Why a run gave no report when npx went to the network for `pkg`. */
+export const npxText = (pkg: string) => `\`${pkg}\` is not installed where test_command runs it, so npx tried to ` +
+  "download it (the sandbox has no network). Install it in install, or link install's node_modules into the " +
+  "repository, which is mounted over /src";
+
 /** The first line of a failure message that says something, as evidence for a hint no signature produced. */
 export function firstLine(message: string): string {
   return message.split("\n").map((l) => l.replace(/^[\sE>]+/, "").trim()).find(Boolean)?.slice(0, 200) ?? "";
