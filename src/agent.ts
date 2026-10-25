@@ -35,6 +35,12 @@ export class RawToolError extends ToolError {
   override name = "RawToolError";
 }
 
+/** A tool's answer that ends the round where it is (stop "stopped", the message as the final text): nothing the model
+ * could do next would help. A brain that runs the tools from afar gets the message as the tool's error. */
+export class StopRound extends RawToolError {
+  override name = "StopRound";
+}
+
 /** The text an error result shows the model: `Name: message`, or a RawToolError's message as it is. */
 export function toolErrorText(e: unknown): string {
   if (e instanceof RawToolError) return e.message;
@@ -380,6 +386,7 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
     const results: Record<string, unknown>[] = [];
     // How long each tool took and how much it returned (never what), so tool time is told apart from model time.
     const timed: Record<string, unknown>[] = [];
+    let halted: string | null = null;
     for (const b of uses) {
       const t0 = performance.now();
       let content: string, error = false;
@@ -387,23 +394,29 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
         o.onTool?.(b.name ?? "", { ...(b.input ?? {}) });
         content = (await ws.call(b.name ?? "", { ...(b.input ?? {}) })) || "(empty)";
         results.push({ type: "tool_result", tool_use_id: b.id, content });
-      } catch (e) { // a tool error goes back to the model; it never ends the run
+      } catch (e) { // a tool error goes back to the model; it never ends the run, unless the tool stops the round
         content = toolErrorText(e);
         error = true;
         results.push({ type: "tool_result", tool_use_id: b.id, is_error: true, content });
+        if (e instanceof StopRound) halted = e.message;
       }
       timed.push({ name: b.name, ms: Math.round(performance.now() - t0), bytes: Buffer.byteLength(content),
         ...(error ? { error: true } : {}) });
+      if (halted !== null) break;
     }
     log({ turn, tools_ran: timed });
     emitTurn({ turn, stop_reason: reply.stopReason, tools: uses.map((b) => b.name ?? ""), paths: pathsOf(uses),
       tool_errors: timed.filter((t) => t.error).length, writes: uses.filter((b) => b.name === "write_file").length,
       test_runs: uses.filter((b) => b.name === "run_tests").length });
+    if (halted !== null) {
+      [final, stop] = [halted, "stopped"];
+      break;
+    }
     messages.push({ role: "user", content: results });
   }
   // A follow-up is extra work after a finished round: when it is cut short (budget, turns, an API error), the round
   // still ended normally, with the reply it ended on.
-  if (stop !== "end_turn" && earlier.length) {
+  if (stop !== "end_turn" && stop !== "stopped" && earlier.length) {
     final = earlier.pop()!;
     stop = "end_turn";
   }

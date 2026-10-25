@@ -5,7 +5,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirS
   writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
-import { Workspace } from "./agent";
+import { StopRound, Workspace } from "./agent";
 import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
 import { getAdapter, LANGUAGES } from "./adapters";
@@ -16,7 +16,7 @@ import {
   secretPinsOf, secretPinsYaml, stamp, stampFile,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
-import { describeHints, diagnose, firstLine, type Hint, passingApart, unexplainedFiles } from "./diagnose";
+import { describeHints, diagnose, firstLine, type Hint, missingLeftOut, passingApart, unexplainedFiles } from "./diagnose";
 import type { FailureModel } from "./jev";
 import { ArnxError } from "./errors";
 import { loadIgnore, matcher } from "./ignore";
@@ -171,10 +171,10 @@ const APART_MAX = 20;
  * goes. */
 export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string,
                                { sessionFactory = dockerSession, targets = [], failureModel, key, acceptedTestsDir,
-                                 accepted, outputLog }: {
+                                 accepted, outputLog, leftOut }: {
                                  sessionFactory?: SessionFactory; targets?: string[]; failureModel?: FailureModel;
                                  key?: string; acceptedTestsDir?: string; accepted?: AcceptedPins;
-                                 outputLog?: string } = {})
+                                 outputLog?: string; leftOut?: LeftOut } = {})
   : Promise<[boolean, string, string, string[], string[], string, SuiteCounts]> {
   const none: SuiteCounts = { acceptedFailing: 0, unexpected: [] };
   // A review clears and collects every writable file in tests_dir: the project's own tests may not live there.
@@ -222,6 +222,13 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     const skips = skipReasons(results);
     const failing = failingFiles(results, cfg);
     if (!ok) {
+      // A failure that names a file the snapshot left out: nothing in review.yaml brings it back, only the user can.
+      const needed = leftOut?.paths.length ? missingLeftOut([result.output,
+        ...(results ?? []).filter(failedTest).map((t) => t.message)], leftOut.paths, leftOut.all) : [];
+      if (needed.length) {
+        tailOf(result.output);
+        throw new LeftOutNeeded(needed);
+      }
       const hints = diagnose(results, cfg, snap);
       // Failing files with no other explanation run once more, together and without the rest of the suite: those
       // that pass then depend on a file left out. Only after a whole-suite run, when other files did run.
@@ -380,6 +387,31 @@ export interface SetupResult {
   failingProject: string | null;
   /** Why the last attempt did not go through, in a few words (a refused proposal, a suite that does not run). */
   problem: string;
+  /** Files the snapshot left out that the tests need: setup stopped at the run that named them (stop "stopped"). */
+  needed?: NeededFile[];
+}
+
+/** A file left out of the snapshot that a run's failure names: `secret`, left out as secret-looking; otherwise
+ * matched by .arnxignore. */
+export interface NeededFile { path: string; secret: boolean }
+
+/** The files the snapshot left out, and the repository's files (to tell a shared name apart), for runSuite. */
+export interface LeftOut { paths: string[]; all: string[] }
+
+/** A run's failure names files the snapshot left out (repository paths). */
+class LeftOutNeeded extends ArnxError {
+  constructor(readonly files: string[]) {
+    super(`the tests need ${files.join(", ")}, which the snapshot left out`);
+  }
+}
+
+/** Why setup stopped, for a person and the agent: which files the tests need, and what left each one out. */
+export function neededText(files: NeededFile[]): string {
+  const secret = files.filter((f) => f.secret).map((f) => f.path);
+  const ignored = files.filter((f) => !f.secret).map((f) => f.path);
+  return "the tests need " + [secret.length ? `${secret.join(", ")}, which arnx left out as secret-looking (not sent, ` +
+    "not in the sandbox)" : "", ignored.length ? `${ignored.join(", ")}, which .arnxignore leaves out` : ""]
+    .filter(Boolean).join(", and ");
 }
 
 /** Withheld files for a person or an agent: path, what looks like a key, and its line. */
@@ -604,7 +636,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
   const state = { accepted: null as string | null, lastTried: null as string | null, summary: "no project tried",
     proven: new Map<string, string>(), attempts: 0, proofs: new Map<string, ProjectProof>(),
     final: null as ReviewFile | null, lastFailing: new Map<string, { env: string; files: string[] }>(),
-    failing: [] as string[], failingProject: null as string | null, problem: "" };
+    failing: [] as string[], failingProject: null as string | null, problem: "", needed: null as NeededFile[] | null };
   const tmp = tempDir("arnx-setup-");
   // Docker steps of this setup, with their durations.
   dockerSteps.log = (line) => {
@@ -641,6 +673,14 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const accepted = settings.acceptedTestsDir;
     // Tests kept by `arnx accept` fail until their bugs are fixed: as pinned, they do not stop a project.
     const trusted = acceptedPins(repo, o.localPins ?? null);
+    // What the snapshot left out: secret-looking files, and the files .arnxignore matches. A run that needs one stops
+    // setup (see LeftOutNeeded).
+    const files = workingTreeFiles(repo, untracked).files;
+    const ignoredFile = loadIgnore(repo);
+    const secret = new Set(withheld.map((w) => w.path));
+    const leftOut: LeftOut = { paths: [...secret, ...files.filter((p) => ignoredFile(p) && !secret.has(p))], all: files };
+    const stopped = () => new StopRound(`stopped: ${state.problem}. Only the user can let ` +
+      `${state.needed!.length === 1 ? "it" : "them"} in, so setup ends here; do not work around it.`);
     if (withheld.length) {
       say(`left out as secret-looking: ${describeWithheld(withheld)}; if one is a test fixture, not a secret, allow ` +
         "it with `arnx allow-secret PATH` and run setup again");
@@ -667,6 +707,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       }
     };
     const tryProject = async (args: Record<string, unknown>): Promise<string> => {
+      if (state.needed) throw stopped();
       const n = ++state.attempts;
       const parsed = parse(args);
       if (typeof parsed === "string") return parsed;
@@ -705,25 +746,34 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           say(`${name}: same environment as the last try; rerunning the ${subset.length} file(s) that failed`);
           [ok, summary, tail, skips, failing, hints, counts] = await runSuite(cfg, snap, log, { sessionFactory: factory,
             targets: subset, failureModel: o.failureModel, key: keyOf(cfg), acceptedTestsDir: accepted,
-            accepted: trusted });
+            accepted: trusted, leftOut });
           if (ok) {
             say(`${name}: they pass now; running the whole suite to prove the project`);
             [ok, summary, tail, skips, failing, hints, counts] = await runSuite(cfg, snap, log, { sessionFactory: factory,
             failureModel: o.failureModel, key: keyOf(cfg), acceptedTestsDir: accepted,
-            accepted: trusted });
+            accepted: trusted, leftOut });
           } else {
             summary = `rerun of the ${subset.length} file(s) that failed last time: ${summary}`;
           }
         } else {
           [ok, summary, tail, skips, failing, hints, counts] = await runSuite(cfg, snap, log, { sessionFactory: factory,
             failureModel: o.failureModel, key: keyOf(cfg), acceptedTestsDir: accepted,
-            accepted: trusted });
+            accepted: trusted, leftOut });
         }
         if (ok) state.lastFailing.delete(name);
         else state.lastFailing.set(name, { env, files: failing.length ? failing : last?.files ?? [] });
       } catch (e) {
         if (!(e instanceof ArnxError)) throw e;
         announce = null;
+        if (e instanceof LeftOutNeeded) {
+          state.needed = e.files.map((path) => ({ path, secret: secret.has(path) }));
+          state.failing = [];
+          state.failingProject = null;
+          state.problem = `${name}: ${neededText(state.needed)}`;
+          say(`${name}: ✗ stopped: ${neededText(state.needed)}`);
+          attempt({ ok: false, reused: false, summary: "", failing: 0, skips: 0, hints: "", error: clip(e.message, 500) });
+          throw stopped();
+        }
         say(`${name}: ✗ ${gist(e.message)}`);
         state.failing = [];
         state.failingProject = null;
@@ -771,6 +821,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         "file with propose.";
     };
     const propose = async (args: Record<string, unknown>): Promise<string> => {
+      if (state.needed) throw stopped();
       const parsed = parse(args);
       if (typeof parsed === "string") return parsed;
       const { f, text } = parsed;
@@ -858,9 +909,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     emit("setup.completed", { ok: state.accepted !== null, stop: result.stop, cost_usd: result.costUsd,
       attempts: state.attempts, projects: projects.map((p) => p.name), summary: clip(state.summary, 500) });
     return { ok: state.accepted !== null, yamlText: state.accepted ?? state.lastTried, summary: state.summary,
-      costUsd: result.costUsd, stop: result.stop, notes: result.finalText, projects, withheld,
+      costUsd: result.costUsd, stop: state.needed ? "stopped" : result.stop, notes: result.finalText, projects, withheld,
       failing: state.accepted !== null ? [] : state.failing, failingProject: state.accepted !== null ? null
-        : state.failingProject, problem: state.problem };
+        : state.failingProject, problem: state.problem, ...(state.needed ? { needed: state.needed } : {}) };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
     dockerSteps.log = null;

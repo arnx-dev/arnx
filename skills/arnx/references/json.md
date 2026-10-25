@@ -158,8 +158,8 @@ in `.arnx/setup/approval.md`.
 | `approval_record` | string or null | `.arnx/setup/approval.md` once approved (who, when, the file's sha256 and the warnings); else `null`. |
 | `cost_usd` | number | What setup's model calls cost. |
 | `seconds` | number | How long setup took, approval included. |
-| `failure` | object or null | Why setup failed: `{ kind, reason, failing }`. `kind` is `environment` (it never got a suite running: a build that fails, a runner that does not start, the budget or the turns used up, no proposal) or `tests` (the suite runs and the current code fails tests outside `known_failing`; `failing` holds their ids). `null` unless `fail`. |
-| `next` | array of strings | The commands to run next: `arnx review` once approved; `arnx approve` (after fixing `review_yaml`, or to approve it); `arnx setup --force` when there was no attempt. |
+| `failure` | object or null | Why setup failed: `{ kind, reason, failing }`. `kind` is `environment` (it never got a suite running: a build that fails, a runner that does not start, the budget or the turns used up, no proposal, or a run that needs a file arnx left out, after which setup stops) or `tests` (the suite runs and the current code fails tests outside `known_failing`; `failing` holds their ids). `null` unless `fail`. |
+| `next` | array of strings | The commands to run next: `arnx review` once approved; `arnx approve` (after fixing `review_yaml`, or to approve it); `arnx setup --force` when there was no attempt. When setup stopped for a file it left out: `arnx allow-secret PATH` (secret-looking) or `add !PATH to .arnxignore`, then `arnx setup`. |
 
 | `result` | Exit | When |
 |---|---|---|
