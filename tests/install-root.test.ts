@@ -60,11 +60,23 @@ test("install runs in install_root and its manifests key the image; tests still 
   expect(dockerfile(server)).toContain("WORKDIR /src\n");
   expect(server.workdir).toBe("crates/server");
   const before = envKey(server, snap);
-  writeFileSync(join(snap, "crates/server/Cargo.toml"), "[package]\nname = \"server\"\nversion = \"2\"\n");
-  expect(envKey(server, snap)).toBe(before); // a member's manifest is not install_root's
   writeFileSync(join(snap, "Cargo.lock"), "# lock 2\n");
   expect(envKey(server, snap)).not.toBe(before);
   expect(envDigest(server)).not.toBe(envDigest(parseReviewFile(WORKSPACE("")).projects[0]!));
+});
+
+// A member's dependencies and features build into the image too: reviewing an older commit whose member manifest
+// differs (a feature added since) in the newer image rebuilt build scripts offline.
+test("a Rust workspace member's manifest keys the image; a build directory's does not", () => {
+  const snap = workspace();
+  const server = parseReviewFile(WORKSPACE(".")).projects[0]!;
+  const before = envKey(server, snap);
+  mkdirSync(join(snap, "target/package/server"), { recursive: true });
+  writeFileSync(join(snap, "target/package/server/Cargo.toml"), "[package]\nname = \"server\"\n");
+  expect(envKey(server, snap)).toBe(before);
+  writeFileSync(join(snap, "crates/server/Cargo.toml"), "[package]\nname = \"server\"\n[dev-dependencies]\n" +
+    "dep = { version = \"1\", features = [\"extra\"] }\n");
+  expect(envKey(server, snap)).not.toBe(before);
 });
 
 test("install_root stays inside the repository and belongs to files with projects", () => {

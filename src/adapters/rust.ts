@@ -42,12 +42,21 @@ function filterOf(target: string): string {
   return `((kind(lib) | kind(bin)) & test(/^${modulePath(rel)}::/))`;
 }
 
-/** Integration-test binaries are named after their file: `tests/<stem>.rs` becomes `--test <stem>`. With a source
- * file among the targets, every target becomes one filterset. A directory target means every test. */
+// The lock install resolved, for test runs of a repository that commits none: without it an offline run cannot
+// resolve, and a fresh resolution may differ from what the image built.
+const LOCK = "/opt/arnx-lock/Cargo.lock";
+const WORKSPACE = 'ws=$(cargo locate-project --workspace --message-format plain 2>/dev/null); ws=${ws%/Cargo.toml}; ' +
+  '[ -n "$ws" ] || ws=.;';
+// Runs build what install built: the whole workspace, so features unify the same way and nothing (no build script
+// that downloads) runs again. The crate's [package] name keeps the run to its own tests; none means every test.
+const PACKAGE = "pkg='all()'; name=$(awk -F'\"' '/^\\[/ { p = ($0 == \"[package]\") } " +
+  "p && /^name[ \\t]*=/ { print $2; exit }' Cargo.toml 2>/dev/null); [ -z \"$name\" ] || pkg=\"package(=$name)\";";
+
+/** The crate's tests, or the targets among them: a file becomes one filter each (an integration test its binary). A
+ * directory target means every test. `$pkg` is PACKAGE's filter. */
 function targetFlags(targets: string[]): string {
   const files = targets.filter((t) => t.endsWith(".rs"));
-  if (files.some((t) => t.startsWith("src/"))) return `-E ${shQuote(files.map(filterOf).join(" | "))}`;
-  return files.map((t) => `--test ${shQuote(posix.basename(t, ".rs"))}`).join(" ");
+  return `--workspace -E "$pkg${files.length ? ` & (${files.map(filterOf).join(" | ")})` : ""}"`;
 }
 
 /** The source file of a test inside a library or binary: the deepest file its module path names, else the target's
@@ -185,6 +194,7 @@ export const rust: Adapter = {
     writeFileSync(join(snapshot, ".arnx-run", "nextest.toml"), PROFILE);
   },
   command: (testCommand, targets, reportPath) =>
+    `${WORKSPACE} [ -f "$ws/Cargo.lock" ] || cp ${LOCK} "$ws/Cargo.lock" 2>/dev/null; ${PACKAGE} cd "$ws" && ` +
     `${testCommand.replaceAll("{targets}", targetFlags(targets))} --config-file ${CONFIG} --profile arnx; s=$?; ` +
     `cp /src/.arnx-run/nextest/arnx/junit.xml ${shQuote(reportPath)} 2>/dev/null; exit $s`,
   parseReport: (text, _runner, _root, exists = () => false) => parseNextest(text, exists),
@@ -205,16 +215,19 @@ export const rust: Adapter = {
       "--workspace --no-run, so one image holds every member's test build.",
     "- Use a rust:<version> image matching rust-toolchain or rust-version; install cargo-nextest from the prebuilt " +
       "binary (curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/cargo/bin).",
-    "- End install with cargo nextest run --no-run so the test build is in the image; set runner: nextest and " +
+    "- End install with cargo nextest run --workspace --no-run so the test build is in the image: tests run from the " +
+      "workspace root with --workspace, filtered to the project's crate. Set runner: nextest and " +
       "test_command: cargo nextest run {targets}.",
     "- Tests inside src/ (#[cfg(test)] modules) are reported by the source file that holds them (src/net/http.rs, " +
       "src/lib.rs for the crate root): when one fails for a reason outside the code, list that file under " +
       "known_failing with the reason in notes; do not exclude tests with -E in test_command.",
   ].join("\n"),
   manifests: ["Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml"],
+  nestedManifests: true,
   // Test runs mount the snapshot over /src, so builds go to a target directory outside it (reused across runs), and
   // the test user (not root) must be able to write there and to cargo's home.
   buildEnv: ["CARGO_TERM_COLOR=never", "CARGO_TARGET_DIR=/opt/arnx-target"],
   runEnv: ["CARGO_TERM_COLOR=never", "CARGO_TARGET_DIR=/opt/arnx-target"],
-  postInstall: ["mkdir -p /opt/arnx-target && chmod -R a+rwX /opt/arnx-target /usr/local/cargo"],
+  postInstall: ["mkdir -p /opt/arnx-target && chmod -R a+rwX /opt/arnx-target /usr/local/cargo",
+    `${WORKSPACE} mkdir -p ${posix.dirname(LOCK)}; [ ! -f "$ws/Cargo.lock" ] || cp "$ws/Cargo.lock" ${LOCK}`],
 };

@@ -14,10 +14,11 @@ import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type Be
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
 import { snapshot } from "./change";
 import { type ReviewConfig, secretPinsOf } from "./config";
+import { ArnxError } from "./errors";
 import { clip, emit, testMessage } from "./events";
 import { type Classified, classify, describeRun, funcOf, ownerFile, runTests, type TestResult } from "./outcomes";
-import { dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, Session, type SessionFactory }
-  from "./sandbox";
+import { dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
+  type SessionFactory } from "./sandbox";
 import type { Say } from "./progress";
 import { describeTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
   typeCheckOf } from "./typecheck";
@@ -216,6 +217,36 @@ export function suffixReviewCopies(repo: string): number {
   return n;
 }
 
+/** Runs the adapter's one-line probe tests placed in `dir` (relative to the repository), then removes them. `seen`:
+ * one was reported passing. Setup proves tests_dir with it; a round first proves the environment runs a test at all. */
+export function probeRun(session: Runner, snap: string, cfg: ReviewConfig, dir: string, report: string, timeout: number)
+  : { seen: boolean; result: RunResult; results: TestResult[] | null; files: string[] } {
+  const files = adapterFor(cfg).probes(cfg.runner).map((p) => ({ ...p, rel: posix.join(dir, p.file) }));
+  try {
+    for (const p of files) {
+      mkdirSync(join(snap, dir), { recursive: true });
+      writeFileSync(join(snap, p.rel), p.source);
+    }
+    const [result, results] = runTests(session, snap, cfg, files.map((p) => posix.relative(cfg.workdir, p.rel)),
+      report, timeout);
+    const seen = (results ?? []).some((t) => t.outcome === "passed" &&
+      ownerFile(t.fileAttr, files.map((p) => p.rel)) !== null);
+    return { seen, result, results, files: files.map((p) => p.rel) };
+  } finally {
+    for (const p of files) rmSync(join(snap, p.rel), { force: true });
+  }
+}
+
+/** Why a round stops before its brain writes a test: the environment runs no test at this commit (a member's
+ * manifest that builds differently from the image, a build script that downloads). Every test would go without a
+ * report, and the review would read as one that found nothing. */
+export function probeFailure(cfg: ReviewConfig, result: RunResult, log: string): ArnxError {
+  const why = result.timedOut ? "timed out" : `exited ${result.exitCode ?? "?"} without a report`;
+  const tail = result.output.trim().split("\n").slice(-6).map((l) => `  ${l}`).join("\n");
+  return new ArnxError(`${cfg.name}: the test environment runs no test at this commit: arnx's one-line test ` +
+    `${why}. The review stopped before writing tests (output: ${log})${tail ? `\n${tail}` : ""}`);
+}
+
 export async function testRound(repo: string, head: string | null, cfg: ReviewConfig, o: {
   brain: Brain; ask: (snap: string) => RoundAsk; writeDir: string; budgetUsd: number;
   runs: number; outDir: string; sessionFactory?: SessionFactory; progress?: Say;
@@ -274,6 +305,13 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
       .map((rel) => [rel, readFileSync(join(snap, rel), "utf8")]));
     [agent, files, results] = await (o.sessionFactory ?? dockerSession)(cfg, snap, join(o.outDir, "env-build.log"),
       async (session) => {
+        say("checking that the environment runs a test");
+        const probe = probeRun(session, snap, cfg, o.writeDir, "probe.xml", RUN_TIMEOUT);
+        if (!probe.seen) {
+          const log = join(o.outDir, "probe.log");
+          writeFileSync(log, probe.result.output);
+          throw probeFailure(cfg, probe.result, log);
+        }
         let counter = 0;
         // Runs name the generated test files, never the tests directory: for some languages (Rust) that directory
         // also holds the project's own tests, which are not part of the review.

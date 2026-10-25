@@ -34,7 +34,8 @@ import { agentUse, logUsage } from "./usage";
 import { randomHex } from "./util";
 import { VERSION } from "./version";
 import { acceptedPins, type AcceptedPins } from "./check";
-import { collect, DOME, dockerSession, isKeptPath, ownTestsInWriteDir, ownTestsProblem, writeDirOf } from "./testround";
+import { collect, DOME, dockerSession, isKeptPath, ownTestsInWriteDir, ownTestsProblem, probeRun, writeDirOf }
+  from "./testround";
 
 export const SUITE_TIMEOUT = 1800;
 export const OUTPUT_TAIL = 6000;
@@ -318,22 +319,8 @@ async function askModel(model: FailureModel, results: TestResult[] | null, cfg: 
  * enough; the probes are removed afterwards. The probes are the run's only targets, so it also tells whether
  * test_command runs only {targets} (see ignoredTargets). [picked up, end of the output, why it runs more] */
 function probe(session: Runner, snap: string, cfg: ReviewConfig): [boolean, string, string] {
-  const adapter = getAdapter(cfg.language);
-  const dir = writeDirOf(cfg);
-  const files = adapter.probes(cfg.runner).map((p) => ({ ...p, rel: posix.join(dir, p.file) }));
-  try {
-    for (const p of files) {
-      mkdirSync(join(snap, dir), { recursive: true });
-      writeFileSync(join(snap, p.rel), p.source);
-    }
-    const targets = files.map((p) => posix.relative(cfg.workdir, p.rel));
-    const [result, results] = runTests(session, snap, cfg, targets, "probe.xml", SUITE_TIMEOUT);
-    const seen = (results ?? []).some((t) => t.outcome === "passed" &&
-      ownerFile(t.fileAttr, files.map((p) => p.rel)) !== null);
-    return [seen, result.output.slice(-OUTPUT_TAIL), seen ? ignoredTargets(results, files.map((p) => p.rel), cfg) : ""];
-  } finally {
-    for (const p of files) rmSync(join(snap, p.rel), { force: true });
-  }
+  const p = probeRun(session, snap, cfg, writeDirOf(cfg), "probe.xml", SUITE_TIMEOUT);
+  return [p.seen, p.result.output.slice(-OUTPUT_TAIL), p.seen ? ignoredTargets(p.results, p.files, cfg) : ""];
 }
 
 /** Tests a run reported from files other than its `targets` (paths relative to the repository). Tests reported

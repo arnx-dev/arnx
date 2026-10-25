@@ -76,6 +76,9 @@ export interface Adapter {
   setupHints: string;
   /** Globs in workdir whose contents key the environment image. */
   manifests: string[];
+  /** The manifests anywhere under the install's directory key the image, not only those at its top: a Cargo
+   * workspace's install builds every member, whose own manifests pick dependencies and features. */
+  nestedManifests?: boolean;
   /** ENV entries in the environment image. */
   buildEnv: string[];
   /** Extra environment entries for test runs. */
