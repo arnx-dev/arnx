@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAdapter } from "../src/adapters";
@@ -11,18 +12,73 @@ const rust = getAdapter("rust");
 const tmp = useTmp();
 const R = "/src/.arnx-run/r.xml";
 
-test("nextest command: files become --test flags, the report is copied out", () => {
+/** The test command as run: everything from `cd` to the report flags. */
+const run = (targets: string[]) => {
+  const cmd = rust.command("cargo nextest run {targets}", targets, R, "nextest");
+  return cmd.slice(cmd.indexOf('cd "$ws" && ')).split(" --config-file")[0];
+};
+
+test("nextest command: runs from the workspace root over the crate's package, the report is copied out", () => {
   expect(rust.runners).toEqual(["nextest"]);
-  const cmd = rust.command("cargo nextest run {targets}", ["tests/arnx_generated_calc.rs", "tests/arnx_generated_b.rs"], R,
-    "nextest");
-  expect(cmd.startsWith("cargo nextest run --test arnx_generated_calc --test arnx_generated_b " +
-    "--config-file /src/.arnx-run/nextest.toml --profile arnx; s=$?;")).toBe(true);
+  expect(run(["tests/arnx_generated_calc.rs", "tests/arnx_generated_b.rs"])).toBe('cd "$ws" && cargo nextest run ' +
+    '--workspace -E "$pkg & ((kind(test) & binary(arnx_generated_calc)) | (kind(test) & binary(arnx_generated_b)))"');
+  // A directory, or no target, runs the crate's whole suite.
+  expect(run(["tests"])).toBe('cd "$ws" && cargo nextest run --workspace -E "$pkg"');
+  expect(run([])).toBe('cd "$ws" && cargo nextest run --workspace -E "$pkg"');
+  const cmd = rust.command("cargo nextest run {targets}", ["tests"], R, "nextest");
+  expect(cmd).toContain("--config-file /src/.arnx-run/nextest.toml --profile arnx; s=$?;");
   expect(cmd).toContain("cp /src/.arnx-run/nextest/arnx/junit.xml");
   expect(cmd).not.toContain("cargo metadata");
   expect(cmd).toContain(`${R}`);
   expect(cmd.endsWith("exit $s")).toBe(true);
-  expect(rust.command("cargo nextest run {targets}", ["tests"], R, "nextest").startsWith("cargo nextest run  --config-file"))
-    .toBe(true);
+});
+
+/** A workspace with member crates/calc (package `calc`) and a fake cargo that prints where and how it ran. */
+function fakeWorkspace(lock: boolean) {
+  const ws = tmp();
+  mkdirSync(join(ws, "crates", "calc"), { recursive: true });
+  writeFileSync(join(ws, "Cargo.toml"), '[workspace]\nmembers = ["crates/calc"]\n');
+  writeFileSync(join(ws, "crates", "calc", "Cargo.toml"),
+    '[package]\nname = "calc"\nversion = "0.1.0"\n\n[dependencies]\nname-like = "1"\n');
+  if (lock) writeFileSync(join(ws, "Cargo.lock"), "# the repository's own lock\n");
+  const bin = join(ws, "fakebin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "cargo"), [
+    "#!/bin/sh",
+    `if [ "$1" = locate-project ]; then echo ${join(ws, "Cargo.toml")}; exit 0; fi`,
+    'echo "cwd=$(pwd)"; echo "args=$*"'].join("\n"), { mode: 0o755 });
+  const saved = join(tmp(), "saved.lock");
+  writeFileSync(saved, "# install's lock\n");
+  return { ws, bin, saved };
+}
+
+test("a workspace without Cargo.lock gets install's lock; runs from the root, filtered to the crate", () => {
+  const { ws, bin, saved } = fakeWorkspace(false);
+  const cmd = rust.command("cargo nextest run {targets}", ["tests/arnx_generated_calc.rs"], R, "nextest")
+    .replaceAll("/opt/arnx-lock/Cargo.lock", saved);
+  const out = spawnSync("sh", ["-c", cmd], { cwd: join(ws, "crates", "calc"), encoding: "utf8",
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } }).stdout;
+  expect(readFileSync(join(ws, "Cargo.lock"), "utf8")).toBe("# install's lock\n");
+  expect(out).toContain(`cwd=${ws}\n`);
+  expect(out).toContain("args=nextest run --workspace -E package(=calc) & ((kind(test) & binary(arnx_generated_calc))) " +
+    "--config-file /src/.arnx-run/nextest.toml --profile arnx");
+});
+
+test("the repository's own Cargo.lock is never replaced", () => {
+  const { ws, bin, saved } = fakeWorkspace(true);
+  const cmd = rust.command("cargo nextest run {targets}", [], R, "nextest").replaceAll("/opt/arnx-lock/Cargo.lock", saved);
+  const out = spawnSync("sh", ["-c", cmd], { cwd: join(ws, "crates", "calc"), encoding: "utf8",
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } }).stdout;
+  expect(readFileSync(join(ws, "Cargo.lock"), "utf8")).toBe("# the repository's own lock\n");
+  expect(out).toContain("args=nextest run --workspace -E package(=calc) --config-file");
+});
+
+test("a manifest with no [package] (a virtual workspace root) runs every test", () => {
+  const { ws, bin, saved } = fakeWorkspace(true);
+  const cmd = rust.command("cargo nextest run {targets}", [], R, "nextest").replaceAll("/opt/arnx-lock/Cargo.lock", saved);
+  const out = spawnSync("sh", ["-c", cmd], { cwd: ws, encoding: "utf8",
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } }).stdout;
+  expect(out).toContain("args=nextest run --workspace -E all() --config-file");
 });
 
 test("validate the command", () => {
@@ -83,7 +139,11 @@ projects:
 `).projects[0]!;
   const df = dockerfile(cfg);
   expect(df).toContain("ENV CARGO_TERM_COLOR=never CARGO_TARGET_DIR=/opt/arnx-target");
-  expect(df.trim().split("\n").at(-1)).toBe("RUN mkdir -p /opt/arnx-target && chmod -R a+rwX /opt/arnx-target /usr/local/cargo");
+  const runs = df.trim().split("\n").slice(-2);
+  expect(runs[0]).toBe("RUN mkdir -p /opt/arnx-target && chmod -R a+rwX /opt/arnx-target /usr/local/cargo");
+  // The lock install resolved, kept for test runs of a repository that commits none.
+  expect(runs[1]).toContain("cargo locate-project --workspace");
+  expect(runs[1]).toContain("/opt/arnx-lock");
   expect(rust.runEnv).toContain("CARGO_TARGET_DIR=/opt/arnx-target");
 });
 
@@ -111,15 +171,13 @@ test("tests inside source files are reported by the file that holds them; their 
     .toBe("src/bin/tool/main.rs");
 });
 
-test("a source file as a target runs the tests of its module; integration targets alone keep --test", () => {
-  const cmd = (targets: string[]) => rust.command("cargo nextest run {targets}", targets, R, "nextest")
-    .split(" --config-file")[0];
-  expect(cmd(["tests/integ.rs"])).toBe("cargo nextest run --test integ");
-  expect(cmd(["src/net/http.rs", "tests/integ.rs", "src/net/mod.rs", "src/lib.rs", "src/main.rs", "src/bin/tool.rs",
-    "src/bin/tool/args.rs"])).toBe("cargo nextest run -E '" + [
+test("a source file as a target runs the tests of its module; an integration file its binary", () => {
+  expect(run(["tests/integ.rs"])).toBe('cd "$ws" && cargo nextest run --workspace -E "$pkg & ((kind(test) & binary(integ)))"');
+  expect(run(["src/net/http.rs", "tests/integ.rs", "src/net/mod.rs", "src/lib.rs", "src/main.rs", "src/bin/tool.rs",
+    "src/bin/tool/args.rs"])).toBe('cd "$ws" && cargo nextest run --workspace -E "$pkg & (' + [
     "((kind(lib) | kind(bin)) & test(/^net::http::/))", "(kind(test) & binary(integ))",
     "((kind(lib) | kind(bin)) & test(/^net::/))", "kind(lib)", "kind(bin)", "(kind(bin) & binary(tool))",
-    "(kind(bin) & binary(tool) & test(/^args::/))"].join(" | ") + "'");
+    "(kind(bin) & binary(tool) & test(/^args::/))"].join(" | ") + ')"');
 });
 
 test("runTests lets the report see the project's files, so inline tests name their file", () => {
