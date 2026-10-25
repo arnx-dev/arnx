@@ -16,7 +16,8 @@ import {
   secretPinsOf, secretPinsYaml, stamp, stampFile,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
-import { describeHints, diagnose, firstLine, type Hint, missingLeftOut, passingApart, unexplainedFiles } from "./diagnose";
+import { describeHints, diagnose, firstLine, type Hint, missingLeftOut, npxDownload, npxText, passingApart,
+  unexplainedFiles } from "./diagnose";
 import type { FailureModel } from "./jev";
 import { ArnxError } from "./errors";
 import { loadIgnore, matcher } from "./ignore";
@@ -217,7 +218,9 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     if (!targets.length && !all?.length && cfg.language !== "rust" && !hasOwnTests(cfg, snap)) {
       return noOwnTests(session, snap, cfg, all === null, tailOf);
     }
-    const [ok, summary, counts] = suiteOk(all, cfg, accepted, acceptedTestsDir);
+    const [ok, verdict, counts] = suiteOk(all, cfg, accepted, acceptedTestsDir);
+    const fetched = all === null ? npxDownload(result.output) : null;
+    const summary = fetched ? `the suite produced no report: ${npxText(fetched)}` : verdict;
     // Accepted tests that fail as pinned are not the environment's to fix: diagnosis and retries leave them out.
     const results = withoutAccepted(all, cfg, accepted, acceptedTestsDir);
     const skips = skipReasons(results);
