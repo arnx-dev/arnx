@@ -19,11 +19,14 @@ const LOCAL = /^(?:localhost|127\.\d+\.\d+\.\d+|::1|\[::1\]|0\.0\.0\.0)$/;
 
 const failed = (t: TestResult) => t.outcome === "failed" || t.outcome === "error";
 
+// pytest's "E   " and ">" line marks and the indent before them; an "E" that starts a word ("Error:") stays.
+const MARKS = /^(?:\s|E(?=\s)|>)+/;
+
 /** The line of the message a signature matched, trimmed, as the hint's evidence. */
 function lineOf(text: string, index: number): string {
   const start = text.lastIndexOf("\n", index) + 1;
   const end = text.indexOf("\n", index);
-  return text.slice(start, end === -1 ? undefined : end).replace(/^[\sE>]+/, "").trim().slice(0, 200);
+  return text.slice(start, end === -1 ? undefined : end).replace(MARKS, "").trim().slice(0, 200);
 }
 
 /** Whether a Python top-level module name is a file or folder of the repository, at its root or on the way to the
@@ -109,7 +112,7 @@ export const npxText = (pkg: string) => `\`${pkg}\` is not installed where test_
 
 /** The first line of a failure message that says something, as evidence for a hint no signature produced. */
 export function firstLine(message: string): string {
-  return message.split("\n").map((l) => l.replace(/^[\sE>]+/, "").trim()).find(Boolean)?.slice(0, 200) ?? "";
+  return message.split("\n").map((l) => l.replace(MARKS, "").trim()).find(Boolean)?.slice(0, 200) ?? "";
 }
 
 /** Hints for the failures outside known_failing, one per kind and detail, with the files they come from. */
