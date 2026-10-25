@@ -212,6 +212,7 @@ export const rust: Adapter = {
       "known_failing with the reason in notes; do not exclude tests with -E in test_command.",
   ].join("\n"),
   manifests: ["Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml"],
+  nestedManifests: true,
   // Test runs mount the snapshot over /src, so builds go to a target directory outside it (reused across runs), and
   // the test user (not root) must be able to write there and to cargo's home.
   buildEnv: ["CARGO_TERM_COLOR=never", "CARGO_TARGET_DIR=/opt/arnx-target"],

@@ -159,16 +159,30 @@ export function envKey(cfg: ReviewConfig, snapshot: string): string {
   const h = createHash("sha256").update(pyJson(post.length ? [cfg.image, root, cfg.install, post]
     : [cfg.image, root, cfg.install]));
   const work = join(snapshot, root);
-  const entries = existsSync(work) ? readdirSync(work).sort() : [];
-  for (const pattern of adapterFor(cfg).manifests) {
+  const adapter = adapterFor(cfg);
+  const entries = !existsSync(work) ? [] : adapter.nestedManifests ? nestedFiles(work) : readdirSync(work).sort();
+  for (const pattern of adapter.manifests) {
     const rx = globRegex(pattern);
-    for (const name of entries) {
-      const p = join(work, name);
-      if (!rx.test(name) || !statSync(p).isFile()) continue;
-      h.update(Buffer.concat([Buffer.from(name + "\0"), readFileSync(p)]));
+    for (const rel of entries) {
+      const p = join(work, rel);
+      if (!rx.test(posix.basename(rel)) || !statSync(p).isFile()) continue;
+      h.update(Buffer.concat([Buffer.from(rel + "\0"), readFileSync(p)]));
     }
   }
   return h.digest("hex").slice(0, 16);
+}
+
+/** Files under `dir` (sorted POSIX paths relative to it), without build output, dependencies and hidden folders
+ * (a repository's own target/ can hold packaged copies of its manifests). Symlinked folders are not followed. */
+function nestedFiles(dir: string, prefix = ""): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(join(dir, prefix), { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${e.name}` : e.name;
+    if (e.isDirectory()) {
+      if (!e.name.startsWith(".") && e.name !== "target" && e.name !== "node_modules") out.push(...nestedFiles(dir, rel));
+    } else out.push(rel);
+  }
+  return out.sort();
 }
 
 /** Whether `docker build` runs on BuildKit, which cache mounts need (null in sandboxOptions: ask Docker once). */
