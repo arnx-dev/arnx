@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runAgent, ToolError, Workspace } from "../src/agent";
 import { ModelError } from "../src/errors";
-import { type Attempt, PRICES, type Reply } from "../src/llm";
+import { type Attempt, billedError, PRICES, type Reply } from "../src/llm";
 import { ScriptedAgent, text, tool } from "./helpers/fakes";
 import { useTmp } from "./helpers/tmp";
 
@@ -104,6 +104,21 @@ test("test_api_error_stops", async () => {
     prices: PRICES, transcript: join(tmp(), "t.jsonl") });
   expect(result.stop.startsWith("api_error")).toBe(true);
   expect(result.stop).toContain("529");
+});
+
+test("a failed call that was billed counts in the agent's cost and usage", async () => {
+  class BilledThenFail extends ScriptedAgent {
+    n = 0;
+    override async create(r: Parameters<ScriptedAgent["create"]>[0]): Promise<Reply> {
+      if (this.n++ === 0) return super.create(r);
+      throw billedError("did not finish", 0.25, { input: 1000, output: 10, cacheRead: 0, cacheWrite: 0 });
+    }
+  }
+  const result = await runAgent(new BilledThenFail([[tool("list_files", {})]]), new Workspace(root),
+    { system: "s", user: "u", budgetUsd: 5, prices: PRICES, transcript: join(tmp(), "t.jsonl") });
+  expect(result.stop.startsWith("api_error")).toBe(true);
+  expect(result.costUsd).toBeGreaterThanOrEqual(0.25);
+  expect(result.usage.input).toBeGreaterThanOrEqual(1000);
 });
 
 test("the agent's result counts the calls whose usage never came: cut-off attempts before a reply, and a failed call", async () => {

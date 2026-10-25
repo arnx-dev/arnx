@@ -303,7 +303,12 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
   const install = strList(spec.install, `${at}install`, problems);
   if (install.some((c) => c.includes("\n"))) problems.push(`${at}install: one command per line; use && to chain`);
   const commandProblems = [...adapter.validateCommand(spec.test_command, runner),
-    ...typeof spec.test_command === "string" && writesFiles(spec.test_command) ? [WRITES] : []].map((p) => at + p);
+    ...typeof spec.test_command === "string" && fileWrite(spec.test_command) !== null
+      ? [writes(fileWrite(spec.test_command)!)] : [],
+    ...typeof spec.test_command === "string" && runner !== "node" && afterTargets(spec.test_command) !== null
+      ? [`test_command: \`${afterTargets(spec.test_command)}\` comes after {targets}: arnx adds the runner's report ` +
+        "options at the end, so they would go to that command and no report is written. End test_command with the " +
+        "runner's own options"] : []].map((p) => at + p);
   problems.push(...commandProblems);
   const command = commandProblems.length ? "" : spec.test_command as string;
   let typecheck: string | undefined;
@@ -426,16 +431,36 @@ const WRITER = new RegExp(`${AT_COMMAND}(?:rm|rmdir|unlink|shred|truncate|mv|cp|
  * wrote `rm -rf tests && echo "test(...)" > smoke/smoke.test.ts; npx vitest run {targets}`). Every redirect must go
  * to another descriptor (2>&1) or to /dev/null; a symlink (ln) is fine. Fails closed: a `>` inside quotes counts. */
 export function writesFiles(command: string): boolean {
-  if (WRITER.test(command)) return true;
-  for (const m of command.matchAll(/(?:\d|&)?>>?\|?\s*(&?[^\s;&|)]*)/g)) {
-    const target = m[1]!;
-    if (!(target === "/dev/null" || /^&\d?-?$/.test(target) && m[0].includes(">&"))) return true;
-  }
-  return false;
+  return fileWrite(command) !== null;
 }
 
-const WRITES = "test_command: must not delete or write files (rm, mv, cp, sed -i, tee, > file): every run must see the " +
-  "repository as it is. Install what the tests need in install; arnx writes its own tests";
+/** The part of a command that deletes or writes a file (`rm`, `> out.log`), as writesFiles finds it; null: none. */
+export function fileWrite(command: string): string | null {
+  const w = WRITER.exec(command);
+  if (w) return w[0].trim().replace(/^[;&|(\s]+/, "");
+  for (const m of command.matchAll(/(?:\d|&)?>>?\|?\s*(&?[^\s;&|)]*)/g)) {
+    const target = m[1]!;
+    if (!(target === "/dev/null" || /^&\d?-?$/.test(target) && m[0].includes(">&"))) return m[0].trim();
+  }
+  return null;
+}
+
+/** What follows the last {targets} in a test command and starts another command (`| tail`, `; echo`): arnx appends
+ * its report options to the end of the command (node's go in at --test), which would then go to that command, and the
+ * runner writes no report. Redirects (2>&1, &>/dev/null) are not commands; null: nothing follows. */
+export function afterTargets(command: string): string | null {
+  const i = command.lastIndexOf("{targets}");
+  if (i < 0) return null;
+  const rest = command.slice(i + "{targets}".length);
+  const m = /\|\|?|;|&&?/.exec(rest.replace(/\d?>&\d?-?|&>>?/g, (r) => " ".repeat(r.length)));
+  return m ? rest.slice(m.index).trim() : null;
+}
+
+/** Why a test_command that writes is refused, naming what writes. A setup approved before the rule fails here on any
+ * command after an upgrade, so it says how to fix it. */
+const writes = (part: string) => `test_command: must not delete or write files (rm, mv, cp, sed -i, tee, > file): ` +
+  `\`${part}\` writes. Every run must see the repository as it is: move it to install (arnx writes its own tests), ` +
+  "then run `arnx approve`";
 
 export function loadReviewFile(repo: string, { requireApproved = true } = {}): ReviewFile {
   const path = reviewConfigPath(repo);

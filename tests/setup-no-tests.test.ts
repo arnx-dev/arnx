@@ -94,6 +94,21 @@ test("a test_command that deletes or writes files is refused; redirects to /dev/
     .toThrow("projects.app.test_command: must not delete or write files (rm, mv, cp, sed -i, tee, > file)");
 });
 
+test("the write rule names what in test_command writes, and how to fix a setup approved before the rule", () => {
+  const said = (c: string) => {
+    try {
+      parseReviewFile(YAML.replace("python -m pytest -q {targets}", c));
+      return "";
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  expect(said("printf '[x]' > .wrapper.cfg && python -m pytest {targets}")).toContain("`> .wrapper.cfg` writes");
+  expect(said("rm -rf build; python -m pytest {targets}")).toContain("`rm` writes");
+  expect(said("python -m pytest {targets} 2>out.log")).toContain("`2>out.log` writes");
+  expect(said("rm -rf build; python -m pytest {targets}")).toContain("move it to install (arnx writes its own tests), then run `arnx approve`");
+});
+
 test("tests named by the runner's configuration, or under build/, count as the project's own", () => {
   // arnx review 20261022-20f6fa: such a project whose suite reports nothing is not proven by the one-line test.
   const cfg = parseReviewFile(YAML).projects[0]!;
@@ -102,4 +117,24 @@ test("tests named by the runner's configuration, or under build/, count as the p
     .toBe(true);
   expect(hasOwnTests(cfg, app({ "build/tests/test_x.py": "def test_x():\n    pass\n" }))).toBe(true);
   expect(hasOwnTests(cfg, app({ "node_modules/x/test_y.py": "" }))).toBe(false);
+});
+
+test("a test_command that starts another command after {targets} is refused before it runs: no report could come", () => {
+  const said = (c: string, yaml = YAML) => {
+    try {
+      parseReviewFile(yaml.replace("python -m pytest -q {targets}", c));
+      return "";
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  for (const [c, part] of [["python -m pytest {targets} 2>&1 | tail -c 1500", "| tail -c 1500"],
+    ["python -m pytest {targets} | grep FAIL", "| grep FAIL"], ["python -m pytest {targets}; echo done", "; echo done"],
+    ["python -m pytest {targets} && echo ok", "&& echo ok"]]) {
+    expect(said(c!)).toContain(`\`${part}\` comes after {targets}`);
+  }
+  for (const c of ["python -m pytest {targets}", "python -m pytest {targets} 2>&1", "cd app && python -m pytest {targets}",
+    "echo y | python -m pytest -q {targets} -x", "python -m pytest {targets} &>/dev/null"]) {
+    expect([c, said(c)]).toEqual([c, ""]);
+  }
 });
