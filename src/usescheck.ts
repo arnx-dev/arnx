@@ -94,9 +94,9 @@ export function usesHints(file: ReviewFile, refs: Map<string, Set<string>>): Use
   return hints;
 }
 
-/** Hints for `file`'s map from its paths alone (`files`: the repository's files): a uses entry with no slash but a
- * trailing one matches at any depth, so one that matches in several places (`api/` and `packages/api/`) is probably
- * meant for one of them; and an entry that takes in two or more other projects whole (a catch-all `services/`) has
+/** Hints for `file`'s map from its paths alone (`files`: the repository's files): a folder entry with no slash but
+ * its trailing one matches at any depth, so one that matches in several places (`api/` and `packages/api/`) is
+ * probably meant for one of them (a file name or a glob matching several files is meant to); and an entry that takes in two or more other projects whole (a catch-all `services/`) has
  * every change in them reviewed twice. */
 export function mapHints(file: ReviewFile, files: string[]): UsesHint[] {
   const hints: UsesHint[] = [];
@@ -106,13 +106,11 @@ export function mapHints(file: ReviewFile, files: string[]): UsesHint[] {
       const m = matcher(entry);
       const matched = files.filter((f) => !owns(f) && m(f));
       if (!matched.length) continue;
-      if (!entry.replace(/\/+$/, "").includes("/")) {
-        // Where each file is matched: the shortest leading part of its path the entry matches.
+      if (/^[^/*?[]+\/+$/.test(entry)) {
+        // Where each file is matched: the folder the entry names on its path.
         const places = [...new Set(matched.map((f) => {
           const parts = f.split("/");
-          const k = parts.findIndex((_, i) => m(`${parts.slice(0, i + 1).join("/")}/`));
-          const at = parts.slice(0, k + 1).join("/");
-          return k < parts.length - 1 ? `${at}/` : at;
+          return `${parts.slice(0, parts.findIndex((_, i) => m(`${parts.slice(0, i + 1).join("/")}/`)) + 1).join("/")}/`;
         }))].sort();
         if (places.length > 1) {
           hints.push({ project: p.name, kind: "unanchored", entry, text: `${p.name}: uses ${entry} matches in ` +
