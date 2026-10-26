@@ -144,3 +144,19 @@ test("three tests failing the same way: All 3 fail", () => {
   expect(p).toContain("  All 3 fail with `boom`.");
   expect(p).toContain("- Likely cause (reviewer): It breaks\n- Accepted tests, in `tests/arnx_generated/t.py`:");
 });
+
+test("no failure text from the runner: the test is listed without an empty 'fails with'", () => {
+  const one = (msgs: string[]) => {
+    const ids = msgs.map((_, i) => `F${i + 1}`);
+    const review = sampleReview({ findings: msgs.map((m, i) => finding(ids[i]!, `${G}/t.py::test_${i}`, `test_${i}`,
+      `${G}/t.py`, m, "It breaks.")),
+    groups: [{ findings: ids, title: "Boom", input: "", actual: "", expected: "", consequence: "" }] });
+    return fixPrompt({ review, marks: { findings: Object.fromEntries(ids.map((id) => [id, "real" as const])),
+      severity: {}, answers: {} }, answers: [], moved: {} }, SETTINGS);
+  };
+  expect(one([""])).toContain("  - `test_0` (F1)\n\n");
+  expect(one([""])).not.toContain("fails with");
+  const two = one(["", "assert 1 == 2"]);
+  expect(two).toContain("  - `test_0` (F1)\n  - `test_1` (F2) fails with `assert 1 == 2`\n");
+  expect(one(["", ""])).not.toContain("fail with");
+});
