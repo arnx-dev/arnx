@@ -19,7 +19,7 @@ import { addUsage, type AgentModel, allPrices, FallbackJson, type JsonModel, typ
   type Trace } from "./llm";
 import { LocalBrain } from "./localbrain";
 import { baseName, funcOf, ownerFile } from "./outcomes";
-import { type CallRecord, cloudFailure, providerFailures, withCalls } from "./outage";
+import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, withCalls } from "./outage";
 import { contextPack } from "./context";
 import type { Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
@@ -45,12 +45,27 @@ export const PROJECT_CONCURRENCY = 2;
 interface SavedVerdict { verdict: string; reason: string; dependsOn: string | null; judge: string | null;
   model: string; cost: number }
 
-/** The newest review of this same change (same diff) that has no report yet. */
+/** The roles whose work a resume does again: the project rounds a failed call stopped, and the judging. */
+const REDONE = new Set(["reviewer", "challenge", "explain", "merge-questions"]);
+
+/** Whether a review's report says a provider outage cut work that a resume does again. A report without one finished:
+ * there is nothing to resume. Not once its findings were accepted. */
+export function cutByOutage(rdir: string): boolean {
+  if (existsSync(join(rdir, "accepted.json"))) return false;
+  try {
+    const r = JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")) as { provider_failures?: ProviderFailure[] };
+    return (r.provider_failures ?? []).some((f) => f.kind === "unavailable" && f.roles.some((x) => REDONE.has(x)));
+  } catch {
+    return false;
+  }
+}
+
+/** The newest review of this same change (same diff) that has no report yet, or whose report a provider outage cut. */
 export function resumable(repo: string, diffSha: string): string | null {
   const dir = join(repo, ".arnx", "reviews");
   if (!existsSync(dir)) return null;
-  const open = readdirSync(dir).map((d) => join(dir, d)).filter((d) => !existsSync(join(d, "review.json")) &&
-    existsSync(join(d, "state.json"))).filter((d) => {
+  const open = readdirSync(dir).map((d) => join(dir, d)).filter((d) => existsSync(join(d, "state.json")) &&
+    (!existsSync(join(d, "review.json")) || cutByOutage(d))).filter((d) => {
     try {
       return (JSON.parse(readFileSync(join(d, "state.json"), "utf8")) as { diff_sha256?: string }).diff_sha256 === diffSha;
     } catch {
@@ -335,6 +350,8 @@ export async function runReview(repo: string, o: { settings: Settings;
     // review order, so ids, questions and the report do not depend on which finished first.
     interface Done { i: number; rnd: Round; hunted: Suspect[] | null; second: ModelUse | null; extras: ModelUse[];
       resumed: boolean }
+    // Projects whose kept round a failed model call stopped: tested again on resume.
+    const redone = new Set<string>();
     const runProject = async (i: number): Promise<Done> => {
       const { project: cfg, owned, used } = routing.routed[i]!;
       o.progress?.(`${cfg.name} (${i + 1}/${n}): preparing the test environment`);
@@ -371,10 +388,12 @@ export async function runReview(repo: string, o: { settings: Settings;
       const roundFile = join(outDir, "round.json");
       let rnd: Round, kept = false, hunted: Suspect[] | null = null, projSecond: ModelUse | null = null;
       const projExtras: ModelUse[] = [];
-      if (resumed && existsSync(roundFile)) {
+      const saved = resumed && existsSync(roundFile) ? JSON.parse(readFileSync(roundFile, "utf8")) as { round: Round;
+        hunted: Suspect[] | null; second: ModelUse | null; extras: ModelUse[] } : null;
+      // A round a failed model call stopped (a provider outage) is tested again; its verdicts are dropped below.
+      if (saved?.round.agent.stop.startsWith("api_error")) redone.add(cfg.name);
+      if (saved && !redone.has(cfg.name)) {
         kept = true;
-        const saved = JSON.parse(readFileSync(roundFile, "utf8")) as { round: Round; hunted: Suspect[] | null;
-          second: ModelUse | null; extras: ModelUse[] };
         [rnd, hunted, projSecond] = [saved.round, saved.hunted, saved.second];
         projExtras.push(...saved.extras);
         o.progress?.(`${cfg.name} (${i + 1}/${n}): already tested before the interruption; kept`);
@@ -515,6 +534,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     const verdictsFile = join(rdir, "verdicts.json");
     const verdicts: Record<string, SavedVerdict> = resumed && existsSync(verdictsFile)
       ? JSON.parse(readFileSync(verdictsFile, "utf8")) : {};
+    for (const k of Object.keys(verdicts)) if (redone.has(k.split("::")[0]!)) delete verdicts[k];
     const priorUses: ModelUse[] = [];
     const j = await brain.judge(challenged, questions, diffs, { diff: change.diff, sources,
       maxQuestions: s.maxQuestions, budgetLeft: left, trace, progress: o.progress, questionProjects,

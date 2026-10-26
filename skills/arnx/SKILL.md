@@ -43,7 +43,8 @@ the user asks for another.
    With `--json`, stdout is one object: `result`, `review_id`, `review_json` and the summary.
 3. Exit 3: setup is missing, or the consent to send code (the message says what); tell the user.
    `no project covers this change`: see [Code arnx did not review](#code-arnx-did-not-review). Exit 2 or an
-   interruption: tell the user; `arnx review --resume` continues an interrupted review of the same change.
+   interruption: tell the user; `arnx review --resume` continues an interrupted review of the same change, or one
+   a provider outage cut.
    `arnx cloud unavailable` or `arnx cloud is not open yet`: tell the user; do not retry, and do not change `[cloud]`
    or pass `--local` yourself.
 4. The summary's first line is `arnx review <id> · ...`. Read `.arnx/reviews/<id>/review.json`; its fields are in
