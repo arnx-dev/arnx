@@ -107,6 +107,22 @@ test("setup --project re-proves one project and keeps the others as approved", a
   expect(ran).toEqual(["pay"]);
 });
 
+test("setup --project: try_project takes the project's settings alone, over the approved file", async () => {
+  approved(COVERED);
+  const newPay = COVERED.replace("install: [pip install pytest]", "install: [pip install pytest hypothesis]");
+  const pay = "root: services/pay\nlanguage: python\nimage: python:3.12-slim\ninstall: [pip install pytest hypothesis]\n" +
+    "test_command: python -m pytest -q {targets}\nservices: [db]\n" +
+    "env: {DATABASE_URL: postgresql://postgres@db:5432/postgres}\nuses: [services/shared/]\n";
+  const m = new ScriptedAgent([[tool("try_project", { project: "pay", project_yaml: pay })],
+    [tool("propose", { yaml: newPay })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: passing,
+    project: "pay" });
+  expect(result(m, 1)).toContain("the suite of pay runs");
+  // propose finds pay unchanged since it ran: the settings alone made the same project.
+  expect([r.ok, r.yamlText]).toEqual([true, newPay]);
+  expect(ran).toEqual(["pay"]);
+});
+
 test("approve --project reruns one project, and only when the others are unchanged", async () => {
   approved(COVERED);
   // the owner edits the approved file: the approved block stays, as it would in an editor

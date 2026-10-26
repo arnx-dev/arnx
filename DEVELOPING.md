@@ -329,7 +329,8 @@ never reach the network.
 project named `main`, with the format, hash and prompts of the first version. Every module that runs tests takes one
 project as a `ReviewConfig`. `route.ts` sends each changed file to the projects that own or use it; `reviewer.ts`
 runs one test round per routed project (at most `max_projects`, budget split evenly) and reports untested paths.
-`detect.ts` finds candidate projects without a model; `setup.ts` lets the agent prove each project (`try_project`)
+`detect.ts` finds candidate projects without a model; `setup.ts` lets the agent prove each project (`try_project`:
+the whole file, or after one a project's settings alone by name, which replace them in the last whole file)
 and accepts the file only when every project ran and every committed source file is owned, used or listed as
 uncovered (`propose`, `coverageMap`). Both count the files a working-tree snapshot holds (`workingTreeFiles`: tracked,
 and untracked unless git ignores them), and the counts name the untracked ones; an untracked file never refuses a
