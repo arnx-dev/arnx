@@ -17,7 +17,7 @@ missing (keys, Docker, configuration); setup and review run the same checks firs
 service, a crate), each with its own environment, and checks each by running its existing suite. It shows a coverage
 map: what each project owns, what it only uses (such as a shared library), and what no project tests, with the
 reason. A review tests every project the change touches and lists what it could not test. `arnx setup --add` covers
-more later; `arnx setup --project NAME` redoes one project. Projects that install the same way (a Cargo workspace,
+more later: it tries every uncovered entry again, so fix what its reason names first; `arnx setup --project NAME` redoes one project. Projects that install the same way (a Cargo workspace,
 one lockfile at the root) share one environment image when they have the same `image`, `install` and
 `install_root` (the directory the install runs in); otherwise each project builds its own.
 
@@ -76,7 +76,10 @@ image (scip-python, scip-typescript or rust-analyzer; no network) and follows th
 module's function or constant with the same name stays out. Indexing adds about 10 to 50 seconds per project to a
 review and builds one extra layer per test image; when the index cannot be built, the review goes on by name. Setup
 then also checks the map once: a `uses` entry the project's code never refers to, or code it refers to outside its
-`owns` and `uses`, goes back to the setup agent as a hint.
+`owns` and `uses`, goes back to the setup agent as a hint. Without an index, setup still checks the map's paths
+once: a `uses` entry with no leading `/` that matches in several places (`api/` also matching `packages/api/`), or
+one that takes in two or more other projects whole (a catch-all `services/`), would have those changes reviewed
+twice, so it goes back to the setup agent as a hint too.
 
 What a review sends, and what it leaves out (untracked files, `.arnxignore`, secrets):
 [SAFETY.md](SAFETY.md#what-a-review-sends).

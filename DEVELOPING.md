@@ -265,7 +265,9 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   `timed_out` when the call ran out of time.
 - `suspect.outcome`, `report.done` (`reviewer.ts`): what became of each suspect; the report's totals.
 - `setup.started`, `setup.attempt`, `setup.completed` (`setup.ts`): the setup agent's attempts and result;
-  `setup.withheld`: files left out of its snapshot as secret-looking (only when there are some); `setup.uses_check`
+  `setup.withheld`: files left out of its snapshot as secret-looking, and `blanked`, files kept with comment lines
+  blanked (only when there are some); `setup.paths_check`:
+  the map's paths (uses entries wider than meant), with each hint's project and kind; `setup.uses_check`
   (`context = "precise"` only): the map against the code, with the projects indexed and each hint's project and kind.
 - `context.index` (`indexer.ts`, `context = "precise"` only): one project's code index: `ok`, `secs`, `files`, and
   `reason` when the hunt's context fell back to names.
@@ -344,7 +346,8 @@ never reach the network.
 project named `main`, with the format, hash and prompts of the first version. Every module that runs tests takes one
 project as a `ReviewConfig`. `route.ts` sends each changed file to the projects that own or use it; `reviewer.ts`
 runs one test round per routed project (at most `max_projects`, budget split evenly) and reports untested paths.
-`detect.ts` finds candidate projects without a model; `setup.ts` lets the agent prove each project (`try_project`)
+`detect.ts` finds candidate projects without a model; `setup.ts` lets the agent prove each project (`try_project`:
+the whole file, or after one a project's settings alone by name, which replace them in the last whole file)
 and accepts the file only when every project ran and every committed source file is owned, used or listed as
 uncovered (`propose`, `coverageMap`). Both count the files a working-tree snapshot holds (`workingTreeFiles`: tracked,
 and untracked unless git ignores them), and the counts name the untracked ones; an untracked file never refuses a
@@ -428,9 +431,10 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `interrupt.ts` | On SIGINT/SIGTERM: tear down running sessions, cancel in-flight OpenAI background responses, exit 130/143 |
 | `settings.ts` | `.arnx/config.toml`: consent, models, budgets, prices, `[cloud]` |
 | `config.ts` | `.arnx/review.yaml`: validation (YAML scalars resolved as PyYAML does), secret-looking variable names refused, approval hash |
-| `secrets.ts` | What is never sent or copied: secret file names, key-like text, credential variable names |
+| `secrets.ts` | What is never sent or copied: secret file names, key-like text, credential variable names; `scanKeys`: withhold a file, or blank its comment lines when its only key-like text is in comments |
+| `comments.ts` | Where a JavaScript, TypeScript, Rust or Python file's comments are (strings and literals skipped) |
 | `ignore.ts` | `.arnxignore` matching, and the proposal of data-like files for `init` |
-| `change.ts` | Resolve the change; build the snapshot |
+| `change.ts` | Resolve the change (diff lines with key-like text in comments blanked); build the snapshot |
 | `sandbox.ts` | Docker: env image, locked-down runs, services, timeouts, cleanup of live sessions; the container a Rust session's runs share |
 | `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, kept when runs reach them (a Python project's own package, from pyproject's or setup.cfg's name, when a probe run in the session imports it from outside `/src`: site-packages, an editable install of a copy; docker.jsonl step `package`), compared with the code to test; the key of an image made from the code (its files, not the tests or reports beside it); when a round's probe runs no test, the files only the copy holds (named in the stop message with `arnx setup --project NAME`) |
 | `outcomes.ts` | Run tests through the adapter; classify results across runs |
@@ -447,7 +451,7 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `hunt.ts` | The hunt's pieces: suspects parsed and merged, the second hunter, part hunters, ranking |
 | `scip.ts` | A SCIP code index read (protobuf, no dependency): each occurrence's file, line, columns, symbol and roles |
 | `indexer.ts` | `context = "precise"`: a project's code index, built by its indexer in its environment image plus a layer, run as tests run; any failure falls back to names |
-| `usescheck.ts` | The map against the code: `uses` entries a project's code never refers to, files it refers to outside its map, referenced `uncovered` paths |
+| `usescheck.ts` | The map against the code: `uses` entries a project's code never refers to, files it refers to outside its map, referenced `uncovered` paths; and against its paths alone (`mapHints`): unanchored entries matching in several places, entries taking in other projects whole |
 | `testround.ts` | Snapshot + session + the brain's agent round over the tools + 3 runs, shared by review and answers |
 | `setup.ts` | The setup agent's tools, `runSuite`, the proof (`approveFile`) |
 | `jev.ts` | Experimental: JEV's hint on a setup failure no signature explains; asked only with `[setup] jev = true` and `JEV_API_KEY` |

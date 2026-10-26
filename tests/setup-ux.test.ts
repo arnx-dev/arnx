@@ -147,3 +147,30 @@ test("tools are described in a few words", () => {
   expect(describeTool("list_dir", { path: "" })).toBe("lists .");
   expect(describeTool("try_project", {})).toBeNull();
 });
+
+test("try_project takes one project's settings by name, in place of the whole file", async () => {
+  const seen: string[] = [];
+  const sessions: SessionFactory = (cfg, snap, log, body, ...rest) => {
+    seen.push(`${cfg.name}: ${cfg.install.join(" && ")} [${cfg.services.map((s) => s.name).join(", ")}]`);
+    return skipping(cfg, snap, log, body, ...rest);
+  };
+  const feed = "root: services/feed\nlanguage: python\nimage: python:3.12-slim\ninstall: [pip install pytest]\n" +
+    "test_command: python -m pytest -q {targets}\nservices: [db]\nuses: [services/shared/]\n";
+  const m = new ScriptedAgent([
+    // Before any whole file, a project's settings alone have no services to name.
+    [tool("try_project", { project: "feed", project_yaml: feed })],
+    [tool("try_project", { yaml: COVERED, project: "pay" })],
+    [tool("try_project", { project: "feed", project_yaml: feed })],
+    [tool("try_project", { project: "feed" })],
+    [text("stopping")],
+  ]);
+  const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: sessions });
+  expect(result(m, 1)).toContain("invalid: review.yaml: projects.feed.services: db not defined under services");
+  expect(result(m, 3)).toContain("the suite of feed runs");
+  expect(result(m, 4)).toContain("invalid: pass the whole file as yaml, or the project's settings as project_yaml");
+  expect(seen).toEqual(["pay: pip install pytest [db]", "feed: pip install pytest [db]"]);
+  // The file left behind is the last one tried: the whole file with feed's settings in place.
+  const left = parseReviewFile(r.yamlText!);
+  expect(left.projects.map((p) => [p.name, p.services.map((s) => s.name)])).toEqual([["pay", ["db"]], ["feed", ["db"]]]);
+  expect(left.uncovered.map((u) => u.path)).toEqual(["/app.py", "infra/"]);
+});

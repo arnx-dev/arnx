@@ -24,7 +24,7 @@ import { type Account, byokHint, CloudClient, credentialsPath, deleteCredentials
   type Fetch, tokenFor, usd } from "./cloud";
 import { dockerSession, suffixReviewCopies } from "./testround";
 import type { SessionFactory } from "./sandbox";
-import { git, repoRoot } from "./change";
+import { describeBlanked, git, repoRoot } from "./change";
 import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, readSecretPins, type ReviewFile,
   reviewConfigPath, withoutSecretPins, withSecretPins } from "./config";
 import { getAdapter } from "./adapters";
@@ -49,9 +49,8 @@ import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSetting
 import { type ModelRef, providerLines, unusedKeysNote } from "./settings";
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
-import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, type ProjectProof, runSetup,
-  type SetupResult, stillRed }
-  from "./setup";
+import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile,
+  type ProjectProof, runSetup, type SetupResult, stillRed } from "./setup";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, PROVEN_COPY,
   proofState, REVIEW_FILE, setupPreview, worthALook }
   from "./setupview";
@@ -864,6 +863,9 @@ class Commands {
     if (result.withheld.length) {
       this.d.out(`Left out as secret-looking (not sent, not in the sandbox): ${describeWithheld(result.withheld)}. ` +
         "If one is a test fixture, not a secret: `arnx allow-secret PATH`, then run setup again.");
+    }
+    if (result.blanked.length) {
+      this.d.out(`Comment lines blanked as secret-looking (not sent): ${describeBlanked(result.blanked)}.`);
     }
     const seconds = () => Math.round((this.clock() - started) / 1000);
     const finish = async (code: number, approved: boolean): Promise<number> => {

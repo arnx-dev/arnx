@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AdapterId } from "./adapters/types";
 import { type Before, type FixStatus, isPreExisting } from "./before";
+import { type Blanked, describeBlanked } from "./change";
 import { ArnxError } from "./errors";
 import { type ModelUse, parseJsonObject } from "./llm";
 import { type ProviderFailure, resumes } from "./outage";
@@ -141,6 +142,8 @@ export interface Review {
   ignoredChanged?: string[];
   /** Changed lockfiles: in the sandbox, their text not sent. */
   lockfilesChanged?: string[];
+  /** Changed source files whose diff lines held key-shaped text in comments: those lines were blanked. */
+  blankedLines?: Blanked[];
   /** Untracked files the review sent because the owner opted in (--untracked); absent when none. */
   untrackedIncluded?: string[];
   /** How many untracked files the review left out (not sent, not in the sandbox); absent when none. */
@@ -653,6 +656,9 @@ export function render(r: Review): string {
     `- Runs without a report (timed out or crashed): ${r.missingRuns}`);
   if (r.ignoredChanged?.length) out.push(`- Changed files left out by .arnxignore (not reviewed): ${ticks(r.ignoredChanged)}`);
   if (r.lockfilesChanged?.length) out.push(`- Changed lockfiles (in the sandbox, not reviewed): ${ticks(r.lockfilesChanged)}`);
+  if (r.blankedLines?.length) {
+    out.push(`- Comment lines blanked as secret-looking (not sent): ${describeBlanked(r.blankedLines)}`);
+  }
   if (r.notSent.length) {
     out.push(`- Files left out because they looked like secrets: ${ticks(r.notSent)}. If one is a test fixture, not a ` +
       "secret: `arnx allow-secret PATH`, then `arnx review` again");

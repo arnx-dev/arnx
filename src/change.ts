@@ -7,12 +7,12 @@
 import { spawnSync } from "node:child_process";
 import {
   copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync,
-  symlinkSync, unlinkSync,
+  statSync, symlinkSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
-import { excludePathspecs, firstUnpinned, isSecretPath, type SecretPin } from "./secrets";
+import { excludePathspecs, firstUnpinned, isSecretPath, type KeyScan, scanKeys, type SecretPin } from "./secrets";
 import { splitLines } from "./util";
 
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -43,6 +43,8 @@ export interface Change {
   /** Not opted in: untracked files left out of the change and the snapshot (git- and .arnxignore-ignored ones, and
    * arnx's own accepted tests, are not counted here). */
   untrackedLeftOut?: string[];
+  /** Source files whose diff lines held key-shaped text in comments only: those lines are blanked in `diff`. */
+  blanked?: Blanked[];
 }
 
 /** A path `arnx accept` writes: an `r<review id>/` folder (Python, TypeScript) or an `arnx_<review id>_` file (Rust). */
@@ -240,6 +242,14 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
           ".arnxignore"
         : "Narrow it with --range"), root);
   }
+  // Key-shaped text in comments is blanked, as in snapshots: each side of a file is read where the diff took it.
+  const show = (rev: string, path: string) => {
+    const text = git(repo, ["show", `${rev}:${path}`], [0, 128]);
+    return text.length > SCAN_LIMIT ? null : text;
+  };
+  const blanked = blankDiff(diff, allow, (path) => base === EMPTY_TREE ? null : show(base, path),
+    (path) => head === null ? readText(join(repo, path)) : show(head, path));
+  diff = blanked.diff;
   const secret = secretInDiff(diff, allow);
   if (secret) {
     throw new ArnxError(`the change contains text that looks like a secret (a key or token) in ${secret.path} ` +
@@ -251,7 +261,65 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
     ...(lockOut.size ? { lockfiles: [...lockOut].sort() } : {}),
     ...(withUntracked && head === null ? { withUntracked: true as const } : {}),
     ...(born && included.length ? { untrackedIncluded: included.sort() } : {}),
-    ...(notSent.length ? { untrackedLeftOut: notSent.sort() } : {}) };
+    ...(notSent.length ? { untrackedLeftOut: notSent.sort() } : {}),
+    ...(blanked.files.length ? { blanked: blanked.files } : {}) };
+}
+
+/** A file's text, or null when it is missing or too large to scan. */
+function readText(p: string): string | null {
+  try {
+    return statSync(p).size > SCAN_LIMIT ? null : readFileSync(p, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** `diff` with its lines blanked where each side's file (`before`, `after`: its text by path, null when absent)
+ * blanks them (scanKeys): key-shaped text in comments of source files. A file whose key is in code is left as it
+ * is, for secretInDiff to refuse. `files`: the lines blanked, numbered in the side each diff line comes from. */
+function blankDiff(diff: string, allow: readonly SecretPin[], before: (path: string) => string | null,
+                   after: (path: string) => string | null): { diff: string; files: Blanked[] } {
+  const files: Blanked[] = [];
+  const pins = (path: string) => allow.find((a) => a.path === path)?.matches ?? [];
+  const sections = diff.split(/^(?=diff --git )/m).map((section) => {
+    const oldPath = /^--- a\/(.*)$/m.exec(section)?.[1] ?? null;
+    const newPath = /^\+\+\+ b\/(.*)$/m.exec(section)?.[1] ?? null;
+    const path = newPath ?? oldPath ?? "";
+    if (!firstUnpinned(section, [...new Set([...pins(oldPath ?? ""), ...pins(newPath ?? "")])])) return section;
+    // Each side's blanked lines by number; a side whose key is in code leaves the section as it is.
+    const side = (p: string | null, text: (p: string) => string | null): Map<number, string> | null => {
+      const t = p === null ? null : text(p);
+      const scan = t === null ? null : scanKeys(p!, t, pins(p!));
+      if (scan && "withhold" in scan) return null;
+      const lines = scan ? scan.text.split("\n") : [];
+      return new Map((scan?.blank ?? []).map((n) => [n, lines[n - 1]!]));
+    };
+    const old = side(oldPath, before), now = side(newPath, after);
+    if (!old || !now || (!old.size && !now.size)) return section;
+    const done = new Set<number>();
+    let a = 0, b = 0, inHunk = false;
+    const out = section.split("\n").map((line) => {
+      const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      if (hunk) {
+        [a, b, inHunk] = [Number(hunk[1]), Number(hunk[2]), true];
+        return line;
+      }
+      if (!inHunk || line.startsWith("\\")) return line;
+      const mark = line[0];
+      let to: string | undefined;
+      if (mark === "-") to = old.get(a);
+      else if (mark === "+" || mark === " ") to = now.get(b);
+      const n = mark === "-" ? a : b;
+      if (mark !== "+") a++;
+      if (mark !== "-") b++;
+      if (to === undefined) return line;
+      done.add(n);
+      return mark + to;
+    });
+    if (done.size) files.push({ path, lines: [...done].sort((x, y) => x - y) });
+    return out.join("\n");
+  });
+  return { diff: sections.join(""), files };
 }
 
 /** The three files taking most of a diff, with their sizes ("package-lock.json 173 KB, README.md 25 KB, …"). */
@@ -325,12 +393,36 @@ export function filesAt(repo: string, head: string | null, untracked = false): s
 /** A file left out of a snapshot for its content: where its first unallowed key-shaped string is. */
 export interface Withheld { path: string; line: number; label: string }
 
+/** A source file a snapshot keeps with comment lines blanked: every unallowed key-shaped string in it was inside a
+ * comment (scanKeys). */
+export interface Blanked { path: string; lines: number[] }
+
+/** Blanked files for a person: path and the lines blanked, runs as ranges ("src/a.ts (lines 3-5, 9)"). */
+export function describeBlanked(b: Blanked[]): string {
+  return b.map(({ path, lines }) => {
+    const runs: string[] = [];
+    for (let i = 0; i < lines.length;) {
+      let j = i;
+      while (j + 1 < lines.length && lines[j + 1] === lines[j]! + 1) j++;
+      runs.push(i === j ? `${lines[i]}` : `${lines[i]}-${lines[j]}`);
+      i = j + 1;
+    }
+    return `${path} (line${lines.length === 1 ? "" : "s"} ${runs.join(", ")})`;
+  }).join(", ");
+}
+
 /** Copy the code at `head` (or the working tree when null) to `dest`, then scrub it. Returns the files removed for
  * their content; `allow` keeps files the user allowed while every key-shaped string in them is pinned. A working-tree
  * snapshot holds tracked files only unless `untracked` (or the repository has no commits yet): whatever reads it (an
  * agent, or tests whose output goes to a model) never sees untracked files the owner did not opt in to. */
 export function snapshot(repo: string, head: string | null, dest: string, allow: readonly SecretPin[] = [],
                          o: { untracked?: boolean } = {}): Withheld[] {
+  return takeSnapshot(repo, head, dest, allow, o).withheld;
+}
+
+/** snapshot, also naming the files kept with comment lines blanked. */
+export function takeSnapshot(repo: string, head: string | null, dest: string, allow: readonly SecretPin[] = [],
+                             o: { untracked?: boolean } = {}): { withheld: Withheld[]; blanked: Blanked[] } {
   mkdirSync(dest, { recursive: true });
   const ignored = loadIgnore(repo);
   const limit = changeLimits.maxSnapshotFiles;
@@ -370,10 +462,13 @@ export function snapshot(repo: string, head: string | null, dest: string, allow:
 }
 
 /** Remove .git, .arnx, paths matched by .arnxignore, secret files, files with secret content and symlinks leaving
- * the tree. Returns the files removed for their content (the others are never expected in a snapshot). */
-function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly SecretPin[]): Withheld[] {
+ * the tree; blank the comment lines of a source file whose only secret content is in comments. Returns the files
+ * removed for their content (the others are never expected in a snapshot) and the files blanked. */
+function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly SecretPin[])
+  : { withheld: Withheld[]; blanked: Blanked[] } {
   const realRoot = realpathSync(root);
   const removedFiles: Withheld[] = [];
+  const blanked: Blanked[] = [];
   const inside = (p: string) => p === realRoot || p.startsWith(realRoot + sep);
   const walk = (dir: string, relDir: string) => {
     for (const name of readdirSync(dir)) {
@@ -403,21 +498,25 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
         unlinkSync(p);
         continue;
       }
-      const hit = secretContent(p, st.size, allow.find((a) => a.path === rel)?.matches ?? []);
-      if (hit) {
+      const hit = secretContent(p, rel, st.size, allow.find((a) => a.path === rel)?.matches ?? []);
+      if (hit && "withhold" in hit) {
         unlinkSync(p);
-        removedFiles.push({ path: rel, ...hit });
+        removedFiles.push({ path: rel, ...hit.withhold });
+      } else if (hit) {
+        writeFileSync(p, hit.text);
+        blanked.push({ path: rel, lines: hit.blank });
       }
     }
   };
   walk(root, "");
-  return removedFiles.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const byPath = (a: { path: string }, b: { path: string }) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+  return { withheld: removedFiles.sort(byPath), blanked: blanked.sort(byPath) };
 }
 
-function secretContent(p: string, size: number, pins: readonly string[]): { line: number; label: string } | null {
+function secretContent(p: string, rel: string, size: number, pins: readonly string[]): KeyScan | null {
   if (size > SCAN_LIMIT) return null;
   try {
-    return firstUnpinned(readFileSync(p, "utf8"), pins);
+    return scanKeys(rel, readFileSync(p, "utf8"), pins);
   } catch {
     return null;
   }
