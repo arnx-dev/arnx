@@ -286,6 +286,8 @@ answers as `review.md` holds them now (latest review, or the id given).
 | `pins` | string or null | The pin file arnx keeps for this clone outside it. |
 | `kept_tests` | array of strings | Accepted test files left in place (without `--tests`). |
 | `failed` | array | `{ path, error }` per file or image that could not be deleted. |
+| `cache_records` | number | With `--yes`: build cache records removed with the images made from the code (`-src-` tags), as `env prune` removes them. |
+| `cache_size` | string | With `--yes`: their total size (`2.4GB`). |
 | `next` | array of strings | `arnx remove --yes` after a list. |
 
 | `result` | Exit | When |

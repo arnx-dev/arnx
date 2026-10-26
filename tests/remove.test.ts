@@ -102,3 +102,56 @@ test("remove lists first, then deletes what git does not track; committed files 
     sandboxOptions.docker = saved;
   }
 });
+
+/** A build cache record as `docker buildx du --verbose` prints it. */
+const record = (id: string, parents: string[], description: string, size = "0B") =>
+  `ID:\t\t${id}\n${parents.length ? `Parents:\n${parents.map((p) => ` - ${p}\n`).join("")}` : ""}` +
+  `Size:\t\t${size}\nDescription:\t${description}\nType:\t\tregular\n`;
+
+test("remove --yes takes the build cache of the images made from the code it removes, each record by id", async () => {
+  const saved = sandboxOptions.docker;
+  try {
+    const repo = gitRepo(tmp());
+    const env = { XDG_CONFIG_HOME: tmp() };
+    put(join(repo, ".arnx", "reviews", "r", "review.md"));
+    const dir = tmp();
+    const log = join(dir, "calls");
+    const src = "arnx-env:k1-src-aaaaaaaaaaaa";
+    const labels = (r: string) => JSON.stringify({ "arnx.created": "2026-10-01T00:00:00Z", "arnx.project": "main",
+      "arnx.repo": r });
+    writeFileSync(join(dir, "images"), `${src}\t2GB\t${labels(repoId(repo))}\n` +
+      `arnx-env:k1\t1GB\t${labels(repoId(repo))}\narnx-env:k2-src-bbbbbbbbbbbb\t2GB\t${labels("0".repeat(16))}\n`);
+    writeFileSync(join(dir, "cache"), [
+      record("base0", [], "pulled from docker.io/library/python:3.12-slim@sha256:00", "50MB"),
+      record("envcopy", ["base0"], "[stage-0 2/4] COPY . /src", "10MB"),
+      record("copya", ["base0"], "[stage-0 2/5] COPY . /src", "300MB"),
+      record("marka", ["copya"], `mount / from exec /bin/sh -c : ${src}`),
+      record("runa", ["marka"], "mount / from exec /bin/sh -c cp -r . /opt/app && pip install pytest", "2.35GB"),
+      // another repository's image made from its code: not touched
+      record("copyb", ["base0"], "[stage-0 2/5] COPY . /src", "300MB"),
+      record("markb", ["copyb"], "mount / from exec /bin/sh -c : arnx-env:k2-src-bbbbbbbbbbbb"),
+    ].join("\n"));
+    writeFileSync(join(dir, "docker"), `#!/bin/sh
+echo "$*" >> '${log}'
+case "$1 $2" in
+  "image ls") cut -f1,2 '${join(dir, "images")}';;
+  "image inspect") shift 4; for t in "$@"; do awk -F '\\t' -v t="$t" '$1 == t { print $3 }' '${join(dir, "images")}'; done;;
+  "buildx du") cat '${join(dir, "cache")}';;
+esac
+exit 0
+`);
+    chmodSync(join(dir, "docker"), 0o755);
+    sandboxOptions.docker = join(dir, "docker");
+    const calls = () => readFileSync(log, "utf8").trim().split("\n");
+
+    expect(await new Cli({ cwd: repo, env }).run("remove")).toBe(0);
+    expect(calls().filter((c) => c.startsWith("buildx prune"))).toEqual([]);
+    const go = new Cli({ cwd: repo, env });
+    expect(await go.run("remove", "--yes", "--json")).toBe(0);
+    expect(calls().filter((c) => /^image rm|^buildx prune/.test(c))).toEqual([`image rm ${src}`, "image rm arnx-env:k1",
+      "buildx prune -f --filter id=runa", "buildx prune -f --filter id=marka", "buildx prune -f --filter id=copya"]);
+    expect(JSON.parse(go.stdout)).toMatchObject({ cache_records: 3, cache_size: "2.6GB" });
+  } finally {
+    sandboxOptions.docker = saved;
+  }
+});

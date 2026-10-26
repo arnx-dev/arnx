@@ -91,13 +91,17 @@ export function pruneEnv(repo: string, o: { keepDays: number; now?: number; dryR
     if (r.status === 0) removed.push(img);
     else failed.push([img, (r.stderr || r.stdout).trim().split("\n")[0] ?? ""]);
   }
-  const sources = removed.map((i) => i.tag).filter((t) => t.includes("-src-"));
-  let cache = sources.length ? sourceRecords(cacheRecords(), sources) : [];
-  if (!o.dryRun) {
-    cache = cache.filter((c) =>
-      docker(["buildx", "prune", "-f", "--filter", `id=${c.id}`], { timeout: 300 }).status === 0);
-  }
-  return { removed, failed, unlabelled, cache };
+  return { removed, failed, unlabelled, cache: sourceCache(removed.map((i) => i.tag), o.dryRun) };
+}
+
+/** Removes (or with dryRun lists) the build cache records the builds of the images made from the code among `tags`
+ * left (sourceRecords), each by its id; the ones removed. */
+export function sourceCache(tags: string[], dryRun = false): CacheRecord[] {
+  const sources = tags.filter((t) => t.includes("-src-"));
+  const cache = sources.length ? sourceRecords(cacheRecords(), sources) : [];
+  if (dryRun) return cache;
+  return cache.filter((c) =>
+    docker(["buildx", "prune", "-f", "--filter", `id=${c.id}`], { timeout: 300 }).status === 0);
 }
 
 /** Every build cache record; none when Docker has no BuildKit (an image delete then frees its layers). */

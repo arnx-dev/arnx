@@ -15,7 +15,8 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   first, `--all-repos` for other repositories' old images too), and with each image made from your code the build
   cache records its build left, each by its id; the rest of Docker's build cache is not touched.
 - `arnx remove` lists everything arnx put in the repository (`.arnx/`, `.arnxignore`, the skill folders), this
-  repository's test images and the pins arnx keeps for it outside the repository; `arnx remove --yes` deletes them.
+  repository's test images and the pins arnx keeps for it outside the repository; `arnx remove --yes` deletes them,
+  with the build cache of the images made from your code (as `arnx env prune` removes it).
   Files you committed are left for the `git rm` it prints, so the removal shows in a commit. Accepted tests are your
   tests by then: kept unless `--tests`. Your arnx cloud login and the arnx program itself are not touched.
 - Your model keys stay in the arnx process. Files that usually hold secrets, and text that looks like a key, are

@@ -39,7 +39,7 @@ import { acceptData, checkData, reportTelemetry, reviewData, type Sender, setupD
 import { Progress, type Live } from "./progress";
 import { runReview } from "./reviewer";
 import { envOwner, requireDocker } from "./sandbox";
-import { ageDays, type EnvImage, KEEP_DAYS, oldImages, pruneEnv, totalSize } from "./envprune";
+import { ageDays, type CacheRecord, type EnvImage, KEEP_DAYS, oldImages, pruneEnv, totalSize } from "./envprune";
 import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSettings, missingKeys, modelRefs, type ModelsMode,
   modelsMode,
   modelsSetting, recordCloudModels, recordConsent, type Settings, settingsPath, untrackedSetting, withModels,
@@ -1098,11 +1098,12 @@ class Commands {
       return under.length && under.length === t.files ? [t.path.replace(/\/$/, "")] : under.sort();
     });
     const gitLine = gitRm.length ? `git rm -r --quiet ${gitRm.map(shellWord).join(" ")}` : null;
-    const json = (failed: [string, string][]) => ({ dry_run: !yes,
+    const json = (failed: [string, string][], cache: CacheRecord[] = []) => ({ dry_run: !yes,
       deleted: plan.untracked.filter((p) => !failed.some(([f]) => f === p)), tracked: plan.tracked, git_rm: gitLine,
       images: images.map((i) => ({ tag: i.tag, size: i.size })), docker_checked: plan.images !== null,
       pins: plan.pins ? this.shown(plan.pins) : null, kept_tests: plan.keptTests,
-      failed: failed.map(([path, error]) => ({ path, error })) });
+      failed: failed.map(([path, error]) => ({ path, error })),
+      ...(yes ? { cache_records: cache.length, cache_size: totalSize(cache) } : {}) });
     if (!plan.targets.length && !images.length && !plan.pins) {
       this.d.out("Nothing of arnx's in this repository.");
       this.emit("ok", 0, { ...json([]), state: "nothing" });
@@ -1131,14 +1132,14 @@ class Commands {
       this.emit("ok", 0, { ...json([]), state: "listed", next: ["arnx remove --yes"] });
       return 0;
     }
-    const failed = applyRemove(repo, plan);
+    const { failed, cache } = applyRemove(repo, plan);
     const done = plan.untracked.length + images.length + (plan.pins ? 1 : 0) - failed.length;
     this.d.out(failed.length ? `Removed ${n(done, "item")}; ${failed.length} could not be removed:`
       : `✓ Removed arnx from this repository${tracked.size ? ", except committed files" : ""}.`);
     for (const [what, why] of failed) this.d.out(`  ${what}: ${why}`);
     if (gitLine) say("Remove the committed files in a commit:", `  ${gitLine}`);
     this.d.out(`Kept: ${kept.join("; ")}.`);
-    this.emit(failed.length ? "fail" : "ok", failed.length ? 2 : 0, { ...json(failed), state: "removed" });
+    this.emit(failed.length ? "fail" : "ok", failed.length ? 2 : 0, { ...json(failed, cache), state: "removed" });
     return failed.length ? 2 : 0;
   }
 
