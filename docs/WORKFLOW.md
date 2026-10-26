@@ -17,7 +17,7 @@ missing (keys, Docker, configuration); setup and review run the same checks firs
 service, a crate), each with its own environment, and checks each by running its existing suite. It shows a coverage
 map: what each project owns, what it only uses (such as a shared library), and what no project tests, with the
 reason. A review tests every project the change touches and lists what it could not test. `arnx setup --add` covers
-more later; `arnx setup --project NAME` redoes one project. Projects that install the same way (a Cargo workspace,
+more later: it tries every uncovered entry again, so fix what its reason names first; `arnx setup --project NAME` redoes one project. Projects that install the same way (a Cargo workspace,
 one lockfile at the root) share one environment image when they have the same `image`, `install` and
 `install_root` (the directory the install runs in); otherwise each project builds its own.
 

@@ -123,6 +123,17 @@ test("setup --project: try_project takes the project's settings alone, over the 
   expect(ran).toEqual(["pay"]);
 });
 
+test("setup --add has the agent try every uncovered entry again and drop the ones it covers", async () => {
+  approved(COVERED);
+  const m = new ScriptedAgent([[text("nothing to add")]]);
+  await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: passing, add: true });
+  const task = String(m.calls[0]!.messages[0]!.content);
+  expect(task).toContain("Try every entry under uncovered again, whatever its reason says: the user may have fixed " +
+    "the cause since setup wrote it, so the reason may be stale. Remove an entry once a project owns or uses its " +
+    "files, and update the reason of one that still cannot be tested.");
+  expect(task).toContain("reason: Terraform; no adapter");
+});
+
 test("approve --project reruns one project, and only when the others are unchanged", async () => {
   approved(COVERED);
   // the owner edits the approved file: the approved block stays, as it would in an editor
