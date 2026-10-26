@@ -56,6 +56,35 @@ test("a line belongs to the function around it, or to the module constant it is 
   expect(enclosing(lines, 1)).toBeNull();
 });
 
+test("a decorator line belongs to the function under it, its argument lines and closing bracket included", () => {
+  // A change that only drops a dependency from `@app.post(...)` gave the hunter no definition: the search went up.
+  const lines = ["from x import app", "", "@app.post(\"/pay\", dependencies=[auth])", "async def pay(req):",
+    "    return 1", "", "@app.get(", "    \"/list\",", "    dependencies=[auth],", ")", "@cached",
+    "def listing():", "    return 2", "", "class A:", "    @property", "    def size(self):", "        return 3"];
+  expect(enclosing(lines, 3)).toEqual({ name: "pay", kind: "function", line: 4 });
+  expect(enclosing(lines, 9)).toEqual({ name: "listing", kind: "function", line: 12 });
+  expect(enclosing(lines, 10)).toEqual({ name: "listing", kind: "function", line: 12 });
+  expect(enclosing(lines, 11)).toEqual({ name: "listing", kind: "function", line: 12 });
+  expect(enclosing(lines, 16)).toEqual({ name: "size", kind: "function", line: 17 });
+  // Lines that are not decorators keep their old answers.
+  expect(enclosing(lines, 4)).toEqual({ name: "pay", kind: "function", line: 4 });
+  expect(enclosing(lines, 13)).toEqual({ name: "listing", kind: "function", line: 12 });
+  expect(enclosing(lines, 18)).toEqual({ name: "size", kind: "function", line: 17 });
+  expect(enclosing(["@decorate", "class B:", "    pass"], 1)).toBeNull();
+});
+
+test("a change to a decorator alone gives the hunter its function and the places that use it", () => {
+  const root = tmp();
+  writeFileSync(join(root, "api.py"), "@app.post(\"/pay\")\nasync def pay(req):\n    return 1\n");
+  writeFileSync(join(root, "client.py"), "from api import pay\n\ndef send():\n    return pay(None)\n");
+  const diff = "diff --git a/api.py b/api.py\n--- a/api.py\n+++ b/api.py\n@@ -1,2 +1,2 @@\n" +
+    "-@app.post(\"/pay\", dependencies=[auth])\n+@app.post(\"/pay\")\n async def pay(req):\n";
+  const pack = contextPack(root, diff, ["api.py"], ["."]);
+  expect(pack).toContain("- `api.py` function `pay` (line 2)");
+  expect(pack).toContain("  - client.py:4 in send: return pay(None)");
+  expect(changedDefinitions(root, diff, ["api.py"])).toContain("async def pay(req):");
+});
+
 test("the context pack lists where a changed function is referred to, step lists included, tests left out", () => {
   const root = tmp();
   mkdirSync(join(root, "app/tests"), { recursive: true });

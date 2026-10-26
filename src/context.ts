@@ -54,9 +54,37 @@ const CONST = [
 const KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "return", "function", "constructor", "else"]);
 const indent = (s: string) => s.length - s.trimStart().length;
 
-/** The definition a line belongs to: the nearest function above it whose body holds it, or the module-level
- * constant it is part of (a multi-line SQL string). */
+/** The function a decorator line belongs to: the definition under its run of decorators, for the decorator line
+ * itself and for the lines its arguments continue on. Null when the line is not part of a decorator. */
+function decorated(lines: string[], at: number): Def | null {
+  const here = lines[at - 1] ?? "";
+  if (!here.trim()) return null;
+  let i = at - 1;
+  if (!here.trim().startsWith("@")) {
+    // An argument line sits deeper than its decorator; a closing bracket sits level with it.
+    const limit = /^[)\]}]/.test(here.trim()) ? indent(here) + 1 : indent(here);
+    for (i = at - 2; i >= 0; i--) if (lines[i]!.trim() && indent(lines[i]!) < limit) break;
+    if (i < 0 || !lines[i]!.trim().startsWith("@")) return null;
+  }
+  const top = indent(lines[i]!);
+  for (let j = i + 1; j < lines.length; j++) {
+    const l = lines[j]!;
+    if (!l.trim() || indent(l) > top || /^(?:@|[)\]}]|#|\/\/)/.test(l.trim())) continue;
+    if (indent(l) < top) return null;
+    for (const rx of FUNC) {
+      const m = rx.exec(l);
+      if (m && !KEYWORDS.has(m[1]!)) return { name: m[1]!, kind: "function", line: j + 1 };
+    }
+    return null;
+  }
+  return null;
+}
+
+/** The definition a line belongs to: the function under a decorator the line is part of, the nearest function
+ * above it whose body holds it, or the module-level constant it is part of (a multi-line SQL string). */
 export function enclosing(lines: string[], at: number): Def | null {
+  const dec = decorated(lines, at);
+  if (dec) return dec;
   const here = lines[at - 1] ?? "";
   const target = here.trim() ? indent(here) : Infinity;
   for (let i = Math.min(at, lines.length) - 1; i >= 0; i--) {
