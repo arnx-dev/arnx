@@ -1,7 +1,7 @@
 {
   "name": "arnx",
   "displayName": "arnx",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Tests every change your coding agent makes: the agent runs arnx review once a change is done, fixes confirmed findings until arnx check passes, and leaves marking and accepting to you.",
   "author": {
     "name": "arnx-dev",
