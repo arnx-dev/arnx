@@ -7,12 +7,12 @@
 import { spawnSync } from "node:child_process";
 import {
   copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync,
-  symlinkSync, unlinkSync,
+  symlinkSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
-import { excludePathspecs, firstUnpinned, isSecretPath, type SecretPin } from "./secrets";
+import { excludePathspecs, firstUnpinned, isSecretPath, type KeyScan, scanKeys, type SecretPin } from "./secrets";
 import { splitLines } from "./util";
 
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -325,12 +325,22 @@ export function filesAt(repo: string, head: string | null, untracked = false): s
 /** A file left out of a snapshot for its content: where its first unallowed key-shaped string is. */
 export interface Withheld { path: string; line: number; label: string }
 
+/** A source file a snapshot keeps with comment lines blanked: every unallowed key-shaped string in it was inside a
+ * comment (scanKeys). */
+export interface Blanked { path: string; lines: number[] }
+
 /** Copy the code at `head` (or the working tree when null) to `dest`, then scrub it. Returns the files removed for
  * their content; `allow` keeps files the user allowed while every key-shaped string in them is pinned. A working-tree
  * snapshot holds tracked files only unless `untracked` (or the repository has no commits yet): whatever reads it (an
  * agent, or tests whose output goes to a model) never sees untracked files the owner did not opt in to. */
 export function snapshot(repo: string, head: string | null, dest: string, allow: readonly SecretPin[] = [],
                          o: { untracked?: boolean } = {}): Withheld[] {
+  return takeSnapshot(repo, head, dest, allow, o).withheld;
+}
+
+/** snapshot, also naming the files kept with comment lines blanked. */
+export function takeSnapshot(repo: string, head: string | null, dest: string, allow: readonly SecretPin[] = [],
+                             o: { untracked?: boolean } = {}): { withheld: Withheld[]; blanked: Blanked[] } {
   mkdirSync(dest, { recursive: true });
   const ignored = loadIgnore(repo);
   const limit = changeLimits.maxSnapshotFiles;
@@ -370,10 +380,13 @@ export function snapshot(repo: string, head: string | null, dest: string, allow:
 }
 
 /** Remove .git, .arnx, paths matched by .arnxignore, secret files, files with secret content and symlinks leaving
- * the tree. Returns the files removed for their content (the others are never expected in a snapshot). */
-function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly SecretPin[]): Withheld[] {
+ * the tree; blank the comment lines of a source file whose only secret content is in comments. Returns the files
+ * removed for their content (the others are never expected in a snapshot) and the files blanked. */
+function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly SecretPin[])
+  : { withheld: Withheld[]; blanked: Blanked[] } {
   const realRoot = realpathSync(root);
   const removedFiles: Withheld[] = [];
+  const blanked: Blanked[] = [];
   const inside = (p: string) => p === realRoot || p.startsWith(realRoot + sep);
   const walk = (dir: string, relDir: string) => {
     for (const name of readdirSync(dir)) {
@@ -403,21 +416,25 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
         unlinkSync(p);
         continue;
       }
-      const hit = secretContent(p, st.size, allow.find((a) => a.path === rel)?.matches ?? []);
-      if (hit) {
+      const hit = secretContent(p, rel, st.size, allow.find((a) => a.path === rel)?.matches ?? []);
+      if (hit && "withhold" in hit) {
         unlinkSync(p);
-        removedFiles.push({ path: rel, ...hit });
+        removedFiles.push({ path: rel, ...hit.withhold });
+      } else if (hit) {
+        writeFileSync(p, hit.text);
+        blanked.push({ path: rel, lines: hit.blank });
       }
     }
   };
   walk(root, "");
-  return removedFiles.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const byPath = (a: { path: string }, b: { path: string }) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+  return { withheld: removedFiles.sort(byPath), blanked: blanked.sort(byPath) };
 }
 
-function secretContent(p: string, size: number, pins: readonly string[]): { line: number; label: string } | null {
+function secretContent(p: string, rel: string, size: number, pins: readonly string[]): KeyScan | null {
   if (size > SCAN_LIMIT) return null;
   try {
-    return firstUnpinned(readFileSync(p, "utf8"), pins);
+    return scanKeys(rel, readFileSync(p, "utf8"), pins);
   } catch {
     return null;
   }

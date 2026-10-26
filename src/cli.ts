@@ -48,9 +48,8 @@ import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSetting
 import { providerLines, unusedKeysNote } from "./settings";
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
-import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, type ProjectProof, runSetup,
-  type SetupResult, stillRed }
-  from "./setup";
+import { approveFile, coverageMap, describeBlanked, describeCoverage, describeWithheld, type NeededFile,
+  type ProjectProof, runSetup, type SetupResult, stillRed } from "./setup";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, PROVEN_COPY,
   proofState, REVIEW_FILE, setupPreview, worthALook }
   from "./setupview";
@@ -838,6 +837,9 @@ class Commands {
     if (result.withheld.length) {
       this.d.out(`Left out as secret-looking (not sent, not in the sandbox): ${describeWithheld(result.withheld)}. ` +
         "If one is a test fixture, not a secret: `arnx allow-secret PATH`, then run setup again.");
+    }
+    if (result.blanked.length) {
+      this.d.out(`Comment lines blanked as secret-looking (not sent): ${describeBlanked(result.blanked)}.`);
     }
     const seconds = () => Math.round((this.clock() - started) / 1000);
     const finish = async (code: number, approved: boolean): Promise<number> => {

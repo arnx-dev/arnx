@@ -11,7 +11,7 @@ import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { AdapterId, TestResult } from "./adapters/types";
-import { filesAt, hasCommits, snapshot, type Withheld, workingTreeFiles } from "./change";
+import { type Blanked, filesAt, hasCommits, snapshot, takeSnapshot, type Withheld, workingTreeFiles } from "./change";
 import {
   loadReviewFile, parseReviewFile, projectDigest, readSecretPins, type ReviewConfig, reviewConfigPath, type ReviewFile,
   secretPinsOf, secretPinsYaml, stamp, stampFile,
@@ -381,6 +381,8 @@ export interface SetupResult {
   projects: ProjectProof[];
   /** Files left out of the snapshot because they hold key-shaped text the user has not allowed. */
   withheld: Withheld[];
+  /** Source files kept with comment lines blanked: their only such text was in comments. */
+  blanked: Blanked[];
   /** The failing tests (outside known_failing) of the last suite that ran with some tests passing: setup got the
    * suite running, the current code fails them. Empty when the last run never got that far. */
   failing: string[];
@@ -417,6 +419,20 @@ export function neededText(files: NeededFile[]): string {
 
 /** Withheld files for a person or an agent: path, what looks like a key, and its line. */
 export const describeWithheld = (w: Withheld[]) => w.map((x) => `${x.path} (${x.label}, line ${x.line})`).join(", ");
+
+/** Blanked files for a person: path and the lines blanked, runs as ranges ("src/a.ts (lines 3-5, 9)"). */
+export function describeBlanked(b: Blanked[]): string {
+  return b.map(({ path, lines }) => {
+    const runs: string[] = [];
+    for (let i = 0; i < lines.length;) {
+      let j = i;
+      while (j + 1 < lines.length && lines[j + 1] === lines[j]! + 1) j++;
+      runs.push(i === j ? `${lines[i]}` : `${lines[i]}-${lines[j]}`);
+      i = j + 1;
+    }
+    return `${path} (line${lines.length === 1 ? "" : "s"} ${runs.join(", ")})`;
+  }).join(", ");
+}
 
 /** Up to `max` names, then "…". */
 const few = (xs: string[], max = 3) => xs.slice(0, max).join(", ") + (xs.length > max ? ", …" : "");
@@ -673,7 +689,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     // Files the user allowed although they look like secrets: the approved file's, or a seed's before the first setup.
     const pins = existing ? secretPinsOf(existing.raw) : seedPins(repo);
     const untracked = !!o.untracked;
-    const withheld = snapshot(repo, null, snap, pins, { untracked });
+    const { withheld, blanked } = takeSnapshot(repo, null, snap, pins, { untracked });
     // Image keys come from the manifests as they were before any run wrote into the snapshot.
     copyManifests(snap, join(tmp, "manifests"));
     const keyOf = (cfg: ReviewConfig) => envKey(cfg, join(tmp, "manifests"));
@@ -691,7 +707,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     if (withheld.length) {
       say(`left out as secret-looking: ${describeWithheld(withheld)}; if one is a test fixture, not a secret, allow ` +
         "it with `arnx allow-secret PATH` and run setup again");
-      emit("setup.withheld", { files: withheld.map((w) => w.path) });
+    }
+    if (blanked.length) say(`comment lines blanked as secret-looking: ${describeBlanked(blanked)}`);
+    if (withheld.length || blanked.length) {
+      emit("setup.withheld", { files: withheld.map((w) => w.path), blanked: blanked.map((b) => b.path) });
     }
     const current = existing ? readFileSync(reviewConfigPath(repo), "utf8") : "";
     // The agent's file, with the user's allow-list added: the agent may not write one.
@@ -976,7 +995,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     emit("setup.completed", { ok: state.accepted !== null, stop: result.stop, cost_usd: result.costUsd,
       attempts: state.attempts, projects: projects.map((p) => p.name), summary: clip(state.summary, 500) });
     return { ok: state.accepted !== null, yamlText: state.accepted ?? state.lastTried, summary: state.summary,
-      costUsd: result.costUsd, stop: state.needed ? "stopped" : result.stop, notes: result.finalText, projects, withheld,
+      costUsd: result.costUsd, stop: state.needed ? "stopped" : result.stop, notes: result.finalText, projects, withheld, blanked,
       failing: state.accepted !== null ? [] : state.failing, failingProject: state.accepted !== null ? null
         : state.failingProject, problem: state.problem, ...(state.needed ? { needed: state.needed } : {}) };
   } finally {

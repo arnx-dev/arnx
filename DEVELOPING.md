@@ -252,7 +252,8 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   `timed_out` when the call ran out of time.
 - `suspect.outcome`, `report.done` (`reviewer.ts`): what became of each suspect; the report's totals.
 - `setup.started`, `setup.attempt`, `setup.completed` (`setup.ts`): the setup agent's attempts and result;
-  `setup.withheld`: files left out of its snapshot as secret-looking (only when there are some); `setup.paths_check`:
+  `setup.withheld`: files left out of its snapshot as secret-looking, and `blanked`, files kept with comment lines
+  blanked (only when there are some); `setup.paths_check`:
   the map's paths (uses entries wider than meant), with each hint's project and kind; `setup.uses_check`
   (`context = "precise"` only): the map against the code, with the projects indexed and each hint's project and kind.
 - `context.index` (`indexer.ts`, `context = "precise"` only): one project's code index: `ok`, `secs`, `files`, and
@@ -413,7 +414,8 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `interrupt.ts` | On SIGINT/SIGTERM: tear down running sessions, cancel in-flight OpenAI background responses, exit 130/143 |
 | `settings.ts` | `.arnx/config.toml`: consent, models, budgets, prices, `[cloud]` |
 | `config.ts` | `.arnx/review.yaml`: validation (YAML scalars resolved as PyYAML does), secret-looking variable names refused, approval hash |
-| `secrets.ts` | What is never sent or copied: secret file names, key-like text, credential variable names |
+| `secrets.ts` | What is never sent or copied: secret file names, key-like text, credential variable names; `scanKeys`: withhold a file, or blank its comment lines when its only key-like text is in comments |
+| `comments.ts` | Where a JavaScript, TypeScript, Rust or Python file's comments are (strings and literals skipped) |
 | `ignore.ts` | `.arnxignore` matching, and the proposal of data-like files for `init` |
 | `change.ts` | Resolve the change; build the snapshot |
 | `sandbox.ts` | Docker: env image, locked-down runs, services, timeouts, cleanup of live sessions; the container a Rust session's runs share |
