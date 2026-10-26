@@ -1162,6 +1162,10 @@ class Commands {
         this.d.out(`${dryRun ? "Would remove" : "Removed"} their build cache: ${n(r.cache.length, "record")} ` +
           `(${totalSize(r.cache)}).`);
       }
+      if (r.cacheNotFound) {
+        this.d.out(`${n(r.cacheNotFound, "image")} built by an older arnx left build cache arnx cannot find; ` +
+          "`docker builder prune` removes all unused build cache (your choice).");
+      }
     } else {
       this.d.out("No environment image to remove.");
     }
@@ -1177,7 +1181,8 @@ class Commands {
       size: i.size });
     this.emit(r.failed.length ? "fail" : "ok", r.failed.length ? 2 : 0, { dry_run: dryRun, keep_days: Number(days),
       removed: r.removed.map(image), failed: r.failed.map(([i, why]) => ({ ...image(i), error: why })),
-      unlabelled: r.unlabelled, cache_records: r.cache.length, cache_size: totalSize(r.cache) });
+      unlabelled: r.unlabelled, cache_records: r.cache.length, cache_size: totalSize(r.cache),
+      cache_not_found: r.cacheNotFound });
     return r.failed.length ? 2 : 0;
   }
 

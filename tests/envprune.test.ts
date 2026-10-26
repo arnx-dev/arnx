@@ -15,11 +15,15 @@ import { CFG } from "./helpers/yaml";
 const tmp = useTmp();
 
 /** A docker that lists `images` (one "tag\tid\tsize\tlabels" line each, labels as k=v,k=v), logs its arguments,
- * fails `image rm` of a tag in `inUse`, and prints `cache` for `buildx du --verbose`. */
-function fakeDocker(images: string[], inUse: string[] = [], cache = ""): { calls: () => string[][] } {
+ * fails `image rm` of a tag in `inUse`, prints `cache` for `buildx du --verbose` and a tag's `history` lines (the
+ * steps that built it) for `image history`. */
+function fakeDocker(images: string[], inUse: string[] = [], cache = "", history: Record<string, string[]> = {})
+  : { calls: () => string[][] } {
   const dir = tmp();
   const log = join(dir, "calls");
   writeFileSync(join(dir, "cache"), cache);
+  writeFileSync(join(dir, "history"), Object.entries(history).flatMap(([t, steps]) => steps.map((l) => `${t}\t${l}\n`))
+    .join(""));
   writeFileSync(join(dir, "images"), images.map((l) => {
     const [tag, , size, raw = ""] = l.split("\t");
     const labels = raw ? JSON.stringify(Object.fromEntries(raw.split(",").map((kv) => kv.split("=")))) : "null";
@@ -32,6 +36,7 @@ case "$1 $2" in
   "image ls") cut -f1,2 '${join(dir, "images")}';;
   "image rm") case "$3" in ${busy}) echo "conflict: image is in use" >&2; exit 1;; esac;;
   "buildx du") cat '${join(dir, "cache")}';;
+  "image history") awk -F '\t' -v t="$6" '$1 == t { print $2 }' '${join(dir, "history")}';;
   "image inspect")
     [ "$3" = "--format" ] || exit 1
     shift 4
@@ -235,6 +240,40 @@ test("doctor shows no image line when there is nothing to prune", async () => {
     const cli = new Cli({ cwd: repo, oldImages });
     await cli.run("doctor");
     expect(cli.stdout).not.toContain("Images:");
+  } finally {
+    sandboxOptions.docker = saved;
+  }
+});
+
+test("prune says when an older arnx's image made from the code leaves build cache it cannot find", async () => {
+  const saved = sandboxOptions.docker;
+  try {
+    const repo = gitRepo(tmp());
+    const me = repoId(repo);
+    const [marked, older] = ["arnx-env:k1-src-aaaaaaaaaaaa", "arnx-env:k1-src-bbbbbbbbbbbb"];
+    const steps = (mark: string | null) => ["RUN /bin/sh -c mkdir -p /opt/app && cp -r . /opt/app # buildkit",
+      "WORKDIR /src/app", ...mark ? [`RUN /bin/sh -c : ${mark} # buildkit`] : [], "COPY . /src # buildkit"];
+    const docker = fakeDocker([
+      `${marked}\tid1\t2.4GB\t${labels(me, "main", 30.5, Date.now())}`,
+      `${older}\tid2\t2.4GB\t${labels(me, "main", 30.5, Date.now())}`,
+      `arnx-env:k1\tid3\t1GB\t${labels(me, "main", 30.5, Date.now())}`,
+    ], [], [record("copya", ["base0"], "[stage-0 2/5] COPY . /src", "300MB"),
+      record("marka", ["copya"], `mount / from exec /bin/sh -c : ${marked}`)].join("\n"),
+    { [marked]: steps(marked), [older]: steps(null), "arnx-env:k1": ["COPY . /src # buildkit"] });
+    const dry = pruneEnv(repo, { keepDays: 7, dryRun: true });
+    expect(dry.removed).toHaveLength(3);
+    expect(dry.cache.map((r) => r.id)).toEqual(["marka", "copya"]);
+    expect(dry.cacheNotFound).toBe(1);
+    const cli = new Cli({ cwd: repo });
+    expect(await cli.run("env", "prune", "--dry-run")).toBe(0);
+    expect(cli.stdout).toContain("Would remove their build cache: 2 records (300MB).\n" +
+      "1 image built by an older arnx left build cache arnx cannot find; `docker builder prune` removes all unused " +
+      "build cache (your choice).\n");
+    // Only images made from the code are asked about; nothing is removed in a dry run.
+    expect(docker.calls().filter((c) => c[1] === "history").map((c) => c[5])).not.toContain("arnx-env:k1");
+    expect(docker.calls().filter((c) => c[1] === "rm" || c[1] === "prune")).toEqual([]);
+    expect(await cli.run("env", "prune", "--json")).toBe(0);
+    expect(JSON.parse(cli.out.at(-1)!)).toMatchObject({ cache_records: 2, cache_not_found: 1 });
   } finally {
     sandboxOptions.docker = saved;
   }

@@ -13,7 +13,9 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   version of the code it tests (`arnx-env:<hash>-src-<hash>`), reused for that code. `arnx env prune` removes this
   repository's images that no proven project uses now and are a week old (`--keep-days N`, `--dry-run` to list them
   first, `--all-repos` for other repositories' old images too), and with each image made from your code the build
-  cache records its build left, each by its id; the rest of Docker's build cache is not touched.
+  cache records its build left, each by its id; the rest of Docker's build cache is not touched. Such images built
+  by arnx before 0.1.3 do not say which records are theirs: prune removes the image, leaves the cache, and says so
+  (`docker builder prune` removes all of Docker's unused build cache, if you want that).
 - `arnx remove` lists everything arnx put in the repository (`.arnx/`, `.arnxignore`, the skill folders), this
   repository's test images and the pins arnx keeps for it outside the repository; `arnx remove --yes` deletes them,
   with the build cache of the images made from your code (as `arnx env prune` removes it).

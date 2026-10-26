@@ -266,6 +266,7 @@ answers as `review.md` holds them now (latest review, or the id given).
 | `unlabelled` | number | `arnx-env` images without arnx's labels, always left alone. |
 | `cache_records` | number | Build cache records removed (or, with `dry_run`, to remove) with the images made from the code (`-src-` tags). |
 | `cache_size` | string | Their total size (`2.4GB`). |
+| `cache_not_found` | number | Of those images, the ones an arnx before 0.1.3 built: their build cache cannot be found, so it stays (`docker builder prune` removes all unused build cache). |
 
 | `result` | Exit | When |
 |---|---|---|
