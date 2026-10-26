@@ -65,7 +65,7 @@ throwaway copy.
 | `prompt` | Print the fix prompt of the review accepted last (or the id given) | `.arnx/reviews/<id>/fix-prompt.md` | nothing | no | no |
 | `check` | Run the accepted tests in the approved sandbox, accepted tests told from the other tests in their files; refuse (exit 4) when a pinned file or its entry changed. `--review [id]`: run a review's confirmed tests on the working tree instead (`recheck.ts`), before anything is accepted | `.arnx/tests/`, `.arnx/accepted-tests.json`; with `--review`, `.arnx/reviews/<id>/` | `.arnx/run/` logs | no | yes |
 | `consent` | Record the consent to send code (`--cloud`: to arnx cloud) without sending anything | `.arnx/config.toml` | `consent_at` or `cloud_consent_at` | no | no |
-| `allow-secret` | Pin the key-like strings of test-fixture files, so they are sent and copied; never shows the strings | the files named | `.arnx/review.yaml` (proven again before the next review) | no | no |
+| `allow-secret` | Pin the key-like strings of test-fixture files, so they are sent and copied; never shows the strings. `--remove PATH...` takes the paths' pins out (the files need not exist; a seed left with none is deleted), so they are withheld again | the files named | `.arnx/review.yaml` (proven again before the next review) | no | no |
 | `env prune` | Remove this repository's environment images no approved project uses, older than `--keep-days` (7); `--all-repos`, `--dry-run`. An image made from the code (`<key>-src-<hash>`, baked.ts) also takes the build cache records its build left, each by id, found from the step marked with its tag | Docker's image labels, `docker buildx du` | nothing | no | yes |
 | `login`, `logout`, `credits` | arnx cloud: a device login (RFC 8628), its deletion, the balance (no answer: "arnx cloud unavailable", exit 2; "not open yet" only on arnx cloud's `not_open`) | the config directory, `/v1/account` | `~/.config/arnx/credentials.json` (0600) | no | no |
 | `cloud on`, `cloud off` | arnx cloud's models for this repository, or the user's keys again: asks the cloud consent once, changes only `[cloud] models` | `.arnx/config.toml` | `.arnx/config.toml` | no | no |
@@ -283,6 +283,9 @@ names to 500, test messages to 500); a test message that looks like a secret is 
 - A resumed review appends a second segment for each project it re-runs; take each project's last segment.
 - `role=jev` calls count every answered call as `unknown_usage` (no token counts): leave them out of aborted-call
   counts.
+- A call to a model with no price (none in `[prices]` or `PRICES`) is `ok: true` with cost 0 and `unknown_usage` 1,
+  its tokens kept: leave those out of aborted-call counts too. Such a model runs (setup, review and accept say once
+  that the budget cap does not cover it, `unpricedNote`); review.json marks its usage entry `unpriced`.
 - `review.failed` is absent when the error came before the log opened (the review has no events at all).
 
 Events are never sent anywhere; they are for reading a run afterwards (debugging, and our own evaluation runs).
@@ -401,7 +404,8 @@ and keeps the keys with the placeholders the code fills (`PLACEHOLDERS`), the JS
 
 A repository overrides single keys in `.arnx/prompts.toml` (`userprompts.ts`); every key it leaves out is arnx's.
 `reviewer.ts`, `setup.ts` and `accept.ts` give the LocalBrain they build `promptsFor(repo)`; the file is read there
-and refused when it names an unknown key or a placeholder its key does not offer. A brain running overrides says so
+and refused when it names an unknown key or a placeholder its key does not offer. `$$` writes a literal `$` (in keys
+with placeholders or without); no default holds `$$`, so arnx's own prompts build as before. A brain running overrides says so
 (`Brain.overrides`): review.json gets `prompt_overrides` and `prompts_hash` (the hash of the 24 texts a model is
 sent), the header of review.md names them; without overrides both are absent and every file is what it was. arnx
 cloud runs its own prompts: `setup` and `review` print `CLOUD_PROMPTS` once when the file overrides one of them, and
@@ -432,7 +436,7 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `outcomes.ts` | Run tests through the adapter; classify results across runs |
 | `before.ts` | The before/after check's comparison: a finding's runs on the code before the change against its failure |
 | `typecheck.ts` | The project's own type check: tsc's output read, errors on the change against those before it, in words |
-| `llm.ts` | Agent clients (Anthropic Messages, or a Responses API: OpenAI, and generic tables that copy either API); JSON calls via either; prices |
+| `llm.ts` | Agent clients (Anthropic Messages, or a Responses API: OpenAI, and generic tables that copy either API); JSON calls via either; prices (a model with none runs, its cost unknown) |
 | `agent.ts` | The tool loop and its confined tools; hard budget |
 | `prompts.ts` | Every prompt: the default text read from `prompts.toml` (imported as text, so every build carries it), the keys and their placeholders, the builders (`Prompts`); `PROMPT_VERSION` changes with any edit of the text |
 | `userprompts.ts` | `.arnx/prompts.toml`: per-key overrides read (unknown keys and placeholders refused), copied, checked by doctor; with arnx cloud, one line and nothing sent |

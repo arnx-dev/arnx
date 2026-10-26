@@ -18,7 +18,7 @@ import { huntParts } from "./hunt";
 import { projectIndex } from "./indexer";
 import { closers } from "./interrupt";
 import { addUsage, type AgentModel, allPrices, FallbackJson, type JsonModel, type ModelUse, newUse,
-  type Trace } from "./llm";
+  type Trace, unpricedModels } from "./llm";
 import { LocalBrain } from "./localbrain";
 import { changeEditsPrompts, PROMPTS_EDITED, promptsFor } from "./userprompts";
 import { baseName, funcOf, ownerFile } from "./outcomes";
@@ -33,7 +33,7 @@ import type { TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
 import { route } from "./route";
 import { isSecretPath } from "./secrets";
-import { cloudModels, refString, type Settings } from "./settings";
+import { cloudModels, modelRefs, refString, type Settings } from "./settings";
 import { collect, dockerSession, ownTestsInWriteDir, ownTestsProblem, type Round, testRound, typecheckRound,
   writeDirOf } from "./testround";
 import { logUsage } from "./usage";
@@ -605,6 +605,11 @@ export async function runReview(repo: string, o: { settings: Settings;
       const i = usage.findIndex((x) => x.model === u.model);
       if (i >= 0) usage[i] = mergeUse(usage[i]!, u);
       else usage.push(u);
+    }
+    // A model arnx has no price for ran with its cost unknown: its entry says so.
+    if (!label) {
+      const unpriced = new Set(unpricedModels(s, modelRefs(s)).map((m) => m.ref));
+      for (const u of usage) if (unpriced.has(u.model)) u.unpriced = true;
     }
     const first = routing.routed[0]!.project;
     // arnx cloud's models fail on its side: only a round's stop says so, and its vendor is never named.

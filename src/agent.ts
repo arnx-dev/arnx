@@ -335,17 +335,19 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
         secs: Math.round((performance.now() - started) / 100) / 10 });
       break;
     }
-    const replyCost = costUsd(model.model, reply.usage, o.prices);
+    // A model with no price costs nothing here: its reply counts as billed with unknown usage.
+    const priced = costUsd(model.model, reply.usage, o.prices), replyCost = priced ?? 0;
+    const unpriced = priced === null ? 1 : 0;
     cost += replyCost;
     spend.add(replyCost);
     usage = addUsage(usage, reply.usage);
     calls += 1;
-    unknown += reply.unknownCalls ?? 0;
+    unknown += (reply.unknownCalls ?? 0) + unpriced;
     recordCall({ provider: model.provider ?? "unknown", ok: true });
     emitModelCall({ provider: model.provider ?? "unknown", model: model.model, ok: true, input: reply.usage.input,
       output: reply.usage.output, cache_read: reply.usage.cacheRead, cache_write: reply.usage.cacheWrite,
       cost_usd: replyCost, latency_ms: latency, ...(tried(reply.attempts?.length ?? reply.tries)),
-      unknown_usage: reply.unknownCalls ?? 0, timed_out: false, turn });
+      unknown_usage: (reply.unknownCalls ?? 0) + unpriced, timed_out: false, turn });
     const text = reply.content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
     const uses = reply.content.filter((b) => b.type === "tool_use");
     // secs is the model's reply alone (all its attempts); the tools it asked for are timed on the line after.

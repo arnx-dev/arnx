@@ -94,6 +94,15 @@ test("test_budget_stops_the_loop", async () => {
   expect(model.calls).toHaveLength(2);
 });
 
+test("a model with no price runs past the budget: its cost unknown, each reply counted with unknown usage", async () => {
+  const model = new ScriptedAgent([[tool("list_dir", { path: "." })], [tool("list_dir", { path: "." })], [text("done")]],
+    { input: 100_000, output: 10_000, cacheRead: 0, cacheWrite: 0 });
+  model.model = "mystery-model";
+  const result = await runAgent(model, new Workspace(root), { system: "s", user: "u", budgetUsd: 0.01, prices: PRICES });
+  expect([result.stop, result.costUsd, result.calls, result.unknownCalls]).toEqual(["end_turn", 0, 3, 3]);
+  expect(result.usage.input).toBe(300_000);
+});
+
 test("test_api_error_stops", async () => {
   class Failing extends ScriptedAgent {
     override async create(): Promise<Reply> {

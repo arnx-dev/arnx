@@ -6,7 +6,7 @@ import { unsupportedText } from "./languages";
 import BANNER_ANSI from "../assets/banner.ans" with { type: "text" };
 import BANNER_TEXT from "../assets/banner.txt" with { type: "text" };
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
@@ -25,12 +25,13 @@ import { type Account, byokHint, CloudClient, credentialsPath, deleteCredentials
 import { dockerSession, suffixReviewCopies } from "./testround";
 import type { SessionFactory } from "./sandbox";
 import { git, repoRoot } from "./change";
-import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, type ReviewFile, reviewConfigPath, withSecretPins }
-  from "./config";
+import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, readSecretPins, type ReviewFile,
+  reviewConfigPath, withoutSecretPins, withSecretPins } from "./config";
 import { getAdapter } from "./adapters";
 import { ArnxError, internalError, SetupRequired } from "./errors";
 import { FILE as IGNORE_FILE, initialIgnore } from "./ignore";
-import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter } from "./llm";
+import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter, unpricedModels,
+  unpricedNote } from "./llm";
 import { exitCode, failureLine, findingStatus, groupsOf, load, neededQuestions, nextSteps, parseMarks, type Review,
   summary, summaryRows, summaryStatus, wrapMarkdown, yourCall } from "./report";
 import { acceptData, checkData, reportTelemetry, reviewData, type Sender, setupData,
@@ -45,7 +46,7 @@ import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSetting
   modelsSetting, recordCloudModels, recordConsent, type Settings, settingsPath, untrackedSetting, withModels,
   writeSettings }
   from "./settings";
-import { providerLines, unusedKeysNote } from "./settings";
+import { type ModelRef, providerLines, unusedKeysNote } from "./settings";
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, type ProjectProof, runSetup,
@@ -105,7 +106,7 @@ Prepare, once per repository
   cloud on|off [--yes]                  arnx cloud's models instead of your keys, or back
   login | logout | credits              arnx cloud: sign this machine in or out; the balance
   consent [--cloud] [--yes]             agree now to send code (otherwise asked on the first send)
-  allow-secret PATH...                  send files whose key-like text is a test fixture
+  allow-secret [--remove] PATH...       send files whose key-like text is a test fixture; --remove undoes it
   skill install [--user] [--force]      the arnx skill for coding agents
   prompts [copy KEY]                    the prompts; copy one to .arnx/prompts.toml to edit it
   env prune [--keep-days N] [--all-repos] [--dry-run]
@@ -197,7 +198,7 @@ const COMMANDS: Record<string, { options: Options; positionals: number }> = Obje
   prompt: { options: {}, positionals: 1 },
   triage: { options: {}, positionals: 1 },
   next: { options: { ...MODELS }, positionals: 0 },
-  "allow-secret": { options: {}, positionals: 1000 },
+  "allow-secret": { options: { remove: { type: "boolean" } }, positionals: 1000 },
   skill: { options: { user: { type: "boolean" }, force: { type: "boolean" } }, positionals: 1 },
   prompts: { options: {}, positionals: 2 },
   env: { options: { "keep-days": { type: "string" }, "all-repos": { type: "boolean" }, "dry-run": { type: "boolean" } },
@@ -519,6 +520,14 @@ class Commands {
     }
   }
 
+  /** The one line about models arnx has no price for: they run, their cost unknown and outside the budget cap. */
+  private unpriced(s: Settings, refs: (ModelRef | null | undefined)[]): boolean {
+    const models = unpricedModels(s, refs);
+    const note = unpricedNote(models);
+    if (note) this.d.out(note);
+    return note !== null;
+  }
+
   /** With arnx cloud, the one line about the repository's own prompts (they are not used, nothing of them is sent). */
   private cloudPrompts(repo: string): void {
     if (hasOverrides(repo)) this.d.out(CLOUD_PROMPTS);
@@ -830,6 +839,7 @@ class Commands {
     const started = this.clock();
     const cloud = await this.cloudBrain(repo, s, mode);
     if (cloud) this.cloudPrompts(repo);
+    const unpriced = !cloud && this.unpriced(s, [s.reviewer]);
     const result = await this.withProgress(a, (progress) => runSetup(repo, s,
       cloud ? null : this.d.setupModel ?? makeAgentModel(s, this.d.env), { outDir, project, add, progress, failureModel,
         untracked, localPins: localPinsPath(this.d.env, repo),
@@ -846,7 +856,8 @@ class Commands {
       return code;
     };
     // With arnx cloud the figure is what it billed (its price), not the models' cost.
-    const cost = cloud ? `Billed $${result.costUsd.toFixed(2)} by arnx cloud` : `Cost $${result.costUsd.toFixed(2)}`;
+    const cost = cloud ? `Billed $${result.costUsd.toFixed(2)} by arnx cloud`
+      : unpriced ? "Cost unknown" : `Cost $${result.costUsd.toFixed(2)}`;
     if (!result.ok) {
       const saved = result.yamlText ? this.saveAttempt(repo, result.yamlText) : null;
       const failure = setupFailure(result, s.setupBudgetUsd);
@@ -877,7 +888,8 @@ class Commands {
     this.d.out("");
     this.d.out(approvalScreen(proposed, repo, { proofs: result.projects, untracked }));
     this.d.out("");
-    this.d.out(`Wrote ${REVIEW_FILE} (${minutes(this.clock() - started)}, $${result.costUsd.toFixed(2)})` +
+    this.d.out(`Wrote ${REVIEW_FILE} (${minutes(this.clock() - started)}, ` +
+      `${unpriced ? "cost unknown" : `$${result.costUsd.toFixed(2)}`})` +
       `${notes ? `; notes in ${relative(repo, notes)}` : ""}.`);
     // Nobody is asked: the suites run once more and the file is stamped; what is worth a look comes at the end.
     const r = await this.approveRun(repo, a, project, untracked, { warnings, since: started });
@@ -1027,6 +1039,7 @@ class Commands {
   /** Pin the key-shaped strings of each file in review.yaml, so snapshots keep it while it holds no others. */
   async allowSecret(a: Args): Promise<number> {
     const repo = this.repo();
+    if (a.values.remove) return this.disallowSecret(repo, a.positionals);
     if (!a.positionals.length) throw new ArnxError("name the files to allow: arnx allow-secret PATH...");
     const pins = a.positionals.map((p) => {
       if (!existsSync(resolve(this.d.cwd, p))) throw new ArnxError(`${p}: no such file`);
@@ -1055,6 +1068,30 @@ class Commands {
     this.emit("ok", 0, { files: pins.map((p) => ({ path: p.path, matches: p.hits.length,
       labels: p.hits.map((h) => ({ label: h.label, line: h.line })) })), review_yaml: REVIEW_FILE,
       next: [seed ? "arnx setup" : "arnx review"] });
+    return 0;
+  }
+
+  /** allow-secret --remove: the paths' pins out of review.yaml, so their files are withheld again. The files need not
+   * exist any more. A seed left with nothing allowed is removed. */
+  private disallowSecret(repo: string, paths: string[]): number {
+    if (!paths.length) throw new ArnxError("name the files to stop allowing: arnx allow-secret --remove PATH...");
+    const rels = paths.map((p) => {
+      const at = resolve(this.d.cwd, p);
+      const full = existsSync(at) ? realpathSync(at)
+        : existsSync(dirname(at)) ? join(realpathSync(dirname(at)), basename(at)) : at;
+      if (!full.startsWith(repo + sep)) throw new ArnxError(`${p} is outside the repository`);
+      return relative(repo, full).split(sep).join("/");
+    });
+    const path = reviewConfigPath(repo);
+    if (!existsSync(path)) throw new ArnxError(`${rels[0]} is not allowed in ${REVIEW_FILE}; nothing to remove`);
+    const seed = isSeedFile(repo);
+    const text = withoutSecretPins(readFileSync(path, "utf8"), rels);
+    if (seed && readSecretPins(repo).every((p) => rels.includes(p.path))) rmSync(path);
+    else writeFileSync(path, text);
+    this.d.out(`✓ No longer allowed: ${rels.join(", ")} (withheld again from model calls and the sandbox).`);
+    const next = seed ? "arnx setup" : "arnx review";
+    this.d.out(`Next: ${next}`);
+    this.emit("ok", 0, { removed: rels, review_yaml: REVIEW_FILE, next: [next] });
     return 0;
   }
 
@@ -1193,6 +1230,7 @@ class Commands {
       return this.reviewWith(repo, s, a, cloud, untracked);
     }
     const agentModel = makeAgentModel(s, this.d.env);
+    this.unpriced(s, [s.reviewer, s.challenger, s.challengerFallback, s.hunter, s.secondHunter]);
     // Verdict calls give up on a stalled attempt sooner than hunt calls (see makeChallenger).
     const challenger = makeChallenger(s, this.d.env);
     const progress = new Progress(this.progressLine, { quiet: a.values.quiet as boolean | undefined,
@@ -1259,6 +1297,7 @@ class Commands {
       live: this.d.live ?? null, cost: costSince() });
     let runner = null;
     let billed = false; // arnx cloud turns the answers into tests: their cost is what it billed
+    let unpriced = false; // the answer model has no price: its cost is unknown
     if (!a.values["no-answers"]) {
       s = await this.agreed(repo, s, mode); // answers are turned into tests by a model
       await this.reprove(repo, a, again);
@@ -1269,6 +1308,7 @@ class Commands {
       } else {
         // Answer rounds use answer_model when set (a cheap model writes a test for a stated behaviour well).
         const agent = makeAgentModel(s.answerModel ? { ...s, reviewer: s.answerModel } : s, this.d.env);
+        unpriced = this.unpriced(s, [s.answerModel ?? s.reviewer]);
         agent.notice = progress.say;
         runner = makeAnswerRunner(repo, loadReviewFile(repo), s, agent, dockerSession, progress.say);
       }
@@ -1318,7 +1358,7 @@ class Commands {
       = [];
     for (const ans of result.answers) {
       const keptCount = Object.values(ans.keep).reduce((n, v) => n + v.size, 0);
-      const cost = `$${ans.costUsd.toFixed(2)}${billed ? " billed" : ""}`;
+      const cost = unpriced ? "cost unknown" : `$${ans.costUsd.toFixed(2)}${billed ? " billed" : ""}`;
       const failing = ans.disagree.map((t) => t.split("::").at(-1)!);
       const rewrite = result.rewrites.find((w) => w.id === ans.qid);
       const label = rewrite ? `${ans.qid} (rewrite of ${rewrite.findings.join(", ")})` : ans.qid;
