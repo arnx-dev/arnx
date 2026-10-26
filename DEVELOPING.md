@@ -252,7 +252,8 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   `timed_out` when the call ran out of time.
 - `suspect.outcome`, `report.done` (`reviewer.ts`): what became of each suspect; the report's totals.
 - `setup.started`, `setup.attempt`, `setup.completed` (`setup.ts`): the setup agent's attempts and result;
-  `setup.withheld`: files left out of its snapshot as secret-looking (only when there are some); `setup.uses_check`
+  `setup.withheld`: files left out of its snapshot as secret-looking (only when there are some); `setup.paths_check`:
+  the map's paths (uses entries wider than meant), with each hint's project and kind; `setup.uses_check`
   (`context = "precise"` only): the map against the code, with the projects indexed and each hint's project and kind.
 - `context.index` (`indexer.ts`, `context = "precise"` only): one project's code index: `ok`, `secs`, `files`, and
   `reason` when the hunt's context fell back to names.
@@ -430,7 +431,7 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `hunt.ts` | The hunt's pieces: suspects parsed and merged, the second hunter, part hunters, ranking |
 | `scip.ts` | A SCIP code index read (protobuf, no dependency): each occurrence's file, line, columns, symbol and roles |
 | `indexer.ts` | `context = "precise"`: a project's code index, built by its indexer in its environment image plus a layer, run as tests run; any failure falls back to names |
-| `usescheck.ts` | The map against the code: `uses` entries a project's code never refers to, files it refers to outside its map, referenced `uncovered` paths |
+| `usescheck.ts` | The map against the code: `uses` entries a project's code never refers to, files it refers to outside its map, referenced `uncovered` paths; and against its paths alone (`mapHints`): unanchored entries matching in several places, entries taking in other projects whole |
 | `testround.ts` | Snapshot + session + the brain's agent round over the tools + 3 runs, shared by review and answers |
 | `setup.ts` | The setup agent's tools, `runSuite`, the proof (`approveFile`) |
 | `jev.ts` | Experimental: JEV's hint on a setup failure no signature explains; asked only with `[setup] jev = true` and `JEV_API_KEY` |

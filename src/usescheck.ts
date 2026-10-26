@@ -2,13 +2,14 @@
 // entry its code never references reviews it for nothing (a catch-all `packages/`, an unanchored `lib/` matching
 // `packages/lib/`), and a file its code references but neither owns nor uses leaves changes there unreviewed by it.
 // Read from the projects' code indexes; it sees code only (an import of a YAML file is not in them), so these are
-// hints for the setup agent, never refusals on their own.
+// hints for the setup agent, never refusals on their own. mapHints needs no index: the map's paths alone.
 import { posix } from "node:path";
 import type { ReviewFile } from "./config";
 import { matcher } from "./ignore";
 import { DEFINITION, type ScipIndex } from "./scip";
 
-export interface UsesHint { project: string; kind: "unreferenced" | "missing" | "uncovered"; text: string }
+export interface UsesHint { project: string; kind: "unreferenced" | "missing" | "uncovered" | "unanchored" | "catch-all";
+  text: string; entry?: string }
 
 /** File -> the other files whose definitions it refers to, over every index given (paths relative to the repository). */
 export function fileReferences(indexes: ScipIndex[]): Map<string, Set<string>> {
@@ -68,7 +69,7 @@ export function usesHints(file: ReviewFile, refs: Map<string, Set<string>>): Use
       // An entry without a leading slash matches at any depth: `lib/` also takes in `packages/lib/`.
       const top = posix.normalize(entry.replace(/^\/+/, ""));
       const unanchored = !entry.startsWith("/") && matched.some((f) => !f.startsWith(top));
-      hints.push({ project: p.name, kind: "unreferenced", text: `${p.name}: its code never refers to the ` +
+      hints.push({ project: p.name, kind: "unreferenced", entry, text: `${p.name}: its code never refers to the ` +
         `${matched.length} source file${matched.length === 1 ? "" : "s"} uses ${entry} matches (${few(where)}); ` +
         (unanchored ? `if you meant the top-level folder, anchor it (/${top})` : "drop it unless the project depends " +
           "on them in a way code does not show (a file it reads, a contract it mirrors)") });
@@ -88,6 +89,43 @@ export function usesHints(file: ReviewFile, refs: Map<string, Set<string>>): Use
     if (by.length) {
       hints.push({ project: by[0]!, kind: "uncovered", text: `${u.path} is listed under uncovered, but the code of ` +
         `${by.join(", ")} refers to it: add it to their uses` });
+    }
+  }
+  return hints;
+}
+
+/** Hints for `file`'s map from its paths alone (`files`: the repository's files): a uses entry with no slash but a
+ * trailing one matches at any depth, so one that matches in several places (`api/` and `packages/api/`) is probably
+ * meant for one of them; and an entry that takes in two or more other projects whole (a catch-all `services/`) has
+ * every change in them reviewed twice. */
+export function mapHints(file: ReviewFile, files: string[]): UsesHint[] {
+  const hints: UsesHint[] = [];
+  const projects = file.projects.map((p) => ({ p, owns: matcher(p.owns.join("\n")) }));
+  for (const { p, owns } of projects) {
+    for (const entry of p.uses) {
+      const m = matcher(entry);
+      const matched = files.filter((f) => !owns(f) && m(f));
+      if (!matched.length) continue;
+      if (!entry.replace(/\/+$/, "").includes("/")) {
+        // Where each file is matched: the shortest leading part of its path the entry matches.
+        const places = [...new Set(matched.map((f) => {
+          const parts = f.split("/");
+          const k = parts.findIndex((_, i) => m(`${parts.slice(0, i + 1).join("/")}/`));
+          const at = parts.slice(0, k + 1).join("/");
+          return k < parts.length - 1 ? `${at}/` : at;
+        }))].sort();
+        if (places.length > 1) {
+          hints.push({ project: p.name, kind: "unanchored", entry, text: `${p.name}: uses ${entry} matches in ` +
+            `${places.length} places (${few(places)}); anchor it to the one meant (${few(places.map((x) => `/${x}`))})` });
+        }
+      }
+      const whole = projects.filter((o) => o.p !== p && files.some((f) => o.owns(f)) &&
+        files.every((f) => !o.owns(f) || m(f))).map((o) => o.p.name);
+      if (whole.length > 1) {
+        hints.push({ project: p.name, kind: "catch-all", entry, text: `${p.name}: uses ${entry} takes in ` +
+          `${whole.length} other projects whole (${few(whole)}), so every change in them is reviewed by ${p.name} too ` +
+          `(duplicate findings, double cost); narrow it to what ${p.name} depends on` });
+      }
     }
   }
   return hints;

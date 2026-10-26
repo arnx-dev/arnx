@@ -34,7 +34,7 @@ import { loadSettings, refString, type Settings, settingsPath } from "./settings
 import { runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
 import { SOURCE } from "./untested";
 import { otherLanguageOf } from "./languages";
-import { fileReferences, usesHints } from "./usescheck";
+import { fileReferences, mapHints, type UsesHint, usesHints } from "./usescheck";
 import { agentUse, logUsage } from "./usage";
 import { randomHex } from "./util";
 import { VERSION } from "./version";
@@ -639,7 +639,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     proven: new Map<string, string>(), attempts: 0, proofs: new Map<string, ProjectProof>(),
     final: null as ReviewFile | null, lastFailing: new Map<string, { env: string; files: string[] }>(),
     failing: [] as string[], failingProject: null as string | null, problem: "", needed: null as NeededFile[] | null,
-    usesChecked: false };
+    usesChecked: false, pathsChecked: false, pathHints: [] as UsesHint[] };
   const tmp = tempDir("arnx-setup-");
   // Docker steps of this setup, with their durations.
   dockerSteps.log = (line) => {
@@ -861,6 +861,21 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         say(`Proposal rejected: ${state.problem}. Retrying...`);
         return `refused:\n${problems.join("\n")}`;
       }
+      // The map's paths are checked once, before any project runs: uses entries wider than meant go back as hints,
+      // and the same file proposed again is accepted. Approved projects must stay as they are, so none is named.
+      if (!state.pathsChecked) {
+        state.pathsChecked = true;
+        state.pathHints = mapHints(f, files.filter((p) => !ignoredFile(p) && !isSecretPath(p)))
+          .filter((h) => !keep.has(h.project));
+        const hints = state.pathHints;
+        emit("setup.paths_check", { projects: f.projects.length,
+          hints: hints.map((h) => ({ project: h.project, kind: h.kind })) });
+        if (hints.length) {
+          say(`${hints.length} uses entr${hints.length === 1 ? "y" : "ies"} too wide; asking the agent`);
+          return "refused once: these uses entries reach further than meant:\n" + hints.map((h) => `- ${h.text}`)
+            .join("\n") + "\nFix them, or propose the same file again to keep it as it is.";
+        }
+      }
       // The rest is right: propose runs each project changed since it was proven, instead of a round trip per project.
       const failed: string[] = [];
       const failedNames: string[] = [];
@@ -889,7 +904,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           const r = await (o.indexer ?? projectIndex)(p, snap, join(o.outDir, "index", p.name));
           if (r.index) indexes.push(r.index);
         }
-        const hints = indexes.length ? usesHints(f, fileReferences(indexes)) : [];
+        // An entry the path check already named is not named again.
+        const hints = (indexes.length ? usesHints(f, fileReferences(indexes)) : [])
+          .filter((h) => !state.pathHints.some((x) => x.project === h.project && x.entry === h.entry));
         emit("setup.uses_check", { indexed: indexes.length, projects: f.projects.length,
           hints: hints.map((h) => ({ project: h.project, kind: h.kind })) });
         if (hints.length) {

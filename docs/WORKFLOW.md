@@ -76,7 +76,10 @@ image (scip-python, scip-typescript or rust-analyzer; no network) and follows th
 module's function or constant with the same name stays out. Indexing adds about 10 to 50 seconds per project to a
 review and builds one extra layer per test image; when the index cannot be built, the review goes on by name. Setup
 then also checks the map once: a `uses` entry the project's code never refers to, or code it refers to outside its
-`owns` and `uses`, goes back to the setup agent as a hint.
+`owns` and `uses`, goes back to the setup agent as a hint. Without an index, setup still checks the map's paths
+once: a `uses` entry with no leading `/` that matches in several places (`api/` also matching `packages/api/`), or
+one that takes in two or more other projects whole (a catch-all `services/`), would have those changes reviewed
+twice, so it goes back to the setup agent as a hint too.
 
 What a review sends, and what it leaves out (untracked files, `.arnxignore`, secrets):
 [SAFETY.md](SAFETY.md#what-a-review-sends).
