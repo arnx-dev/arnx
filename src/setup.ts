@@ -16,8 +16,8 @@ import {
   secretPinsOf, secretPinsYaml, stamp, stampFile,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
-import { describeHints, diagnose, firstLine, type Hint, missingLeftOut, npxDownload, npxText, passingApart,
-  unexplainedFiles } from "./diagnose";
+import { describeHints, diagnose, firstErrors, firstLine, type Hint, missingLeftOut, npxDownload, npxText,
+  passingApart, unexplainedFiles } from "./diagnose";
 import type { FailureModel } from "./jev";
 import { ArnxError } from "./errors";
 import { loadIgnore, matcher } from "./ignore";
@@ -246,7 +246,8 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
       // Experimental: what no signature and no run apart explains is asked of JEV, one failure per file. Asked only
       // now, since a test that fails for want of another file's state reads like a genuine failure.
       if (failureModel) hints.push(...await askModel(failureModel, results, cfg, snap, hints));
-      return [ok, summary, tailOf(result.output), skips, failing, describeHints(hints, cfg), counts] as Out;
+      const said = [describeHints(hints, cfg), firstErrors(results, cfg)].filter(Boolean).join("\n");
+      return [ok, summary, tailOf(result.output), skips, failing, said, counts] as Out;
     }
     if (targets.length) return [ok, summary, tailOf(result.output), skips, failing, "", counts] as Out;
     const [probed, tail, ignored] = probe(session, snap, cfg);
