@@ -29,8 +29,8 @@ arnx reviews only code inside a project backed by an existing test suite (a proj
    - self-contained: arnx runs tests in Docker with no network, so use saved fixtures (a recorded API response, a
      transaction as JSON in a file), never live services, keys or the internet;
    - run it yourself and make it pass on the current code.
-   Then tell the user to run `arnx setup --add` themselves (it is an approval step: they approve
-   `.arnx/review.yaml`), and to ask you to review again once it is approved. Do not run setup yourself.
+   Then tell the user to run `arnx setup --add` themselves (it sends code to their model and rewrites
+   `.arnx/review.yaml`), and to ask you to review again once it has finished. Do not run setup yourself.
 
 ## Example wording
 

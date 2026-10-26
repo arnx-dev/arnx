@@ -25,7 +25,7 @@ import { type Account, byokHint, CloudClient, credentialsPath, deleteCredentials
 import { dockerSession, suffixReviewCopies } from "./testround";
 import type { SessionFactory } from "./sandbox";
 import { git, repoRoot } from "./change";
-import { approvalStamp, isSeedFile, loadReviewFile, parseReviewFile, type ReviewFile, reviewConfigPath, withSecretPins }
+import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, type ReviewFile, reviewConfigPath, withSecretPins }
   from "./config";
 import { getAdapter } from "./adapters";
 import { ArnxError, internalError, SetupRequired } from "./errors";
@@ -48,10 +48,11 @@ import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSetting
 import { providerLines, unusedKeysNote } from "./settings";
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
-import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, runSetup, type SetupResult,
-  stillRed }
+import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, type ProjectProof, runSetup,
+  type SetupResult, stillRed }
   from "./setup";
-import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, REVIEW_FILE, setupPreview }
+import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, REVIEW_FILE, setupPreview,
+  worthALook }
   from "./setupview";
 import { isoSeconds } from "./util";
 import { spend } from "./spend";
@@ -94,9 +95,9 @@ Tests every change your coding agent makes.
 
 Prepare, once per repository
   init [--cloud] [--force]              write .arnx/config.toml and .arnxignore
-  setup [--untracked] [--yes] [--force] find how your tests run in Docker, then approve it
+  setup [--untracked] [--yes] [--force] find how your tests run in Docker and prove it
         [--project NAME | --add]        prove one project again, or cover what no project covers
-  approve [--project NAME] [--yes]      run the suites in .arnx/review.yaml and approve it
+  approve [--project NAME]              run the suites in .arnx/review.yaml again and stamp it
   doctor                                check config, keys, Docker and the environment
   cloud on|off [--yes]                  arnx cloud's models instead of your keys, or back
   login | logout | credits              arnx cloud: sign this machine in or out; the balance
@@ -563,10 +564,14 @@ class Commands {
       checks.push([null, "Environment", "not configured"]);
     } else {
       try {
-        file = loadReviewFile(repo);
+        file = loadReviewFile(repo, { requireApproved: false });
         const names = file.projects.map((p) => p.name);
-        checks.push([true, "Environment", file.legacy ? "approved" : `approved (${names.length} project` +
-          `${names.length === 1 ? "" : "s"}: ${names.join(", ")})`]);
+        const which = file.legacy ? "" : ` (${names.length} project${names.length === 1 ? "" : "s"}: ${names.join(", ")})`;
+        // A changed or unproven file is no stop: the next review proves it first.
+        const state = isFileApproved(file) ? `proven${which}`
+          : approvalStamp(repo) ? `changed since its proof${which}: the next review proves it again`
+          : `not proven yet${which}: the next review proves it`;
+        checks.push([true, "Environment", state]);
       } catch (e) {
         if (!(e instanceof ArnxError)) throw e;
         checks.push([false, "Environment", e.message]);
@@ -712,15 +717,15 @@ class Commands {
     if (project || add) {
       if (!existsSync(path)) throw new SetupRequired("no .arnx/review.yaml yet; run `arnx setup` first");
     } else if (!a.values.force) {
-      // Only a file approved once is kept: a seed, or a failed setup's attempt (never approved), is set up again.
+      // Only a file proven once is kept: a seed, or a failed setup's attempt (never proven), is set up again.
       const stamp = approvalStamp(repo);
       if (stamp?.current) {
-        throw new ArnxError(`${REVIEW_FILE} is already set up (approved ${stamp.at} by ${stamp.by}). Next: arnx review ` +
+        throw new ArnxError(`${REVIEW_FILE} is already set up (proven ${stamp.at} by ${stamp.by}). Next: arnx review ` +
           "— or arnx setup --force to start over (--project NAME redoes one project, --add covers more).");
       }
       if (stamp) {
-        throw new ArnxError(`${REVIEW_FILE} changed since it was approved (${stamp.at} by ${stamp.by}). Next: arnx ` +
-          "approve — or arnx setup --force to start over.");
+        throw new ArnxError(`${REVIEW_FILE} changed since its proof (${stamp.at} by ${stamp.by}); the next review ` +
+          "proves it again. Next: arnx review — or arnx setup --force to start over.");
       }
     }
     // doctor's checks first: a missing key or a stopped Docker ends setup here, before it reads or spends anything.
@@ -759,12 +764,11 @@ class Commands {
     };
     // With arnx cloud the figure is what it billed (its price), not the models' cost.
     const cost = cloud ? `Billed $${result.costUsd.toFixed(2)} by arnx cloud` : `Cost $${result.costUsd.toFixed(2)}`;
-    const auto = Boolean(a.values.yes);
     if (!result.ok) {
       const saved = result.yamlText ? this.saveAttempt(repo, result.yamlText) : null;
       const failure = setupFailure(result, s.setupBudgetUsd);
       this.d.out(failure.text);
-      this.d.out(`${cost} · last attempt: ${saved ? `${saved} (not approved)` : "none"} · logs: .arnx/setup/`);
+      this.d.out(`${cost} · last attempt: ${saved ? `${saved} (not proven)` : "none"} · logs: .arnx/setup/`);
       // Files the tests need and the snapshot left out: only letting them in helps, then the same setup again.
       const again = `arnx setup${project ? ` --project ${project}` : add ? " --add" : ""}`;
       const letIn = neededSteps(result.needed ?? []);
@@ -785,30 +789,55 @@ class Commands {
     const warnings = approvalWarnings(proposed, result.projects);
     const json = (o: { approved: boolean; record?: string | null; approval?: ApprovedProject[];
       failure?: Record<string, unknown> | null; next: string[] }) => setupJson({ file: proposed, result,
-      approved: o.approved, auto: o.approved && auto, files, warnings, reviewYaml: REVIEW_FILE, record: o.record ?? null,
+      approved: o.approved, auto: o.approved, files, warnings, reviewYaml: REVIEW_FILE, record: o.record ?? null,
       seconds: seconds(), failure: o.failure ?? null, next: o.next, approval: o.approval ?? [] });
     this.d.out("");
     this.d.out(approvalScreen(proposed, repo, { proofs: result.projects, untracked }));
     this.d.out("");
     this.d.out(`Wrote ${REVIEW_FILE} (${minutes(this.clock() - started)}, $${result.costUsd.toFixed(2)})` +
       `${notes ? `; notes in ${relative(repo, notes)}` : ""}.`);
-    if (!await this.confirm("Approve this environment?", auto)) {
-      this.d.out(`Environment not approved; ${REVIEW_FILE} is saved.`);
-      this.d.out("Next: arnx approve");
-      this.emit("not-approved", 3, json({ approved: false, next: ["arnx approve"] }));
-      return finish(3, false);
-    }
-    const r = await this.approveRun(repo, a, project, untracked, { auto, warnings, since: started });
+    // Nobody is asked: the suites run once more and the file is stamped; what is worth a look comes at the end.
+    const r = await this.approveRun(repo, a, project, untracked, { warnings, since: started });
     if (r.code !== 0) {
-      this.d.out(`${cost} · last attempt: ${REVIEW_FILE} (not approved) · logs: .arnx/run/`);
+      this.d.out(`Not proven:\n${r.detail}`);
+      this.d.out(`${cost} · last attempt: ${REVIEW_FILE} (not proven) · logs: .arnx/run/`);
       this.d.out(`Next: fix ${REVIEW_FILE}, then arnx approve`);
       const failing = r.projects.flatMap((p) => p.unexpected);
       this.emit("fail", 2, json({ approved: false, approval: r.projects, next: ["arnx approve"],
         failure: { kind: failing.length ? "tests" : "environment", reason: r.detail, failing } }));
       return finish(r.code, false);
     }
+    this.provenEnd(repo, proposed, r.projects, { proofs: result.projects, untracked });
     this.emit("ok", 0, json({ approved: true, record: r.record, approval: r.projects, next: ["arnx review"] }));
     return finish(0, true);
+  }
+
+  /** The end of setup and approve: the proof, what is worth a look (only what applies), the next step. */
+  private provenEnd(repo: string, file: ReviewFile, projects: ApprovedProject[],
+                    o: { proofs?: ProjectProof[]; untracked?: boolean }): void {
+    this.d.out("✓ Environment proven");
+    const red = projects.reduce((k, p) => k + p.accepted_failing, 0);
+    if (red) this.d.out(stillRed(red));
+    const look = worthALook(file, repo, o);
+    if (look.length) this.d.out(["", "Worth a look:", ...look.map((l) => `  ! ${l}`), ""].join("\n"));
+    this.d.out(nextStep(repo));
+  }
+
+  /** A review.yaml changed since its proof (or never proven) is proven again before a review, a check or accept uses
+   * its sandbox: one line, the suites, the stamp. A failing proof stops the command (exit 3); `command` is the one to
+   * run again once the file is fixed. */
+  private async reprove(repo: string, a: Args, command: string): Promise<void> {
+    if (!existsSync(reviewConfigPath(repo)) || isSeedFile(repo)) return; // the command itself says to run setup
+    const file = loadReviewFile(repo, { requireApproved: false });
+    if (isFileApproved(file)) return;
+    const stamped = approvalStamp(repo) !== null;
+    const why = stamped ? "changed since its proof" : "is not proven yet";
+    this.d.out(`${REVIEW_FILE} ${why}: running its suites${stamped ? " again" : ""}`);
+    const r = await this.approveRun(repo, a, undefined, undefined, { warnings: approvalWarnings(file) });
+    if (r.code !== 0) {
+      throw new SetupRequired(`${REVIEW_FILE} ${why}, and its suites fail:\n${r.detail}\nNext: fix ${REVIEW_FILE}, ` +
+        `then ${command}`);
+    }
   }
 
   /** A failed setup's last attempt: `.arnx/review.yaml`, unapproved, unless that file is approved (a failed attempt
@@ -857,12 +886,13 @@ class Commands {
     }
   }
 
-  /** Runs the suites and stamps the file. `untracked`: the suites run with untracked files too, as setup proved them
-   * (default: `[review] untracked`). `auto`: approved by --yes; `warnings`: the screen's `!` lines, recorded with the
-   * approval in .arnx/setup/approval.md (a local file; review.yaml stays as it is). */
+  /** The proof: runs the suites and stamps the file. `untracked`: the suites run with untracked files too, as setup
+   * proved them (default: `[review] untracked`). `warnings`: what is worth a look, recorded with the proof in
+   * .arnx/setup/approval.md (a local file; review.yaml stays as it is). Says nothing but progress. */
   private async approveRun(repo: string, a: Args, project: string | undefined, untracked: boolean | undefined,
-                           o: { auto: boolean; warnings: string[]; since?: number })
+                           o: { warnings: string[]; since?: number })
     : Promise<{ code: number; projects: ApprovedProject[]; detail: string; record: string | null }> {
+    // Who ran the proof: the git user (a coding agent running arnx is not told apart from its user).
     const by = git(repo, ["config", "user.name"], [0, 1]).trim() || "unknown";
     const at = isoSeconds(new Date());
     const [ok, detail, suites] = await this.withProgress(a, (progress) =>
@@ -872,22 +902,13 @@ class Commands {
     o.since !== undefined ? { since: o.since } : {});
     const projects = suites.map((s) => ({ name: s.name, ok: s.ok, summary: s.summary,
       accepted_failing: s.acceptedFailing, unexpected: s.unexpected }));
-    if (!ok) {
-      this.d.out(`Not approved:\n${detail}`);
-      return { code: 2, projects, detail, record: null };
-    }
+    if (!ok) return { code: 2, projects, detail, record: null };
     const record = APPROVAL_RECORD;
     const sha = createHash("sha256").update(readFileSync(reviewConfigPath(repo))).digest("hex").slice(0, 12);
     mkdirSync(dirname(join(repo, record)), { recursive: true });
-    writeFileSync(join(repo, record), [`# Environment ${o.auto ? "auto-approved (--yes)" : "approved"}`, "",
-      `${at} · by ${by} · ${REVIEW_FILE} sha256 ${sha}`, "",
-      ...(o.warnings.length ? ["Warnings:", ...o.warnings.map((w) => `- ${w}`)] : ["Warnings: none"]), ""].join("\n"));
-    const n = o.warnings.length;
-    this.d.out(!o.auto ? "✓ Environment approved" : `✓ Environment auto-approved (--yes)` +
-      (n ? `, with ${n} warning${n === 1 ? "" : "s"}` : ""));
-    const red = suites.reduce((k, s) => k + s.acceptedFailing, 0);
-    if (red) this.d.out(stillRed(red));
-    this.d.out(nextStep(repo));
+    writeFileSync(join(repo, record), ["# Environment proven", "", `${at} · by ${by} · ${REVIEW_FILE} sha256 ${sha}`, "",
+      ...(o.warnings.length ? ["Worth a look:", ...o.warnings.map((w) => `- ${w}`)] : ["Worth a look: nothing"]), ""]
+      .join("\n"));
     return { code: 0, projects, detail, record };
   }
 
@@ -917,11 +938,11 @@ class Commands {
     this.d.out(`✓ Allowed in ${REVIEW_FILE}: from now on, model calls and the sandbox may include ` +
       `${pins.length === 1 ? "this file" : "these files"}.`);
     this.d.out("  A new key-like string in it withholds the file again.");
-    this.d.out(`Next: ${seed ? "arnx setup" : "arnx approve"}`);
+    this.d.out(`Next: ${seed ? "arnx setup" : "arnx review"}`);
     // Never the matched text, nor its pins: where each key-like string is, and what kind it looks like.
     this.emit("ok", 0, { files: pins.map((p) => ({ path: p.path, matches: p.hits.length,
       labels: p.hits.map((h) => ({ label: h.label, line: h.line })) })), review_yaml: REVIEW_FILE,
-      next: [seed ? "arnx setup" : "arnx approve"] });
+      next: [seed ? "arnx setup" : "arnx review"] });
     return 0;
   }
 
@@ -1024,17 +1045,16 @@ class Commands {
     const repo = this.repo();
     const file = loadReviewFile(repo, { requireApproved: false }); // validates the file before showing it
     const n = file.projects.length;
+    const untracked = untrackedSetting(repo);
     this.d.out(approvalScreen(file, repo, { header: `${REVIEW_FILE} holds ${n} project${n === 1 ? "" : "s"}.`,
-      untracked: untrackedSetting(repo) }));
+      untracked }));
     this.d.out("");
-    if (!await this.confirm("Run every suite and approve this environment?", a.values.yes as boolean)) {
-      // With --json nothing is asked: approving is the person's, at a terminal or with --yes.
-      this.emit("not-approved", 3, { approved: false, projects: [], next: ["arnx approve"] });
-      return 3;
-    }
+    // Nothing is asked (--yes is still taken): the proof runs and the file is stamped.
     requireDocker();
     const r = await this.approveRun(repo, a, a.values.project as string | undefined, undefined,
-      { auto: Boolean(a.values.yes), warnings: approvalWarnings(file) });
+      { warnings: approvalWarnings(file) });
+    if (r.code === 0) this.provenEnd(repo, file, r.projects, { untracked });
+    else this.d.out(`Not proven:\n${r.detail}`);
     this.emit(r.code === 0 ? "ok" : "fail", r.code, { approved: r.code === 0, projects: r.projects,
       ...(r.code === 0 ? {} : { detail: r.detail }), next: [r.code === 0 ? "arnx review" : "arnx approve"] });
     return r.code;
@@ -1048,6 +1068,7 @@ class Commands {
     if (typeof ready === "number") return ready;
     const { mode } = ready;
     const s = await this.agreed(repo, ready.s, mode);
+    await this.reprove(repo, a, "arnx review");
     const cloud = await this.cloudBrain(repo, s, mode);
     if (cloud) return this.reviewWith(repo, s, a, cloud, untracked);
     const agentModel = makeAgentModel(s, this.d.env);
@@ -1109,6 +1130,10 @@ class Commands {
     const { s: file, mode } = this.settings(repo, a);
     let s = file;
     const rdir = findReview(repo, a.positionals[0] ?? null);
+    // Answers and the closing check run in the sandbox: a changed review.yaml is proven again first.
+    if (!a.values["no-answers"] || (!a.values["no-check"] && this.d.check !== false)) {
+      await this.reprove(repo, a, `arnx accept${a.positionals[0] ? ` ${a.positionals[0]}` : ""}`);
+    }
     const progress = new Progress(this.progressLine, { quiet: a.values.quiet as boolean | undefined,
       live: this.d.live ?? null, cost: costSince() });
     let runner = null;
@@ -1407,7 +1432,10 @@ class Commands {
     suffixReviewCopies(repo);
     const s = loadSettings(repo);
     const json = !!a.values.json;
-    if (a.values.review) return this.recheck(a, repo, s, json);
+    if (a.values.review) {
+      await this.reprove(repo, a, `arnx check --review${a.positionals[0] ? ` ${a.positionals[0]}` : ""}`);
+      return this.recheck(a, repo, s, json);
+    }
     // Accepted tests edited or deleted since accept are not run: passing them would prove nothing. Nor are they when
     // their pins were changed or removed by anything but arnx.
     const changed = changedAccepted(repo, localPinsPath(this.d.env, repo));
@@ -1424,6 +1452,7 @@ class Commands {
         legacy.slice(0, 5).map((p) => `  ${p}`).join("\n") + (legacy.length > 5 ? `\n  … and ${legacy.length - 5} more` : "") +
         "\nMove them to .arnx/tests/: arnx accept --move");
     }
+    await this.reprove(repo, a, "arnx check");
     const progress = new Progress(this.progressLine, { quiet: a.values.quiet as boolean | undefined,
       live: this.d.live ?? null });
     const started = performance.now();

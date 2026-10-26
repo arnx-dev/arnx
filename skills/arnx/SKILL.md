@@ -8,10 +8,10 @@ description: Test a finished code change with arnx before handing it back. Use w
 arnx writes tests for a code change, runs each one 3 times in a Docker sandbox, and has a second model judge every
 failure. A **confirmed** finding is a test that failed in all 3 runs and was not disputed. The flow, in this order:
 
-    setup → approve → review → triage → accept → check → prompt → fix → check → full suites → commit/push
+    setup → review → triage → accept → check → prompt → fix → check → full suites → commit/push
 
-Yours: **review**, **check**, **prompt**, **fix**, **check**, **full suites**. The user's: **setup**, **approve**,
-**triage**, **accept**, and whether to **commit/push**. Never skip a step or change the order. Do not fix anything
+Yours: **review**, **check**, **prompt**, **fix**, **check**, **full suites**. The user's: **setup**, **triage**,
+**accept**, and whether to **commit/push**. Never skip a step or change the order. Do not fix anything
 before the user has triaged and accepted, even a finding that looks obvious.
 
 ## 1. Is arnx ready?
@@ -24,8 +24,8 @@ before the user has triaged and accepted, even a finding that looks obvious.
 2. `.arnx/config.toml` must exist. If not, tell the user to run `arnx init` themselves (it writes the config that
    names their models). Never run `arnx init`. Stop there.
 3. `arnx next` prints where the repository is in the flow and the command to run now (`arnx next --json`: the
-   `next` field). If it says `arnx setup`, `arnx approve`, `arnx login` or `arnx credits`, tell the user to run it
-   (setup asks their consent to send code and sets up the test environment; approve approves it) and stop.
+   `next` field). If it says `arnx setup`, `arnx login` or `arnx credits`, tell the user to run it (setup asks their
+   consent to send code and sets up the test environment) and stop.
    `arnx doctor` (`--json`: each check, `ok: false` for a problem) says what is missing; tell the user.
 
 ## 2. Review the change, once
@@ -41,7 +41,8 @@ the user asks for another.
    Uncommitted work is tracked files only: first `git add` each new file your change created, naming it by path
    (stage, do not commit). Never pass `--untracked`: other untracked files may be the user's private notes.
    With `--json`, stdout is one object: `result`, `review_id`, `review_json` and the summary.
-3. Exit 3: setup is missing, or the consent to send code (the message says what); tell the user.
+3. Exit 3: setup is missing, or the consent to send code, or `.arnx/review.yaml` changed and its suites now fail
+   (the message says what and names the failing tests); tell the user.
    `no project covers this change`: see [Code arnx did not review](#code-arnx-did-not-review). Exit 2 or an
    interruption: tell the user; `arnx review --resume` continues an interrupted review of the same change.
    `arnx cloud unavailable` or `arnx cloud is not open yet`: tell the user; do not retry, and do not change `[cloud]`

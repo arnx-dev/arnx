@@ -7,7 +7,7 @@ import type { TestResult } from "../src/adapters/types";
 import { parseReviewFile } from "../src/config";
 import { defaultSettings } from "../src/settings";
 import { approveFile, describeTool, runSetup, skipReasons, unexplainedFailing } from "../src/setup";
-import { approvalChecks, approvalScreen, nextStep, projectTable, setupPreview } from "../src/setupview";
+import { approvalChecks, approvalScreen, nextStep, projectTable, setupPreview, worthALook } from "../src/setupview";
 import type { SessionFactory } from "../src/sandbox";
 import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
@@ -89,7 +89,7 @@ test("an uncovered reason split by a comma is refused, not read as a shorter rea
   expect(() => parseReviewFile(bad)).toThrow("quote a reason that holds a comma");
 });
 
-test("the approval screen names the file, one line per project, and what to check", () => {
+test("the setup screen names the file, one line per project; what is worth a look comes after the proof", () => {
   const file = parseReviewFile(COVERED.replace("install: [pip install pytest]",
     "install: [\"pip install pytest || true\"]\n    known_failing: [tests/test_live.py]"));
   const proofs = [{ name: "pay", summary: "1 passed, 2 skipped", skips: ['"needs DB" (2)'] },
@@ -104,7 +104,9 @@ test("the approval screen names the file, one line per project, and what to chec
   ]);
   const screen = approvalScreen(file, repo, { proofs });
   expect(screen.startsWith("  project")).toBe(true);
-  expect(screen).toContain("Not tested (a change here is reported as not tested):\n  /app.py");
+  expect(screen).not.toContain("! ");
+  expect(worthALook(file, repo, { proofs }).filter((l) => l.startsWith("not tested: "))).toEqual([
+    expect.stringMatching(/^not tested: \/app\.py \(/), "not tested: infra/ (1 file): Terraform; no adapter"]);
   expect(screen).not.toMatch(/setup agent's notes|The full file/);
   // No project has services: no services column.
   const plain = { ...file, projects: file.projects.map((p) => ({ ...p, services: [] })) };

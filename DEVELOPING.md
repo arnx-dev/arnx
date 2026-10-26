@@ -54,8 +54,8 @@ Accepted tests are written into the project's own test folders.
 |---|---|---|---|---|---|
 | `init` | Write the harness, each role on it when its key is set (else commented, Claude standing in), the known providers and `telemetry = false`; write `.arnxignore` (data, dumps, images; fixtures kept) when absent. Asks nothing, checks nothing (doctor does; the first send asks the consent). Again: keeps what is there, creates what is missing, exit 0. `--force` rewrites the config, keeping the consents, `telemetry`, `[cloud]` and the user's provider tables | env keys, tracked and untracked files (not git-ignored) | `.arnx/config.toml`, `.arnx/.gitignore`, `.arnxignore` (only if absent) | no | no |
 | `doctor` | Say what is missing: Configuration, Models, Keys (or arnx cloud's Login and Credits), Docker (✗), then Consent and Environment (· when not done yet); coverage, JEV and the telemetry state (one line each, never a check); then "Ready for review." or "Not ready for review." and a Next line (the fix, or the flow's next command). setup and review run the same checks first and stop on a ✗ with its line | everything | nothing | no | checks it runs |
-| `setup` | doctor's checks, then the consent to send code (asked once; `--yes` gives it); an agent reads the repo and proposes a test environment, proving each proposal by running the existing suite (arnx's probe test for a project with no tests of its own); then asks to approve it and runs approve's step. `--project NAME` redoes one project, `--add` covers more; an approved file is set up again only with `--force` | the repo (snapshot) | `.arnx/review.yaml`, `.arnx/setup/` logs and `approval.md` | reviewer model | yes |
-| `approve` | The user accepts the environment: run every suite once more (accepted tests still red, matching their pins, do not block it: "N accepted tests still fail"), stamp the file with a hash, record the approval and its warnings | `.arnx/review.yaml`, `.arnx/accepted-tests.json` | the stamp in `.arnx/review.yaml`, `.arnx/setup/approval.md` | no | yes |
+| `setup` | doctor's checks, then the consent to send code (asked once; `--yes` gives it); an agent reads the repo and proposes a test environment, proving each proposal by running the existing suite (arnx's probe test for a project with no tests of its own); then runs approve's proof without asking (`--yes` gives only the consent) and ends with "Worth a look" (`worthALook` in `setupview.ts`: only what applies). `--project NAME` redoes one project, `--add` covers more; a proven file is set up again only with `--force` | the repo (snapshot) | `.arnx/review.yaml`, `.arnx/setup/` logs and `approval.md` | reviewer model | yes |
+| `approve` | The proof, asked nothing: run every suite once more (accepted tests still red, matching their pins, do not block it: "N accepted tests still fail"), stamp the file with a hash (the `approved:` key, its old name; `by` is the git user: arnx does not tell a coding agent from its user), record the proof and its warnings. `review`, `check` and `accept` run it themselves first when review.yaml changed since its proof (`reprove` in `cli.ts`: one line; a failing proof stops them, exit 3) | `.arnx/review.yaml`, `.arnx/accepted-tests.json` | the stamp in `.arnx/review.yaml`, `.arnx/setup/approval.md` | no | yes |
 | `review` | Write tests for the current change, run them 3 times, turn stable failures into findings, have a second model challenge each one | the change, the code, the approved environment | `.arnx/reviews/<id>/` | reviewer + challenger | yes |
 | `next` | Say where the repository is in the flow and the one command to run now (`next.ts`); with arnx cloud, the login or a top-up first | `.arnx/`, the change | nothing | no | no |
 | `triage` | Step through the findings in the terminal: marks, severity, answers | `.arnx/reviews/<id>/` | `review.md`, `triage.json` | no | no |
@@ -63,7 +63,7 @@ Accepted tests are written into the project's own test folders.
 | `prompt` | Print the fix prompt of the review accepted last (or the id given) | `.arnx/reviews/<id>/fix-prompt.md` | nothing | no | no |
 | `check` | Run the accepted tests in the approved sandbox, accepted tests told from the other tests in their files; refuse (exit 4) when a pinned file or its entry changed. `--review [id]`: run a review's confirmed tests on the working tree instead (`recheck.ts`), before anything is accepted | `tests/arnx/`, `.arnx/accepted-tests.json`; with `--review`, `.arnx/reviews/<id>/` | `.arnx/run/` logs | no | yes |
 | `consent` | Record the consent to send code (`--cloud`: to arnx cloud) without sending anything | `.arnx/config.toml` | `consent_at` or `cloud_consent_at` | no | no |
-| `allow-secret` | Pin the key-like strings of test-fixture files, so they are sent and copied; never shows the strings | the files named | `.arnx/review.yaml` (needs approving again) | no | no |
+| `allow-secret` | Pin the key-like strings of test-fixture files, so they are sent and copied; never shows the strings | the files named | `.arnx/review.yaml` (proven again before the next review) | no | no |
 | `env prune` | Remove this repository's environment images no approved project uses, older than `--keep-days` (7); `--all-repos`, `--dry-run` | Docker's image labels | nothing | no | yes |
 | `login`, `logout`, `credits` | arnx cloud: a device login (RFC 8628), its deletion, the balance (no answer: "arnx cloud unavailable", exit 2; "not open yet" only on arnx cloud's `not_open`) | the config directory, `/v1/account` | `~/.config/arnx/credentials.json` (0600) | no | no |
 | `cloud on`, `cloud off` | arnx cloud's models for this repository, or the user's keys again: asks the cloud consent once, changes only `[cloud] models` | `.arnx/config.toml` | `.arnx/config.toml` | no | no |
@@ -301,7 +301,7 @@ directory, read from the environment arnx was given (`XDG_CONFIG_HOME`, else `HO
 sent, which is what every test that does not set them gets), made at the first send. `TELEMETRY_OPEN` is true; the
 test CLI helper passes `telemetryOpen: false` unless a test opens it, so no test posts to the real endpoint.
 
-When on, `setup` (after approval, or when it stops), `review` (when it reports), `accept` and `check` end with
+When on, `setup` (after the proof, or when it stops), `review` (when it reports), `accept` and `check` end with
 `reportTelemetry`: one POST to `ARNX_TELEMETRY_URL` (default `https://api.arnx.dev/v1/telemetry`) of
 `{schema: 1, install_id, arnx_version, os, arch, event, at, data}`, awaited for at most `SEND_TIMEOUT_MS` (2 s:
 `main.ts` exits right after), one try, every error swallowed, the exit code unchanged. A command that throws sends
@@ -385,7 +385,7 @@ the copy under its old name is removed.
 | `cloud.ts` | arnx cloud's HTTP side: credentials (per user, 0600), the device login, calls as JSON or server-sent events, retries, what 402 / 503 / unreachable mean |
 | `hunt.ts` | The hunt's pieces: suspects parsed and merged, the second hunter, part hunters, ranking |
 | `testround.ts` | Snapshot + session + the brain's agent round over the tools + 3 runs, shared by review and answers |
-| `setup.ts` | The setup agent's tools, `runSuite`, approval |
+| `setup.ts` | The setup agent's tools, `runSuite`, the proof (`approveFile`) |
 | `jev.ts` | Experimental: JEV's hint on a setup failure no signature explains; asked only with `[setup] jev = true` and `JEV_API_KEY` |
 | `reviewer.ts` | One review, end to end: routing, rounds, findings, resume, the report |
 | `challenge.ts` | The second-model check |
@@ -428,7 +428,8 @@ CI, teammates) the committed pins are the trusted ones.
 - arnx never edits the user's code. `review` writes under `.arnx/`; `accept` writes only to `tests/arnx/` (a Rust crate:
   `tests/arnx_<id>_*.rs`) and `.arnx/` (and its local pins); `init` writes `.arnxignore` only when there is none; `skill install` writes only the skill
   folders.
-- A run refuses an environment that is unapproved or changed since approval.
+- A run uses only a proven environment: a review.yaml changed since its proof (or never proven) is proven again
+  before `review`, `check` or `accept` uses it, and a failing proof stops the command.
 - Repository content reaches the model as data, and the prompts say so.
 - `tests/clean.test.ts` keeps the tree publishable: only `node:` built-ins and declared dependencies, no private names.
 - Telemetry follows `telemetry` in `.arnx/config.toml` (init writes `false`: off unless the user turns it on), and `ARNX_TELEMETRY=0` or `DO_NOT_TRACK`

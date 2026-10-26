@@ -79,8 +79,8 @@ directly. Other providers and models: [docs/MODELS.md](docs/MODELS.md).
 
 Then, in both cases:
 
-    arnx setup                          # asks before sending code, finds how your tests run, checks it by running
-                                        # your suite in Docker; you approve the environment
+    arnx setup                          # asks before sending code, finds how your tests run, proves it by running
+                                        # your suite in Docker, then lists what is worth a look
     # ... let your agent change something ...
     arnx review                         # writes tests for the change and runs them: 2 issues confirmed (4 findings)
     arnx triage                         # mark real / intended / noise / rewrite, answer questions
@@ -88,7 +88,7 @@ Then, in both cases:
     arnx prompt                         # the fix prompt for your coding agent
     arnx check                          # runs the accepted tests; green means they pass now
 
-Commit `.arnx/config.toml` and `.arnx/review.yaml`: teammates, other branches and CI reuse the approved environment.
+Commit `.arnx/config.toml` and `.arnx/review.yaml`: teammates, other branches and CI reuse the proven environment.
 Lost? `arnx next` says where you are in this flow and the command to run now; `arnx doctor` says what is missing.
 
 `arnx review` looks at what a pull request would show: on a branch, every commit since it left the default branch
@@ -114,8 +114,9 @@ More in [docs/WORKFLOW.md](docs/WORKFLOW.md).
 ## The workflow
 
 1. **setup** reads the repository, proposes one project per unit whose tests run on their own, and checks each by
-   running its suite in Docker (no tests yet? arnx's own one-line test checks it instead). You approve it once; a
-   changed environment needs approving again.
+   running its suite in Docker (no tests yet? arnx's own one-line test checks it instead). Nothing to approve: it
+   ends with what is worth a look (test files set aside, what is not tested, allowed secret-looking files, downloads
+   from outside the package registries). A changed `.arnx/review.yaml` is proven again before the next review.
 2. **review** writes tests for the change, runs them 3 times, runs the failures on the code before the change, asks
    a second model, and writes `.arnx/reviews/<id>/review.md` with what was tested and what was not.
 3. **triage** (or edit review.md) marks each issue and answers arnx's questions; answers become tests too.
@@ -132,7 +133,7 @@ Details, exit codes, `--json` and the before/after check: [docs/WORKFLOW.md](doc
 The arnx skill lets Claude Code (and other agents that read Agent Skills) close the loop: after a change it runs
 `arnx review` once, after saying what it may cost, and hands the findings to you. Once you have triaged and accepted,
 it fixes the code from `arnx prompt` until `arnx check` passes, runs each touched project's full suite, and reports.
-Setup, approve, marking findings, answering questions, `arnx accept`, `arnx init`, logins and commits stay yours: the
+Setup, marking findings, answering questions, `arnx accept`, `arnx init`, logins and commits stay yours: the
 skill tells the agent never to run them or edit accepted tests (`arnx check` would refuse those anyway).
 
     arnx skill install                  # writes .agents/skills/arnx/ and .claude/skills/arnx/: commit them
@@ -157,7 +158,7 @@ Secret files, files with key-shaped text and paths in `.arnxignore` are never se
 
 ## Safety and data
 
-- Tests run only in Docker, on a throwaway copy of the repository, with no network (only services you approved), no
+- Tests run only in Docker, on a throwaway copy of the repository, with no network (only services in `.arnx/review.yaml`), no
   host environment and resource limits. Docker shares the host kernel: it is not a perfect boundary for hostile
   code, and image builds have network access to install dependencies.
 - Your model keys stay in the arnx process, never in a container. The secrets filter is a heuristic: extend
@@ -182,8 +183,8 @@ broke and how long setup took.
 - Changes up to 200 KB per review; review a long branch in parts with `--range A..B`.
 - Python, JavaScript/TypeScript and Rust only (`arnx init` and `arnx doctor` say so for a repository in another
   language, before anything is sent). No Windows build: use WSL 2.
-- Setup marks test files it cannot run as `known_failing`, with a reason that is a model's judgement: read those
-  entries in `.arnx/review.yaml` before approving.
+- Setup marks test files it cannot run as `known_failing`, with a reason that is a model's judgement: setup lists
+  them under "Worth a look"; read those entries in `.arnx/review.yaml`.
 - Model replies vary: two reviews of the same change can report different findings.
 
 ## Try it, and tell us

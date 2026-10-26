@@ -1,5 +1,5 @@
 // What setup and approve show a developer: what is about to happen and roughly what it costs, one line per project
-// to judge, the points worth checking before approving, and what to do next.
+// to judge, what is worth a look once the environment is proven, and what to do next.
 import { describe, filesAt, git, leftOutUntracked, resolveChange, someNames, untrackedLine } from "./change";
 import { readSecretPins, type ReviewFile, secretPinsOf } from "./config";
 import { detect } from "./detect";
@@ -45,7 +45,19 @@ export function projectTable(file: ReviewFile, proofs: ProjectProof[] = []): str
   return pad(rows).join("\n");
 }
 
-/** What a developer should look at before approving: tests the environment cannot run, and shortcuts in it. */
+/** Hosts an install line may download from without a mention: the package registries (and their subdomains). */
+const REGISTRIES = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "registry.yarnpkg.com", "crates.io"];
+
+/** The hosts an install line downloads from with curl, wget or git clone, other than the package registries. */
+export function downloadHosts(line: string): string[] {
+  if (!/\b(curl|wget)\b|\bgit\s+clone\b/.test(line)) return [];
+  const hosts = [...line.matchAll(/\b(?:https?|git|ssh|ftp):\/\/(?:[^@/\s'"]+@)?([\w.-]+)|\bgit@([\w.-]+):/g)]
+    .map((m) => (m[1] ?? m[2])!.toLowerCase());
+  return hosts.filter((h) => !REGISTRIES.some((r) => h === r || h.endsWith(`.${r}`)));
+}
+
+/** What a developer should look at once the environment is proven: tests it cannot run, shortcuts in it, and
+ * downloads from outside the package registries. */
 export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = []): string[] {
   const out: string[] = [];
   for (const p of file.projects) {
@@ -59,17 +71,19 @@ export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = []): s
     }
     const hidden = p.install.filter((l) => /\|\|\s*true\b/.test(l)).length + (/\|\|\s*true\b|;\s*true\)/.test(p.testCommand) ? 1 : 0);
     if (hidden) out.push(`${p.name}: ${hidden} command(s) ignore their own errors (|| true)`);
+    const hosts = [...new Set(p.install.flatMap(downloadHosts))];
+    if (hosts.length) out.push(`${p.name}: install downloads from ${hosts.join(", ")} (not a package registry)`);
   }
   return out;
 }
 
-/** Every `!` line of the approval screen: approvalChecks, and the files allowed although they look like secrets. */
+/** Every warning recorded with a proof: approvalChecks, and the files allowed although they look like secrets. */
 export function approvalWarnings(file: ReviewFile, proofs: ProjectProof[] = []): string[] {
   const checks = approvalChecks(file, proofs);
   const allowed = secretPinsOf(file.raw);
   if (allowed.length) {
-    checks.push(`${allowed.map((p) => p.path).join(", ")}: sent to the model and the sandbox although they look like ` +
-      "secrets (you allowed them under allow_secret_looking): approve only if they hold test fixtures");
+    checks.push(`${allowed.map((p) => p.path).join(", ")}: allowed although secret-looking; sent to the model and the ` +
+      "sandbox");
   }
   return checks;
 }
@@ -96,28 +110,31 @@ export function filesLine(f: FilesSummary): string {
       : "");
 }
 
-/** The screen before "Approve?": the table, the files line, the checks, what is not tested (the agent's notes go to a
- * file). `untracked`: untracked files are counted, as setup and reviews read them. */
+/** The screen before the proof runs: the table and the files line (the agent's notes go to a file). `untracked`:
+ * untracked files are counted, as setup and reviews read them. */
 export function approvalScreen(file: ReviewFile, repo: string, o: { proofs?: ProjectProof[]; header?: string;
   untracked?: boolean }): string {
   const lines = [...(o.header ? [o.header, ""] : []), projectTable(file, o.proofs)];
   const files = filesSummary(file, repo, !!o.untracked);
   if (files) lines.push(filesLine(files));
-  const checks = approvalWarnings(file, o.proofs);
-  if (checks.length) lines.push("", "Check before approving:", ...checks.map((c) => `  ! ${c}`));
-  if (!file.legacy) {
-    const map = coverageMap(repo, file, !!o.untracked);
-    if (map.uncovered.length) {
-      lines.push("", "Not tested (a change here is reported as not tested):",
-        ...map.uncovered.map((u) => `  ${u.path} (${u.files} file${u.files === 1 ? "" : "s"}` +
-          `${u.untracked ? `, ${u.untracked} untracked` : ""}): ${u.reason}`));
-    }
-    if (map.unexplained.length) lines.push(`  ${map.unexplained.length} source files no project mentions`);
-  }
   return lines.join("\n");
 }
 
-/** After approval: the next command, and what it would review in this repository right now (what would be sent:
+/** The lines of "Worth a look" after a proof, only what applies: the warnings, then what no project tests (a change
+ * there is reported as not tested) and source files no project mentions. */
+export function worthALook(file: ReviewFile, repo: string, o: { proofs?: ProjectProof[]; untracked?: boolean })
+  : string[] {
+  const lines = approvalWarnings(file, o.proofs);
+  if (!file.legacy) {
+    const map = coverageMap(repo, file, !!o.untracked);
+    lines.push(...map.uncovered.map((u) => `not tested: ${u.path} (${u.files} file${u.files === 1 ? "" : "s"}` +
+      `${u.untracked ? `, ${u.untracked} untracked` : ""}): ${u.reason}`));
+    if (map.unexplained.length) lines.push(`${map.unexplained.length} source files no project mentions`);
+  }
+  return lines;
+}
+
+/** After the proof: the next command, and what it would review in this repository right now (what would be sent:
  * tracked changes, and untracked files only with `untracked`, default `[review] untracked`). */
 export function nextStep(repo: string, untracked = untrackedSetting(repo)): string {
   try {

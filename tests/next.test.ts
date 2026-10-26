@@ -13,7 +13,7 @@ import { useTmp } from "./helpers/tmp";
 const tmp = useTmp();
 const YAML = "version: 1\nprojects:\n  svc:\n    root: svc\n    image: python:3.12-slim\n    test_command: pytest {targets}\n";
 
-test("next walks the flow: init, setup, approve, review, triage, check", () => {
+test("next walks the flow: init, setup, review, triage, check; an unproven file goes to review", () => {
   const repo = gitRepo(tmp());
   mkdirSync(join(repo, "svc"));
   writeFileSync(join(repo, "svc/a.py"), "X = 1\n");
@@ -22,7 +22,7 @@ test("next walks the flow: init, setup, approve, review, triage, check", () => {
   writeSettings(repo, { ...defaultSettings(), consentAt: "2026-10-14T00:00:00Z" });
   expect(whatNext(repo).command).toBe("arnx setup");
   writeFileSync(reviewConfigPath(repo), YAML);
-  expect(whatNext(repo).command).toBe("arnx approve");
+  expect(whatNext(repo).command).toMatch(/^arnx review/); // the review proves it first
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(YAML), "Dev", "2026-10-14"));
   writeFileSync(join(repo, "svc/a.py"), "X = 2\n");
   expect(whatNext(repo)).toMatchObject({ command: "arnx review" });

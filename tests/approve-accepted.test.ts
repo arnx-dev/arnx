@@ -82,7 +82,7 @@ test("approve passes with accepted tests still red, in one line; a changed one b
     sandboxOptions.docker = dockerThatRuns();
     const { repo, cli } = await acceptedRepo();
     expect(await cli.run("approve", "--yes", "--quiet")).toBe(0);
-    expect(cli.out).toContain("✓ Environment auto-approved (--yes)");
+    expect(cli.out).toContain("✓ Environment proven");
     expect(cli.out).toContain("1 accepted test still fails (bugs not fixed yet): arnx check");
     expect(cli.stdout).not.toContain("Approved.");
     expect(isFileApproved(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")))).toBe(true);
