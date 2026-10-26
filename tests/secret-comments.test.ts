@@ -111,6 +111,9 @@ test("a private key in a comment is blanked with its body; a body outside the co
     .toEqual({ line: 1, label: "a private key" });
   expect(withheld("a.ts", `/*\n * ${PEM}\n */\nconst x = 1;\n/*\n * ${BODY}\n * ${PEM_END}\n */\n`))
     .toEqual({ line: 2, label: "a private key" });
+  // A header and END in comments with no body between them, and a body in code: withheld.
+  expect(withheld("a.py", `# ${PEM}\n# ${PEM_END}\nK = """\n${NO_DIGITS}\n"""\n`)).toEqual({ line: 1, label: "a private key" });
+  expect(blanked("a.py", `# ${PEM}\n# ${PEM_END}\nK = 1\n`).lines).toEqual([1, 2]);
   // A header with no END line: a placeholder only while the file holds no key body anywhere.
   const far = Array.from({ length: 60 }, (_, i) => `const a${i} = ${i};`).join("\n");
   expect(withheld("a.ts", `// ${PEM}\n${far}\nconst b = "${BODY}";\n`)).toEqual({ line: 1, label: "a private key" });
