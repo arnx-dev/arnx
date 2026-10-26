@@ -24,6 +24,8 @@ export const GREP_FILE_LIMIT = 2_000_000;
 export const grepLimits = { ms: 2000 };
 /** Text sent to grep's worker at once: the files read so far, matched in one message. */
 export const GREP_BATCH_BYTES = 1_000_000;
+/** Longer lines are left out of a regex grep (minified or generated code, where a slow pattern backtracks longest). */
+export const GREP_LINE_LIMIT = 10_000;
 /** What a batch may take beyond the matching time left: its transfer and the worker's start. */
 const BATCH_SLACK_MS = 1000;
 export const WRITE_LIMIT = 200_000;
@@ -136,22 +138,40 @@ parentPort.on("message", (m) => {
   if (m.pattern !== undefined) { rx = new RegExp(m.pattern); return; }
   const started = Date.now();
   const found = [];
+  let skipped = 0;
   for (let f = 0; f < m.files.length && found.length < m.max; f++) {
     const lines = m.files[f];
-    for (let i = 0; i < lines.length && found.length < m.max; i++) if (rx.test(lines[i])) found.push([f, i]);
+    for (let i = 0; i < lines.length && found.length < m.max; i++) {
+      if (lines[i].length > m.lineLimit) skipped++;
+      else if (rx.test(lines[i])) found.push([f, i]);
+    }
   }
-  parentPort.postMessage({ found, ms: Date.now() - started });
+  parentPort.postMessage({ found, skipped, ms: Date.now() - started });
 });`;
 
-/** Matches batches of files against one grep's pattern until its matching time runs out. */
+/** Matches batches of files against one grep's pattern until its matching time runs out. A plain literal is searched
+ * here with indexOf (linear, every line); a regex in the worker, lines over GREP_LINE_LIMIT left out. */
 class Matcher {
   private worker: Worker | null = null;
   private used = 0;
+  /** Lines left out as too long. */
+  skipped = 0;
+  private readonly literal: boolean;
 
-  constructor(private readonly pattern: string) {}
+  constructor(private readonly pattern: string) {
+    this.literal = !/[\\^$.|?*+()[\]{}]/.test(pattern);
+  }
 
   /** Up to `max` matching lines as [file, line] indexes into `files`; a ToolError once the matching time runs out. */
   match(files: string[][], max: number): Promise<[number, number][]> {
+    if (this.literal) {
+      const found: [number, number][] = [];
+      for (let f = 0; f < files.length && found.length < max; f++) {
+        const lines = files[f]!;
+        for (let i = 0; i < lines.length && found.length < max; i++) if (lines[i]!.includes(this.pattern)) found.push([f, i]);
+      }
+      return Promise.resolve(found);
+    }
     const left = grepLimits.ms - this.used;
     if (left <= 0) return Promise.reject(this.slow());
     if (!this.worker) {
@@ -166,9 +186,10 @@ class Matcher {
         worker.off("message", onMessage);
         worker.off("error", onError);
       };
-      const onMessage = (m: { found: [number, number][]; ms: number }) => {
+      const onMessage = (m: { found: [number, number][]; skipped: number; ms: number }) => {
         done();
         this.used += m.ms;
+        this.skipped += m.skipped;
         if (this.used > grepLimits.ms) {
           this.close();
           reject(this.slow());
@@ -180,7 +201,7 @@ class Matcher {
       const timer = setTimeout(() => { done(); this.close(); reject(this.slow()); }, left + BATCH_SLACK_MS);
       worker.on("message", onMessage);
       worker.on("error", onError);
-      worker.postMessage({ files, max });
+      worker.postMessage({ files, max, lineLimit: GREP_LINE_LIMIT });
     });
   }
 
@@ -386,7 +407,22 @@ export class Workspace {
       size = 0;
       return hits.length >= GREP_LIMIT;
     };
-    const truncated = () => hits.join("\n") + `\n... (truncated at ${GREP_LIMIT} matches)`;
+    // A grep stopped by its time limit keeps what it found, then says why it stopped.
+    const send = async () => {
+      try {
+        return await flush();
+      } catch (e) {
+        if (!(e instanceof ToolError) || !hits.length) throw e;
+        stopped = e.message;
+        return true;
+      }
+    };
+    let stopped = "";
+    const skipped = () => matcher.skipped ? [`${matcher.skipped} line${matcher.skipped === 1 ? "" : "s"} over ` +
+      `${String(GREP_LINE_LIMIT).replace(/\B(?=(\d{3})+$)/g, ",")} characters skipped (minified or generated)`] : [];
+    const end = () => [hits.join("\n") || "(no matches)",
+      ...stopped ? [`... stopped: ${stopped}`] : hits.length >= GREP_LIMIT ? [`... (truncated at ${GREP_LIMIT} matches)`] : [],
+      ...skipped()].join("\n");
     for (const fp of this.walk(this.resolvePath(path))) {
       let data: Buffer;
       try {
@@ -398,10 +434,10 @@ export class Workspace {
       if (isBinary(data)) continue;
       batch.push({ fp, lines: splitLines(data.toString("utf8")) });
       size += data.length;
-      if (size >= GREP_BATCH_BYTES && await flush()) return truncated();
+      if (size >= GREP_BATCH_BYTES && await send()) return end();
     }
-    if (await flush()) return truncated();
-    return hits.join("\n") || "(no matches)";
+    await send();
+    return end();
   }
 
   private walk(base: string): string[] {

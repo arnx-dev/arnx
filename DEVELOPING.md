@@ -443,7 +443,7 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `before.ts` | The before/after check's comparison: a finding's runs on the code before the change against its failure |
 | `typecheck.ts` | The project's own type check: tsc's output read, errors on the change against those before it, in words |
 | `llm.ts` | Agent clients (Anthropic Messages, or a Responses API: OpenAI, and generic tables that copy either API); JSON calls via either; prices (a model with none runs, its cost unknown) |
-| `agent.ts` | The tool loop and its confined tools (grep refuses the usual backtracking shapes, then matches in a worker thread, stopped after 2 s of matching); hard budget |
+| `agent.ts` | The tool loop and its confined tools (grep: a plain literal by indexOf; a regex refused in the usual backtracking shapes, else matched in a worker thread without lines over 10,000 characters, stopped after 2 s of matching with what it found); hard budget |
 | `prompts.ts` | Every prompt: the default text read from `prompts.toml` (imported as text, so every build carries it), the keys and their placeholders, the builders (`Prompts`); `PROMPT_VERSION` changes with any edit of the text |
 | `userprompts.ts` | `.arnx/prompts.toml`: per-key overrides read (unknown keys and placeholders refused), copied, checked by doctor; with arnx cloud, one line and nothing sent |
 | `brain.ts` | The `Brain` interface: agent rounds (review, answer, setup), judge, finish; what the CLI hands over |
