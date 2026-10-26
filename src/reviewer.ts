@@ -21,6 +21,7 @@ import { addUsage, type AgentModel, allPrices, FallbackJson, type JsonModel, typ
   type Trace } from "./llm";
 import { LocalBrain } from "./localbrain";
 import { changeEditsPrompts, PROMPTS_EDITED, promptsFor } from "./userprompts";
+import { changeEditsAccepted } from "./check";
 import { baseName, funcOf, ownerFile } from "./outcomes";
 import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, withCalls } from "./outage";
 import { CONTEXT_LIMIT, contextPack } from "./context";
@@ -239,6 +240,9 @@ export async function runReview(repo: string, o: { settings: Settings;
   // The local brain reads .arnx/prompts.toml from the working tree: a change that edits it is reviewed with its own.
   const promptsEdited = !o.brain && changeEditsPrompts(repo, change);
   if (promptsEdited) o.progress?.(PROMPTS_EDITED);
+  // Elsewhere (a fresh clone, CI) check trusts the committed pins: an edit of accepted tests shows only here.
+  const acceptedEdited = changeEditsAccepted(repo, change);
+  if (acceptedEdited.length) o.progress?.(`this change edits accepted tests: ${someNames(acceptedEdited, 5)}`);
   const routing = route(file, change.files, s.maxProjects);
   if (!routing.routed.length) {
     const paths = routing.uncovered.map((u) => `${u.path} (${u.reason})`).join(", ");
@@ -620,6 +624,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       promptVersion: brain.version,
       ...(brain.overrides ? { promptOverrides: brain.overrides.keys, promptsHash: brain.overrides.hash } : {}),
       ...(promptsEdited ? { promptsFileEdited: true as const } : {}),
+      ...(acceptedEdited.length ? { acceptedTestsEdited: acceptedEdited } : {}),
       findings, questions: questions.slice(0, s.maxQuestions),
       flaky, errors, passed, testsWritten: written, missingRuns, notSent: [...notSent].sort(),
       ...(change.ignored ? { ignoredChanged: change.ignored } : {}),

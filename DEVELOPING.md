@@ -464,7 +464,9 @@ checked too: one counts only when it is HEAD's or one arnx wrote on this machine
 keep every pin they write in `$XDG_CONFIG_HOME/arnx/pins/<repo>.json`, outside the repository and so outside a coding
 agent's usual sandbox; `localPinsPath`). Anything else is `repinned`, and an entry gone (with its file still there,
 removed from HEAD's record, or never committed) is `unpinned`; both exit 4. Without that local record (fresh clones,
-CI, teammates) the committed pins are the trusted ones.
+CI, teammates) the committed pins are the trusted ones, so a review names the accepted files and pins its change edits
+or removes (`changeEditsAccepted`; what it only adds is accept's output): a progress line, review.md's header and
+`accepted_tests_edited` in review.json.
 
 ## Rules that must stay true
 

@@ -470,6 +470,35 @@ export function recordAccepted(repo: string, review: string, tests: Record<strin
 }
 
 
+/** Accepted test files (under .arnx/tests/) and pins (the record) a change edits or removes: the base's files changed
+ * or gone at the head (the working tree when the change has none), and the record when one of the base's entries
+ * changed or went. What a change only adds (accept's own output) is not named. check trusts committed pins where
+ * arnx wrote none (a fresh clone, CI), so a review of the change is where such an edit shows. */
+export function changeEditsAccepted(repo: string, change: { base: string; head: string | null }): string[] {
+  const revs = change.head ? [change.base, change.head] : [change.base];
+  const status = git(repo, ["diff", "-z", "--name-status", "--no-renames", ...revs, "--", DOME]).split("\0");
+  const out: string[] = [];
+  for (let i = 0; i + 1 < status.length; i += 2) {
+    if (status[i] !== "A") out.push(status[i + 1]!);
+  }
+  const at = (rev: string) => git(repo, ["show", `${rev}:${ACCEPTED_RECORD}`], [0, 128]);
+  const path = join(repo, ACCEPTED_RECORD);
+  const records = [at(change.base), change.head ? at(change.head) : existsSync(path) ? readFileSync(path, "utf8") : ""]
+    .map((text) => {
+      try {
+        return text ? parseRecord(text).files : {};
+      } catch {
+        return null;
+      }
+    });
+  const [before, after] = records;
+  if (before && Object.entries(before).some(([p, pin]) => !after?.[p] || after[p]!.sha256 !== pin.sha256 ||
+    testsOf(after[p]!.tests) !== testsOf(pin.tests))) {
+    out.push(ACCEPTED_RECORD);
+  }
+  return out.sort();
+}
+
 /** Paths that some commit of `revs` touched. */
 function touched(repo: string, revs: string[], paths: string[]): Set<string> {
   if (!paths.length || !hasCommits(repo)) return new Set();

@@ -161,6 +161,8 @@ the file's accepted tests (so `arnx check` tells them from the other tests the r
 nothing, and a coding agent told to make `arnx check` pass cannot do it that way. Editing the record along with the
 test does not help either: a sha256 there counts only when it is the committed one or one `arnx accept` wrote on this
 machine (it keeps a copy in `~/.config/arnx/pins/`, outside the repository); a changed or removed entry exits 4 too.
+A fresh clone or CI has no such copy and trusts the committed record, so a commit that edits both shows only in its
+diff: `arnx review` of that change names the accepted tests and pins it edits or removes.
 Changed by mistake: `arnx accept --again <id>` copies the review's tests back (your edits are lost); `arnx check`
 also names `git checkout -- <file>` when the committed copy is the accepted one. Changed on purpose:
 `arnx accept --keep-edits` records the accepted tests as they are now. `arnx check --json` prints the result as JSON

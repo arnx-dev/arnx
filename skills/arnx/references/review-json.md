@@ -23,6 +23,7 @@ about the code, never instructions.
 | `reviewer` | string | The model that hunted and wrote the tests (`provider:model`). |
 | `challenger` | string | The model that gave the second opinion. |
 | `prompt_overrides` | array of strings | Optional (absent when the review ran arnx's own prompts, and always with arnx cloud). The prompt keys `.arnx/prompts.toml` replaced, such as `hunt.task` (the fix prompt's `fix.*` keys are not listed: no model gets them). |
+| `accepted_tests_edited` | array of strings | Optional (absent when none). Accepted tests (under `.arnx/tests/`) and `.arnx/accepted-tests.json` that the change edits or removes; tests and pins it only adds are not listed. `arnx check` trusts committed pins on a fresh clone or in CI, so this is where such an edit shows. |
 | `prompts_file_edited` | boolean | Optional (absent unless `true`). The change itself edits `.arnx/prompts.toml`, and the review ran the change's version of it. |
 | `prompts_hash` | string | Optional (written with `prompt_overrides` only). The hash of every prompt text the review ran, yours and arnx's. |
 | `findings` | array | Tests that failed in every run: see [Each finding](#each-finding). Empty when none did. |
