@@ -2,6 +2,7 @@
 // for Rust). A repository's images that no approved project uses now, older than the days kept, are removed; an
 // image without arnx's labels (built before they existed) is counted, never removed.
 import { loadReviewFile } from "./config";
+import { LAYER_VERSION } from "./indexer";
 import { docker, envKey, repoId } from "./sandbox";
 
 export { repoId };
@@ -46,7 +47,9 @@ export function pruneEnv(repo: string, o: { keepDays: number; now?: number; dryR
   const now = o.now ?? Date.now();
   let current: string[] = [];
   try {
-    current = loadReviewFile(repo).projects.map((cfg) => `arnx-env:${envKey(cfg, repo)}`);
+    // A current image's code indexer layer (indexer.ts) is current with it.
+    current = loadReviewFile(repo).projects.flatMap((cfg) => [`arnx-env:${envKey(cfg, repo)}`,
+      `arnx-env:${envKey(cfg, repo)}-${LAYER_VERSION}`]);
   } catch {
     current = []; // no approved file: no image is current
   }

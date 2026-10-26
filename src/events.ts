@@ -13,7 +13,7 @@ export type Role = "reviewer" | "part-hunt" | "second-hunt" | "rank" | "merge-qu
   "setup" | "jev" | "unknown";
 
 export type EventType = "review.started" | "review.completed" | "review.failed" | "model.call" | "agent.turn" |
-  "hunt.list" | "hunt.suspect" | "hunt.merged" | "hunt.dropped" | "test.files" | "test.written" | "test.run" |
+  "context.index" | "hunt.list" | "hunt.suspect" | "hunt.merged" | "hunt.dropped" | "test.files" | "test.written" | "test.run" |
   "test.run_missing" | "test.classified" | "before.started" | "before.run" | "before.finding" | "before.done" |
   "fix_proof.started" | "fix_proof.run" | "fix_proof.done" | "typecheck.run" | "typecheck.done" | "challenge.verdict" |
   "suspect.outcome" | "report.done" | "setup.started" | "setup.attempt" | "setup.completed" | "setup.withheld";

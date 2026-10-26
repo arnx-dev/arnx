@@ -1,9 +1,12 @@
 // What the hunter sees beyond the diff, without a model: each definition the change touches (a function, a method,
 // a module-level constant such as an SQL string) and every place that refers to it by name, two levels out. A step
 // list such as `for step in (fetch, evaluate, score)` refers to names without calling them, so names find it.
-// Names, not a resolved graph: a same-named definition elsewhere also matches, which costs a few extra lines.
+// Names alone also match a same-named definition elsewhere (another script's `main`, a library's `count`); with the
+// project's SCIP index, references are the index's occurrences of the definition's symbol, plus the name matches the
+// index does not put another symbol on (strings, step lists, code the indexer missed).
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
+import { DEFINITION, type ScipIndex } from "./scip";
 import { isSecretPath } from "./secrets";
 import { SOURCE } from "./untested";
 
@@ -157,13 +160,67 @@ function references(files: Map<string, string>, name: string, skip: { file: stri
   return out;
 }
 
-/** The context pack: changed definitions in `owned` files, with references two levels out, as text for a prompt. */
+/** The symbol a definition line declares: the index's definition occurrence on that line that spells the name. */
+function symbolOf(index: ScipIndex, lines: string[], file: string, d: Def): string | null {
+  const text = lines[d.line - 1] ?? "";
+  for (const o of index.byFileLine.get(file)?.get(d.line) ?? []) {
+    if (o.roles & DEFINITION && text.slice(o.start, o.end) === d.name) return o.symbol;
+  }
+  return null;
+}
+
+/** The index's references to `symbol`, then the name matches it does not resolve to another symbol. */
+function indexedReferences(files: Map<string, string>, linesOf: (file: string) => string[] | null, index: ScipIndex,
+                           symbol: string, name: string, skip: { file: string; line: number }): Ref[] {
+  const out: Ref[] = [];
+  const at = new Set<string>();
+  for (const o of index.bySymbol.get(symbol) ?? []) {
+    if (o.roles & DEFINITION || TEST_PATH.test(o.file) || (o.file === skip.file && o.line === skip.line)) continue;
+    const lines = linesOf(o.file);
+    if (!lines || at.has(`${o.file}:${o.line}`)) continue;
+    at.add(`${o.file}:${o.line}`);
+    out.push({ file: o.file, line: o.line, text: (lines[o.line - 1] ?? "").trim().slice(0, 120), in: enclosing(lines, o.line) });
+  }
+  out.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line));
+  for (const r of references(files, name, skip)) {
+    if (at.has(`${r.file}:${r.line}`)) continue;
+    const here = index.byFileLine.get(r.file)?.get(r.line) ?? [];
+    const lines = linesOf(r.file);
+    const other = here.some((o) => o.symbol !== symbol && lines?.[r.line - 1]?.slice(o.start, o.end) === name);
+    if (other && !here.some((o) => o.symbol === symbol)) continue;
+    out.push(r);
+  }
+  return out;
+}
+
+/** The context pack: changed definitions in `owned` files, with references two levels out, as text for a prompt.
+ * `index`: the project's SCIP index at the change, for references by symbol (paths relative to `root`). */
 export function contextPack(root: string, diff: string, owned: string[], searchDirs: string[],
-                            limit = CONTEXT_LIMIT): string {
+                            limit = CONTEXT_LIMIT, index: ScipIndex | null = null): string {
   const files = sourceFiles(root, searchDirs);
   const changed = changedLines(diff);
   const parts: string[] = [];
   const seen = new Set<string>();
+  const split = new Map<string, string[] | null>();
+  const linesOf = (file: string): string[] | null => {
+    if (!split.has(file)) {
+      let body = files.get(file) ?? null;
+      if (body === null && SOURCE.test(file) && !isSecretPath(file)) {
+        try {
+          body = readFileSync(join(root, file), "utf8");
+        } catch {
+          body = null;
+        }
+      }
+      split.set(file, body === null ? null : body.split("\n"));
+    }
+    return split.get(file)!;
+  };
+  const refsOf = (file: string, lines: string[], d: Def): Ref[] => {
+    const symbol = index && symbolOf(index, lines, file, d);
+    return symbol ? indexedReferences(files, linesOf, index!, symbol, d.name, { file, line: d.line })
+      : references(files, d.name, { file, line: d.line });
+  };
   for (const path of owned) {
     if (!SOURCE.test(path)) continue;
     const body = files.get(path) ?? (() => {
@@ -185,7 +242,7 @@ export function contextPack(root: string, diff: string, owned: string[], searchD
       const key = `${path}:${d.name}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const refs = references(files, d.name, { file: path, line: d.line });
+      const refs = refsOf(path, lines, d);
       const lines1 = [`- \`${path}\` ${d.kind} \`${d.name}\` (line ${d.line}): ` +
         (refs.length ? `${refs.length > MAX_REFS ? `more than ${MAX_REFS}` : refs.length} references` : "no references found")];
       for (const r of refs.slice(0, MAX_REFS)) {
@@ -196,7 +253,7 @@ export function contextPack(root: string, diff: string, owned: string[], searchD
         seen.add(k2);
         // Second level: where the referring definition is used, by location only. A name used in many places
         // (main, run) says little, so it is left out.
-        const r2s = references(files, r.in.name, { file: r.file, line: r.in.line });
+        const r2s = refsOf(r.file, linesOf(r.file) ?? [], r.in);
         if (r2s.length && r2s.length <= MAX_REFS) {
           lines1.push(`    - \`${r.in.name}\` is used at ` +
             r2s.map((r2) => `${r2.file}:${r2.line}${r2.in ? ` (${r2.in.name})` : ""}`).join(", "));

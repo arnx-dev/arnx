@@ -5,6 +5,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseReviewConfig, parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { pruneEnv, repoId } from "../src/envprune";
+import { LAYER_VERSION } from "../src/indexer";
 import { ensureEnv, envKey, envOwner, sandboxOptions } from "../src/sandbox";
 import { Cli } from "./helpers/cli";
 import { gitRepo } from "./helpers/gitutil";
@@ -78,6 +79,8 @@ test("prune removes this repository's images no approved project uses, past the 
     const me = repoId(repo);
     const docker = fakeDocker([
       `${current}\tid1\t1.2GB\t${labels(me, "main", 30)}`,
+      // the code indexer's layer on the current image (context = "precise") is current too
+      `${current}-${LAYER_VERSION}\tid7\t0.7GB\t${labels(me, "main", 30)}`,
       `arnx-env:old1\tid2\t5GB\t${labels(me, "main", 30)}`,
       `arnx-env:recent\tid3\t5GB\t${labels(me, "main", 1)}`,
       `arnx-env:busy\tid4\t2GB\t${labels(me, "main", 30)}`,

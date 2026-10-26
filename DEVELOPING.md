@@ -247,6 +247,8 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
 - `suspect.outcome`, `report.done` (`reviewer.ts`): what became of each suspect; the report's totals.
 - `setup.started`, `setup.attempt`, `setup.completed` (`setup.ts`): the setup agent's attempts and result;
   `setup.withheld`: files left out of its snapshot as secret-looking (only when there are some).
+- `context.index` (`indexer.ts`, `context = "precise"` only): one project's code index: `ok`, `secs`, `files`, and
+  `reason` when the hunt's context fell back to names.
 
 Roles on `model.call` and `agent.turn`: `reviewer`, `part-hunt`, `second-hunt`, `rank`, `merge-questions`, `challenge`,
 `explain`, `setup`, `jev`, and `unknown` when no role is set (`withRole` sets one). Text fields are clipped (model-given
@@ -384,6 +386,8 @@ the copy under its old name is removed.
 | `cloudbrain.ts` | `CloudBrain`: the Brain over arnx cloud's v1 contract (arnx models); builds each call's inputs, runs the brain's tool calls with the CLI's tools, records hunt and billing |
 | `cloud.ts` | arnx cloud's HTTP side: credentials (per user, 0600), the device login, calls as JSON or server-sent events, retries, what 402 / 503 / unreachable mean |
 | `hunt.ts` | The hunt's pieces: suspects parsed and merged, the second hunter, part hunters, ranking |
+| `scip.ts` | A SCIP code index read (protobuf, no dependency): each occurrence's file, line, columns, symbol and roles |
+| `indexer.ts` | `context = "precise"`: a project's code index, built by its indexer in its environment image plus a layer, run as tests run; any failure falls back to names |
 | `testround.ts` | Snapshot + session + the brain's agent round over the tools + 3 runs, shared by review and answers |
 | `setup.ts` | The setup agent's tools, `runSuite`, approval |
 | `jev.ts` | Experimental: JEV's hint on a setup failure no signature explains; asked only with `[setup] jev = true` and `JEV_API_KEY` |
