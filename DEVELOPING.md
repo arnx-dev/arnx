@@ -64,7 +64,7 @@ Accepted tests are written into the project's own test folders.
 | `check` | Run the accepted tests in the approved sandbox, accepted tests told from the other tests in their files; refuse (exit 4) when a pinned file or its entry changed. `--review [id]`: run a review's confirmed tests on the working tree instead (`recheck.ts`), before anything is accepted | `tests/arnx/`, `.arnx/accepted-tests.json`; with `--review`, `.arnx/reviews/<id>/` | `.arnx/run/` logs | no | yes |
 | `consent` | Record the consent to send code (`--cloud`: to arnx cloud) without sending anything | `.arnx/config.toml` | `consent_at` or `cloud_consent_at` | no | no |
 | `allow-secret` | Pin the key-like strings of test-fixture files, so they are sent and copied; never shows the strings | the files named | `.arnx/review.yaml` (needs approving again) | no | no |
-| `env prune` | Remove this repository's environment images no approved project uses, older than `--keep-days` (7); `--all-repos`, `--dry-run` | Docker's image labels | nothing | no | yes |
+| `env prune` | Remove this repository's environment images no approved project uses, older than `--keep-days` (7); `--all-repos`, `--dry-run`. An image made from the code (`<key>-src-<hash>`, baked.ts) also takes the build cache records its build left, each by id, found from the step marked with its tag | Docker's image labels, `docker buildx du` | nothing | no | yes |
 | `login`, `logout`, `credits` | arnx cloud: a device login (RFC 8628), its deletion, the balance (no answer: "arnx cloud unavailable", exit 2; "not open yet" only on arnx cloud's `not_open`) | the config directory, `/v1/account` | `~/.config/arnx/credentials.json` (0600) | no | no |
 | `cloud on`, `cloud off` | arnx cloud's models for this repository, or the user's keys again: asks the cloud consent once, changes only `[cloud] models` | `.arnx/config.toml` | `.arnx/config.toml` | no | no |
 | `skill install` | Write the arnx skill for coding agents (`skills/arnx/`, embedded in the build) to `.agents/skills/arnx/` and `.claude/skills/arnx/`, or under `~/` with `--user`; a different copy only with `--force`. `init` names the command until the repository has it | nothing | `.agents/skills/arnx/`, `.claude/skills/arnx/` | no | no |
@@ -83,6 +83,7 @@ fields are in `skills/arnx/references/json.md` and `check-json.md`; `tests/json-
         snapshot           change.ts     copy of the code at the change's head, secrets removed
         dockerSession      sandbox.ts    build the env image once, start services, internal network
           bakedIn          baked.ts      an older copy of the code in the image: use an image made from this code
+                                         (keyed on the code, kept for later sessions; `env prune` removes it)
           probe            testround.ts  arnx's one-line test must pass, else the round stops before any model call
           agentRound       localbrain.ts the brain's round starts with its tools (with --hunt, the tool-less hunters
                                          too); after each final reply, the facts
@@ -378,7 +379,7 @@ the copy under its old name is removed.
 | `ignore.ts` | `.arnxignore` matching, and the proposal of data-like files for `init` |
 | `change.ts` | Resolve the change; build the snapshot |
 | `sandbox.ts` | Docker: env image, locked-down runs, services, timeouts, cleanup of live sessions |
-| `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, kept when runs reach them, compared with the code to test |
+| `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, kept when runs reach them, compared with the code to test; the key of an image made from the code (its files, not the tests or reports beside it) |
 | `outcomes.ts` | Run tests through the adapter; classify results across runs |
 | `before.ts` | The before/after check's comparison: a finding's runs on the code before the change against its failure |
 | `typecheck.ts` | The project's own type check: tsc's output read, errors on the change against those before it, in words |

@@ -1001,6 +1001,10 @@ class Commands {
         const age = Math.floor(ageDays(i, now));
         this.d.out(`  ${i.tag} (${i.project}, ${age} day${age === 1 ? "" : "s"} old, ${i.size})`);
       }
+      if (r.cache.length) {
+        this.d.out(`${dryRun ? "Would remove" : "Removed"} their build cache: ${n(r.cache.length, "record")} ` +
+          `(${totalSize(r.cache)}).`);
+      }
     } else {
       this.d.out("No environment image to remove.");
     }
@@ -1016,7 +1020,7 @@ class Commands {
       size: i.size });
     this.emit(r.failed.length ? "fail" : "ok", r.failed.length ? 2 : 0, { dry_run: dryRun, keep_days: Number(days),
       removed: r.removed.map(image), failed: r.failed.map(([i, why]) => ({ ...image(i), error: why })),
-      unlabelled: r.unlabelled });
+      unlabelled: r.unlabelled, cache_records: r.cache.length, cache_size: totalSize(r.cache) });
     return r.failed.length ? 2 : 0;
   }
 

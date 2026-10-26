@@ -191,7 +191,8 @@ exit 0
     expect(await dry.run("env", "prune", "--dry-run", "--json")).toBe(0);
     expect(json(dry)).toEqual({ schema_version: 1, command: "env", result: "ok", exit_code: 0, dry_run: true,
       keep_days: 7, removed: [{ tag: "arnx-env:old1", project: "main", age_days: 30, size: "5GB" },
-        { tag: "arnx-env:busy", project: "main", age_days: 30, size: "2GB" }], failed: [], unlabelled: 1 });
+        { tag: "arnx-env:busy", project: "main", age_days: 30, size: "2GB" }], failed: [], unlabelled: 1,
+      cache_records: 0, cache_size: "0MB" });
     const real = new Cli({ cwd: repo });
     expect(await real.run("env", "prune", "--keep-days", "3", "--json")).toBe(2);
     expect(json(real)).toMatchObject({ result: "fail", exit_code: 2, dry_run: false, keep_days: 3,

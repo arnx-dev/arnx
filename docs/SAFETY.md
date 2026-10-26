@@ -9,8 +9,11 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
 - Each test environment is a Docker image (`arnx-env:<hash>`), built again when the install steps or the dependency
   files change; Rust images can take several GB. With `context = "precise"` (`.arnx/config.toml`), each one also
   gets a code indexer layer (`arnx-env:<hash>-scip1`, about 0.7 GB for Python and TypeScript; the indexer runs with
-  no network). `arnx env prune` removes this repository's images that no approved project uses now and are a week
-  old (`--keep-days N`, `--dry-run` to list them first, `--all-repos` for other repositories' old images too).
+  no network). When the install copies your code into the image (`cp -r . /opt/app`), arnx builds one more image per
+  version of the code it tests (`arnx-env:<hash>-src-<hash>`), reused for that code. `arnx env prune` removes this
+  repository's images that no approved project uses now and are a week old (`--keep-days N`, `--dry-run` to list them
+  first, `--all-repos` for other repositories' old images too), and with each image made from your code the build
+  cache records its build left, each by its id; the rest of Docker's build cache is not touched.
 - `arnx remove` lists everything arnx put in the repository (`.arnx/`, `.arnxignore`, the skill folders), this
   repository's test images and the pins arnx keeps for it outside the repository; `arnx remove --yes` deletes them.
   Files you committed are left for the `git rm` it prints, so the removal shows in a commit. Accepted tests are your

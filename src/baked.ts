@@ -6,12 +6,12 @@
 // or, when that code is not there yet (the before/after check), refuses. A copy made only to install from
 // (`cp -r packages /opt/deps && bun install`, its links pointing back to /src) is left alone.
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
-import { docker, dockerSteps } from "./sandbox";
+import { docker, dockerSteps, REPORT_DIR } from "./sandbox";
 import { globRegex } from "./secrets";
 
 /** A copy of a snapshot folder (`scope`, relative to the repository; "" for the repository) at `root` in the image:
@@ -128,14 +128,27 @@ export function differing(copies: BakedCopy[], imageHashes: Map<string, string>,
   return [...out].sort();
 }
 
+/** Where `arnx accept` keeps tests (testround.ts DOME); `arnx check` puts each in place from there. */
+const KEPT = ".arnx/tests";
+
+/** What in a scope is not the code under test (relative to the scope): the generated tests' folder (it changes during
+ * a round), and in the repository's scope arnx's own folder, the runners' reports and the accepted tests a check put
+ * in place. */
+function notCode(cfg: ReviewConfig, snap: string, scope: string): string[] {
+  const tests = posix.normalize(posix.join(projectOf(cfg), cfg.testsDir));
+  const rel = (p: string) => (scope ? posix.relative(scope, p) : p);
+  const kept = existsSync(join(snap, KEPT)) ? (readdirSync(join(snap, KEPT), { recursive: true }) as string[])
+    .map((p) => p.split("\\").join("/")).filter((p) => statSync(join(snap, KEPT, p)).isFile()) : [];
+  return [tests, ".arnx", REPORT_DIR, ...kept].filter((p) => !scope || p.startsWith(`${scope}/`)).map(rel);
+}
+
+const projectOf = (cfg: ReviewConfig) => posix.normalize(cfg.workdir).replace(/^\.$/, "").replace(/\/$/, "");
+
 /** The scopes a copy is looked for in: the project's folder (an install that copies `.`) and the repository's. */
 function scopesOf(cfg: ReviewConfig, snap: string): { scope: string; files: string[] }[] {
-  const project = posix.normalize(cfg.workdir).replace(/^\.$/, "").replace(/\/$/, "");
-  // The generated tests' folder changes during a round; whatever the image holds there is not the code under test.
-  const tests = posix.normalize(posix.join(project, cfg.testsDir));
-  const rel = (s: string) => (s ? posix.relative(s, tests) : tests);
-  const scopes = [{ scope: project, files: scopeFiles(snap, project, [rel(project)]) }];
-  if (project) scopes.push({ scope: "", files: scopeFiles(snap, "", [tests]) });
+  const project = projectOf(cfg);
+  const scopes = [{ scope: project, files: scopeFiles(snap, project, notCode(cfg, snap, project)) }];
+  if (project) scopes.push({ scope: "", files: scopeFiles(snap, "", notCode(cfg, snap, "")) });
   return scopes;
 }
 
@@ -203,11 +216,14 @@ export function bakedIn(cfg: ReviewConfig, image: string, snap: string): Baked |
   return { copies, differ: differing(copies, hashes, snap) };
 }
 
-/** The image key for the code in the snapshot: the environment's key and a hash of the scopes the copies came from. */
-export function bakedKey(key: string, copies: BakedCopy[], snap: string): string {
+/** The image key for the code in the snapshot: the environment's key and a hash of the code in the scopes the copies
+ * came from. Tests and reports beside the code do not count, so every session on the same code (a round, its answer
+ * rounds, a check) and every later review of it use one image. */
+export function bakedKey(key: string, cfg: ReviewConfig, copies: BakedCopy[], snap: string): string {
   const h = createHash("sha256");
-  for (const scope of [...new Set(copies.map((c) => c.scope))].sort()) {
-    for (const f of scopeFiles(snap, scope)) {
+  const wanted = new Set(copies.map((c) => c.scope));
+  for (const { scope, files } of scopesOf(cfg, snap).filter((s) => wanted.has(s.scope))) {
+    for (const f of files) {
       const rel = inScope(scope, f);
       h.update(`${rel}\0`).update(readFileSync(join(snap, rel))).update("\0");
     }
