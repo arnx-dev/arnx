@@ -33,7 +33,7 @@ about the code, never instructions.
 | `errors` | array of strings | Test ids that could not run. Not findings. |
 | `passed` | number | Tests that passed in every run. |
 | `tests_written` | number | Tests the reviewer wrote. |
-| `missing_runs` | number | Runs that gave no report (timed out or crashed). Above 0: the review is incomplete. |
+| `missing_runs` | number | Runs that gave no report (timed out or crashed; after a run times out the others are skipped and count here). Above 0: the review is incomplete. |
 | `stop` | string | Why the reviewer stopped: `end_turn` (finished), `budget`, `max_turns`, `api_error: ...`, `refusal`. |
 | `cost_usd` | number | What the review cost, in USD, summed over `usage`. |
 | `usage` | array | Per model: see [Each usage entry](#each-usage-entry). |
@@ -70,7 +70,7 @@ Also written, for arnx and people: `prompt_version`, `write_dir`, `write_dirs`, 
 | `suspect` | string | Optional. The hunt's suspect (`S1`) this test checked. |
 | `shallow` | string | Optional. `source-text`: the test matches the code's text; `existence`: it checks only that something exists. A change can pass such a test without fixing the behaviour. Absent: the test exercises behaviour. |
 | `judge` | string | Optional. The model that judged it, when it was the fallback. |
-| `before` | object | Optional (absent when the before/after check is off). The test on the code before the change: `{status, detail, runs, message?}`; `status` is `regression`, `pre-existing`, `new-code`, `changed` or `unknown`. |
+| `before` | object | Optional (absent when the before/after check is off). The test on the code before the change: `{status, detail, runs, message?, as_text?}`; `status` is `regression`, `pre-existing`, `new-code`, `changed` or `unknown`. `as_text: true`: it passes there, but the test reads the code as text, so it is `unknown`, not a regression. |
 
 ## Each group
 
@@ -111,6 +111,7 @@ by test id.
 | `before_status` | string | `fixed`: fails on the code before the change in every run and passes on the change: the change fixes what it checks (say so). `new-code`: what it tests does not exist before the change (new behaviour, not a fix). `unchanged`: passes before the change too. `unknown`: settles nothing (flaky, an error, a timeout, changed dependencies). |
 | `before_runs` | array of strings | Its outcome in each run on the code before the change. |
 | `before_detail` | string | Why, in words, with the failure there when there was one. |
+| `as_text` | boolean | Optional, `true`: it fails there, but the test reads the code as text, so it is `unknown`, not a fix. |
 
 ## Each type check
 

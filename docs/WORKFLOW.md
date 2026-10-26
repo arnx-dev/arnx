@@ -115,7 +115,9 @@ What each outcome means: **regression** (passes before, fails after: the change 
 test is right); **pre-existing** (fails the same way before: not caused by the change); **new-code** (what it tests
 does not exist before, so there is nothing to compare); **changed** (fails before too, differently: kept as a
 finding); **unknown** (not checked, or nothing settled: flaky, an error, no base, or the change altered the image's
-dependencies so a same failure would prove nothing). Only regression is evidence about the change itself.
+dependencies so a same failure would prove nothing). Only regression is evidence about the change itself. A test
+that reads one of the project's source files as text and matches it is never a regression or a fix: it shows the
+text changed, not the behaviour, so its outcome there is unknown and review.md says why.
 
 ## Type check
 

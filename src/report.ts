@@ -109,9 +109,10 @@ export const rankGroups = (groups: Group[]) => [...groups].sort(bySeverity);
 export interface Checked { project: string; test: string; expects: string }
 
 /** A passing test run on the code before the change (the fix proof). `beforeStatus` "fixed": it fails there in every
- * run, so the change fixes what it checks; `beforeRuns`: its outcome in each run there. */
+ * run, so the change fixes what it checks; `beforeRuns`: its outcome in each run there; `asText`: it would be fixed,
+ * but it reads the code as text, so it is unknown and not counted. */
 export interface FixProof { testId: string; project: string; file: string | null; beforeStatus: FixStatus;
-  beforeRuns: string[]; beforeDetail: string }
+  beforeRuns: string[]; beforeDetail: string; asText?: true }
 
 export interface Review {
   id: string;
@@ -537,6 +538,11 @@ export function render(r: Review): string {
       out.push(`- \`${x.testId}\`${what ? `: ${firstLine(what)}` : ""}${multi(r) ? ` (${x.project})` : ""}`);
     }
     out.push("");
+  }
+  const asText = (r.fixProof ?? []).filter((x) => x.asText);
+  if (asText.length) {
+    out.push(`Not counted as fixes (${asText.length === 1 ? "it reads" : "they read"} the code as text): ` +
+      `${ticks(asText.map((x) => x.testId))}.`, "");
   }
   out.push("## Findings", "");
   const caused = active(r), already = r.findings.filter(isPreExisting);
@@ -982,7 +988,8 @@ export function save(r: Review, rdir: string, diff: string): void {
   mkdirSync(rdir, { recursive: true });
   // schema_version, each finding's status and exit_code are derived for readers; load() drops them.
   const json = { schema_version: REVIEW_SCHEMA_VERSION, ...rekey(r, snake),
-    findings: r.findings.map((f) => ({ ...rekey(f, snake), status: findingStatus(f) })),
+    findings: r.findings.map((f) => ({ ...rekey(f, snake), ...(f.before ? { before: rekey(f.before, snake) } : {}),
+      status: findingStatus(f) })),
     project_stats: (r.projectStats ?? []).map((p) => rekey(p, snake)),
     usage: (r.usage ?? []).map((u) => rekey(u, snake)), ...(r.timings ? { timings: rekey(r.timings, snake) } : {}),
     ...(r.fixProof ? { fix_proof: r.fixProof.map((x) => rekey(x, snake)) } : {}),
@@ -1003,8 +1010,10 @@ export function load(rdir: string): Review {
     throw new ArnxError(`cannot read ${path}: ${(e as Error).message}`);
   }
   const findings = (data.findings as object[]).map((f) => {
-    const { status: _status, ...rest } = f as Record<string, unknown>;
-    return { project: "main", ...rekey(rest, camel) } as unknown as Finding;
+    const { status: _status, before, ...rest } = f as Record<string, unknown>;
+    const finding = { project: "main", ...rekey(rest, camel) } as unknown as Finding;
+    if (before) finding.before = rekey(before as object, camel) as unknown as Before;
+    return finding;
   });
   const { schema_version: _version, exit_code: _code, ...fields } = data;
   const r = { language: "python", projects: ["main"], notReviewed: [], uncovered: [], ...rekey(fields, camel),

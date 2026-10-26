@@ -91,7 +91,8 @@ fields are in `skills/arnx/references/json.md` and `check-json.md`; `tests/json-
           agentRound       localbrain.ts the brain's round starts with its tools (with --hunt, the tool-less hunters
                                          too); after each final reply, the facts
           runAgent         agent.ts      the model reads, writes tests, runs them (tools only, no shell)
-        runTests x3        outcomes.ts   the adapter's command and report -> passed / failed / error, per run
+        runTests x3        outcomes.ts   the adapter's command and report -> passed / failed / error, per run;
+                                         after a run times out the rest are skipped (no report)
         classify           outcomes.ts   failed in all 3 runs = finding; anything else never is
         beforeStage        testround.ts  findings' files x3 on a snapshot of the change's base, same image
           judgeBefore      before.ts     regression / pre-existing / new-code / changed / unknown, per finding
@@ -142,7 +143,8 @@ uncommitted work); a first commit has none and its findings are `unknown` ("not 
 commits yet (change kind `no-commits`: every file a working-tree snapshot holds, diffed against the empty tree). The
 snapshot of the base gets the round's generated files exactly as they ran and nothing else from the change; only the
 files with findings run, `runs` times, each with the final runs' timeout, in the change's image (`SessionFactory`'s
-`envFrom`). A same failure is the same first line of the message (addresses evened out); when the change also alters
+`envFrom`); as in the final runs, after a run times out the others are skipped (runs without a report), here and in
+the fix proof's runs. A same failure is the same first line of the message (addresses evened out); when the change also alters
 what keys the image (its dependencies), a same failure proves nothing and is `unknown`. A check that cannot run (no
 base, out of time, an error, an image holding a copy of the code that differs from the base: `baked.ts`) never stops
 the review; "out of time" is testRound's `before.deadline`, which nothing sets yet (a review has no overall time
@@ -166,6 +168,13 @@ docs), when there is no base, and when out of time. review.json gets `fix_proof`
 `before_status`, absent when none ran) and `timings.fix_proof_secs` (absent when it is off); review.md a
 "The change fixes" section above the findings when any is `fixed`; the summary a line. The exit code ignores it.
 `tests/fixproof-neutral.test.ts` holds the neutral goldens' reviews to "only these fields differ".
+
+A test that reads one of the project's source files as text and matches it (`shallow.ts` "source-text": the read in
+its body, or a name given that text at the top of its file or suite; the path, resolved in the change's snapshot,
+names a file of the project that is not a test or in a fixtures folder) proves nothing about behaviour: in
+`beforeStage` its `regression` and its `fixed` become `unknown` with `asText` and a detail saying why (`textBefore`,
+`textFix` in `before.ts`). It is then no regression label and no "the change fixes"; review.md lists such passing
+tests once, "Not counted as fixes", and review.json has `as_text` on the finding's `before` or the fix proof entry.
 
 The type check (`typecheck.ts`): a TypeScript project may name its own type check in review.yaml
 (`typecheck: npx tsc --noEmit -p tsconfig.json`), apart from `test_command`, so a type error never fails the suite and
@@ -234,12 +243,14 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   suspects, where a listed suspect went (`hunt.merged` has `duplicate`).
 - `test.files`, `test.run`, `test.run_missing`, `test.classified` (`testround.ts`): generated files, each result of each
   repeat (`func`; `run_seconds` for runs that were not carried), the class of each test; a run without a report says
-  `timed_out`, `exit_code` and `seconds`.
+  `timed_out`, `exit_code` and `seconds`. After a final run times out the others are not run (a hanging test would
+  hang again): each says `skipped` and counts as a run without a report.
 - `test.written` (`reviewer.ts`): which suspect a test was written for; `func` is the test function name, the key
   `test.run` and `test.classified` share.
 - `before.started`, `before.run`, `before.done` (`testround.ts`): the before/after check of one project: findings and
-  files; each run's `duration_ms`, whether it `reported` and `timed_out`; the whole check's `duration_ms`,
-  `snapshot_ms`, `runs_ms`, `counts` by status, and `skipped_reason` (`no-base`, `time`, `error`) when it did not run.
+  files; each run's `duration_ms`, whether it `reported` and `timed_out` (`skipped` after a run timed out); the whole
+  check's `duration_ms`, `snapshot_ms`, `runs_ms`, `counts` by status, and `skipped_reason` (`no-base`, `time`,
+  `error`) when it did not run.
 - `before.finding` (`reviewer.ts`): each finding's status on the code before the change, with `detail` (`resumed`
   when its round was kept from before an interruption).
 - `fix_proof.started`, `fix_proof.run`, `fix_proof.done` (`testround.ts`): the fix proof of one project: passing tests,

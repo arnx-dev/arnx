@@ -220,6 +220,40 @@ test("a change that touches no source (tests, docs) proves no fix: no session on
   expect(r.fixProof).toBeUndefined();
 });
 
+// A test that hangs on the code before the change made each of its runs there wait the whole timeout, for the
+// findings and again for the passing tests.
+test("on the code before the change, a timed-out run skips the rest, findings' and passing tests'", async () => {
+  const add = `${G}/test_add.py`, zero = `${G}/test_zero.py`;
+  const after = (command: string) => junitXml([[add, "test_add", "failed", "assert 4 == 5"], [zero, "test_zero",
+    "passed", ""]].filter(([f]) => command.includes(f!)) as [string, string, string, string][]);
+  const seen: Seen[] = [];
+  const factory: SessionFactory = async (_cfg, snap, _log, body) => {
+    const before = snap.endsWith("/before");
+    const s = new FakeSession(snap, (command) => before ? [null, "[timed out]", true] : [after(command), "", false]);
+    seen.push({ snap, commands: s.commands });
+    return body(s);
+  };
+  const steps = new ScriptedAgent([[tool("write_file", { path: add, content: FILES[add]! }),
+    tool("write_file", { path: zero, content: FILES[zero]! })], [text(REPORT)], [text(REPORT)]]);
+  const said: string[] = [];
+  const { review: r, rdir } = await runReview(repo, { settings: SETTINGS, agentModel: steps, sessionFactory: factory,
+    challenger: new FakeJson([{ verdict: "confirmed", reason: "r" }]), progress: (m) => said.push(m) });
+  const base = seen[1]!.commands;
+  expect([base.filter((c) => c.includes("before-")).length, base.filter((c) => c.includes("fix-proof-")).length])
+    .toEqual([1, 1]);
+  expect(r.findings[0]!.before).toMatchObject({ status: "unknown", runs: ["timeout", "missing", "missing"],
+    detail: "3 of 3 runs on the code before the change gave no report (1 timed out)" });
+  expect(r.fixProof!.map((x) => [x.testId, x.beforeStatus, x.beforeRuns])).toEqual([[id("zero"), "unknown",
+    ["timeout", "missing", "missing"]]]);
+  const ev = events(rdir);
+  for (const type of ["before.run", "fix_proof.run"]) {
+    expect(ev.filter((e) => e.type === type).map((e) => [e.data.run, e.data.timed_out, e.data.skipped]))
+      .toEqual([[1, true, undefined], [2, false, true], [3, false, true]]);
+  }
+  expect(said).toContain("main: before the change: run 1/3 timed out; the other runs skipped");
+  expect(said).toContain("main: before the change: run 1/3 of the passing tests timed out; the other runs skipped");
+});
+
 test("a passing test beside a finding is judged from the findings' runs; the findings do not change", async () => {
   // test_add fails on the change too (a finding); test_add2 in its file passes, and failed before the change.
   const file = `${G}/test_add.py`;

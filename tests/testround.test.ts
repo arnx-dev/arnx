@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseReviewConfig } from "../src/config";
+import { EventLog, withEvents } from "../src/events";
 import { PROMPT_VERSION, reviewSystem, reviewTask } from "../src/prompts";
 import type { SessionFactory } from "../src/sandbox";
 import { ownTestsInWriteDir, testRound, writeDirOf, COPY_SUFFIX } from "../src/testround";
@@ -58,14 +59,37 @@ test("test_round_end_to_end_with_fakes", async () => {
   expect(r.agent.stop).toBe("end_turn");
   expect(Object.keys(r.files)).toEqual(["app/" + GEN]); // the stale file was cleared before the agent ran
   expect(existsSync(join(out, "tests", "app", GEN + COPY_SUFFIX)) && existsSync(join(out, "transcript.jsonl"))).toBe(true);
-  expect(r.classified.missingRuns).toBe(1); // one run timed out
+  expect(r.classified.missingRuns).toBe(2); // one run timed out, the last was skipped after it
   expect(r.classified.findings).toEqual([]);
   expect(r.classified.flaky.map((t) => t.name)).toEqual(["test_x"]);
   const commands = sessions[0]!.commands;
   expect(commands[0]).toContain("test_arnx_probe.py"); // the environment runs a test before the agent writes any
   expect(commands[1]).toContain("tests/arnx_generated");
-  expect(commands).toHaveLength(5); // the probe, one agent run, three final runs
+  expect(commands).toHaveLength(4); // the probe, one agent run, two final runs (the second timed out)
   expect(existsSync(join(repo, "app", "tests", "arnx_generated", "test_stale.py"))).toBe(true); // user's tree untouched
+});
+
+// One hanging test made every final run wait the whole timeout: three runs, three times RUN_TIMEOUT.
+test("after a final run times out the other final runs are skipped, counted as runs without a report", async () => {
+  const repo = gitRepo(tmp());
+  const model = new ScriptedAgent([
+    [tool("write_file", { path: "app/" + GEN, content: "def test_x(): pass\n" })],
+    [text('{"tests": []}')],
+  ]);
+  const hangs = (command: string): [string | null, string, boolean] => command.includes("final-")
+    ? [null, "[timed out]", true] : [junitXml([[GEN, "test_x", "passed", ""]]), "1 passed", false];
+  const sessions: FakeSession[] = [];
+  const said: string[] = [];
+  const path = join(tmp(), "events.jsonl");
+  const r = await withEvents(new EventLog(path, "t"), () => testRound(repo, null, CFG, { ...answerRound(model, CFG),
+    writeDir: writeDirOf(CFG), budgetUsd: 1.0, runs: 3, outDir: join(tmp(), "o"), progress: (m) => said.push(m),
+    sessionFactory: fakeFactory(hangs, sessions) }));
+  expect(sessions[0]!.commands.filter((c) => c.includes("final-"))).toHaveLength(1);
+  expect([r.classified.missingRuns, r.classified.totalRuns]).toEqual([3, 3]); // as when all three timed out
+  expect(said).toContain("main: final run 1/3 timed out; the other runs skipped");
+  const missing = readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    .filter((e) => e.type === "test.run_missing").map((e) => [e.data.repeat, e.data.timed_out, e.data.skipped]);
+  expect(missing).toEqual([[1, true, undefined], [2, false, true], [3, false, true]]);
 });
 
 test("test_round_without_tests_skips_runs", async () => {
@@ -150,7 +174,7 @@ test("runs target the generated test files, never the whole tests directory", as
   await testRound(repo, null, cfg, { ...answerRound(model, cfg), writeDir: "tests",
     budgetUsd: 1.0, runs: 3, outDir: join(tmp(), "o"), sessionFactory: fakeFactory(script, sessions) });
   const commands = sessions[0]!.commands.slice(1); // after the probe
-  expect(commands).toHaveLength(4);
+  expect(commands).toHaveLength(3); // one agent run, two final runs (the second timed out)
   for (const c of commands) expect(c.startsWith("pytest tests/test_new.py ")).toBe(true);
 });
 

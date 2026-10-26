@@ -12,8 +12,9 @@ export const BEFORE_STATUSES = ["regression", "pre-existing", "new-code", "chang
 export type BeforeStatus = typeof BEFORE_STATUSES[number];
 
 /** What a finding's test did on the code before the change. `runs`: its outcome in each run there ("missing": the run
- * gave no report, "timeout": it timed out, "absent": the report left the test out). `message`: its failure there. */
-export interface Before { status: BeforeStatus; detail: string; runs: string[]; message?: string }
+ * gave no report, "timeout": it timed out, "absent": the report left the test out). `message`: its failure there.
+ * `asText`: it would be a regression, but the test reads the code as text (`textBefore`). */
+export interface Before { status: BeforeStatus; detail: string; runs: string[]; message?: string; asText?: true }
 
 /** One round's check: the result per test id, why it did not run (no base, out of time), and how long it took. */
 export interface BeforeCheck {
@@ -152,8 +153,9 @@ export function judgeBefore(t: TestResult, file: string | null, runs: BeforeRun[
 export const FIX_STATUSES = ["fixed", "new-code", "unchanged", "unknown"] as const;
 export type FixStatus = typeof FIX_STATUSES[number];
 
-/** A passing test on the code before the change: as `Before`, with a fix status. */
-export interface Fix { status: FixStatus; detail: string; runs: string[]; message?: string }
+/** A passing test on the code before the change: as `Before`, with a fix status; `asText`: it would be fixed, but the
+ * test reads the code as text (`textFix`). */
+export interface Fix { status: FixStatus; detail: string; runs: string[]; message?: string; asText?: true }
 
 /** One round's fix proof: the result per passing test id, why it did not run, and how long its own runs took. */
 export interface FixCheck { tests: Record<string, Fix>; skipped?: string; secs: number; runsMs: number }
@@ -207,6 +209,20 @@ export function judgeFix(t: TestResult, file: string | null, runs: BeforeRun[], 
     : `mixed outcomes on the code before the change (${outcomes.join(", ")})`, runs: outcomes });
 }
 
+/** A test that reads the code under test as text and matches it (shallow.ts "source-text"): passing on one side of
+ * the change and failing on the other shows the text changed, not the behaviour. Its regression is no proof: unknown,
+ * saying why. Other outcomes stand. */
+export function textBefore(b: Before): Before {
+  return b.status !== "regression" ? b : { ...b, status: "unknown", asText: true, detail: "passes on the code before " +
+    `the change (${plural(b.runs.length, "run")}), but it reads the code as text: no proof of a regression` };
+}
+
+/** As `textBefore`, for the fix proof: a fix shown by a test that reads the code as text is no proof. */
+export function textFix(f: Fix): Fix {
+  return f.status !== "fixed" ? f : { ...f, status: "unknown", asText: true, detail: "fails on the code before " +
+    `the change (${plural(f.runs.length, "run")}), but it reads the code as text: no proof of a fix` };
+}
+
 /** The stage's first progress line: which tests run on the code before the change. */
 export function beforeStartText(failing: number, passing: number): string {
   const kinds = [failing ? `${failing} failing` : "", passing ? `${passing} passing` : ""].filter(Boolean)
@@ -234,7 +250,8 @@ const FIX_WORDS: Record<FixStatus, [string, string]> = {
 const SHORT_REASONS: [RegExp, string][] = [[/timed out/, "timed out"], [/gave no report/, "no report"],
   [/^flaky/, "flaky"], [/^mixed outcomes/, "mixed outcomes"], [/^skipped/, "skipped"],
   [/^(did )?not run/, "did not run"], [/^could not run/, "could not run"],
-  [/returned nothing there/, "undefined value"], [/dependencies the image/, "new dependencies"]];
+  [/returned nothing there/, "undefined value"], [/dependencies the image/, "new dependencies"],
+  [/reads the code as text/, "reads the code as text"]];
 
 function outcomesText<S extends string>(kind: string, order: readonly S[], words: Record<S, [string, string]>,
   tests: { status: S; detail: string }[], reasons: boolean, either = false): string {
