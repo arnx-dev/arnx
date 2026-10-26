@@ -168,6 +168,46 @@ test("arnx allow-secret pins a file's key-shaped strings into review.yaml and se
   expect(cli.stderr).toContain("never sent");
 });
 
+test("arnx allow-secret --remove takes a path's pins out; review.yaml is proven again before the next review",
+  async () => {
+  const repo = gitRepo(tmp());
+  mkdirSync(join(repo, "src"));
+  writeFileSync(join(repo, "src", "detect.py"), FIXTURE);
+  writeFileSync(join(repo, "src", "other.py"), FIXTURE);
+  const cli = new Cli({ cwd: join(repo, "src") });
+  // Before setup: the seed loses the path; with no path left it is gone, as if never written.
+  expect(await cli.run("allow-secret", "detect.py", "other.py")).toBe(0);
+  expect(await cli.run("allow-secret", "--remove", "other.py")).toBe(0);
+  expect(readSecretPins(repo).map((p) => p.path)).toEqual(["src/detect.py"]);
+  expect(cli.out.slice(-2)).toEqual(["✓ No longer allowed: src/other.py (withheld again from model calls and the " +
+    "sandbox).", "Next: arnx setup"]);
+  expect(await cli.run("allow-secret", "--remove", "detect.py")).toBe(0);
+  expect(existsSync(reviewConfigPath(repo))).toBe(false);
+  // After setup: the stamp no longer holds, so the next review proves the file again.
+  writeFileSync(reviewConfigPath(repo), withSecretPins(stampFile(parseReviewFile(YAML), "u", "t"),
+    [{ path: "src/detect.py", matches: secretPins(FIXTURE) }, { path: "src/gone.py", matches: secretPins(FIXTURE) }]));
+  writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")), "u",
+    "t"));
+  // A file deleted since it was allowed can still be taken out.
+  const json = new Cli({ cwd: join(repo, "src") });
+  expect(await json.run("allow-secret", "--remove", "gone.py", "--json")).toBe(0);
+  expect(JSON.parse(json.stdout)).toMatchObject({ result: "ok", removed: ["src/gone.py"],
+    review_yaml: ".arnx/review.yaml", next: ["arnx review"] });
+  expect(readSecretPins(repo).map((p) => p.path)).toEqual(["src/detect.py"]);
+  expect(isFileApproved(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")))).toBe(false);
+  expect(await cli.run("allow-secret", "--remove", "detect.py")).toBe(0);
+  expect(cli.out.at(-1)).toBe("Next: arnx review");
+  expect(readFileSync(reviewConfigPath(repo), "utf8")).not.toContain("allow_secret_looking");
+  // A path that is not allowed: an error, and nothing is written.
+  const before = readFileSync(reviewConfigPath(repo), "utf8");
+  expect(await cli.run("allow-secret", "--remove", "detect.py")).toBe(2);
+  expect(cli.stderr).toContain("src/detect.py is not allowed in .arnx/review.yaml; nothing to remove");
+  expect(await cli.run("allow-secret", "--remove")).toBe(2);
+  expect(cli.stderr).toContain("name the files to stop allowing: arnx allow-secret --remove PATH...");
+  expect(await cli.run("allow-secret", "--remove", "../../x.py")).toBe(2);
+  expect(readFileSync(reviewConfigPath(repo), "utf8")).toBe(before);
+});
+
 test("worth a look names the allowed files", () => {
   const repo = gitRepo(tmp());
   const pin = { path: "detect.py", matches: secretPins(FIXTURE) };

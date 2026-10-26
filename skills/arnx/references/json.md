@@ -246,13 +246,14 @@ answers as `review.md` holds them now (latest review, or the id given).
 
 | Field | Type | Meaning |
 |---|---|---|
-| `files` | array | One per file allowed: `{ path, matches, labels }`. `matches`: how many key-like strings it holds; `labels`: each one's kind and line, `{ label, line }` (`AKIA…`, `a private key`). Never the strings themselves. |
+| `files` | array | One per file allowed: `{ path, matches, labels }`. `matches`: how many key-like strings it holds; `labels`: each one's kind and line, `{ label, line }` (`AKIA…`, `a private key`). Never the strings themselves. Not with `--remove`. |
+| `removed` | array of strings | Only with `--remove`: the paths whose pins were taken out, so their files are withheld again. |
 | `review_yaml` | string | `.arnx/review.yaml`, where they are pinned. |
 | `next` | array of strings | `arnx setup` before setup, else `arnx review` (it proves the changed file again first). |
 
 | `result` | Exit | When |
 |---|---|---|
-| `ok` | 0 | Every file named was allowed. A file that is missing, outside the repository, named like a secret file or holding nothing key-like is an `error`, and nothing is written. |
+| `ok` | 0 | Every file named was allowed (or, with `--remove`, taken out). A file that is missing, outside the repository, named like a secret file or holding nothing key-like is an `error`, and nothing is written; with `--remove`, a path outside the repository or not allowed is. |
 
 ### env prune
 

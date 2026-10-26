@@ -6,7 +6,7 @@ import { unsupportedText } from "./languages";
 import BANNER_ANSI from "../assets/banner.ans" with { type: "text" };
 import BANNER_TEXT from "../assets/banner.txt" with { type: "text" };
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
@@ -25,8 +25,8 @@ import { type Account, byokHint, CloudClient, credentialsPath, deleteCredentials
 import { dockerSession, suffixReviewCopies } from "./testround";
 import type { SessionFactory } from "./sandbox";
 import { git, repoRoot } from "./change";
-import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, type ReviewFile, reviewConfigPath, withSecretPins }
-  from "./config";
+import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, readSecretPins, type ReviewFile,
+  reviewConfigPath, withoutSecretPins, withSecretPins } from "./config";
 import { getAdapter } from "./adapters";
 import { ArnxError, internalError, SetupRequired } from "./errors";
 import { FILE as IGNORE_FILE, initialIgnore } from "./ignore";
@@ -106,7 +106,7 @@ Prepare, once per repository
   cloud on|off [--yes]                  arnx cloud's models instead of your keys, or back
   login | logout | credits              arnx cloud: sign this machine in or out; the balance
   consent [--cloud] [--yes]             agree now to send code (otherwise asked on the first send)
-  allow-secret PATH...                  send files whose key-like text is a test fixture
+  allow-secret [--remove] PATH...       send files whose key-like text is a test fixture; --remove undoes it
   skill install [--user] [--force]      the arnx skill for coding agents
   prompts [copy KEY]                    the prompts; copy one to .arnx/prompts.toml to edit it
   env prune [--keep-days N] [--all-repos] [--dry-run]
@@ -198,7 +198,7 @@ const COMMANDS: Record<string, { options: Options; positionals: number }> = Obje
   prompt: { options: {}, positionals: 1 },
   triage: { options: {}, positionals: 1 },
   next: { options: { ...MODELS }, positionals: 0 },
-  "allow-secret": { options: {}, positionals: 1000 },
+  "allow-secret": { options: { remove: { type: "boolean" } }, positionals: 1000 },
   skill: { options: { user: { type: "boolean" }, force: { type: "boolean" } }, positionals: 1 },
   prompts: { options: {}, positionals: 2 },
   env: { options: { "keep-days": { type: "string" }, "all-repos": { type: "boolean" }, "dry-run": { type: "boolean" } },
@@ -1039,6 +1039,7 @@ class Commands {
   /** Pin the key-shaped strings of each file in review.yaml, so snapshots keep it while it holds no others. */
   async allowSecret(a: Args): Promise<number> {
     const repo = this.repo();
+    if (a.values.remove) return this.disallowSecret(repo, a.positionals);
     if (!a.positionals.length) throw new ArnxError("name the files to allow: arnx allow-secret PATH...");
     const pins = a.positionals.map((p) => {
       if (!existsSync(resolve(this.d.cwd, p))) throw new ArnxError(`${p}: no such file`);
@@ -1067,6 +1068,30 @@ class Commands {
     this.emit("ok", 0, { files: pins.map((p) => ({ path: p.path, matches: p.hits.length,
       labels: p.hits.map((h) => ({ label: h.label, line: h.line })) })), review_yaml: REVIEW_FILE,
       next: [seed ? "arnx setup" : "arnx review"] });
+    return 0;
+  }
+
+  /** allow-secret --remove: the paths' pins out of review.yaml, so their files are withheld again. The files need not
+   * exist any more. A seed left with nothing allowed is removed. */
+  private disallowSecret(repo: string, paths: string[]): number {
+    if (!paths.length) throw new ArnxError("name the files to stop allowing: arnx allow-secret --remove PATH...");
+    const rels = paths.map((p) => {
+      const at = resolve(this.d.cwd, p);
+      const full = existsSync(at) ? realpathSync(at)
+        : existsSync(dirname(at)) ? join(realpathSync(dirname(at)), basename(at)) : at;
+      if (!full.startsWith(repo + sep)) throw new ArnxError(`${p} is outside the repository`);
+      return relative(repo, full).split(sep).join("/");
+    });
+    const path = reviewConfigPath(repo);
+    if (!existsSync(path)) throw new ArnxError(`${rels[0]} is not allowed in ${REVIEW_FILE}; nothing to remove`);
+    const seed = isSeedFile(repo);
+    const text = withoutSecretPins(readFileSync(path, "utf8"), rels);
+    if (seed && readSecretPins(repo).every((p) => rels.includes(p.path))) rmSync(path);
+    else writeFileSync(path, text);
+    this.d.out(`✓ No longer allowed: ${rels.join(", ")} (withheld again from model calls and the sandbox).`);
+    const next = seed ? "arnx setup" : "arnx review";
+    this.d.out(`Next: ${next}`);
+    this.emit("ok", 0, { removed: rels, review_yaml: REVIEW_FILE, next: [next] });
     return 0;
   }
 

@@ -225,6 +225,20 @@ export function withSecretPins(text: string | null, pins: SecretPin[]): string {
   return toYaml({ ...raw, [SECRET_KEY]: all.map((p) => ({ path: p.path, matches: [...p.matches] })) });
 }
 
+/** review.yaml's text without the pins of `paths`, each of which it must allow (`arnx allow-secret --remove`). */
+export function withoutSecretPins(text: string, paths: string[]): string {
+  const raw = parseYaml(text);
+  if (!isMap(raw)) throw new ArnxError("review.yaml must be a mapping");
+  const problems: string[] = [];
+  const pins = parsePins(raw[SECRET_KEY], problems);
+  if (problems.length) throw new ArnxError("review.yaml: " + problems.join("; "));
+  const missing = paths.find((p) => !pins.some((x) => x.path === p));
+  if (missing !== undefined) throw new ArnxError(`${missing} is not allowed in .arnx/review.yaml; nothing to remove`);
+  const kept = pins.filter((p) => !paths.includes(p.path));
+  if (!kept.length) return toYaml(without(raw, SECRET_KEY));
+  return toYaml({ ...raw, [SECRET_KEY]: kept.map((p) => ({ path: p.path, matches: [...p.matches] })) });
+}
+
 /** The allow-list as YAML to append to a file that has none (setup adds the user's to the agent's file). */
 export const secretPinsYaml = (pins: SecretPin[]) =>
   toYaml({ [SECRET_KEY]: pins.map((p) => ({ path: p.path, matches: [...p.matches] })) });
