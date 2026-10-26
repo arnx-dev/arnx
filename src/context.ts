@@ -43,7 +43,8 @@ const FUNC = [
   /^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)/, // Python
   /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/, // JS/TS function
   /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::[^=]+)?=>/, // arrow
-  /^\s+(?:public\s+|private\s+|protected\s+|static\s+|async\s+|readonly\s+)*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::[^{]+)?\{\s*$/, // method
+  // method; not Rust's `match (a, b) {` (a method named match has no space before its parenthesis)
+  /^\s+(?:public\s+|private\s+|protected\s+|static\s+|async\s+|readonly\s+)*(?!match\s)([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::[^{]+)?\{\s*$/,
   /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_]\w*)/, // Rust
 ];
 const CONST = [
