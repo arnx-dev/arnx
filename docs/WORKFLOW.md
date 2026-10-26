@@ -40,7 +40,9 @@ noticed and proven again before the next `review`, `check` or `accept` uses it. 
 last proof, per project: `test_command` (old → new), `install`, files added to or removed from `known_failing`, `env`,
 `services`, `owns`, `uses`, any other key by name, and projects added or removed. It compares with the copy the last
 proof kept in `.arnx/setup/proven-review.yaml` (a local file; without it, as after a proof by an older arnx or in a
-fresh clone, it says there is no copy to compare). Then the suites run and the file is stamped again, followed by what
+fresh clone, it says there is no copy to compare), stamp or not; a file whose stamp holds but whose content is not
+that copy's (a stamp recomputed by hand) counts as changed too. With `--json`, the command's object says so in
+`reproved`. Then the suites run and the file is stamped again, followed by what
 is worth a look; the changes go into `.arnx/setup/approval.md` too. When a suite fails there, the command stops and
 names the failing tests (exit 3). `arnx approve` runs the same proof on its own, saying the same.
 

@@ -41,8 +41,8 @@ the user asks for another.
    Uncommitted work is tracked files only: first `git add` each new file your change created, naming it by path
    (stage, do not commit). Never pass `--untracked`: other untracked files may be the user's private notes.
    With `--json`, stdout is one object: `result`, `review_id`, `review_json` and the summary.
-3. Exit 3: setup is missing, or the consent to send code, or `.arnx/review.yaml` changed and its suites now fail
-   (the message says what and names the failing tests); tell the user.
+3. Exit 3: setup or the consent to send code is missing, or a changed `.arnx/review.yaml` fails its suites; tell the
+   user. arnx says what changed in that file (`--json`: `reproved.changes`): always pass it to the user verbatim.
    `no project covers this change`: see [Code arnx did not review](#code-arnx-did-not-review). Exit 2 or an
    interruption: tell the user; `arnx review --resume` continues an interrupted review of the same change.
    `arnx cloud unavailable` or `arnx cloud is not open yet`: tell the user; do not retry, and do not change `[cloud]`

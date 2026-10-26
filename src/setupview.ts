@@ -3,7 +3,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, filesAt, git, leftOutUntracked, resolveChange, someNames, untrackedLine } from "./change";
-import { parseReviewFile, readSecretPins, type ReviewFile, secretPinsOf } from "./config";
+import { fileDigest, isFileApproved, parseReviewFile, readSecretPins, type ReviewFile, secretPinsOf } from "./config";
 import { detect } from "./detect";
 import { ArnxError } from "./errors";
 import { refString, type Settings, untrackedSetting } from "./settings";
@@ -155,20 +155,28 @@ export function nextStep(repo: string, untracked = untrackedSetting(repo)): stri
   }
 }
 
-/** What changed in review.yaml since its proof, one line per change; null without a copy of the proven file (an
- * older arnx proved it, or the copy is of another proof). */
-export function changesSinceProof(repo: string, now: ReviewFile): string[] | null {
+/** The copy of review.yaml the last proof on this machine kept; null when there is none or it does not read. */
+function provenCopy(repo: string): ReviewFile | null {
   const path = join(repo, PROVEN_COPY);
   if (!existsSync(path)) return null;
-  let old: ReviewFile;
   try {
-    old = parseReviewFile(readFileSync(path, "utf8"));
+    return parseReviewFile(readFileSync(path, "utf8"));
   } catch (e) {
     if (e instanceof ArnxError) return null;
     throw e;
   }
-  const sha = (f: ReviewFile) => (f.raw.approved as { sha256?: unknown } | undefined)?.sha256;
-  return sha(old) !== undefined && sha(old) === sha(now) ? describeChanges(old, now) : null;
+}
+
+/** Where review.yaml stands against its last proof on this machine. `proven`: its stamp holds and it holds what the
+ * proof's copy holds (or there is no copy: a proof by an older arnx, a fresh clone). Otherwise `changes`: what changed
+ * since the copy, stamp or not (null without a copy). `stamped`: it carries a stamp, current or not. */
+export function proofState(repo: string, file: ReviewFile): { proven: boolean; stamped: boolean;
+  changes: string[] | null } {
+  const copy = provenCopy(repo);
+  // A stamp that holds over content this machine did not prove (recomputed by hand) is no proof.
+  const proven = isFileApproved(file) && (!copy || fileDigest(copy) === fileDigest(file));
+  const stamped = typeof file.raw.approved === "object" && file.raw.approved !== null;
+  return { proven, stamped, changes: !proven && copy ? describeChanges(copy, file) : null };
 }
 
 type Raw = Record<string, unknown>;

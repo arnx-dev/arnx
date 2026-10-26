@@ -51,8 +51,8 @@ import { isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, type ProjectProof, runSetup,
   type SetupResult, stillRed }
   from "./setup";
-import { approvalScreen, approvalWarnings, changesSinceProof, type FilesSummary, filesSummary, nextStep, PROVEN_COPY,
-  REVIEW_FILE, setupPreview, worthALook }
+import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, PROVEN_COPY,
+  proofState, REVIEW_FILE, setupPreview, worthALook }
   from "./setupview";
 import { isoSeconds } from "./util";
 import { spend } from "./spend";
@@ -249,11 +249,15 @@ export function jsonObject(command: string, result: string, exitCode: number, fi
 class Commands {
   constructor(private d: CliDeps, private j: JsonOut | null = null) {}
 
+  /** The proof this command ran first because review.yaml changed (reprove): added to its JSON object as `reproved`. */
+  private reproved: { changes: string[] | null; no_copy: boolean } | null = null;
+
   /** With --json, the command's JSON object (once); without it, nothing. `result` is a short word ("ok", "fail", or
    * the command's own, such as "findings"); `fields` are the command's data, snake_case. */
   private emit(result: string, exitCode: number, fields: Record<string, unknown> = {}): void {
     if (!this.j || this.j.done) return;
-    this.j.write(jsonObject(this.j.command, result, exitCode, fields));
+    this.j.write(jsonObject(this.j.command, result, exitCode,
+      { ...fields, ...(this.reproved ? { reproved: this.reproved } : {}) }));
     this.j.done = true;
   }
 
@@ -265,7 +269,7 @@ class Commands {
   /** With --json, an object written whole (a command with its own schema); without it, nothing. */
   private emitRaw(text: string): void {
     if (!this.j || this.j.done) return;
-    this.j.write(text);
+    this.j.write(this.reproved ? JSON.stringify({ ...JSON.parse(text), reproved: this.reproved }, null, 2) : text);
     this.j.done = true;
   }
 
@@ -568,8 +572,9 @@ class Commands {
         const names = file.projects.map((p) => p.name);
         const which = file.legacy ? "" : ` (${names.length} project${names.length === 1 ? "" : "s"}: ${names.join(", ")})`;
         // A changed or unproven file is no stop: the next review proves it first.
-        const state = isFileApproved(file) ? `proven${which}`
-          : approvalStamp(repo) ? `changed since its proof${which}: the next review proves it again`
+        const st = proofState(repo, file);
+        const state = st.proven ? `proven${which}`
+          : st.stamped || st.changes ? `changed since its proof${which}: the next review proves it again`
           : `not proven yet${which}: the next review proves it`;
         checks.push([true, "Environment", state]);
       } catch (e) {
@@ -828,39 +833,40 @@ class Commands {
     if (look.length) this.d.out(["", "Worth a look:", ...look.map((l) => `  ! ${l}`), ""].join("\n"));
   }
 
-  /** Before the suites of a file stamped before run again: what changed since its proof, compared with the copy the
-   * proof kept (PROVEN_COPY). Null for a file never proven or unchanged; "no-copy" when there is no copy to compare
-   * (an older arnx proved it); else the changes, which the approval record keeps. */
-  private sayChanges(repo: string, file: ReviewFile): string[] | "no-copy" | null {
-    if (isFileApproved(file) || approvalStamp(repo) === null) return null;
-    const changes = changesSinceProof(repo, file);
-    if (!changes?.length) {
-      this.d.out(`${REVIEW_FILE} changed since its proof${changes ? "" : " (no copy of the proven file to compare)"}: ` +
-        "running its suites again");
-      return changes ?? "no-copy";
+  /** Before the suites of an unproven file run: what changed since the last proof on this machine, compared with the
+   * copy it kept (PROVEN_COPY), stamp or not; without a copy, that there is none (a stamp) or that it is not proven
+   * yet (no stamp). Returns what the approval record keeps: the changes, "no-copy", or null (never proven). */
+  private sayChanges(st: { stamped: boolean; changes: string[] | null }): string[] | "no-copy" | null {
+    if (st.changes?.length) {
+      this.d.out([`${REVIEW_FILE} changed since its proof:`, ...st.changes.map((c) => `  ${c}`),
+        "Running its suites again."].join("\n"));
+    } else if (st.changes || st.stamped) {
+      this.d.out(`${REVIEW_FILE} changed since its proof${st.changes ? "" : " (no copy of the proven file to compare)"}` +
+        ": running its suites again");
+    } else {
+      this.d.out(`${REVIEW_FILE} is not proven yet: running its suites`);
     }
-    this.d.out([`${REVIEW_FILE} changed since its proof:`, ...changes.map((c) => `  ${c}`), "Running its suites again."]
-      .join("\n"));
-    return changes;
+    return st.changes ?? (st.stamped ? "no-copy" : null);
   }
 
   /** A review.yaml changed since its proof (or never proven) is proven again before a review, a check or accept uses
    * its sandbox: one line, the suites, the stamp. A failing proof stops the command (exit 3); `command` is the one to
    * run again once the file is fixed. */
-  private async reprove(repo: string, a: Args, command: string): Promise<void> {
+  private async reprove(repo: string, a: Args, command: string, untracked?: boolean): Promise<void> {
     if (!existsSync(reviewConfigPath(repo)) || isSeedFile(repo)) return; // the command itself says to run setup
     const file = loadReviewFile(repo, { requireApproved: false });
-    if (isFileApproved(file)) return;
+    const st = proofState(repo, file);
+    if (st.proven) return;
     // A changed file says what changed first: a weakened test_command or a new known_failing entry is never silent.
-    const changes = this.sayChanges(repo, file);
-    if (changes === null) this.d.out(`${REVIEW_FILE} is not proven yet: running its suites`);
+    const changes = this.sayChanges(st);
+    this.reproved = { changes: st.changes, no_copy: st.changes === null };
     const why = changes === null ? "is not proven yet" : "changed since its proof";
-    const r = await this.approveRun(repo, a, undefined, undefined, { warnings: approvalWarnings(file), changes });
+    const r = await this.approveRun(repo, a, undefined, untracked, { warnings: approvalWarnings(file), changes });
     if (r.code !== 0) {
       throw new SetupRequired(`${REVIEW_FILE} ${why}, and its suites fail:\n${r.detail}\nNext: fix ${REVIEW_FILE}, ` +
         `then ${command}`);
     }
-    this.sayWorthALook(repo, file, { untracked: untrackedSetting(repo) });
+    this.sayWorthALook(repo, file, { untracked: untracked ?? untrackedSetting(repo) });
   }
 
   /** A failed setup's last attempt: `.arnx/review.yaml`, unapproved, unless that file is approved (a failed attempt
@@ -1079,7 +1085,8 @@ class Commands {
     this.d.out("");
     // Nothing is asked (--yes is still taken): the proof runs and the file is stamped.
     requireDocker();
-    const changes = this.sayChanges(repo, file);
+    const st = proofState(repo, file);
+    const changes = st.proven ? null : this.sayChanges(st);
     const r = await this.approveRun(repo, a, a.values.project as string | undefined, undefined,
       { warnings: approvalWarnings(file), changes });
     if (r.code === 0) this.provenEnd(repo, file, r.projects, { untracked });
@@ -1097,7 +1104,7 @@ class Commands {
     if (typeof ready === "number") return ready;
     const { mode } = ready;
     const s = await this.agreed(repo, ready.s, mode);
-    await this.reprove(repo, a, "arnx review");
+    await this.reprove(repo, a, "arnx review", untracked);
     const cloud = await this.cloudBrain(repo, s, mode);
     if (cloud) return this.reviewWith(repo, s, a, cloud, untracked);
     const agentModel = makeAgentModel(s, this.d.env);
@@ -1159,16 +1166,17 @@ class Commands {
     const { s: file, mode } = this.settings(repo, a);
     let s = file;
     const rdir = findReview(repo, a.positionals[0] ?? null);
-    // Answers and the closing check run in the sandbox: a changed review.yaml is proven again first.
-    if (!a.values["no-answers"] || (!a.values["no-check"] && this.d.check !== false)) {
-      await this.reprove(repo, a, `arnx accept${a.positionals[0] ? ` ${a.positionals[0]}` : ""}`);
-    }
+    // Answers and the closing check run in the sandbox: a changed review.yaml is proven again first (after the
+    // consent the answers need).
+    const again = `arnx accept${a.positionals[0] ? ` ${a.positionals[0]}` : ""}`;
+    if (a.values["no-answers"] && !a.values["no-check"] && this.d.check !== false) await this.reprove(repo, a, again);
     const progress = new Progress(this.progressLine, { quiet: a.values.quiet as boolean | undefined,
       live: this.d.live ?? null, cost: costSince() });
     let runner = null;
     let billed = false; // arnx cloud turns the answers into tests: their cost is what it billed
     if (!a.values["no-answers"]) {
       s = await this.agreed(repo, s, mode); // answers are turned into tests by a model
+      await this.reprove(repo, a, again);
       const cloud = await this.cloudBrain(repo, s, mode);
       billed = !!cloud;
       if (cloud) {
@@ -1351,6 +1359,7 @@ class Commands {
       if (e instanceof ArnxError) throw new SetupRequired(e.message);
       throw e;
     }
+    await this.reprove(repo, a, `arnx check --review${a.positionals[0] ? ` ${a.positionals[0]}` : ""}`);
     const progress = new Progress(this.progressLine, { quiet: a.values.quiet as boolean | undefined,
       live: this.d.live ?? null });
     progress.start();
@@ -1461,10 +1470,7 @@ class Commands {
     suffixReviewCopies(repo);
     const s = loadSettings(repo);
     const json = !!a.values.json;
-    if (a.values.review) {
-      await this.reprove(repo, a, `arnx check --review${a.positionals[0] ? ` ${a.positionals[0]}` : ""}`);
-      return this.recheck(a, repo, s, json);
-    }
+    if (a.values.review) return this.recheck(a, repo, s, json);
     // Accepted tests edited or deleted since accept are not run: passing them would prove nothing. Nor are they when
     // their pins were changed or removed by anything but arnx.
     const changed = changedAccepted(repo, localPinsPath(this.d.env, repo));

@@ -10,6 +10,14 @@ Every arnx command takes `--json`. Then:
 
 `arnx check --json` and `arnx check --review --json` keep their own fields: [check-json.md](check-json.md).
 
+`review`, `check` and `accept` prove `.arnx/review.yaml` again first when it changed since its last proof on this
+machine (see [approve](#approve)). When they did, their object (an `error` one too) has `reproved`:
+`{ changes, no_copy }`. `changes`: what changed since that proof, one line each (`shop: test_command \`a\` → \`b\``,
+`shop: known_failing added tests/test_x.py`, `project feed added`, `shop: image changed`); `null` when there was no
+copy of the proven file to compare (`no_copy` true: proven by an older arnx, or a fresh clone). Absent when no proof
+ran. A change that weakens the tests (a `test_command` that runs less, files added to `known_failing`) is the user's
+to judge: pass `changes` on to them.
+
 ## Shared fields
 
 | Field | Type | Meaning |

@@ -7,6 +7,9 @@ holds the error object every arnx command gives ([json.md](json.md)): `schema_ve
 `result: "error"`, `error` (the message, also on stderr) and `exit_code` 2 or 3; a wrong option is
 `result: "usage-error"`.
 
+With or without `--review`, when `.arnx/review.yaml` changed since its last proof, check proves it again first and the
+object (an error one too) also has `reproved`: `{ changes, no_copy }`, as in [json.md](json.md).
+
 `arnx check` runs the accepted tests (what `arnx accept` kept in `.arnx/tests/`, each at the path it runs from) of
 every project in the proven sandbox, on the working tree as it is now. Test ids are relative to the project, at
 the path each test runs from; `files` are where they are kept.

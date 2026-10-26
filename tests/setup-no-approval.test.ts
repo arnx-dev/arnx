@@ -1,16 +1,19 @@
 // Setup asks nothing about the environment: it proves it, stamps it and ends with what is worth a look. A
 // review.yaml changed since its proof is proven again before a review or a check uses it.
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { approvalStamp, isFileApproved, parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { whatNext } from "../src/next";
+import { save } from "../src/report";
+import { loadSettings, writeSettings } from "../src/settings";
 import { type Runner, sandboxOptions, type SessionFactory } from "../src/sandbox";
 import { approvalChecks } from "../src/setupview";
 import { Cli } from "./helpers/cli";
 import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
+import { sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -22,9 +25,11 @@ type Case = [string, string, string, string];
 const PASS: Case = ["tests/test_pricing.py", "test_total", "passed", ""];
 const FAIL: Case = ["tests/test_pricing.py", "test_total", "failed", "assert 1 == 2"];
 
-const suites = (cases: Case[], runs: string[] = []): SessionFactory =>
+/** Suites that report `cases`; `runs` gets each project run, `seen` whether its snapshot held notes.md. */
+const suites = (cases: Case[], runs: string[] = [], seen: boolean[] = []): SessionFactory =>
   async <T>(cfg: { name: string }, snap: string, _log: string, body: (r: Runner) => Promise<T>) => {
     runs.push(cfg.name);
+    seen.push(existsSync(join(snap, "notes.md")));
     return body(new FakeSession(snap, () => [junitXml(cases), "out", false]));
   };
 
@@ -225,4 +230,82 @@ test("next and doctor send a changed review.yaml to review, not to approve", asy
   expect(cli.stdout).toContain("✓ Environment: changed since its proof (1 project: shop): the next review proves it " +
     "again\n");
   expect(cli.stdout).toContain("\nReady for review.\nNext: arnx review");
+});
+
+/** shop() with GOOD proven by arnx, so a copy of the proven file is kept. */
+async function provenShop(): Promise<string> {
+  const repo = await shop();
+  writeFileSync(reviewConfigPath(repo), GOOD);
+  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]) });
+  await cli.run("review", "--range", "HEAD..HEAD", "--quiet");
+  expect(proven(repo)).toBe(true);
+  return repo;
+}
+
+const WEAK = (text: string) => text.replace("python -m pytest -q {targets}", "python -m pytest -q -k 'not pricing' {targets}");
+const WEAKENED = "  shop: test_command `python -m pytest -q {targets}` → `python -m pytest -q -k 'not pricing' {targets}`";
+
+test("an unstamped file over a proven one is compared with the proven copy", async () => {
+  const repo = await provenShop();
+  writeFileSync(reviewConfigPath(repo), WEAK(GOOD)); // a saved attempt copied over it, an old checkout: no stamp
+  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]) });
+  await cli.run("review", "--range", "HEAD..HEAD", "--quiet");
+  expect(cli.out[0]).toBe([".arnx/review.yaml changed since its proof:", WEAKENED, "Running its suites again."].join("\n"));
+});
+
+test("a stamp recomputed by hand over changed content is proven again, the changes shown", async () => {
+  const repo = await provenShop();
+  writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(WEAK(GOOD)), "Dev", "2026-10-26T00:00:00+00:00"));
+  expect(proven(repo)).toBe(true); // the stamp holds; the content is not what this machine proved
+  const runs: string[] = [];
+  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS], runs) });
+  await cli.run("review", "--range", "HEAD..HEAD", "--quiet");
+  expect(cli.out[0]).toBe([".arnx/review.yaml changed since its proof:", WEAKENED, "Running its suites again."].join("\n"));
+  expect(runs).toEqual(["shop"]);
+  const doctor = new Cli({ cwd: repo, env: ENV });
+  expect(await doctor.run("doctor")).toBe(0);
+  expect(doctor.stdout).toContain("✓ Environment: proven (1 project: shop)\n");
+});
+
+test("--json: review and check carry the re-proof and its changes", async () => {
+  const repo = await provenShop();
+  writeFileSync(reviewConfigPath(repo), WEAK(readFileSync(reviewConfigPath(repo), "utf8")));
+  const review = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]) });
+  await review.run("review", "--range", "HEAD..HEAD", "--json", "--quiet");
+  expect(JSON.parse(review.stdout)).toMatchObject({ command: "review", result: "error",
+    reproved: { changes: [WEAKENED.trim()], no_copy: false } });
+  writeFileSync(reviewConfigPath(repo), readFileSync(reviewConfigPath(repo), "utf8").replace("python:3.12", "python:3.13"));
+  rmSync(join(repo, ".arnx", "setup", "proven-review.yaml"));
+  const check = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]), checkSessions: suites([PASS]) });
+  await check.run("check", "--json", "--quiet");
+  expect(JSON.parse(check.stdout)).toMatchObject({ command: "check", reproved: { changes: null, no_copy: true } });
+  // Proven now: nothing to say.
+  const again = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]), checkSessions: suites([PASS]) });
+  await again.run("check", "--json", "--quiet");
+  expect(JSON.parse(again.stdout).reproved).toBeUndefined();
+});
+
+test("the automatic proof reads untracked files when the review does", async () => {
+  const repo = await changed();
+  writeFileSync(join(repo, "notes.md"), "scratch\n");
+  const seen: boolean[] = [];
+  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS], [], seen) });
+  await cli.run("review", "--untracked", "--range", "HEAD..HEAD", "--quiet");
+  expect(seen).toEqual([true]);
+});
+
+test("check --review finds the review, and accept asks the consent, before any proof", async () => {
+  const repo = await changed();
+  const runs: string[] = [];
+  const check = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS], runs) });
+  expect(await check.run("check", "--review", "--quiet")).toBe(3);
+  expect(check.stderr).toContain("no reviews yet");
+  const rdir = join(repo, ".arnx", "reviews", "20261026-abcdef");
+  mkdirSync(rdir, { recursive: true });
+  save({ ...sampleReview(), id: "20261026-abcdef" }, rdir, "d");
+  writeSettings(repo, { ...loadSettings(repo), consentAt: null });
+  const accept = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS], runs) });
+  expect(await accept.run("accept", "--quiet")).toBe(3);
+  expect(accept.stderr).toContain("arnx consent");
+  expect(runs).toEqual([]);
 });
