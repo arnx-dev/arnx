@@ -12,7 +12,8 @@ import {
 import { dirname, join, resolve, sep } from "node:path";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
-import { excludePathspecs, firstUnpinned, isSecretPath, type KeyScan, scanKeys, type SecretPin } from "./secrets";
+import { excludePathspecs, firstUnpinned, hasKeyBody, isSecretPath, type KeyScan, scanKeys, type SecretPin }
+  from "./secrets";
 import { splitLines } from "./util";
 
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -276,7 +277,8 @@ function readText(p: string): string | null {
 
 /** `diff` with its lines blanked where each side's file (`before`, `after`: its text by path, null when absent)
  * blanks them (scanKeys): key-shaped text in comments of source files. A file whose key is in code is left as it
- * is, for secretInDiff to refuse. `files`: the lines blanked, numbered in the side each diff line comes from. */
+ * is, for secretInDiff to refuse. A section of a file with blanked lines loses its hunk headers' function context,
+ * which git may take from a key's body. `files`: the lines blanked, numbered in the side each diff line comes from. */
 function blankDiff(diff: string, allow: readonly SecretPin[], before: (path: string) => string | null,
                    after: (path: string) => string | null): { diff: string; files: Blanked[] } {
   const files: Blanked[] = [];
@@ -285,7 +287,9 @@ function blankDiff(diff: string, allow: readonly SecretPin[], before: (path: str
     const oldPath = /^--- a\/(.*)$/m.exec(section)?.[1] ?? null;
     const newPath = /^\+\+\+ b\/(.*)$/m.exec(section)?.[1] ?? null;
     const path = newPath ?? oldPath ?? "";
-    if (!firstUnpinned(section, [...new Set([...pins(oldPath ?? ""), ...pins(newPath ?? "")])])) return section;
+    // A key-shaped string, or a body line of one (in a line or a hunk header) whose header is outside the hunk.
+    if (!firstUnpinned(section, [...new Set([...pins(oldPath ?? ""), ...pins(newPath ?? "")])]) &&
+      !hasKeyBody(section)) return section;
     // Each side's blanked lines by number; a side whose key is in code leaves the section as it is.
     const side = (p: string | null, text: (p: string) => string | null): Map<number, string> | null => {
       const t = p === null ? null : text(p);
@@ -302,7 +306,7 @@ function blankDiff(diff: string, allow: readonly SecretPin[], before: (path: str
       const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
       if (hunk) {
         [a, b, inHunk] = [Number(hunk[1]), Number(hunk[2]), true];
-        return line;
+        return hunk[0];
       }
       if (!inHunk || line.startsWith("\\")) return line;
       const mark = line[0];

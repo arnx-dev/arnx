@@ -66,7 +66,7 @@ export type KeyScan = { withhold: { line: number; label: string } } | { blank: n
 /** A private key's END line. */
 const KEY_END = /-----END [A-Z ]*PRIVATE KEY-----/;
 /** Something like a key body anywhere: a run of 40 or more base64 characters in both cases. */
-const hasKeyBody = (text: string) => [...text.matchAll(/[A-Za-z0-9+/=]{40,}/g)]
+export const hasKeyBody = (text: string) => [...text.matchAll(/[A-Za-z0-9+/=]{40,}/g)]
   .some(([run]) => /[a-z]/.test(run) && /[A-Z]/.test(run));
 
 export function scanKeys(path: string, text: string, pins: readonly string[]): KeyScan | null {

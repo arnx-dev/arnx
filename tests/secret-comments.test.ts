@@ -176,6 +176,26 @@ test("a review's diff: a key in a comment on a context or removed line is blanke
     "client.py (ghp_…)");
 });
 
+test("a review's diff never carries a key body in a hunk header's function context", () => {
+  const repo = gitRepo(tmp());
+  const pad = Array.from({ length: 12 }, (_, i) => `    a${i}();`).join("\n");
+  const RSA = "-----BEGIN RSA " + "PRIVATE KEY-----", RSA_END = "-----END RSA " + "PRIVATE KEY-----";
+  const body2 = "Zm9vYmFy" + "Yy".repeat(28);
+  const file = (first: string, last: string) =>
+    `${first}\n/*\n${RSA}\n${BODY}\n${body2}\n${RSA_END}\n*/\n${pad}\n    ${last}\n`;
+  writeFileSync(join(repo, "b.ts"), file("const v = 1;", "old();"));
+  commit(repo, "key in a comment");
+  // A change near the header (blanked in context) and one far below it, whose hunk git labels with a body line.
+  writeFileSync(join(repo, "b.ts"), file("const v = 2;", "neu();"));
+  const near = resolveChange(repo);
+  expect([near.diff.includes(BODY), near.diff.includes(body2), hasSecretContent(near.diff)]).toEqual([false, false, false]);
+  expect(near.diff).toMatch(/^@@ -17,4 \+17,4 @@$/m);
+  writeFileSync(join(repo, "b.ts"), file("const v = 1;", "neu();"));
+  const far = resolveChange(repo);
+  expect([far.diff.includes(body2), far.blanked]).toEqual([false, undefined]);
+  expect(far.diff).toMatch(/^@@ -17,4 \+17,4 @@$/m);
+});
+
 test("the review names the files whose comment lines were blanked", () => {
   const md = render(sampleReview({ blankedLines: [{ path: "src/auth.ts", lines: [4] }] }));
   expect(md).toContain("- Comment lines blanked as secret-looking (not sent): src/auth.ts (line 4)");
