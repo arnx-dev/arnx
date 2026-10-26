@@ -274,6 +274,28 @@ const KEEPALIVE = 'end=$(($(date +%s)+86400)); while :; do sleep 60; now=$(date 
 const KILL_ALL = "kill -9 -1 2>/dev/null; exit 0";
 // All Docker says when the container is no longer there.
 const GONE = /^Error response from daemon: (?:No such container|container \S+ is not running)[^\n]*$/i;
+// Past this many characters of paths to touch, a run touches every file of the snapshot instead.
+const TOUCH_LIMIT = 64_000;
+/** Seconds Docker gets to start, or kill the processes in, a shared container (mutable for tests). */
+export const keptBox = { dockerSeconds: 60 };
+
+/** Files under `root` (POSIX paths relative to it) changed after `since` (ms, host clock), the reports left out. */
+function changedSince(root: string, since: number, prefix = ""): string[] {
+  const out: string[] = [];
+  let entries;
+  try {
+    entries = readdirSync(join(root, prefix), { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    const rel = prefix ? `${prefix}/${e.name}` : e.name;
+    if (e.isDirectory()) {
+      if (rel !== REPORT_DIR) out.push(...changedSince(root, since, rel));
+    } else if (e.isFile() && (statSync(join(root, rel), { throwIfNoEntry: false })?.mtimeMs ?? 0) > since) out.push(rel);
+  }
+  return out;
+}
 
 /** Services and network for one review; close() tears them down, including on errors and interrupts.
  *
@@ -283,20 +305,31 @@ const GONE = /^Error response from daemon: (?:No such container|container \S+ is
  * Why cargo stays right: it trusts a build of a workspace crate when no source file that build read is newer than it
  * (mtimes; registry dependencies are keyed by version, not by files). A session has one snapshot, so one version of
  * the code (the change's, or the base's in the before/after check, never both), and each later change to it is a
- * file arnx writes between runs (a run is synchronous: nothing writes during one), newer than every build before it,
- * so cargo rebuilds what changed. The first run starts from the image's target as every run did before: the snapshot
- * is extracted with fresh mtimes (`tar -m`), newer than that build, so an image built from other code is never taken
- * for this code. A kept target never moves to another session (another snapshot, whose files may be older than its
- * build), and the container is removed with its session, by its exact name. Before each run the container's /tmp,
- * /dev/shm and the adapter's `emptied` directories are emptied, and after it every process the run left is killed,
- * as a new container would have them; other files a run writes in the container stay for the session's next runs. */
+ * file arnx writes between runs (a run is synchronous: nothing writes during one). Each run first touches, inside the
+ * container, the files changed since the last run there (found by their mtimes against the host's clock at that
+ * run's start), so they are newer than every build before by the clock cargo's builds use, even when Docker's clock
+ * is ahead of the host's (Docker Desktop's VM): cargo rebuilds what changed. The first run starts from the image's
+ * target as every run did before: the snapshot is extracted with fresh mtimes (`tar -m`), newer than that build, so an
+ * image built from other code is never taken for this code. A kept target never moves to another session (another
+ * snapshot, whose files may be older than its build), and the container is removed with its session, by its exact
+ * name. Before each run the container's /tmp, /dev/shm and the adapter's `emptied` directories are emptied, and after
+ * it every process the run left is killed, as a new container would have them; other files a run writes in the
+ * container stay for the session's next runs. An image with an entrypoint runs each command in a new container, as
+ * other languages do: its entrypoint stays the first process, and the kill after each run would end it. */
 export class Session implements Runner {
   readonly id = randomHex(4);
   readonly network: string;
   private started: string[] = [];
   private networkCreated = false;
+  private closed = false;
+  /** Whether the runs may share a container (the image has no entrypoint); null until the first run asks. */
+  private shared: boolean | null = null;
   /** The container the runs share (keepBuild), once the first run started it. */
   private box: string | null = null;
+  /** Every shared container started and not yet removed, by name: close removes them. */
+  private boxes = new Set<string>();
+  /** When the last run in the shared container started (host clock, ms); 0 before its first. */
+  private lastRun = 0;
 
   constructor(readonly image: string, readonly cfg: ReviewConfig, readonly snapshot: string,
               readonly limits: Limits = DEFAULT_LIMITS) {
@@ -341,15 +374,19 @@ export class Session implements Runner {
   }
 
   close(): void {
+    this.closed = true;
     if (!live.delete(this)) return;
     this.dropBox();
+    for (const name of this.boxes) docker(["rm", "-f", name]);
+    this.boxes.clear();
     for (const name of this.started) docker(["rm", "-f", name]);
     if (this.networkCreated) docker(["network", "rm", this.network]);
   }
 
   run(command: string, timeout: number): RunResult {
     const keep = adapterFor(this.cfg).keepBuild;
-    if (!keep) {
+    // A closed session (an interrupt) starts no container that nothing would remove.
+    if (!keep || this.closed || !this.mayShare()) {
       const name = `arnx-${this.id}-run-${randomHex(3)}`;
       return this.spawnRun(this.argv(name, command), command, timeout, () => docker(["kill", name]));
     }
@@ -360,6 +397,24 @@ export class Session implements Runner {
       r = this.keptRun(command, timeout, keep.emptied);
     }
     return r;
+  }
+
+  private mayShare(): boolean {
+    if (this.shared === null) {
+      let entrypoint = "";
+      try {
+        const r = docker(["image", "inspect", "-f", "{{json .Config.Entrypoint}}", this.image]);
+        entrypoint = r.status === 0 ? r.stdout.trim() : "unknown";
+      } catch {
+        entrypoint = "unknown";
+      }
+      this.shared = entrypoint === "null" || entrypoint === "[]";
+      if (!this.shared) {
+        stepLog({ step: "container", project: this.cfg.name, kept: false,
+          reason: entrypoint === "unknown" ? "inspect-failed" : "entrypoint" });
+      }
+    }
+    return this.shared;
   }
 
   private argv(name: string, command: string): string[] {
@@ -374,29 +429,61 @@ export class Session implements Runner {
     if (!this.box) {
       const name = `arnx-${this.id}-build-${randomHex(3)}`;
       const [, run, ...rest] = this.argv(name, KEEPALIVE);
+      // Named before it starts: a start Docker answers too late can still have made it, and close removes it.
+      [this.box, this.lastRun] = [name, 0];
+      this.boxes.add(name);
       live.add(this);
       const t0 = performance.now();
-      const r = docker([run!, "-d", ...rest]);
+      const seconds = () => (performance.now() - t0) / 1000;
+      let r;
+      try {
+        r = docker([run!, "-d", ...rest], { timeout: keptBox.dockerSeconds });
+      } catch (e) {
+        if (e instanceof SetupRequired) throw e;
+        this.dropBox();
+        return { exitCode: null, output: `${e instanceof Error ? e.message : String(e)}\n[timed out]`, timedOut: true,
+          seconds: seconds() };
+      }
       stepLog({ step: "container", project: this.cfg.name, ok: r.status === 0, secs: secsSince(t0) });
       if (r.status !== 0) {
+        this.dropBox();
         return { exitCode: r.status, output: (r.stdout + r.stderr).slice(-OUTPUT_LIMIT), timedOut: false,
-          seconds: (performance.now() - t0) / 1000 };
+          seconds: seconds() };
       }
-      this.box = name;
     }
-    const box = this.box;
+    const box = this.box!;
     const empty = ["/tmp", "/dev/shm", ...emptied].flatMap((d) => [`${d}/*`, `${d}/.[!.]*`, `${d}/..?*`]).join(" ");
-    const wrapped = `rm -rf ${empty} 2>/dev/null; sh -c ${shQuote(command)}; s=$?; kill -9 -1 2>/dev/null; exit $s`;
+    const changed = this.lastRun ? changedSince(this.snapshot, this.lastRun).sort().map((p) => shQuote(`/src/${p}`))
+      : [];
+    const touch = !changed.length ? ""
+      : changed.join(" ").length > TOUCH_LIMIT
+        ? `find /src -path /src/${REPORT_DIR} -prune -o -type f -exec touch -c {} + 2>/dev/null; `
+        : `touch -c -- ${changed.join(" ")}; `;
+    const wrapped = `rm -rf ${empty} 2>/dev/null; ${touch}sh -c ${shQuote(command)}; s=$?; kill -9 -1 2>/dev/null; ` +
+      "exit $s";
+    this.lastRun = Date.now();
     return this.spawnRun([sandboxOptions.docker, "exec", box, "sh", "-c", wrapped], command, timeout, () => {
-      // Killing docker exec leaves the run going inside: its processes go, the container and its build stay.
-      if (docker(["exec", box, "sh", "-c", KILL_ALL], { timeout: 60 }).status !== 0) this.dropBox();
+      // Killing docker exec leaves the run going inside: its processes go, the container and its build stay. A
+      // container Docker cannot reach in time goes too: the run counts as timed out either way.
+      try {
+        if (docker(["exec", box, "sh", "-c", KILL_ALL], { timeout: keptBox.dockerSeconds }).status === 0) return;
+      } catch {
+        // not answered in time
+      }
+      this.dropBox();
     });
   }
 
+  /** Removes the shared container, best effort: one Docker does not remove now is removed again at close. */
   private dropBox(): void {
-    if (!this.box) return;
-    docker(["rm", "-f", this.box]);
+    const box = this.box;
     this.box = null;
+    if (!box) return;
+    try {
+      if (docker(["rm", "-f", box], { timeout: keptBox.dockerSeconds }).status === 0) this.boxes.delete(box);
+    } catch {
+      // close tries again
+    }
   }
 
   private spawnRun(argv: string[], command: string, timeout: number, onTimeout: () => void): RunResult {

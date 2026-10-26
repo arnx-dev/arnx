@@ -343,11 +343,14 @@ rewritten) and Rust (`adapters/rust.ts`: cargo-nextest JUnit; generated tests ar
 Rust keeps its build within a session (`keepBuild`): the session's runs share one container, started at its first run
 with every limit a run has, so cargo starts each run from the target the last run left instead of compiling the
 workspace again from the image's. A session holds one snapshot, so one version of the code (the change's, or the
-base's for the before/after check); every later change to it is a file written between runs, newer than every build,
-so cargo's mtime check rebuilds what changed. A target never moves between sessions, and the container is removed by
-its exact name when the session closes (or on an interrupt). Before each run /tmp, /dev/shm and the target's tmp/ are
+base's for the before/after check); every later change to it is a file written between runs, and each run first
+touches those files inside the container (by Docker's clock, which cargo's builds use), so cargo's mtime check rebuilds
+what changed. A target never moves between sessions, and the container is removed by its exact name when the session
+closes (or on an interrupt); a closed session starts none. Before each run /tmp, /dev/shm and the target's tmp/ are
 emptied, and after it every process the run left is killed; a timeout kills the run's processes and keeps the
-container. The reasoning is at `Session` in `sandbox.ts`.
+container (one Docker does not answer in time is removed, and the run counts as timed out). An image with an
+entrypoint runs each command in a new container (docker.jsonl: `container` step with `kept: false`). The reasoning is
+at `Session` in `sandbox.ts`.
 
 Kept test files are named after what they protect, inside a folder that keeps the review id (`tests/arnx/r<id>/`,
 i.e. `accepted_tests_dir` under the project's root; while that is the default, TypeScript uses `__tests__/arnx/r<id>/`;
