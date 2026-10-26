@@ -215,6 +215,18 @@ test("a review's diff never carries a key body in a hunk header's function conte
   expect(far.diff).toMatch(/^@@ -17,4 \+17,4 @@$/m);
 });
 
+test("a review's diff showing a key body of a withheld file refuses, though the header is outside the hunk", () => {
+  const repo = gitRepo(tmp());
+  const RSA = "-----BEGIN RSA " + "PRIVATE KEY-----", RSA_END = "-----END RSA " + "PRIVATE KEY-----";
+  const rows = ["a", "b", "c", "d", "e"].map((c) => "MIIEowIBAAKCAQEA" + c.repeat(48));
+  const file = (tail: string) => `const PEM = \`${RSA}\n${rows.join("\n")}\n${RSA_END}\`;\n${tail}\n`;
+  writeFileSync(join(repo, "k.ts"), file("x();"));
+  commit(repo, "key in code");
+  writeFileSync(join(repo, "k.ts"), file("y();"));
+  expect(() => resolveChange(repo)).toThrow("the change contains text that looks like a secret (a key or token) in " +
+    "k.ts (a private key)");
+});
+
 test("the review names the files whose comment lines were blanked", () => {
   const md = render(sampleReview({ blankedLines: [{ path: "src/auth.ts", lines: [4] }] }));
   expect(md).toContain("- Comment lines blanked as secret-looking (not sent): src/auth.ts (line 4)");
