@@ -20,7 +20,7 @@ answer_usd = 0.5
 runs = 3                          # each test runs 3 times; a finding fails every time
 max_questions = 5                 # questions you are asked, at most
 before_check = true               # rerun failing tests on the code before the change
-accepted_tests_dir = "tests/arnx" # where accepted tests go
+accepted_tests_dir = "tests/arnx" # path accepted tests run from; kept in .arnx/tests/
 
 [cloud]
 models = false                                       # true: arnx models instead of your own keys

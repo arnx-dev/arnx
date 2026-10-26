@@ -387,7 +387,7 @@ export function writeSettings(repo: string, s: Settings, opts: { known?: boolean
     ...(s.fixProofMax !== 20 ? [setting(`fix_proof_max = ${s.fixProofMax}`,
       "passing tests per project rerun there to prove a fix (0: off)")] : []),
     ...(s.untracked ? [setting("untracked = true", "send untracked files too")] : []),
-    setting(`accepted_tests_dir = ${q(s.acceptedTestsDir)}`, "where accepted tests go"),
+    setting(`accepted_tests_dir = ${q(s.acceptedTestsDir)}`, "path accepted tests run from; kept in .arnx/tests/"),
     ...(s.context !== "names" ? [setting(`context = ${q(s.context)}`, "follow symbols with a code index")] : []),
     ...(s.jev ? ["", "[setup]", commented("jev = true", "experimental: ask JEV (needs JEV_API_KEY)")] : []),
     // Always written, models off unless turned on, so going to arnx cloud and back is one word in the file.
