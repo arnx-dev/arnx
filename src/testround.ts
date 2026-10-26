@@ -11,7 +11,7 @@ import { adapterFor } from "./adapters";
 import { bakedError, bakedIn, bakedKey, type BakedCopy, copyOnly, type CopyOnly, copyStopText, rebuildText }
   from "./baked";
 import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
-  fixText, judgeBefore, judgeFix, notChecked, SKIP_REASONS } from "./before";
+  fixText, judgeBefore, judgeFix, notChecked, SKIP_REASONS, textBefore, textFix } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
 import { snapshot } from "./change";
 import { type ReviewConfig, secretPinsOf } from "./config";
@@ -24,6 +24,7 @@ import type { Say } from "./progress";
 import { describeTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
   typeCheckOf } from "./typecheck";
 import { databaseEnv, dbUntested, untestedFiles } from "./untested";
+import { projectSource, shallowKind } from "./shallow";
 
 export const TOOL_TIMEOUT = 300;
 export const RUN_TIMEOUT = 600;
@@ -660,11 +661,18 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
       return out;
     }, o.headSnap, o.headKey);
     if (late) return skip("time");
-    return result(() => done(Object.fromEntries(o.findings.map((t) =>
-      [t.testId, judgeBefore(t, ownerFile(t.fileAttr, own), runs, envChanged)]))),
+    // A test that reads one of the project's source files as text and matches it proves no regression and no fix.
+    const source = projectSource(o.headSnap, cfg.workdir, (name) => adapterFor(cfg).isTestFile(name));
+    const asText = (t: TestResult, file: string | null) => file !== null &&
+      shallowKind(o.files[file], funcOf(t), (p) => source(file, p)) === "source-text";
+    return result(() => done(Object.fromEntries(o.findings.map((t) => {
+      const file = ownerFile(t.fileAttr, own), b = judgeBefore(t, file, runs, envChanged);
+      return [t.testId, asText(t, file) ? textBefore(b) : b];
+    }))),
     () => proofLate ? proved({}, "time") : proved(Object.fromEntries(o.proofs.map((t) => {
       const file = ownerFile(t.fileAttr, own);
-      return [t.testId, judgeFix(t, file, file !== null && owners.includes(file) ? runs : proofRuns, envChanged)];
+      const f = judgeFix(t, file, file !== null && owners.includes(file) ? runs : proofRuns, envChanged);
+      return [t.testId, asText(t, file) ? textFix(f) : f];
     }))));
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

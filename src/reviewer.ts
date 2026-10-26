@@ -510,7 +510,8 @@ export async function runReview(repo: string, o: { settings: Settings;
       for (const [testId, fx] of Object.entries(rnd.fixProof?.tests ?? {})) {
         const t = passedById.get(testId);
         fixProof.push({ testId, project: cfg.name, file: t ? ownerFile(t.fileAttr, Object.keys(rnd.files)) : null,
-          beforeStatus: fx.status, beforeRuns: fx.runs, beforeDetail: fx.detail });
+          beforeStatus: fx.status, beforeRuns: fx.runs, beforeDetail: fx.detail,
+          ...(fx.asText ? { asText: true as const } : {}) });
       }
       if (rnd.typecheck) typecheck.push(rnd.typecheck);
       if (kept) keptRound.add(cfg.name);

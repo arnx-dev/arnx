@@ -54,8 +54,9 @@ function full(): Record<string, unknown> {
   untrackedIncluded: ["notes.md"], untrackedLeftOut: 1,
   usage: [{ model: "anthropic:m", calls: 1, unknownCalls: 0, input: 1, output: 1, cacheRead: 0, cacheWrite: 0,
     costUsd: 0.1 }] as Review["usage"],
-  fixProof: [{ testId: "tests/g/test_a.py::test_b", project: "main", file: "tests/g/test_a.py", beforeStatus: "fixed",
-    beforeRuns: ["failed", "failed", "failed"], beforeDetail: "fails before" }],
+  fixProof: [{ testId: "tests/g/test_a.py::test_b", project: "main", file: "tests/g/test_a.py", beforeStatus: "unknown",
+    beforeRuns: ["failed", "failed", "failed"], beforeDetail: "fails before, but it reads the code as text",
+    asText: true }],
   // `output` comes only with a check that failed or timed out; here only to see every field written.
   typecheck: [{ project: "main", command: "npx tsc --noEmit", status: "errors", errors: 1, inChangedFiles: 1, new: 1,
     preExisting: 0, before: "compared", diagnostics: [{ file: "a.ts", line: 1, column: 2, code: "TS2322",
