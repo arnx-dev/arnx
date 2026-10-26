@@ -17,7 +17,7 @@ import { Cli } from "./helpers/cli";
 import { gitRepo, runGit } from "./helpers/gitutil";
 import { sampleReview } from "./helpers/review";
 import { render } from "../src/report";
-import { approvalScreen } from "../src/setupview";
+import { worthALook } from "../src/setupview";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
 import { GOOD, PROJECTS } from "./helpers/yaml";
@@ -143,7 +143,7 @@ test("setup keeps the files a seed allows and carries the allow-list into its pr
   expect(secretPinsOf(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")).raw)).toEqual([pin]);
 });
 
-test("arnx allow-secret pins a file's key-shaped strings into review.yaml and asks for setup or approval", async () => {
+test("arnx allow-secret pins a file's key-shaped strings into review.yaml and sends to setup or review", async () => {
   const repo = gitRepo(tmp());
   mkdirSync(join(repo, "src"));
   writeFileSync(join(repo, "src", "detect.py"), "A = 1\n" + FIXTURE);
@@ -154,12 +154,12 @@ test("arnx allow-secret pins a file's key-shaped strings into review.yaml and as
   expect(cli.stdout).toContain("src/detect.py: 1 key-like string (AKIA… line 2)");
   expect(cli.stdout).toContain("arnx setup");
   expect(cli.stdout).not.toContain("AKIAIOSFODNN7EXAMPLE");
-  // After setup the file is a full review.yaml: allowing more needs approving again.
+  // After setup the file is a full review.yaml: allowing more needs a new proof, which the next review runs.
   writeFileSync(reviewConfigPath(repo), withSecretPins(stampFile(parseReviewFile(YAML), "u", "t"), readSecretPins(repo)));
   writeFileSync(join(repo, "src", "detect.py"), FIXTURE + "T = 'ghp_" + "d".repeat(36) + "'\n");
   expect(await cli.run("allow-secret", "detect.py")).toBe(0);
   expect(readSecretPins(repo)[0]!.matches).toHaveLength(2);
-  expect(cli.stdout).toContain("arnx approve");
+  expect(cli.out.at(-1)).toBe("Next: arnx review");
   expect(isFileApproved(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")))).toBe(false);
   for (const bad of ["../plain.py", "missing.py", "/etc/hostname"]) expect(await cli.run("allow-secret", bad)).toBe(2);
   expect(cli.stderr).toContain("nothing that looks like a key");
@@ -168,13 +168,13 @@ test("arnx allow-secret pins a file's key-shaped strings into review.yaml and as
   expect(cli.stderr).toContain("never sent");
 });
 
-test("the approval screen names the allowed files", () => {
+test("worth a look names the allowed files", () => {
   const repo = gitRepo(tmp());
   const pin = { path: "detect.py", matches: secretPins(FIXTURE) };
   const f = parseReviewFile(withSecretPins(YAML, [pin]));
-  expect(approvalScreen(f, repo, { header: "h" })).toContain("detect.py");
-  expect(approvalScreen(f, repo, { header: "h" })).toContain("look like secrets");
-  expect(approvalScreen(parseReviewFile(YAML), repo, { header: "h" })).not.toContain("look like secrets");
+  expect(worthALook(f, repo, {}).join("\n")).toContain("detect.py");
+  expect(worthALook(f, repo, {}).join("\n")).toContain("allowed although secret-looking");
+  expect(worthALook(parseReviewFile(YAML), repo, {}).join("\n")).not.toContain("secret-looking");
 });
 
 test("the review names withheld files and how to allow one", () => {

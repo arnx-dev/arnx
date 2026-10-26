@@ -1,5 +1,5 @@
-// `.arnx/review.yaml`: the test environment the user approved. A run refuses a config that is missing, unapproved,
-// or changed since approval (the stamp holds a hash of everything else in the file). The hash is the one Python
+// `.arnx/review.yaml`: the test environment setup proved. A run refuses a config that is missing, unproven, or
+// changed since its proof (the stamp, kept under its old name `approved`, holds a hash of everything else in the file). The hash is the one Python
 // arnx computed (json.dumps with sorted keys over the parsed YAML), so files stamped by either version stay valid.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -488,7 +488,8 @@ export function loadReviewFile(repo: string, { requireApproved = true } = {}): R
   if (!existsSync(path)) throw new SetupRequired("no .arnx/review.yaml; run `arnx setup`");
   const f = parseReviewFile(readFileSync(path, "utf8"));
   if (requireApproved && !isFileApproved(f)) {
-    throw new SetupRequired(".arnx/review.yaml is not approved, or changed since it was approved; run `arnx approve`");
+    throw new SetupRequired(".arnx/review.yaml is not proven, or changed since its proof; run `arnx approve` to prove " +
+      "it");
   }
   return f;
 }

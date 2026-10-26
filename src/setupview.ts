@@ -1,7 +1,9 @@
 // What setup and approve show a developer: what is about to happen and roughly what it costs, one line per project
-// to judge, the points worth checking before approving, and what to do next.
+// to judge, what is worth a look once the environment is proven, and what to do next.
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, filesAt, git, leftOutUntracked, resolveChange, someNames, untrackedLine } from "./change";
-import { readSecretPins, type ReviewFile, secretPinsOf } from "./config";
+import { fileDigest, isFileApproved, parseReviewFile, readSecretPins, type ReviewFile, secretPinsOf } from "./config";
 import { detect } from "./detect";
 import { ArnxError } from "./errors";
 import { refString, type Settings, untrackedSetting } from "./settings";
@@ -12,6 +14,8 @@ const MIN_PER_PROJECT = [1, 3];
 const USD_PER_PROJECT = [0.03, 0.1];
 
 export const REVIEW_FILE = ".arnx/review.yaml";
+/** A copy of review.yaml as its last proof stamped it (a local file): what a changed file is compared with. */
+export const PROVEN_COPY = ".arnx/setup/proven-review.yaml";
 
 /** Shown before setup starts: the steps, what is sent, and a rough estimate from the layout found without a model.
  * `untracked`: the agent reads untracked files too (--untracked; default `[review] untracked`). */
@@ -45,7 +49,19 @@ export function projectTable(file: ReviewFile, proofs: ProjectProof[] = []): str
   return pad(rows).join("\n");
 }
 
-/** What a developer should look at before approving: tests the environment cannot run, and shortcuts in it. */
+/** Hosts an install line may download from without a mention: the package registries (and their subdomains). */
+const REGISTRIES = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "registry.yarnpkg.com", "crates.io"];
+
+/** The hosts an install line downloads from with curl, wget or git clone, other than the package registries. */
+export function downloadHosts(line: string): string[] {
+  if (!/\b(curl|wget)\b|\bgit\s+clone\b/.test(line)) return [];
+  const hosts = [...line.matchAll(/\b(?:https?|git|ssh|ftp):\/\/(?:[^@/\s'"]+@)?([\w.-]+)|\bgit@([\w.-]+):/g)]
+    .map((m) => (m[1] ?? m[2])!.toLowerCase());
+  return hosts.filter((h) => !REGISTRIES.some((r) => h === r || h.endsWith(`.${r}`)));
+}
+
+/** What a developer should look at once the environment is proven: tests it cannot run, shortcuts in it, and
+ * downloads from outside the package registries. */
 export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = []): string[] {
   const out: string[] = [];
   for (const p of file.projects) {
@@ -59,17 +75,19 @@ export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = []): s
     }
     const hidden = p.install.filter((l) => /\|\|\s*true\b/.test(l)).length + (/\|\|\s*true\b|;\s*true\)/.test(p.testCommand) ? 1 : 0);
     if (hidden) out.push(`${p.name}: ${hidden} command(s) ignore their own errors (|| true)`);
+    const hosts = [...new Set(p.install.flatMap(downloadHosts))];
+    if (hosts.length) out.push(`${p.name}: install downloads from ${hosts.join(", ")} (not a package registry)`);
   }
   return out;
 }
 
-/** Every `!` line of the approval screen: approvalChecks, and the files allowed although they look like secrets. */
+/** Every warning recorded with a proof: approvalChecks, and the files allowed although they look like secrets. */
 export function approvalWarnings(file: ReviewFile, proofs: ProjectProof[] = []): string[] {
   const checks = approvalChecks(file, proofs);
   const allowed = secretPinsOf(file.raw);
   if (allowed.length) {
-    checks.push(`${allowed.map((p) => p.path).join(", ")}: sent to the model and the sandbox although they look like ` +
-      "secrets (you allowed them under allow_secret_looking): approve only if they hold test fixtures");
+    checks.push(`${allowed.map((p) => p.path).join(", ")}: allowed although secret-looking; sent to the model and the ` +
+      "sandbox");
   }
   return checks;
 }
@@ -96,28 +114,31 @@ export function filesLine(f: FilesSummary): string {
       : "");
 }
 
-/** The screen before "Approve?": the table, the files line, the checks, what is not tested (the agent's notes go to a
- * file). `untracked`: untracked files are counted, as setup and reviews read them. */
+/** The screen before the proof runs: the table and the files line (the agent's notes go to a file). `untracked`:
+ * untracked files are counted, as setup and reviews read them. */
 export function approvalScreen(file: ReviewFile, repo: string, o: { proofs?: ProjectProof[]; header?: string;
   untracked?: boolean }): string {
   const lines = [...(o.header ? [o.header, ""] : []), projectTable(file, o.proofs)];
   const files = filesSummary(file, repo, !!o.untracked);
   if (files) lines.push(filesLine(files));
-  const checks = approvalWarnings(file, o.proofs);
-  if (checks.length) lines.push("", "Check before approving:", ...checks.map((c) => `  ! ${c}`));
-  if (!file.legacy) {
-    const map = coverageMap(repo, file, !!o.untracked);
-    if (map.uncovered.length) {
-      lines.push("", "Not tested (a change here is reported as not tested):",
-        ...map.uncovered.map((u) => `  ${u.path} (${u.files} file${u.files === 1 ? "" : "s"}` +
-          `${u.untracked ? `, ${u.untracked} untracked` : ""}): ${u.reason}`));
-    }
-    if (map.unexplained.length) lines.push(`  ${map.unexplained.length} source files no project mentions`);
-  }
   return lines.join("\n");
 }
 
-/** After approval: the next command, and what it would review in this repository right now (what would be sent:
+/** The lines of "Worth a look" after a proof, only what applies: the warnings, then what no project tests (a change
+ * there is reported as not tested) and source files no project mentions. */
+export function worthALook(file: ReviewFile, repo: string, o: { proofs?: ProjectProof[]; untracked?: boolean })
+  : string[] {
+  const lines = approvalWarnings(file, o.proofs);
+  if (!file.legacy) {
+    const map = coverageMap(repo, file, !!o.untracked);
+    lines.push(...map.uncovered.map((u) => `not tested: ${u.path} (${u.files} file${u.files === 1 ? "" : "s"}` +
+      `${u.untracked ? `, ${u.untracked} untracked` : ""}): ${u.reason}`));
+    if (map.unexplained.length) lines.push(`${map.unexplained.length} source files no project mentions`);
+  }
+  return lines;
+}
+
+/** After the proof: the next command, and what it would review in this repository right now (what would be sent:
  * tracked changes, and untracked files only with `untracked`, default `[review] untracked`). */
 export function nextStep(repo: string, untracked = untrackedSetting(repo)): string {
   try {
@@ -132,4 +153,75 @@ export function nextStep(repo: string, untracked = untrackedSetting(repo)): stri
     if (!(e instanceof ArnxError)) throw e;
     return `Next: arnx review, once there is a change (${e.message})`;
   }
+}
+
+/** The copy of review.yaml the last proof on this machine kept; null when there is none or it does not read. */
+function provenCopy(repo: string): ReviewFile | null {
+  const path = join(repo, PROVEN_COPY);
+  if (!existsSync(path)) return null;
+  try {
+    return parseReviewFile(readFileSync(path, "utf8"));
+  } catch (e) {
+    if (e instanceof ArnxError) return null;
+    throw e;
+  }
+}
+
+/** Where review.yaml stands against its last proof on this machine. `proven`: its stamp holds and it holds what the
+ * proof's copy holds (or there is no copy: a proof by an older arnx, a fresh clone). Otherwise `changes`: what changed
+ * since the copy, stamp or not (null without a copy). `stamped`: it carries a stamp, current or not. */
+export function proofState(repo: string, file: ReviewFile): { proven: boolean; stamped: boolean;
+  changes: string[] | null } {
+  const copy = provenCopy(repo);
+  // A stamp that holds over content this machine did not prove (recomputed by hand) is no proof.
+  const proven = isFileApproved(file) && (!copy || fileDigest(copy) === fileDigest(file));
+  const stamped = typeof file.raw.approved === "object" && file.raw.approved !== null;
+  return { proven, stamped, changes: !proven && copy ? describeChanges(copy, file) : null };
+}
+
+type Raw = Record<string, unknown>;
+/** Equal as data (the YAML's whole numbers are bigints). */
+const same = (a: unknown, b: unknown) => {
+  const text = (v: unknown) => JSON.stringify(v, (_k, x: unknown) => typeof x === "bigint" ? `${x}n` : x);
+  return text(a) === text(b);
+};
+const clipped = (s: string) => s.length > 80 ? `${s.slice(0, 79)}…` : s;
+/** The keys a change is described by; any other key that changed is named as it is. */
+const NAMED = new Set(["test_command", "install", "known_failing", "env", "services", "owns", "uses", "approved"]);
+
+/** Projects added or removed, then per project: test_command (old → new), install, known_failing (added and
+ * removed files), env, services, owns, uses, and any other key by name; then the file's own keys. */
+export function describeChanges(old: ReviewFile, now: ReviewFile): string[] {
+  const out: string[] = [];
+  for (const p of old.projects) if (!now.projects.some((q) => q.name === p.name)) out.push(`project ${p.name} removed`);
+  for (const p of now.projects) if (!old.projects.some((q) => q.name === p.name)) out.push(`project ${p.name} added`);
+  const spec = (f: ReviewFile, name: string): Raw => (f.legacy ? f.raw : (f.raw.projects as Record<string, Raw>)[name]) ?? {};
+  for (const p of now.projects) {
+    const o = old.projects.find((q) => q.name === p.name);
+    if (!o) continue;
+    const who = now.legacy ? "" : `${p.name}: `;
+    if (o.testCommand !== p.testCommand) {
+      out.push(`${who}test_command \`${clipped(o.testCommand)}\` → \`${clipped(p.testCommand)}\``);
+    }
+    if (!same(o.install, p.install)) out.push(`${who}install changed`);
+    const added = p.knownFailing.filter((k) => !o.knownFailing.includes(k));
+    const removed = o.knownFailing.filter((k) => !p.knownFailing.includes(k));
+    if (added.length) out.push(`${who}known_failing added ${added.join(", ")}`);
+    if (removed.length) out.push(`${who}known_failing removed ${removed.join(", ")}`);
+    for (const [key, a, b] of [["env", o.env, p.env], ["services", o.services, p.services], ["owns", o.owns, p.owns],
+      ["uses", o.uses, p.uses]] as const) {
+      if (!same(a, b)) out.push(`${who}${key} changed`);
+    }
+    const before = spec(old, p.name), after = spec(now, p.name);
+    const other = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+      .filter((k) => !NAMED.has(k) && !same(before[k], after[k])).sort();
+    if (other.length) out.push(`${who}${other.join(", ")} changed`);
+  }
+  if (!now.legacy) {
+    // Services are told per project, where they are used.
+    const keys = ["version", "allow_env_names", "uncovered", "allow_secret_looking"]
+      .filter((k) => !same(old.raw[k], now.raw[k]));
+    if (keys.length) out.push(`${keys.join(", ")} changed`);
+  }
+  return out;
 }

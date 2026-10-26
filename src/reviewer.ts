@@ -248,7 +248,7 @@ export async function runReview(repo: string, o: { settings: Settings;
   });
   if (crowded.length) {
     throw new SetupRequired(`${crowded.join("\n")}\nChange tests_dir in .arnx/review.yaml (or run \`arnx setup\`), ` +
-      "then `arnx approve`");
+      "then `arnx review` again");
   }
   const started = performance.now();
   // A review saves each finished project round and each verdict as it goes, so `--resume` continues one that was cut

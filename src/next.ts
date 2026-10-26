@@ -5,7 +5,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { startedAt } from "./accept";
 import { describe, hasCommits, resolveChange, untrackedLine } from "./change";
-import { reviewConfigPath, isFileApproved, isSeedFile, parseReviewFile, readSecretPins } from "./config";
+import { reviewConfigPath, isSeedFile, readSecretPins } from "./config";
 import { ChangeTooLarge, NoChange } from "./errors";
 import { load, nextSteps } from "./report";
 import { settingsPath, untrackedSetting } from "./settings";
@@ -14,8 +14,8 @@ import { settingsPath, untrackedSetting } from "./settings";
 export interface Next { phase: string; where: string; command: string; why: string; note?: string; then?: string }
 
 /** The flow's four phases, named after the command that next() returns. */
-const PHASES: [string, string][] = [["init", "1. Prepare"], ["setup", "1. Prepare"], ["approve", "1. Prepare"],
-  ["review", "2. Review"], ["triage", "3. Decide"], ["accept", "3. Decide"], ["check", "4. Fix"]];
+const PHASES: [string, string][] = [["init", "1. Prepare"], ["setup", "1. Prepare"], ["review", "2. Review"],
+  ["triage", "3. Decide"], ["accept", "3. Decide"], ["check", "4. Fix"]];
 
 export function whatNext(repo: string): Next {
   const n = step(repo);
@@ -31,10 +31,7 @@ function step(repo: string): Omit<Next, "phase"> & { phase?: string } {
     return { where: "no test environment yet", command: "arnx setup",
       why: "finds how your tests run in Docker" };
   }
-  if (!isFileApproved(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")))) {
-    return { where: "test environment not approved (or changed since)", command: "arnx approve",
-      why: "runs every suite and approves the file" };
-  }
+  // A review.yaml changed since its proof needs no step of its own: the next review proves it again first.
   const base = join(repo, ".arnx", "reviews");
   const reviews = existsSync(base) ? readdirSync(base).map((d) => join(base, d))
     .filter((d) => existsSync(join(d, "state.json")) || existsSync(join(d, "review.json"))) : [];

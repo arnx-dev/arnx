@@ -2,13 +2,16 @@
 
 `arnx check --json` prints one JSON object on stdout (progress goes to stderr; `--quiet` turns it off) and exits
 with its `exit_code`. This page is its contract, `schema_version` 1; arnx's tests check every field below. When the
-command fails before checking (no `.arnx/config.toml`, no approved environment, no Docker, no such review), stdout
+command fails before checking (no `.arnx/config.toml`, no environment set up, no Docker, no such review), stdout
 holds the error object every arnx command gives ([json.md](json.md)): `schema_version`, `command` (`check`),
 `result: "error"`, `error` (the message, also on stderr) and `exit_code` 2 or 3; a wrong option is
 `result: "usage-error"`.
 
+With or without `--review`, when `.arnx/review.yaml` changed since its last proof, check proves it again first and the
+object (an error one too) also has `reproved`: `{ changes, no_copy }`, as in [json.md](json.md).
+
 `arnx check` runs the accepted tests (what `arnx accept` kept in `.arnx/tests/`, each at the path it runs from) of
-every project in the approved sandbox, on the working tree as it is now. Test ids are relative to the project, at
+every project in the proven sandbox, on the working tree as it is now. Test ids are relative to the project, at
 the path each test runs from; `files` are where they are kept.
 `arnx check --review [id] --json` runs a review's confirmed tests instead: see [With --review](#with---review).
 
@@ -83,7 +86,7 @@ test.
 ## With --review
 
 `arnx check --review <id> --json` (no id: the latest review) runs the review's **confirmed** tests, the ones that
-proved its findings, from `.arnx/reviews/<id>/`, on the working tree as it is now, in the approved sandbox. Nothing is
+proved its findings, from `.arnx/reviews/<id>/`, on the working tree as it is now, in the proven sandbox. Nothing is
 accepted, copied into the repository or recorded, and no model is called (no cost). Use it right after fixing a
 review's findings, before the user has accepted anything. A test that fails in one run is still failing; a fix
 counts only when its test passes in every run (3 by default, `runs` in `.arnx/config.toml`), as a review decides.

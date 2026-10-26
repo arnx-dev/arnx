@@ -1,5 +1,5 @@
 // Setup: an agent reads the repository and proposes `.arnx/review.yaml` as a list of projects, proving each one by
-// building its environment and running its existing suite. The user approves; approval runs the suites once more and
+// building its environment and running its existing suite. Nobody is asked: the proof runs the suites once more and
 // stamps the file.
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync,
   writeFileSync } from "node:fs";
@@ -695,7 +695,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       state.lastTried = pins.length ? `${args.yaml.trimEnd()}\n${secretPinsYaml(pins)}` : args.yaml;
       try {
         const own = parseReviewFile(args.yaml);
-        if ("approved" in own.raw) return "invalid: remove the approved key; only the user approves";
+        if ("approved" in own.raw) return "invalid: remove the approved key; arnx stamps the file after its proof";
         if ("allow_secret_looking" in own.raw) {
           return "invalid: remove allow_secret_looking; only the user allows secret-looking files, and setup adds " +
             "their list itself";
@@ -981,10 +981,10 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
   if (o.project) {
     const prev = (f.raw.approved as { projects?: Record<string, string> } | undefined)?.projects;
     if (!f.projects.some((p) => p.name === o.project)) return [false, `no project ${o.project} in review.yaml`, []];
-    if (!prev) return [false, "no earlier approval with per-project hashes; run `arnx approve` without --project", []];
+    if (!prev) return [false, "no earlier proof with per-project hashes; run `arnx approve` without --project", []];
     const changed = f.projects.filter((p) => p.name !== o.project && prev[p.name] !== projectDigest(f, p.name));
     if (changed.length) {
-      return [false, `${changed.map((p) => p.name).join(", ")} changed since it was approved; run \`arnx approve\` ` +
+      return [false, `${changed.map((p) => p.name).join(", ")} changed since its proof; run \`arnx approve\` ` +
         "without --project", []];
     }
     run = f.projects.filter((p) => p.name === o.project);

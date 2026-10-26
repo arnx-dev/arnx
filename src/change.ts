@@ -244,7 +244,7 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
   if (secret) {
     throw new ArnxError(`the change contains text that looks like a secret (a key or token) in ${secret.path} ` +
       `(${secret.label}); arnx will not send it to a model. If it is a test fixture, not a secret, allow the file: ` +
-      `\`arnx allow-secret ${secret.path}\`, then \`arnx approve\``);
+      `\`arnx allow-secret ${secret.path}\`, then \`arnx review\` again`);
   }
   return { kind, base, head, diff, files: [...new Set(files)].sort(), ...(branch ? { branch } : {}),
     ...(leftOut.length ? { leftOut } : {}), ...(ignoredOut.size ? { ignored: [...ignoredOut].sort() } : {}),

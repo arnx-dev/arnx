@@ -635,7 +635,7 @@ export function render(r: Review): string {
   if (r.lockfilesChanged?.length) out.push(`- Changed lockfiles (in the sandbox, not reviewed): ${ticks(r.lockfilesChanged)}`);
   if (r.notSent.length) {
     out.push(`- Files left out because they looked like secrets: ${ticks(r.notSent)}. If one is a test fixture, not a ` +
-      "secret: `arnx allow-secret PATH`, then `arnx approve`");
+      "secret: `arnx allow-secret PATH`, then `arnx review` again");
   }
   const stats = r.projectStats ?? [];
   if (stats.length && (multi(r) || stats.some(troubled))) {

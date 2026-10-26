@@ -4,14 +4,14 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
 
 ## What runs where
 
-- Tests run only in Docker: no network (only the services you approved), no environment variables except the
-  ones in `.arnx/review.yaml`, CPU, memory and process limits, on a throwaway copy of your repository.
+- Tests run only in Docker: no network (only the services in `.arnx/review.yaml`), no environment variables except
+  the ones in it, CPU, memory and process limits, on a throwaway copy of your repository.
 - Each test environment is a Docker image (`arnx-env:<hash>`), built again when the install steps or the dependency
   files change; Rust images can take several GB. With `context = "precise"` (`.arnx/config.toml`), each one also
   gets a code indexer layer (`arnx-env:<hash>-scip1`, about 0.7 GB for Python and TypeScript; the indexer runs with
   no network). When the install copies your code into the image (`cp -r . /opt/app`), arnx builds one more image per
   version of the code it tests (`arnx-env:<hash>-src-<hash>`), reused for that code. `arnx env prune` removes this
-  repository's images that no approved project uses now and are a week old (`--keep-days N`, `--dry-run` to list them
+  repository's images that no proven project uses now and are a week old (`--keep-days N`, `--dry-run` to list them
   first, `--all-repos` for other repositories' old images too), and with each image made from your code the build
   cache records its build left, each by its id; the rest of Docker's build cache is not touched.
 - `arnx remove` lists everything arnx put in the repository (`.arnx/`, `.arnxignore`, the skill folders), this
@@ -21,13 +21,17 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
 - Your model keys stay in the arnx process. Files that usually hold secrets, and text that looks like a key, are
   never sent to a model. A file left out this way is named at setup and in each review. When its key-shaped text
   is test fixtures (a secret detector's own tests), `arnx allow-secret PATH` pins each such string in
-  `.arnx/review.yaml`, which then needs approving again; a new key-shaped string in that file withholds it again.
+  `.arnx/review.yaml`, which is then proven again before the next review; a new key-shaped string in that file
+  withholds it again. Setup lists allowed files under "Worth a look".
   When a setup run fails on a file left out this way (or by `.arnxignore`), setup stops and names it: only you can
   let it in.
 - arnx never edits your code or your tests. `accept` writes only into `.arnx/` (accepted tests in `.arnx/tests/`,
   where your own test run never collects them).
-- Accepted tests are code a model wrote. They run only through `arnx check`, in the approved sandbox. Read them
+- Accepted tests are code a model wrote. They run only through `arnx check`, in the proven sandbox. Read them
   before you commit them.
+- Setup asks nothing about the environment it writes: it proves it by running your suites. Its install steps, written
+  by the setup agent, run with network access when the image builds; setup lists under "Worth a look" any install
+  line that downloads with `curl`, `wget` or `git clone` from outside the package registries.
 - Data files (CSV and other exports, dumps, databases, images) are kept out by `.arnxignore`, which `arnx init`
   writes: patterns for them, the test fixture folders (`tests/`, `fixtures/`, `testdata/`, …) kept with `!` lines,
   and any other data-like file the repository has, by name. An existing `.arnxignore` is left as it is. A `!` line

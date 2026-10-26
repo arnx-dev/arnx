@@ -47,17 +47,22 @@ const suite = (outcome: "passed" | "failed"): SessionFactory => async (_cfg, sna
   body(new FakeSession(snap, () => [junitXml([["tests/test_a.py", "test_a", outcome, "boom"]]),
     `1 ${outcome}`, false]));
 
-test("approve --json without --yes asks nothing and approves nothing: not-approved, exit 3", async () => {
-  const repo = projectsRepo();
-  const cli = new Cli({ cwd: repo, ask: async () => { throw new Error("asked"); } });
-  expect(await cli.run("approve", "--json")).toBe(3);
-  expect(json(cli)).toEqual({ schema_version: 1, command: "approve", result: "not-approved", exit_code: 3,
-    approved: false, projects: [], next: ["arnx approve"] });
-  expect(cli.stderr).toContain("holds 2 projects");
-  expect(isFileApproved(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")))).toBe(false);
+test("approve --json asks nothing and needs no --yes: the suites run and the file is stamped", async () => {
+  const saved = sandboxOptions.docker;
+  try {
+    sandboxOptions.docker = dockerThatRuns();
+    const repo = projectsRepo();
+    const cli = new Cli({ cwd: repo, approveSessions: suite("passed"), ask: async () => { throw new Error("asked"); } });
+    expect(await cli.run("approve", "--json", "--quiet")).toBe(0);
+    expect(json(cli)).toMatchObject({ command: "approve", result: "ok", exit_code: 0, approved: true });
+    expect(cli.stderr).toContain("holds 2 projects");
+    expect(isFileApproved(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")))).toBe(true);
+  } finally {
+    sandboxOptions.docker = saved;
+  }
 });
 
-test("approve --yes --json: each project's suite, approved or not", async () => {
+test("approve --yes --json: each project's suite, proven or not", async () => {
   const saved = sandboxOptions.docker;
   try {
     sandboxOptions.docker = dockerThatRuns();
@@ -68,7 +73,7 @@ test("approve --yes --json: each project's suite, approved or not", async () => 
       projects: [{ name: "pay", ok: true, summary: "1 passed", accepted_failing: 0, unexpected: [] },
         { name: "feed", ok: true, summary: "1 passed", accepted_failing: 0, unexpected: [] }],
       next: ["arnx review"] });
-    expect(ok.stderr).toContain("✓ Environment auto-approved (--yes)");
+    expect(ok.stderr).toContain("✓ Environment proven");
     const bad = new Cli({ cwd: repo, approveSessions: suite("failed") });
     expect(await bad.run("approve", "--yes", "--json", "--quiet")).toBe(2);
     const o = json(bad);
