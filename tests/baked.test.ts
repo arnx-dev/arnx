@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, cpSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { bakedKey, commandPaths, differing, findCopies, onlyInCopies, reached, scopeFiles } from "../src/baked";
+import { bakedKey, commandPaths, differing, findCopies, onlyInCopies, packageName, reached, scopeFiles }
+  from "../src/baked";
 import { parseReviewConfig } from "../src/config";
 import { cacheRecords, sourceRecords } from "../src/envprune";
 import { dockerSteps, envKey, sandboxOptions } from "../src/sandbox";
@@ -186,6 +187,121 @@ exit 0
   } finally {
     sandboxOptions.docker = saved;
   }
+});
+
+const INSTALLED = `
+version: 1
+image: python:3.12-slim
+workdir: app
+install: ["pip install ."]
+test_command: python -m pytest -q {targets}
+env:
+  APP_MODE: test
+`;
+
+test("the project's package name: pyproject's [project] name, else setup.cfg's [metadata] name, - as _", () => {
+  const cfg = parseReviewConfig(INSTALLED);
+  let n = 0;
+  const dir = (files: Record<string, string>) => write(join(tmp(), `s${n++}`), files);
+  expect(packageName(cfg, dir({ "app/pyproject.toml": '[project]\nname = "my-app"\nversion = "1"\n' })))
+    .toBe("my_app");
+  expect(packageName(cfg, dir({ "app/setup.cfg": "[metadata]\nname = old-app\n\n[options]\nname = x\n" })))
+    .toBe("old_app");
+  // A pyproject without [project] name (poetry, a tool's config only) falls back to setup.cfg; neither: none.
+  expect(packageName(cfg, dir({ "app/pyproject.toml": "[tool.pytest.ini_options]\n",
+    "app/setup.cfg": "[metadata]\nname = cfg-app\n" }))).toBe("cfg_app");
+  expect(packageName(cfg, dir({ "app/pyproject.toml": "not toml [" }))).toBeNull();
+  expect(packageName(cfg, dir({ "app/a.py": "" }))).toBeNull();
+});
+
+const randomName = () => Math.random().toString(36).slice(2);
+
+/** A docker whose image holds the environment, answers the package probe with `origin` (exit `status`), hashes
+ * `hashed` (image path → contents) and builds by adding the tag; every run's arguments are logged. */
+function probeDocker(image: string, origin: string, hashed: Record<string, string>, status = 0)
+  : { builds: () => number; runs: () => string[] } {
+  const dir = join(tmp(), `docker-${randomName()}`);
+  mkdirSync(dir);
+  writeFileSync(join(dir, "images"), `${image}\n`);
+  writeFileSync(join(dir, "hashes"), Object.entries(hashed).map(([p, text]) => `${sha(text)}  ${p}\n`).join(""));
+  writeFileSync(join(dir, "docker"), `#!/bin/sh
+case "$1" in
+  info) echo 27;;
+  image) grep -qxF "$3" '${join(dir, "images")}' || exit 1;;
+  build) echo "$3" >> '${join(dir, "images")}'; echo b >> '${join(dir, "builds")}';;
+  run) echo "$*" | tr '\\n' ' ' >> '${join(dir, "runs")}'; echo >> '${join(dir, "runs")}'; case "$*" in
+    *arnx-package*) echo 'arnx-package: ${origin}'; exit ${status};;
+    *sha256sum*) cat > /dev/null; cat '${join(dir, "hashes")}';;
+  esac;;
+esac
+exit 0
+`);
+  chmodSync(join(dir, "docker"), 0o755);
+  sandboxOptions.docker = join(dir, "docker");
+  const lines = (f: string) => existsSync(join(dir, f)) ? readFileSync(join(dir, f), "utf8").trim().split("\n") : [];
+  return { builds: () => lines("builds").length, runs: () => lines("runs") };
+}
+
+describe("the project's package installed outside /src", () => {
+  const SITE = "/usr/local/lib/python3.12/site-packages";
+  const code = () => ({ "app/pyproject.toml": `[project]\nname = "my-app"\n# ${Date.now()}${Math.random()}\n`,
+    "app/src/my_app/__init__.py": "", "app/src/my_app/core.py": "NEW = 1\n", "app/src/my_app/data.json": "{}",
+    "app/tests/test_core.py": "def test_x(): pass\n" });
+  const open = async (origin: string, hashed: Record<string, string>, status = 0) => {
+    const saved = { docker: sandboxOptions.docker, buildkit: sandboxOptions.buildkit, log: dockerSteps.log };
+    const logs: Record<string, unknown>[] = [];
+    try {
+      sandboxOptions.buildkit = false;
+      dockerSteps.log = (l) => logs.push(l);
+      const cfg = parseReviewConfig(INSTALLED);
+      const snap = write(join(tmp(), `snap-${randomName()}`), code());
+      const docker = probeDocker(`arnx-env:${envKey(cfg, snap)}`, origin, hashed, status);
+      await dockerSession(cfg, snap, join(tmp(), "build.log"), async () => null);
+      return { builds: docker.builds(), runs: docker.runs(), snap, probe: logs.filter((l) => l.step === "package") };
+    } finally {
+      Object.assign(sandboxOptions, { docker: saved.docker, buildkit: saved.buildkit });
+      dockerSteps.log = saved.log;
+    }
+  };
+
+  test("an older copy in site-packages that the project's Python imports: an image made from this code", async () => {
+    const r = await open(`${SITE}/my_app/__init__.py`, { [`${SITE}/my_app/__init__.py`]: "",
+      [`${SITE}/my_app/core.py`]: "OLD = 1\n" });
+    expect(r.builds).toBe(1);
+    // The probe runs as a test run does: the code under test at /src, the project's folder, its env, no network.
+    const probe = r.runs.find((l) => l.includes("arnx-package"))!;
+    expect(probe).toContain("--network none");
+    expect(probe).toContain(`-v ${r.snap}:/src -w /src/app`);
+    expect(probe).toContain("APP_MODE=test");
+    expect(probe).toContain("my_app");
+    expect(r.runs.filter((l) => l.includes("arnx-package"))).toHaveLength(1);
+    expect(r.probe).toEqual([expect.objectContaining({ project: "main", package: "my_app",
+      origin: `${SITE}/my_app/__init__.py`, copy: `${SITE}/my_app`, differ: 1 })]);
+  });
+
+  test("a copy that matches the code, or a package imported from /src, builds nothing", async () => {
+    const same = await open(`${SITE}/my_app/__init__.py`, { [`${SITE}/my_app/__init__.py`]: "",
+      [`${SITE}/my_app/core.py`]: "NEW = 1\n" });
+    expect(same.builds).toBe(0);
+    expect(same.probe[0]).toMatchObject({ copy: `${SITE}/my_app`, differ: 0 });
+    const mounted = await open("/src/app/src/my_app/__init__.py", {});
+    expect(mounted.builds).toBe(0);
+    expect(mounted.probe[0]).toMatchObject({ origin: "/src/app/src/my_app/__init__.py", copy: null });
+    expect(mounted.runs.filter((l) => l.includes("sha256sum"))).toEqual([]);
+  });
+
+  test("an editable install of a copy outside /src counts too; a probe that fails or finds nothing changes nothing",
+    async () => {
+      const editable = await open("/opt/app/src/my_app/__init__.py", { "/opt/app/src/my_app/core.py": "OLD = 1\n" });
+      expect(editable.builds).toBe(1);
+      expect(editable.probe[0]).toMatchObject({ copy: "/opt/app/src/my_app", differ: 1 });
+      const failed = await open(`${SITE}/my_app/__init__.py`, { [`${SITE}/my_app/core.py`]: "OLD = 1\n" }, 1);
+      expect(failed.builds).toBe(0);
+      expect(failed.probe[0]).toMatchObject({ origin: null, copy: null });
+      const none = await open("", {});
+      expect(none.builds).toBe(0);
+      expect(none.probe[0]).toMatchObject({ origin: null, copy: null });
+    });
 });
 
 // ---- Docker integration: real containers. Run with ARNX_DOCKER_TESTS=1. ----

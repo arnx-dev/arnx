@@ -101,7 +101,7 @@ export function pruneEnv(repo: string, o: { keepDays: number; now?: number; dryR
 }
 
 /** Whether an image made from the code was built with the step marked with its tag; true when Docker cannot say. */
-function markedBuild(tag: string): boolean {
+export function markedBuild(tag: string): boolean {
   const r = docker(["image", "history", "--no-trunc", "--format", "{{.CreatedBy}}", tag]);
   return r.status !== 0 || !r.stdout.trim() || r.stdout.includes(` : ${tag}`);
 }

@@ -9,7 +9,8 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
 - Each test environment is a Docker image (`arnx-env:<hash>`), built again when the install steps or the dependency
   files change; Rust images can take several GB. With `context = "precise"` (`.arnx/config.toml`), each one also
   gets a code indexer layer (`arnx-env:<hash>-scip1`, about 0.7 GB for Python and TypeScript; the indexer runs with
-  no network). When the install copies your code into the image (`cp -r . /opt/app`), arnx builds one more image per
+  no network). When the install copies your code into the image (`cp -r . /opt/app`, or `pip install .` when your
+  tests import the installed package rather than the code in /src), arnx builds one more image per
   version of the code it tests (`arnx-env:<hash>-src-<hash>`), reused for that code. `arnx env prune` removes this
   repository's images that no proven project uses now and are a week old (`--keep-days N`, `--dry-run` to list them
   first, `--all-repos` for other repositories' old images too), and with each image made from your code the build

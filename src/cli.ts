@@ -233,6 +233,10 @@ async function ask(prompt: string): Promise<string | null> {
   }
 }
 
+/** env prune's and remove's line on images an older arnx made from the code, whose build cache cannot be found. */
+const olderCacheLine = (k: number) => `${k} image${k === 1 ? "" : "s"} built by an older arnx left build cache arnx ` +
+  "cannot find; `docker builder prune` removes all unused build cache (your choice).";
+
 /** doctor's and setup's line on the images `arnx env prune` would remove. */
 const oldImagesLine = (images: EnvImage[]) => {
   const one = images.length === 1;
@@ -1132,11 +1136,12 @@ class Commands {
       this.emit("ok", 0, { ...json([]), state: "listed", next: ["arnx remove --yes"] });
       return 0;
     }
-    const { failed, cache } = applyRemove(repo, plan);
+    const { failed, cache, cacheNotFound } = applyRemove(repo, plan);
     const done = plan.untracked.length + images.length + (plan.pins ? 1 : 0) - failed.length;
     this.d.out(failed.length ? `Removed ${n(done, "item")}; ${failed.length} could not be removed:`
       : `✓ Removed arnx from this repository${tracked.size ? ", except committed files" : ""}.`);
     for (const [what, why] of failed) this.d.out(`  ${what}: ${why}`);
+    if (cacheNotFound) this.d.out(olderCacheLine(cacheNotFound));
     if (gitLine) say("Remove the committed files in a commit:", `  ${gitLine}`);
     this.d.out(`Kept: ${kept.join("; ")}.`);
     this.emit(failed.length ? "fail" : "ok", failed.length ? 2 : 0, { ...json(failed, cache), state: "removed" });
@@ -1162,10 +1167,7 @@ class Commands {
         this.d.out(`${dryRun ? "Would remove" : "Removed"} their build cache: ${n(r.cache.length, "record")} ` +
           `(${totalSize(r.cache)}).`);
       }
-      if (r.cacheNotFound) {
-        this.d.out(`${n(r.cacheNotFound, "image")} built by an older arnx left build cache arnx cannot find; ` +
-          "`docker builder prune` removes all unused build cache (your choice).");
-      }
+      if (r.cacheNotFound) this.d.out(olderCacheLine(r.cacheNotFound));
     } else {
       this.d.out("No environment image to remove.");
     }

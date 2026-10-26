@@ -8,7 +8,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync, rmdirSync, rmSync } f
 import { dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 import { git } from "./change";
 import { ACCEPTED_RECORD } from "./check";
-import { type CacheRecord, type EnvImage, repoImages, sourceCache } from "./envprune";
+import { type CacheRecord, type EnvImage, markedBuild, repoImages, sourceCache } from "./envprune";
 import { ArnxError } from "./errors";
 import { FILE as IGNORE_FILE } from "./ignore";
 import { docker } from "./sandbox";
@@ -135,8 +135,10 @@ export function planRemove(repo: string, o: { tests: boolean; pins: string | nul
 
 /** Deletes what the plan lists that may be deleted here: untracked files (then the folders they leave empty), the
  * images (and the build cache of those made from the code) and the pin file. Returns what could not be deleted, and
- * why, and the build cache records removed. */
-export function applyRemove(repo: string, plan: RemovePlan): { failed: [string, string][]; cache: CacheRecord[] } {
+ * why, the build cache records removed, and how many images an older arnx made from the code went without theirs
+ * (envprune.ts pruneEnv). */
+export function applyRemove(repo: string, plan: RemovePlan)
+  : { failed: [string, string][]; cache: CacheRecord[]; cacheNotFound: number } {
   const failed: [string, string][] = [];
   const dirs = new Set<string>();
   for (const p of plan.untracked) {
@@ -162,6 +164,8 @@ export function applyRemove(repo: string, plan: RemovePlan): { failed: [string, 
     }
   }
   const removed: string[] = [];
+  // Asked before the images go: their history is gone with them.
+  const unmarked = (plan.images ?? []).map((i) => i.tag).filter((t) => t.includes("-src-") && !markedBuild(t));
   for (const img of plan.images ?? []) {
     const r = docker(["image", "rm", img.tag]);
     if (r.status === 0) removed.push(img.tag);
@@ -175,5 +179,5 @@ export function applyRemove(repo: string, plan: RemovePlan): { failed: [string, 
       failed.push([plan.pins, (e as Error).message]);
     }
   }
-  return { failed, cache };
+  return { failed, cache, cacheNotFound: removed.filter((t) => unmarked.includes(t)).length };
 }

@@ -155,3 +155,33 @@ exit 0
     sandboxOptions.docker = saved;
   }
 });
+
+test("remove --yes says when an older arnx's image made from the code leaves build cache it cannot find", async () => {
+  const saved = sandboxOptions.docker;
+  try {
+    const repo = gitRepo(join(tmp(), "repo"));
+    const env = { XDG_CONFIG_HOME: join(tmp(), "config") };
+    const dir = join(tmp(), "docker");
+    mkdirSync(dir);
+    const [marked, older] = ["arnx-env:k1-src-aaaaaaaaaaaa", "arnx-env:k1-src-bbbbbbbbbbbb"];
+    const labels = JSON.stringify({ "arnx.created": "2026-10-01T00:00:00Z", "arnx.project": "main",
+      "arnx.repo": repoId(repo) });
+    writeFileSync(join(dir, "images"), `${marked}\t2GB\t${labels}\n${older}\t2GB\t${labels}\n`);
+    writeFileSync(join(dir, "docker"), `#!/bin/sh
+case "$1 $2" in
+  "image ls") cut -f1,2 '${join(dir, "images")}';;
+  "image inspect") shift 4; for t in "$@"; do awk -F '\\t' -v t="$t" '$1 == t { print $3 }' '${join(dir, "images")}'; done;;
+  "image history") echo "COPY . /src # buildkit"; [ "$6" = '${older}' ] || echo "RUN /bin/sh -c : $6 # buildkit";;
+esac
+exit 0
+`);
+    chmodSync(join(dir, "docker"), 0o755);
+    sandboxOptions.docker = join(dir, "docker");
+    const go = new Cli({ cwd: repo, env });
+    expect(await go.run("remove", "--yes")).toBe(0);
+    expect(go.out).toContain("1 image built by an older arnx left build cache arnx cannot find; " +
+      "`docker builder prune` removes all unused build cache (your choice).");
+  } finally {
+    sandboxOptions.docker = saved;
+  }
+});
