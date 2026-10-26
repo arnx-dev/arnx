@@ -1,7 +1,7 @@
 import { beforeEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { backtracks, runAgent, ToolError, Workspace } from "../src/agent";
+import { backtracks, grepLimits, runAgent, ToolError, Workspace } from "../src/agent";
 import { ModelError } from "../src/errors";
 import { type Attempt, billedError, PRICES, type Reply } from "../src/llm";
 import { ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -163,12 +163,14 @@ test("grep refuses a long pattern", async () => {
 });
 
 test("grep refuses the usual backtracking shapes before matching anything", async () => {
-  for (const p of ["(a+)+", "(a*)*", "(\\w+\\s?)*", "x(?:ab?)+y", "((a+)b)*", "(a+){2,}", "a*a*", "\\w+\\d*", ".*.*",
-    "[a-z]+[a-z]*", "a+\\w+"]) {
+  for (const p of ["(a+)+", "(a*)*", "(\\w+\\s?)*", "x(?:ab?)+y", "((a+)b)*", "(a+){2,}", "(a*a*)+", "a*a*a*",
+    ".*.*.*", "a*\\w*a*", "\\w+\\d*", ".*\\w*", "[A-Z0-9_]+[A-Z_]*"]) {
     expect(backtracks(p)).toBe(true);
   }
+  // Two in a row where the second takes all the first does are linear in practice.
   for (const p of ["needle", "def \\w+\\(", "(foo|bar)+", "\\s*\\w+", "[a-z]+[0-9]+", "(\\w+)\\s*=", "a*b*",
-    "import .*", "x{2}(ab){3}", "a*ba*", "(a{2})+", "a\\*a*", "[(a+)]+", "\\(a+\\)+"]) {
+    "import .*", "x{2}(ab){3}", "a*ba*", "(a{2})+", "a\\*a*", "[(a+)]+", "\\(a+\\)+", "\\w+.*", "[A-Z_]+[A-Z0-9_]*",
+    "a*a*", ".*.*", "a+\\w+", "\\d+\\w*\\s+\\w+"]) {
     expect(backtracks(p)).toBe(false);
   }
   writeFileSync(join(root, "slow.txt"), "a".repeat(600) + "\n");
@@ -186,6 +188,25 @@ test("grep stops a pattern that backtracks without end", async () => {
   expect(Date.now() - started).toBeLessThan(4000);
   expect(await new Workspace(root).call("grep", { pattern: "needle" })).toContain("latin.txt:1:");
 });
+
+test("grep's time limit counts matching only: a literal grep over 6,000 files finds its matches", async () => {
+  for (let d = 0; d < 60; d++) {
+    mkdirSync(join(root, "many", `d${d}`), { recursive: true });
+    for (let f = 0; f < 100; f++) {
+      writeFileSync(join(root, "many", `d${d}`, `f${f}.py`), `x = ${f}\n` + (d === 59 && f === 99 ? "marker\n" : "") +
+        "def handler(request):\n    return request\n".repeat(20));
+    }
+  }
+  const ws = new Workspace(root);
+  expect(await ws.call("grep", { pattern: "marker", path: "many" })).toBe("many/d59/f99.py:2: marker");
+  // Walking and reading 6,000 files takes longer than this; matching a literal in them does not.
+  grepLimits.ms = 300;
+  try {
+    expect(await ws.call("grep", { pattern: "marker", path: "many" })).toBe("many/d59/f99.py:2: marker");
+  } finally {
+    grepLimits.ms = 2000;
+  }
+}, 30_000);
 
 test("grep skips files over the size limit", async () => {
   writeFileSync(join(root, "big.txt"), "needle\n" + "x".repeat(2_000_001));
