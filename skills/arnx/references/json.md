@@ -257,6 +257,8 @@ answers as `review.md` holds them now (latest review, or the id given).
 | `removed` | array | `{ tag, project, age_days, size }` per image removed (or, with `dry_run`, to remove). `size` as Docker shows it (`1.2GB`). |
 | `failed` | array | The same, plus `error`, per image Docker would not remove (in use, …). |
 | `unlabelled` | number | `arnx-env` images without arnx's labels, always left alone. |
+| `cache_records` | number | Build cache records removed (or, with `dry_run`, to remove) with the images made from the code (`-src-` tags). |
+| `cache_size` | string | Their total size (`2.4GB`). |
 
 | `result` | Exit | When |
 |---|---|---|

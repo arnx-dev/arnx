@@ -7,9 +7,12 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
 - Tests run only in Docker: no network (only the services you approved), no environment variables except the
   ones in `.arnx/review.yaml`, CPU, memory and process limits, on a throwaway copy of your repository.
 - Each test environment is a Docker image (`arnx-env:<hash>`), built again when the install steps or the dependency
-  files change; Rust images can take several GB. `arnx env prune` removes this repository's images that no approved
-  project uses now and are a week old (`--keep-days N`, `--dry-run` to list them first, `--all-repos` for other
-  repositories' old images too).
+  files change; Rust images can take several GB. When the install copies your code into the image (`cp -r . /opt/app`),
+  arnx builds one more image per version of the code it tests (`arnx-env:<hash>-src-<hash>`), reused for that code.
+  `arnx env prune` removes this repository's images that no approved project uses now and are a week old
+  (`--keep-days N`, `--dry-run` to list them first, `--all-repos` for other repositories' old images too), and with
+  each image made from your code the build cache records its build left, each by its id; the rest of Docker's build
+  cache is not touched.
 - `arnx remove` lists everything arnx put in the repository (`.arnx/`, `.arnxignore`, the skill folders), this
   repository's test images and the pins arnx keeps for it outside the repository; `arnx remove --yes` deletes them.
   Files you committed are left for the `git rm` it prints, so the removal shows in a commit. Accepted tests are your

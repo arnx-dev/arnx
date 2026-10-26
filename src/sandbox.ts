@@ -195,8 +195,11 @@ function buildkit(): boolean {
 }
 
 /** cache: install steps share the language's download cache (a BuildKit cache mount, kept out of the image). The
- * Dockerfile is not part of the image key: the cache changes how fast an image builds, not what it holds. */
-export function dockerfile(cfg: ReviewConfig, { cache = false }: { cache?: boolean } = {}): string {
+ * Dockerfile is not part of the image key: the cache changes how fast an image builds, not what it holds. mark: an
+ * image made from the code under test (baked.ts) names its tag in a step of its own, so `arnx env prune` can find the
+ * build cache records that build left (they hold the layers after the image is gone). */
+export function dockerfile(cfg: ReviewConfig, { cache = false, mark }: { cache?: boolean; mark?: string } = {})
+  : string {
   const adapter = adapterFor(cfg);
   const lines = [`FROM ${cfg.image}`];
   // ARG, not ENV: the cache location is set while installing and gone from the image the tests run in.
@@ -206,12 +209,14 @@ export function dockerfile(cfg: ReviewConfig, { cache = false }: { cache?: boole
   const mount = cache && adapter.downloadCache?.length
     ? `--mount=type=cache,id=arnx-${cfg.language},target=/arnx-cache,mode=0777 ` : "";
   const post = adapter.postInstall ?? [];
-  lines.push("COPY . /src", `WORKDIR ${workdirIn("/src", cfg.installRoot)}`,
+  lines.push("COPY . /src", ...(mark ? [`RUN : ${mark}`] : []), `WORKDIR ${workdirIn("/src", cfg.installRoot)}`,
     ...[...cfg.install, ...post].map((c) => `RUN ${mount}${c}`));
   return lines.join("\n") + "\n";
 }
 
-export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: string, key?: string): Promise<string> {
+/** `mark`: the image is made from the code under test (baked.ts); its build is marked with its tag. */
+export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: string, key?: string,
+                                { mark = false }: { mark?: boolean } = {}): Promise<string> {
   const tag = `arnx-env:${key ?? envKey(cfg, snapshot)}`;
   const t0 = performance.now();
   if (docker(["image", "inspect", tag]).status === 0) {
@@ -219,7 +224,7 @@ export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: st
     return tag;
   }
   dockerSteps.say?.(`${cfg.name}: building its test image (minutes on a first build)`);
-  const text = dockerfile(cfg, { cache: buildkit() });
+  const text = dockerfile(cfg, { cache: buildkit(), ...(mark ? { mark: tag } : {}) });
   const labels = envLabels(cfg);
   let r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", snapshot], { timeout: BUILD_TIMEOUT, stdin: text });
   stepLog({ step: "image", project: cfg.name, tag, built: true, ok: r.status === 0, secs: secsSince(t0) });

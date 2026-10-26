@@ -47,14 +47,16 @@ export interface Round {
 export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, envFrom, key) => {
   requireDocker();
   let image = await ensureEnv(cfg, envFrom ?? snap, buildLog, key);
-  // An image holding an older copy of the code (baked.ts) is built again for the code in the snapshot. The before/after
-  // check copies its code in once the session is up: a copy that differs from it then refuses the first run.
+  // An image holding an older copy of the code (baked.ts) is built again for the code in the snapshot, once per version
+  // of that code (keyed on it: later sessions and reviews of the same code reuse it). The before/after check copies its
+  // code in once the session is up: a copy that differs from it then refuses the first run.
   let guard: ((s: Session) => Runner) | null = null;
   if (existsSync(snap) && readdirSync(snap).length) {
     const baked = bakedIn(cfg, image, snap);
     if (baked?.differ.length) {
       dockerSteps.say?.(rebuildText(cfg, baked));
-      image = await ensureEnv(cfg, snap, buildLog, bakedKey(image.slice(image.indexOf(":") + 1), baked.copies, snap));
+      const own = bakedKey(image.slice(image.indexOf(":") + 1), cfg, baked.copies, snap);
+      image = await ensureEnv(cfg, snap, buildLog, own, { mark: true });
     }
   } else {
     guard = (s) => {
