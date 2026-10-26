@@ -44,8 +44,7 @@ the user asks for another.
 3. Exit 3: setup or the consent to send code is missing, or a changed `.arnx/review.yaml` fails its suites; tell the
    user. arnx says what changed in that file (`--json`: `reproved.changes`): always pass it to the user verbatim.
    `no project covers this change`: see [Code arnx did not review](#code-arnx-did-not-review). Exit 2 or an
-   interruption: tell the user; `arnx review --resume` continues an interrupted review of the same change, or one
-   a provider outage cut.
+   interruption: tell the user; `arnx review --resume` continues an interrupted or outage-cut review of the same change.
    `arnx cloud unavailable` or `arnx cloud is not open yet`: tell the user; do not retry, and do not change `[cloud]`
    or pass `--local` yourself.
 4. The summary's first line is `arnx review <id> · ...`. Read `.arnx/reviews/<id>/review.json`; its fields are in

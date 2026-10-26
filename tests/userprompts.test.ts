@@ -168,7 +168,7 @@ test("doctor: a default changed since copied, a needed placeholder dropped, a fi
     "no_tests, second_files");
 });
 
-test("editing .arnx/prompts.toml leaves the environment approved: the stamp covers review.yaml only", async () => {
+test("editing .arnx/prompts.toml leaves the environment proven: the stamp covers review.yaml only", async () => {
   const repo = approvedRepo();
   writeSettings(repo, SETTINGS);
   expect(approvalStamp(repo)?.current).toBe(true);
@@ -178,7 +178,7 @@ test("editing .arnx/prompts.toml leaves the environment approved: the stamp cove
   expect(approvalStamp(repo)?.current).toBe(true);
   const cli = new Cli({ cwd: repo, env: { ANTHROPIC_API_KEY: "k" } });
   await cli.run("doctor");
-  expect(cli.out.find((l) => l.includes("Environment"))).toBe("✓ Environment: approved");
+  expect(cli.out.find((l) => l.includes("Environment"))).toBe("✓ Environment: proven");
 });
 
 const GEN = "tests/arnx_generated/test_add.py";
