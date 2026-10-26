@@ -169,9 +169,11 @@ docs), when there is no base, and when out of time. review.json gets `fix_proof`
 "The change fixes" section above the findings when any is `fixed`; the summary a line. The exit code ignores it.
 `tests/fixproof-neutral.test.ts` holds the neutral goldens' reviews to "only these fields differ".
 
-A test that reads one of the project's source files as text and matches it (`shallow.ts` "source-text": the read in
-its body, or a name given that text at the top of its file or suite; the path, resolved in the change's snapshot,
-names a file of the project that is not a test or in a fixtures folder) proves nothing about behaviour: in
+A test that reads one of the project's source files as text and matches it (`shallow.ts` "source-text": a text
+check whose subject is that text, the read itself or a name given it in the test or at the top of its file or suite,
+and no eval, vm, exec or importlib of it there; the path, joined from the read's quoted parts and resolved from the
+test's folder, the project's or the repository's root in the change's snapshot, names a file of the project that is
+not a test or in a fixtures folder) proves nothing about behaviour: in
 `beforeStage` its `regression` and its `fixed` become `unknown` with `asText` and a detail saying why (`textBefore`,
 `textFix` in `before.ts`). It is then no regression label and no "the change fixes"; review.md lists such passing
 tests once, "Not counted as fixes", and review.json has `as_text` on the finding's `before` or the fix proof entry.
