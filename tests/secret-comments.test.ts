@@ -19,6 +19,7 @@ const tmp = useTmp();
 const PEM = "-----BEGIN " + "PRIVATE KEY-----";
 const PEM_END = "-----END " + "PRIVATE KEY-----";
 const BODY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7";
+const NO_DIGITS = "MIIEowIBAAKCAQEA" + "x".repeat(48);
 const GH = "ghp_" + "a".repeat(36);
 const SK = "sk-" + "A".repeat(40);
 
@@ -36,15 +37,13 @@ const withheld = (path: string, text: string) => {
   return r && "withhold" in r ? r.withhold : null;
 };
 
-test("JS and TS: a JSDoc example and a trailing // comment are blanked, code and delimiters stay", () => {
+test("JS and TS: a JSDoc example and a whole-line comment are blanked; delimiters stay", () => {
   const doc = ["/**", " * A service account credential.", " * @example", ` * privateKey: "${PEM}..."`, " */",
     "export interface Credential { privateKey: string }", ""].join("\n");
   for (const path of ["src/auth.ts", "src/auth.tsx", "lib/auth.js", "lib/auth.mjs", "lib/auth.cjs"]) {
     expect(blanked(path, doc)).toEqual({ lines: [4], text: doc.replace(` * privateKey: "${PEM}..."`, "") });
   }
-  // The comment closes on the next line with code after it: only the comment's part of each line goes.
-  const trailing = `const n = 1; // e.g. ${GH}\nconst url = "http://example.com"; /* ${SK} */ run();\n`;
-  expect(blanked("a.ts", trailing).text).toBe('const n = 1; //\nconst url = "http://example.com"; /**/ run();\n');
+  expect(blanked("a.ts", `run();\n  // e.g. ${GH}\n/* ${SK} */\n`).text).toBe("run();\n  //\n/**/\n");
   // An opening line keeps its /*, so the comment still closes where it did.
   expect(blanked("a.ts", `/** token ${GH}\n * more\n */\nx();\n`).text).toBe("/*\n * more\n */\nx();\n");
 });
@@ -58,9 +57,26 @@ test("JS and TS: a key in a string, a template literal or after a regex literal 
   expect(withheld("a.ts", `// ${GH}\nconst k = "${SK}";\n`)).toEqual({ line: 2, label: "sk-…" });
 });
 
+test("a comment sharing its line with code, or opened after code, withholds the file: the lexer may misread it", () => {
+  const K = "sk-ant-" + "A".repeat(30);
+  expect(withheld("a.ts", `const n = 1; // e.g. ${GH}\n`)).toEqual({ line: 1, label: "ghp_…" });
+  expect(withheld("a.ts", `/* ${K} */ const a = 1;\n`)).toEqual({ line: 1, label: "sk-ant-…" });
+  expect(withheld("a.ts", `if (x) /[/*]/.test(s); const k = "${K}"; // */\n`)).toEqual({ line: 1, label: "sk-ant-…" });
+  expect(withheld("a.ts", `if (x) /[/*]/.test(s);\nconst k = "${K}";\n/* end */\n`))
+    .toEqual({ line: 2, label: "sk-ant-…" });
+  expect(withheld("a.tsx", `const a = <p>// ${K}</p>;\n`)).toEqual({ line: 1, label: "sk-ant-…" });
+  expect(withheld("a.ts", `// note\rconst k = "${K}";\n`)).toEqual({ line: 1, label: "sk-ant-…" });
+  expect(withheld("a.py", `x = f"{"#"} ${K}"\n`)).toEqual({ line: 1, label: "sk-ant-…" });
+  expect(withheld("a.py", `    return None  # or ${SK}\n`)).toEqual({ line: 1, label: "sk-…" });
+  expect(withheld("a.rs", `let a = cr"\\"; let k = "// ${K}";\n`)).toEqual({ line: 1, label: "sk-ant-…" });
+  expect(withheld("a.rs", `let a = cr"x\n// ${K}";\n`)).toEqual({ line: 2, label: "sk-ant-…" });
+  // Windows line ends: a whole-line comment is still one.
+  expect(blanked("a.ts", `x();\r\n// ${GH}\r\ny();\r\n`).text).toBe("x();\r\n//\r\ny();\r\n");
+});
+
 test("Python: a # comment is blanked; a key in a string or a docstring withholds the file", () => {
-  const src = `def connect():\n    # example: token = "${GH}"\n    return None  # or ${SK}\n`;
-  expect(blanked("app/client.py", src).text).toBe("def connect():\n    #\n    return None  #\n");
+  const src = `def connect():\n    # example: token = "${GH}"\n    # or ${SK}\n    return None\n`;
+  expect(blanked("app/client.py", src).text).toBe("def connect():\n    #\n    #\n    return None\n");
   expect(blanked("app/client.pyi", src).lines).toEqual([2, 3]);
   expect(withheld("app/client.py", `URL = "http://x#frag"; K = "${GH}"\n`)).toEqual({ line: 1, label: "ghp_…" });
   expect(withheld("app/client.py", `def f():\n    """Example:\n\n    key = ${GH}\n    """\n`))
@@ -73,8 +89,9 @@ test("Rust: line, doc and nested block comments are blanked; raw strings and cha
   // Nesting survives: the inner /* and */ stay.
   expect(blanked("src/lib.rs", `/* outer\n   /* inner ${GH}\n   */\n*/\nfn f() {}\n`).text)
     .toBe("/* outer\n/*\n   */\n*/\nfn f() {}\n");
-  expect(blanked("src/lib.rs", `let q = '"'; // ${GH}\nfn g<'a>(x: &'a str) {} // ${SK}\n`).text)
-    .toBe("let q = '\"'; //\nfn g<'a>(x: &'a str) {} //\n");
+  // A char literal and a lifetime do not open a string that would hide the comments below them.
+  expect(blanked("src/lib.rs", `let q = '"';\n// ${GH}\nfn g<'a>(x: &'a str) {}\n// ${SK}\n`).text)
+    .toBe("let q = '\"';\n//\nfn g<'a>(x: &'a str) {}\n//\n");
   expect(withheld("src/lib.rs", `let k = r#"// "${GH}"#;\n`)).toEqual({ line: 1, label: "ghp_…" });
   expect(withheld("src/lib.rs", `let k = "multi\n// ${GH}";\n`)).toEqual({ line: 2, label: "ghp_…" });
 });
@@ -84,8 +101,20 @@ test("a private key in a comment is blanked with its body; a body outside the co
   expect(blanked("a.ts", block)).toEqual({ lines: [2, 3, 4, 5], text: "/*\n\n\n\n\n * Keep this.\n */\n" });
   const hashes = `# ${PEM}\n# ${BODY}\n# ${PEM_END}\nx = 1\n`;
   expect(blanked("a.py", hashes)).toEqual({ lines: [1, 2, 3], text: "#\n#\n#\nx = 1\n" });
-  expect(withheld("a.py", `# ${PEM}\nBODY = """\n${BODY}\n"""\n`)).toEqual({ line: 3, label: "a private key" });
-  expect(withheld("a.py", `# ${PEM}\n${BODY}\n`)).toEqual({ line: 2, label: "a private key" });
+  // The block up to its END line must lie in the comment; otherwise the file is withheld, the header named.
+  const RSA = "-----BEGIN RSA " + "PRIVATE KEY-----";
+  expect(withheld("a.py", `# ${PEM}\nBODY = """\n${BODY}\n"""\n`)).toEqual({ line: 1, label: "a private key" });
+  expect(withheld("a.py", `# ${PEM}\n${BODY}\n`)).toEqual({ line: 1, label: "a private key" });
+  expect(withheld("a.ts", `// ${RSA}\nconst body = "${BODY}";\n`)).toEqual({ line: 1, label: "a private key" });
+  expect(withheld("a.ts", `// ${RSA}\nconst body = "${NO_DIGITS}";\n`)).toEqual({ line: 1, label: "a private key" });
+  expect(withheld("a.ts", `// ${PEM}\nconst PEM =\n  "${BODY}" +\n  "${BODY}";\n`))
+    .toEqual({ line: 1, label: "a private key" });
+  expect(withheld("a.ts", `/*\n * ${PEM}\n */\nconst x = 1;\n/*\n * ${BODY}\n * ${PEM_END}\n */\n`))
+    .toEqual({ line: 2, label: "a private key" });
+  // A header with no END line: a placeholder only while the file holds no key body anywhere.
+  const far = Array.from({ length: 60 }, (_, i) => `const a${i} = ${i};`).join("\n");
+  expect(withheld("a.ts", `// ${PEM}\n${far}\nconst b = "${BODY}";\n`)).toEqual({ line: 1, label: "a private key" });
+  expect(blanked("a.ts", `/** e.g. key: "${PEM}..." */\n${far}\n`).lines).toEqual([1]);
 });
 
 test("other files are withheld as before, and pinned keys are left alone", () => {
@@ -161,6 +190,26 @@ test("a review's diff: a key in a comment on a context or removed line is blanke
   writeFileSync(join(repo, "client.py"), `# token = "${GH}"\nA = "${GH}"\n`);
   expect(() => resolveChange(repo)).toThrow("the change contains text that looks like a secret (a key or token) in " +
     "client.py (ghp_…)");
+});
+
+test("a review's diff never carries a key body in a hunk header's function context", () => {
+  const repo = gitRepo(tmp());
+  const pad = Array.from({ length: 12 }, (_, i) => `    a${i}();`).join("\n");
+  const RSA = "-----BEGIN RSA " + "PRIVATE KEY-----", RSA_END = "-----END RSA " + "PRIVATE KEY-----";
+  const body2 = "Zm9vYmFy" + "Yy".repeat(28);
+  const file = (first: string, last: string) =>
+    `${first}\n/*\n${RSA}\n${BODY}\n${body2}\n${RSA_END}\n*/\n${pad}\n    ${last}\n`;
+  writeFileSync(join(repo, "b.ts"), file("const v = 1;", "old();"));
+  commit(repo, "key in a comment");
+  // A change near the header (blanked in context) and one far below it, whose hunk git labels with a body line.
+  writeFileSync(join(repo, "b.ts"), file("const v = 2;", "neu();"));
+  const near = resolveChange(repo);
+  expect([near.diff.includes(BODY), near.diff.includes(body2), hasSecretContent(near.diff)]).toEqual([false, false, false]);
+  expect(near.diff).toMatch(/^@@ -17,4 \+17,4 @@$/m);
+  writeFileSync(join(repo, "b.ts"), file("const v = 1;", "neu();"));
+  const far = resolveChange(repo);
+  expect([far.diff.includes(body2), far.blanked]).toEqual([false, undefined]);
+  expect(far.diff).toMatch(/^@@ -17,4 \+17,4 @@$/m);
 });
 
 test("the review names the files whose comment lines were blanked", () => {

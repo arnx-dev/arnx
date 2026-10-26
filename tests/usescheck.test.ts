@@ -160,10 +160,16 @@ ${run}    uses: [services/, packages/shared/]
   expect(mapHints(file, files).map((h) => [h.project, h.kind, h.text])).toEqual([
     ["shared", "unanchored", "shared: uses api/ matches in 2 places (api/, packages/api/); anchor it to the one meant " +
       "(/api/, /packages/api/)"],
-    ["shared", "unanchored", "shared: uses util.ts matches in 2 places (scripts/util.ts, services/web/util.ts); " +
-      "anchor it to the one meant (/scripts/util.ts, /services/web/util.ts)"],
     ["scripts", "catch-all", "scripts: uses services/ takes in 2 other projects whole (web, jobs), so every change " +
       "in them is reviewed by scripts too (duplicate findings, double cost); narrow it to what scripts depends on"]]);
+  // A file name or a glob matching several files is meant to: no hint.
+  expect(mapHints(parseReviewFile(`version: 1
+projects:
+  api:
+    root: api
+${run}    uses: ["*.proto", tsconfig*.json, package.json, "lib*/"]
+`), ["api/a.ts", "proto/x.proto", "proto/y.proto", "tsconfig.base.json", "web/tsconfig.json", "package.json",
+    "web/package.json", "lib1/a.ts", "web/lib2/b.ts"])).toEqual([]);
   // One project used whole (a shared library), an anchored entry and an unanchored one with one place: no hint.
   expect(mapHints(parseReviewFile(`version: 1
 projects:

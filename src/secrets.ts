@@ -63,10 +63,11 @@ export function firstUnpinned(text: string, pins: readonly string[]): { line: nu
  * `blank` those comment lines: `text` is the file with them blanked, its line count kept. */
 export type KeyScan = { withhold: { line: number; label: string } } | { blank: number[]; text: string };
 
-/** A private key's body: a long base64 run on its own line, or its END line. */
-const KEY_BODY = /-----END |^[\s*/#!]*[A-Za-z0-9+/=]{40,}\s*$/;
-/** How far after a comment's private key header a body is looked for. */
-const BODY_LINES = 50;
+/** A private key's END line. */
+const KEY_END = /-----END [A-Z ]*PRIVATE KEY-----/;
+/** Something like a key body anywhere: a run of 40 or more base64 characters in both cases. */
+export const hasKeyBody = (text: string) => [...text.matchAll(/[A-Za-z0-9+/=]{40,}/g)]
+  .some(([run]) => /[a-z]/.test(run) && /[A-Z]/.test(run));
 
 export function scanKeys(path: string, text: string, pins: readonly string[]): KeyScan | null {
   const hits = [...text.matchAll(new RegExp(CONTENT, "g"))].filter((m) => !pins.includes(pinOf(m[0])));
@@ -80,28 +81,39 @@ export function scanKeys(path: string, text: string, pins: readonly string[]): K
   const lines = text.split("\n");
   const starts: number[] = [];
   lines.reduce((at, l) => (starts.push(at), at + l.length + 1), 0);
-  // A line whose every non-blank character is inside a comment.
-  const covered = (i: number) => [...lines[i]!].every((ch, k) => /\s/.test(ch) || !!within(starts[i]! + k, starts[i]! + k + 1));
+  // A line holding nothing but comment: every non-blank character in a comment, each comment on it opened with only
+  // blanks before it on its line. A comment after code may be a misread regex, string or JSX text, so a key on such a
+  // line withholds the file.
+  const opensClean = (s: { start: number }) => /^\s*$/.test(text.slice(text.lastIndexOf("\n", s.start - 1) + 1, s.start));
+  const covered = (i: number) => {
+    const from = starts[i]!, to = from + lines[i]!.length;
+    return [...lines[i]!].every((ch, k) => /\s/.test(ch) || !!within(from + k, from + k + 1)) &&
+      spans.every((s) => s.end <= from || s.start >= to || opensClean(s));
+  };
   const blank = new Set<number>();
   for (const m of hits) {
     const at = lineOf(m.index) - 1;
+    if (!covered(at)) return { withhold: { line: at + 1, label: label(m[0]) } };
     blank.add(at);
-    if (!m[0].startsWith("-----") || lines[at]!.includes("-----END ")) continue;
-    // A private key's body follows on the next lines: blanked with it while they are comment, up to its END line;
-    // a body in the lines after the comment withholds the file.
-    for (let i = at + 1; i < lines.length; i++) {
-      if (covered(i)) {
-        // A line of comment marks alone (a closing */) holds nothing to blank.
-        if (!/^[\s*/#!]*$/.test(lines[i]!)) blank.add(i);
-        if (lines[i]!.includes("-----END ")) break;
-        continue;
+    if (!m[0].startsWith("-----") || KEY_END.test(lines[at]!)) continue;
+    // A private key header is blanked with its block only when the block up to its END line lies in the comment.
+    // With no END line, it is a placeholder (a doc example) only while the file holds no END and no key body.
+    const withhold = { withhold: { line: at + 1, label: label(m[0]) } };
+    let end = -1;
+    for (let i = at + 1; i < lines.length && covered(i); i++) {
+      if (KEY_END.test(lines[i]!)) {
+        end = i;
+        break;
       }
-      const body = lines.slice(i, i + BODY_LINES).findIndex((l) => KEY_BODY.test(l));
-      if (body >= 0) return { withhold: { line: i + body + 1, label: label(m[0]) } };
-      break;
     }
+    if (end < 0) {
+      if (KEY_END.test(text) || hasKeyBody(text)) return withhold;
+      continue;
+    }
+    // A line of comment marks alone (a closing */) holds nothing to blank.
+    for (let i = at + 1; i <= end; i++) if (!/^[\s*/#!]*$/.test(lines[i]!)) blank.add(i);
   }
-  // A blanked line keeps its code and the comments' delimiters (an opening // or #, and /* and */ inside a block
+  // A blanked line keeps its blanks and the comments' delimiters (an opening // or #, and /* and */ inside a block
   // comment, so nesting and closing stay as they were); the rest of each comment goes.
   for (const i of blank) {
     let out = "";

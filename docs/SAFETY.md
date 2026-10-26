@@ -24,9 +24,10 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   tests by then: kept unless `--tests`. Your arnx cloud login and the arnx program itself are not touched.
 - Your model keys stay in the arnx process. Files that usually hold secrets, and text that looks like a key, are
   never sent to a model. A file left out this way is named at setup and in each review. When every key-shaped
-  string in a JavaScript, TypeScript, Python or Rust file is inside a comment (a doc example), the file is sent with
-  those comment lines blanked instead (a private key's body lines too), and setup names the file and its lines; one in
-  code still leaves the whole file out. A review's diff blanks such lines the same way and names them; a key in code
+  string in a JavaScript, TypeScript, Python or Rust file is inside a comment that has its lines to itself (a doc
+  example), the file is sent with those comment lines blanked instead (a private key's whole block too, when it lies
+  in the comment), and setup names the file and its lines; one in code, or on a line that also holds code, still
+  leaves the whole file out. A review's diff blanks such lines the same way and names them; a key in code
   in the diff still stops the review. When its key-shaped text
   is test fixtures (a secret detector's own tests), `arnx allow-secret PATH` pins each such string in
   `.arnx/review.yaml`, which is then proven again before the next review; a new key-shaped string in that file

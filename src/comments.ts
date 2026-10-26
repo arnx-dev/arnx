@@ -21,9 +21,10 @@ export function comments(text: string, style: CommentStyle): Comment[] {
 }
 
 const ident = (c: string | undefined) => !!c && /[A-Za-z0-9_$]/.test(c);
+/** Where the line at `k` ends: a lone \r ends a line too. */
 const lineEnd = (text: string, k: number) => {
-  const e = text.indexOf("\n", k);
-  return e < 0 ? text.length : e;
+  while (k < text.length && text[k] !== "\n" && text[k] !== "\r") k++;
+  return k;
 };
 
 /** The index after a string opened by `q` at `k`; one that is not `multi` ends at the end of its line unclosed. */
@@ -32,7 +33,7 @@ function skipQuoted(text: string, k: number, q: string, multi: boolean): number 
     const c = text[k];
     if (c === "\\") k++;
     else if (c === q) return k + 1;
-    else if (c === "\n" && !multi) return k;
+    else if ((c === "\n" || c === "\r") && !multi) return k;
   }
   return text.length;
 }
@@ -41,7 +42,7 @@ function skipQuoted(text: string, k: number, q: string, multi: boolean): number 
 const BEFORE_REGEX = "(,=:[!&|?{};+-*%<>~^";
 const REGEX_WORDS = new Set(["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw",
   "yield", "await"]);
-const RAW = /b?r(#*)"/y;
+const RAW = /[bc]?r(#*)"/y;
 
 function cComments(text: string, rust: boolean): Comment[] {
   const out: Comment[] = [];
@@ -88,7 +89,7 @@ function cComments(text: string, rust: boolean): Comment[] {
     let next = i + 1;
     if (rust) {
       RAW.lastIndex = i;
-      const raw = !ident(text[i - 1]) && (c === "r" || c === "b") ? RAW.exec(text) : null;
+      const raw = !ident(text[i - 1]) && (c === "r" || c === "b" || c === "c") ? RAW.exec(text) : null;
       if (raw) {
         const close = `"${raw[1]}`;
         const e = text.indexOf(close, i + raw[0].length);
@@ -106,7 +107,7 @@ function cComments(text: string, rust: boolean): Comment[] {
     else if (c === "`") next = template(i + 1);
     else if (c === "/" && (BEFORE_REGEX.includes(prev) || REGEX_WORDS.has(word))) {
       let k = i + 1, inClass = false;
-      for (; k < n && text[k] !== "\n"; k++) {
+      for (; k < n && text[k] !== "\n" && text[k] !== "\r"; k++) {
         const ch = text[k];
         if (ch === "\\") k++;
         else if (ch === "[") inClass = true;
