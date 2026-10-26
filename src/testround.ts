@@ -248,7 +248,7 @@ export function probeFailure(cfg: ReviewConfig, result: RunResult, log: string):
 }
 
 export async function testRound(repo: string, head: string | null, cfg: ReviewConfig, o: {
-  brain: Brain; ask: (snap: string) => RoundAsk; writeDir: string; budgetUsd: number;
+  brain: Brain; ask: (snap: string) => RoundAsk | Promise<RoundAsk>; writeDir: string; budgetUsd: number;
   runs: number; outDir: string; sessionFactory?: SessionFactory; progress?: Say;
   /** Changed files the round should cover: after each final reply the brain is told which of them no test names
    * yet, and which hold SQL that no test connecting to the database names. */
@@ -289,7 +289,8 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
       [open, fail] = [resolve, reject];
     });
     tools.catch(() => {});
-    const ask = o.ask(snap);
+    // With `context = "precise"` the hunt's context waits for the project's code index (built in its environment).
+    const ask = await o.ask(snap);
     const base = { budgetUsd: o.budgetUsd, outDir: o.outDir, ...(o.progress ? { progress: o.progress } : {}) };
     const round = ask.kind === "review" ? o.brain.agentRound("review", { ...ask.input, ...base }, tools)
       : o.brain.agentRound("answer", { ...ask.input, ...base }, tools);

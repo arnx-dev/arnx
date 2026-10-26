@@ -14,13 +14,15 @@ import { added, type Change, describe, EMPTY_TREE, filesAt, git, removed, resolv
   untrackedLine } from "./change";
 import { loadReviewFile, type ReviewConfig, reviewConfigPath, secretPinsOf } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
+import { huntParts } from "./hunt";
+import { projectIndex } from "./indexer";
 import { closers } from "./interrupt";
 import { addUsage, type AgentModel, allPrices, FallbackJson, type JsonModel, type ModelUse, newUse,
   type Trace } from "./llm";
 import { LocalBrain } from "./localbrain";
 import { baseName, funcOf, ownerFile } from "./outcomes";
 import { type CallRecord, cloudFailure, providerFailures, withCalls } from "./outage";
-import { contextPack } from "./context";
+import { CONTEXT_LIMIT, contextPack } from "./context";
 import type { Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
 import { type AgentReport, type Checked, type Finding, type FixProof, parseReports, type ProjectStat, type Review,
@@ -176,6 +178,8 @@ export async function runReview(repo: string, o: { settings: Settings;
   /** The reviewer and the second opinion of the local brain (not needed when `brain` is given). */
   agentModel?: AgentModel; challenger?: JsonModel;
   range?: string | null; sessionFactory?: SessionFactory; now?: Date; progress?: Say;
+  /** Builds a project's code index for `context = "precise"` (default: in its Docker environment). */
+  indexer?: typeof projectIndex;
   /** Look for defects before writing tests (default on). */
   hunt?: boolean;
   /** Hunts each part of a big change (tool-less); without it only the reviewer and the second hunter hunt. */
@@ -361,12 +365,21 @@ export async function runReview(repo: string, o: { settings: Settings;
           ...(s.beforeCheck ? { base: change.base === EMPTY_TREE ? null : change.base } : {}) } } : {}),
         // The hunt reads the snapshot the tests run on: the context pack is built on it here, the hunters run in the
         // brain.
-        ask: (snap: string) => {
+        ask: async (snap: string) => {
           const searchDirs = [cfg.workdir, ...new Set(used.map((u) => posix.dirname(u)))];
+          let index = null;
+          if (o.hunt && s.context === "precise") {
+            o.progress?.(`${cfg.name} (${i + 1}/${n}): indexing the code`);
+            const r = await (o.indexer ?? projectIndex)(cfg, snap, outDir);
+            if (!r.index) o.progress?.(`${cfg.name} (${i + 1}/${n}): no code index (${clip(r.reason ?? "", 80)}); context by names`);
+            index = r.index;
+          }
           return { kind: "review" as const, input: { cfg, diff, scope, scoped: !file.legacy, envTests: env,
             maxQuestions: s.maxQuestions, dbNames: databaseEnv(cfg.env, cfg.services),
-            ...(o.hunt ? { hunt: { context: contextPack(snap, diff, scope.owned, searchDirs), root: snap,
-              searchDirs } } : {}) } };
+            // Part hunters build their context packs from the snapshot; with an index they get them built here.
+            ...(o.hunt ? { hunt: { context: contextPack(snap, diff, scope.owned, searchDirs, CONTEXT_LIMIT, index),
+              root: snap, searchDirs, ...(index ? { parts: huntParts(snap, cfg, diff, scope.owned, searchDirs, index) }
+                : {}) } } : {}) } };
         } };
       const roundFile = join(outDir, "round.json");
       let rnd: Round, kept = false, hunted: Suspect[] | null = null, projSecond: ModelUse | null = null;

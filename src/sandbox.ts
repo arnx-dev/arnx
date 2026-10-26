@@ -247,12 +247,15 @@ export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: st
 }
 
 export function runArgv(o: { image: string; name: string; network: string; snapshot: string; workdir: string;
-  env: Record<string, string>; command: string; limits: Limits; user: string; runEnv: string[] }): string[] {
+  env: Record<string, string>; command: string; limits: Limits; user: string; runEnv: string[];
+  /** Extra bind mounts, "host:container" (the code indexer's output folder). */
+  mounts?: string[] }): string[] {
   const argv = [sandboxOptions.docker, "run", "--rm", "--name", o.name, "--network", o.network,
     "--cpus", o.limits.cpus, "--memory", o.limits.memory, "--memory-swap", o.limits.memory,
     "--pids-limit", String(o.limits.pids), "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
     "--user", o.user, "--tmpfs", `/tmp:rw,exec,size=${o.limits.tmp}`,
     "-v", `${o.snapshot}:/src`, "-w", workdirIn("/src", o.workdir), "-e", "HOME=/tmp"];
+  for (const m of o.mounts ?? []) argv.push("-v", m);
   for (const e of o.runEnv) argv.push("-e", e);
   for (const k of Object.keys(o.env).sort()) argv.push("-e", `${k}=${o.env[k]}`);
   return [...argv, o.image, "sh", "-c", o.command];

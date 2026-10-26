@@ -4,7 +4,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { HuntPart } from "./brain";
 import type { ReviewConfig } from "./config";
-import { changedDefinitions, contextPack } from "./context";
+import { changedDefinitions, CONTEXT_LIMIT, contextPack } from "./context";
 import { sliceDiff } from "./change";
 import { adapterFor } from "./adapters";
 import { changedSources } from "./untested";
@@ -14,6 +14,7 @@ import { type JsonModel, type ModelUse, newUse, tally } from "./llm";
 import { HUNT_SCHEMA, huntSystem, MAX_SUSPECTS, RANK_SCHEMA, rankSystem, rankTask, type Scope, secondHuntTask,
   type Suspect } from "./prompts";
 import type { Say } from "./progress";
+import type { ScipIndex } from "./scip";
 import { inPool } from "./challenge";
 
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : v === undefined || v === null ? "" : String(v));
@@ -107,14 +108,15 @@ export function partition(diff: string, files: string[], limit = PART_LIMIT): st
 }
 
 /** The parts a big change is hunted in, each with what its hunter reads from the snapshot at `root`: its context
- * pack and its changed definitions. Empty when the change is small enough to hunt whole. */
-export function huntParts(root: string, cfg: ReviewConfig, diff: string, owned: string[], searchDirs: string[])
-  : HuntPart[] {
+ * pack (by symbol when the project's code index is given) and its changed definitions. Empty when the change is
+ * small enough to hunt whole. */
+export function huntParts(root: string, cfg: ReviewConfig, diff: string, owned: string[], searchDirs: string[],
+                          index: ScipIndex | null = null): HuntPart[] {
   // Product code only: the project's own tests and helpers are not what a change is reviewed for.
   return partition(diff, changedSources(owned, adapterFor(cfg))).map((files) => {
     const d = sliceDiff(diff, files);
-    return { files, context: contextPack(root, d, files, searchDirs), changedDefinitions: changedDefinitions(root, d,
-      files) };
+    return { files, context: contextPack(root, d, files, searchDirs, CONTEXT_LIMIT, index),
+      changedDefinitions: changedDefinitions(root, d, files) };
   });
 }
 
