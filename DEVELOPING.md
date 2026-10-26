@@ -417,7 +417,7 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `secrets.ts` | What is never sent or copied: secret file names, key-like text, credential variable names; `scanKeys`: withhold a file, or blank its comment lines when its only key-like text is in comments |
 | `comments.ts` | Where a JavaScript, TypeScript, Rust or Python file's comments are (strings and literals skipped) |
 | `ignore.ts` | `.arnxignore` matching, and the proposal of data-like files for `init` |
-| `change.ts` | Resolve the change; build the snapshot |
+| `change.ts` | Resolve the change (diff lines with key-like text in comments blanked); build the snapshot |
 | `sandbox.ts` | Docker: env image, locked-down runs, services, timeouts, cleanup of live sessions; the container a Rust session's runs share |
 | `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, kept when runs reach them, compared with the code to test; the key of an image made from the code (its files, not the tests or reports beside it); when a round's probe runs no test, the files only the copy holds (named in the stop message with `arnx setup --project NAME`) |
 | `outcomes.ts` | Run tests through the adapter; classify results across runs |

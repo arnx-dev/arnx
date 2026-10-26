@@ -11,7 +11,8 @@ import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { AdapterId, TestResult } from "./adapters/types";
-import { type Blanked, filesAt, hasCommits, snapshot, takeSnapshot, type Withheld, workingTreeFiles } from "./change";
+import { type Blanked, describeBlanked, filesAt, hasCommits, snapshot, takeSnapshot, type Withheld, workingTreeFiles }
+  from "./change";
 import {
   loadReviewFile, parseReviewFile, projectDigest, readSecretPins, type ReviewConfig, reviewConfigPath, type ReviewFile,
   secretPinsOf, secretPinsYaml, stamp, stampFile,
@@ -420,19 +421,6 @@ export function neededText(files: NeededFile[]): string {
 /** Withheld files for a person or an agent: path, what looks like a key, and its line. */
 export const describeWithheld = (w: Withheld[]) => w.map((x) => `${x.path} (${x.label}, line ${x.line})`).join(", ");
 
-/** Blanked files for a person: path and the lines blanked, runs as ranges ("src/a.ts (lines 3-5, 9)"). */
-export function describeBlanked(b: Blanked[]): string {
-  return b.map(({ path, lines }) => {
-    const runs: string[] = [];
-    for (let i = 0; i < lines.length;) {
-      let j = i;
-      while (j + 1 < lines.length && lines[j + 1] === lines[j]! + 1) j++;
-      runs.push(i === j ? `${lines[i]}` : `${lines[i]}-${lines[j]}`);
-      i = j + 1;
-    }
-    return `${path} (line${lines.length === 1 ? "" : "s"} ${runs.join(", ")})`;
-  }).join(", ");
-}
 
 /** Up to `max` names, then "…". */
 const few = (xs: string[], max = 3) => xs.slice(0, max).join(", ") + (xs.length > max ? ", …" : "");

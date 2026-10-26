@@ -10,8 +10,8 @@ import type { Billed, Brain, Totals } from "./brain";
 import { inPool } from "./challenge";
 import { shallowKind } from "./shallow";
 import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, withRole } from "./events";
-import { added, type Change, describe, EMPTY_TREE, filesAt, git, removed, resolveChange, sliceDiff, someNames,
-  untrackedLine } from "./change";
+import { added, type Change, describe, describeBlanked, EMPTY_TREE, filesAt, git, removed, resolveChange, sliceDiff,
+  someNames, untrackedLine } from "./change";
 import { loadReviewFile, type ReviewConfig, reviewConfigPath, secretPinsOf } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
 import { huntParts } from "./hunt";
@@ -236,6 +236,7 @@ export async function runReview(repo: string, o: { settings: Settings;
   if (change.leftOut) {
     o.progress?.(`left out ${change.leftOut.length} accepted test file(s) not committed yet`);
   }
+  if (change.blanked) o.progress?.(`comment lines blanked as secret-looking: ${describeBlanked(change.blanked)}`);
   // The local brain reads .arnx/prompts.toml from the working tree: a change that edits it is reviewed with its own.
   const promptsEdited = !o.brain && changeEditsPrompts(repo, change);
   if (promptsEdited) o.progress?.(PROMPTS_EDITED);
@@ -624,6 +625,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       flaky, errors, passed, testsWritten: written, missingRuns, notSent: [...notSent].sort(),
       ...(change.ignored ? { ignoredChanged: change.ignored } : {}),
       ...(change.lockfiles ? { lockfilesChanged: change.lockfiles } : {}),
+      ...(change.blanked ? { blankedLines: change.blanked } : {}),
       ...(change.untrackedIncluded ? { untrackedIncluded: change.untrackedIncluded } : {}),
       ...(change.untrackedLeftOut ? { untrackedLeftOut: change.untrackedLeftOut.length } : {}),
       costUsd: Math.round(usage.reduce((a, u) => a + u.costUsd, 0) * 10_000) / 10_000, usage,

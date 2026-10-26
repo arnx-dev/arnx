@@ -3,13 +3,15 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { takeSnapshot } from "../src/change";
+import { describeBlanked, resolveChange, takeSnapshot } from "../src/change";
+import { render } from "../src/report";
 import type { SessionFactory } from "../src/sandbox";
 import { hasSecretContent, scanKeys, secretPins } from "../src/secrets";
 import { defaultSettings } from "../src/settings";
-import { describeBlanked, runSetup } from "../src/setup";
+import { runSetup } from "../src/setup";
 import { fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
+import { sampleReview } from "./helpers/review";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
 
@@ -125,4 +127,44 @@ test("setup keeps a blanked file in its snapshot and names it with its lines", a
   expect(progress).toContain("comment lines blanked as secret-looking: creds.py (lines 2-4)");
   expect(describeBlanked([{ path: "a.ts", lines: [3, 4, 5, 9] }, { path: "b.rs", lines: [7] }]))
     .toBe("a.ts (lines 3-5, 9), b.rs (line 7)");
+});
+
+test("a review's diff: a key in a comment on an added line is blanked and the review goes on", () => {
+  const repo = gitRepo(tmp());
+  mkdirSync(join(repo, "src"), { recursive: true });
+  writeFileSync(join(repo, "src/auth.ts"), "/**\n * A credential.\n */\nexport interface Credential { key: string }\n");
+  commit(repo, "auth");
+  writeFileSync(join(repo, "src/auth.ts"),
+    `/**\n * A credential.\n * @example\n * key: "${PEM}..."\n */\nexport interface Credential { key: string }\n`);
+  const c = resolveChange(repo);
+  expect(hasSecretContent(c.diff)).toBe(false);
+  expect(c.diff).toContain("\n+ * @example\n+\n  */\n");
+  expect(c.blanked).toEqual([{ path: "src/auth.ts", lines: [4] }]);
+  // Committed, the same holds for the commit's diff.
+  commit(repo, "example");
+  const done = resolveChange(repo);
+  expect([hasSecretContent(done.diff), done.blanked]).toEqual([false, [{ path: "src/auth.ts", lines: [4] }]]);
+});
+
+test("a review's diff: a key in a comment on a context or removed line is blanked; one in code still refuses", () => {
+  const repo = gitRepo(tmp());
+  writeFileSync(join(repo, "client.py"), `# token = "${GH}"\nA = 1\n`);
+  writeFileSync(join(repo, "lib.rs"), `/// Example: ${SK}\nfn f() {}\n`);
+  commit(repo, "keys in comments");
+  writeFileSync(join(repo, "client.py"), `# token = "${GH}"\nA = 2\n`);
+  writeFileSync(join(repo, "lib.rs"), "fn f() {}\n");
+  const c = resolveChange(repo);
+  expect(hasSecretContent(c.diff)).toBe(false);
+  expect(c.diff).toContain("@@\n #\n-A = 1\n+A = 2\n");
+  expect(c.diff).toContain("@@\n-//\n fn f() {}\n");
+  expect(c.blanked).toEqual([{ path: "client.py", lines: [1] }, { path: "lib.rs", lines: [1] }]);
+  writeFileSync(join(repo, "client.py"), `# token = "${GH}"\nA = "${GH}"\n`);
+  expect(() => resolveChange(repo)).toThrow("the change contains text that looks like a secret (a key or token) in " +
+    "client.py (ghp_…)");
+});
+
+test("the review names the files whose comment lines were blanked", () => {
+  const md = render(sampleReview({ blankedLines: [{ path: "src/auth.ts", lines: [4] }] }));
+  expect(md).toContain("- Comment lines blanked as secret-looking (not sent): src/auth.ts (line 4)");
+  expect(render(sampleReview())).not.toContain("Comment lines blanked");
 });
