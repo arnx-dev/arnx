@@ -291,10 +291,10 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: projects", () => {
         writeFileSync(lib, readFileSync(lib, "utf8").replace("a + b", "a - b"));
         return [first, second, s.run("cargo nextest run", 600)];
       });
-      expect(runs[0]!.output).toContain("Compiling calc");
+      expect(runs[0]!.output).toContain("Compiling rust-calc");
       expect(runs[1]!.exitCode).toBe(0);
-      expect(runs[1]!.output).not.toContain("Compiling calc"); // the first run's build was kept
-      expect(runs[2]!.output).toContain("Compiling calc");
+      expect(runs[1]!.output).not.toContain("Compiling rust-calc"); // the first run's build was kept
+      expect(runs[2]!.output).toContain("Compiling rust-calc");
       expect(runs[2]!.exitCode).not.toBe(0); // the changed add is what runs
     } finally {
       rmSync(join(head, ".."), { recursive: true, force: true });
