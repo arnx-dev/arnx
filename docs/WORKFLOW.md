@@ -60,7 +60,9 @@ The hunter also reads where the project uses each function the change touches, t
 `context = "precise"` under `[review]` in `.arnx/config.toml`, arnx first indexes each project's code in its test
 image (scip-python, scip-typescript or rust-analyzer; no network) and follows the function itself, so another
 module's function or constant with the same name stays out. Indexing adds about 10 to 50 seconds per project to a
-review and builds one extra layer per test image; when the index cannot be built, the review goes on by name.
+review and builds one extra layer per test image; when the index cannot be built, the review goes on by name. Setup
+then also checks the map once: a `uses` entry the project's code never refers to, or code it refers to outside its
+`owns` and `uses`, goes back to the setup agent as a hint.
 
 What a review sends, and what it leaves out (untracked files, `.arnxignore`, secrets):
 [SAFETY.md](SAFETY.md#what-a-review-sends).

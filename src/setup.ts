@@ -21,16 +21,19 @@ import { describeHints, diagnose, firstErrors, firstLine, type Hint, missingLeft
 import type { FailureModel } from "./jev";
 import { ArnxError } from "./errors";
 import { loadIgnore, matcher } from "./ignore";
+import { projectIndex } from "./indexer";
 import { isSecretPath, type SecretPin } from "./secrets";
 import { type AgentModel, allPrices, type Tool } from "./llm";
 import { ownerFile, runTests } from "./outcomes";
 import { LocalBrain } from "./localbrain";
 import type { Say } from "./progress";
 import { copyManifests, dockerSteps, envKey, type Runner, type SessionFactory } from "./sandbox";
+import type { ScipIndex } from "./scip";
 import { loadSettings, refString, type Settings, settingsPath } from "./settings";
 import { runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
 import { SOURCE } from "./untested";
 import { otherLanguageOf } from "./languages";
+import { fileReferences, usesHints } from "./usescheck";
 import { agentUse, logUsage } from "./usage";
 import { randomHex } from "./util";
 import { VERSION } from "./version";
@@ -591,7 +594,9 @@ type SetupOptions = { outDir: string; sessionFactory?: SessionFactory; project?:
   /** The judgement side (default: LocalBrain over `agentModel`). */
   brain?: Brain;
   /** This machine's record of the accepted tests' pins (localPinsPath). */
-  localPins?: string | null };
+  localPins?: string | null;
+  /** Builds a project's code index for the map check (`context = "precise"`; default: in its Docker environment). */
+  indexer?: typeof projectIndex };
 
 /** The allowed files of a review.yaml no setup has approved yet (a seed, or a failed setup's last attempt); none when
  * it does not read as YAML: secret-looking files then stay out. */
@@ -627,7 +632,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
   const state = { accepted: null as string | null, lastTried: null as string | null, summary: "no project tried",
     proven: new Map<string, string>(), attempts: 0, proofs: new Map<string, ProjectProof>(),
     final: null as ReviewFile | null, lastFailing: new Map<string, { env: string; files: string[] }>(),
-    failing: [] as string[], failingProject: null as string | null, problem: "", needed: null as NeededFile[] | null };
+    failing: [] as string[], failingProject: null as string | null, problem: "", needed: null as NeededFile[] | null,
+    usesChecked: false };
   const tmp = tempDir("arnx-setup-");
   // Docker steps of this setup, with their durations.
   dockerSteps.log = (line) => {
@@ -866,6 +872,25 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         say(`Proposal rejected: ${why}. Retrying...`);
         return `refused: propose ran the projects changed since they were proven, and these do not run:\n` +
           failed.join("\n\n");
+      }
+      // With a code index (`context = "precise"`), the map is checked once against what each project's code refers
+      // to: what it finds goes back as hints, and the same file proposed again is accepted.
+      if (settings.context === "precise" && !state.usesChecked) {
+        state.usesChecked = true;
+        say("checking the map against the code");
+        const indexes: ScipIndex[] = [];
+        for (const p of f.projects) {
+          const r = await (o.indexer ?? projectIndex)(p, snap, join(o.outDir, "index", p.name));
+          if (r.index) indexes.push(r.index);
+        }
+        const hints = indexes.length ? usesHints(f, fileReferences(indexes)) : [];
+        emit("setup.uses_check", { indexed: indexes.length, projects: f.projects.length,
+          hints: hints.map((h) => ({ project: h.project, kind: h.kind })) });
+        if (hints.length) {
+          say(`the code does not bear out ${hints.length} map entr${hints.length === 1 ? "y" : "ies"}; asking the agent`);
+          return "refused once: the projects' code (from their code indexes) does not match these parts of the map:\n" +
+            hints.map((h) => `- ${h.text}`).join("\n") + "\nFix them, or propose the same file again to keep it as it is.";
+        }
       }
       state.accepted = text;
       state.final = f;
