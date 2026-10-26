@@ -85,6 +85,16 @@ test("a change to a decorator alone gives the hunter its function and the places
   expect(changedDefinitions(root, diff, ["api.py"])).toContain("async def pay(req):");
 });
 
+test("a Rust match on a tuple is not a function: the line belongs to the fn around it", () => {
+  const lines = ["pub fn step(a: u8, b: u8) -> u8 {", "    match (a, b) {", "        (0, _) => 0,", "        _ => 1,", "    }",
+    "}"];
+  expect(enclosing(lines, 3)).toEqual({ name: "step", kind: "function", line: 1 });
+  expect(enclosing(lines, 2)).toEqual({ name: "step", kind: "function", line: 1 });
+  // A TypeScript method named match is still one.
+  expect(enclosing(["class Router {", "  match(path: string) {", "    return path;", "  }", "}"], 3))
+    .toEqual({ name: "match", kind: "function", line: 2 });
+});
+
 test("the context pack lists where a changed function is referred to, step lists included, tests left out", () => {
   const root = tmp();
   mkdirSync(join(root, "app/tests"), { recursive: true });
