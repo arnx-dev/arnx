@@ -629,6 +629,17 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
       envChanged = envKey(cfg, snap) !== o.headKey;
       snapshotMs = ms(t0);
       const out: BeforeRun[] = [];
+      // As in the final runs, a test that hangs would hang again: after a run times out the others are skipped, each
+      // a run without a report.
+      const skipRest = (runs: BeforeRun[], i: number, type: "before.run" | "fix_proof.run", files: number) => {
+        o.say(`before the change: run ${i}/${o.runs}${type === "fix_proof.run" ? " of the passing tests" : ""} ` +
+          "timed out; the other runs skipped");
+        for (let j = i + 1; j <= o.runs; j++) {
+          runs.push({ results: null, output: "skipped: an earlier run timed out", timedOut: false });
+          emit(type, { project: cfg.name, run: j, files, duration_ms: 0, reported: false, timed_out: false,
+            skipped: true });
+        }
+      };
       for (let i = 1; ids.length && i <= o.runs; i++) {
         if (o.deadline !== undefined && performance.now() >= o.deadline) {
           late = true;
@@ -643,6 +654,10 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
         out.push({ results: ours.length ? ours : null, output: run.output, timedOut: run.timedOut });
         emit("before.run", { project: cfg.name, run: i, files: targets.length, duration_ms: took,
           reported: ours.length > 0, timed_out: run.timedOut });
+        if (run.timedOut && i < o.runs) {
+          skipRest(out, i, "before.run", targets.length);
+          break;
+        }
       }
       for (let i = 1; !late && proofTargets.length && i <= o.runs; i++) {
         if (o.deadline !== undefined && performance.now() >= o.deadline) {
@@ -657,6 +672,10 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
         proofRuns.push({ results: ours.length ? ours : null, output: run.output, timedOut: run.timedOut });
         emit("fix_proof.run", { project: cfg.name, run: i, files: proofTargets.length, duration_ms: took,
           reported: ours.length > 0, timed_out: run.timedOut });
+        if (run.timedOut && i < o.runs) {
+          skipRest(proofRuns, i, "fix_proof.run", proofTargets.length);
+          break;
+        }
       }
       return out;
     }, o.headSnap, o.headKey);

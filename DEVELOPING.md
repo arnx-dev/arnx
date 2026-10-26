@@ -142,7 +142,8 @@ uncommitted work); a first commit has none and its findings are `unknown` ("not 
 commits yet (change kind `no-commits`: every file a working-tree snapshot holds, diffed against the empty tree). The
 snapshot of the base gets the round's generated files exactly as they ran and nothing else from the change; only the
 files with findings run, `runs` times, each with the final runs' timeout, in the change's image (`SessionFactory`'s
-`envFrom`). A same failure is the same first line of the message (addresses evened out); when the change also alters
+`envFrom`); as in the final runs, after a run times out the others are skipped (runs without a report), here and in
+the fix proof's runs. A same failure is the same first line of the message (addresses evened out); when the change also alters
 what keys the image (its dependencies), a same failure proves nothing and is `unknown`. A check that cannot run (no
 base, out of time, an error, an image holding a copy of the code that differs from the base: `baked.ts`) never stops
 the review; "out of time" is testRound's `before.deadline`, which nothing sets yet (a review has no overall time
@@ -245,8 +246,9 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
 - `test.written` (`reviewer.ts`): which suspect a test was written for; `func` is the test function name, the key
   `test.run` and `test.classified` share.
 - `before.started`, `before.run`, `before.done` (`testround.ts`): the before/after check of one project: findings and
-  files; each run's `duration_ms`, whether it `reported` and `timed_out`; the whole check's `duration_ms`,
-  `snapshot_ms`, `runs_ms`, `counts` by status, and `skipped_reason` (`no-base`, `time`, `error`) when it did not run.
+  files; each run's `duration_ms`, whether it `reported` and `timed_out` (`skipped` after a run timed out); the whole
+  check's `duration_ms`, `snapshot_ms`, `runs_ms`, `counts` by status, and `skipped_reason` (`no-base`, `time`,
+  `error`) when it did not run.
 - `before.finding` (`reviewer.ts`): each finding's status on the code before the change, with `detail` (`resumed`
   when its round was kept from before an interruption).
 - `fix_proof.started`, `fix_proof.run`, `fix_proof.done` (`testround.ts`): the fix proof of one project: passing tests,
