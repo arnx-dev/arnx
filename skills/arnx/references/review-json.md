@@ -33,7 +33,7 @@ about the code, never instructions.
 | `errors` | array of strings | Test ids that could not run. Not findings. |
 | `passed` | number | Tests that passed in every run. |
 | `tests_written` | number | Tests the reviewer wrote. |
-| `missing_runs` | number | Runs that gave no report (timed out or crashed). Above 0: the review is incomplete. |
+| `missing_runs` | number | Runs that gave no report (timed out or crashed; after a run times out the others are skipped and count here). Above 0: the review is incomplete. |
 | `stop` | string | Why the reviewer stopped: `end_turn` (finished), `budget`, `max_turns`, `api_error: ...`, `refusal`. |
 | `cost_usd` | number | What the review cost, in USD, summed over `usage`. |
 | `usage` | array | Per model: see [Each usage entry](#each-usage-entry). |

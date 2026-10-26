@@ -382,13 +382,24 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
             if (got) ran(i + 1, got, false, secs);
             else emit("test.run_missing", { project: cfg.name, repeat: i + 1, timed_out: run.timedOut,
               exit_code: run.exitCode, seconds: secs });
-            continue;
+          } else {
+            const rerun = new Set(got.map((t) => ownerFile(t.fileAttr, Object.keys(f))));
+            const kept = first.filter((t) => !rerun.has(ownerFile(t.fileAttr, Object.keys(f))));
+            r.push([...kept, ...got]);
+            ran(i + 1, kept, true);
+            ran(i + 1, got, false, secs);
           }
-          const rerun = new Set(got.map((t) => ownerFile(t.fileAttr, Object.keys(f))));
-          const kept = first.filter((t) => !rerun.has(ownerFile(t.fileAttr, Object.keys(f))));
-          r.push([...kept, ...got]);
-          ran(i + 1, kept, true);
-          ran(i + 1, got, false, secs);
+          // A test that hangs would hang again: the other runs are skipped, each a run without a report, as if it
+          // had timed out there too.
+          if (run.timedOut && i + 1 < o.runs) {
+            say(`final run ${i + 1}/${o.runs} timed out; the other runs skipped`);
+            for (let j = i + 2; j <= o.runs; j++) {
+              r.push(null);
+              emit("test.run_missing", { project: cfg.name, repeat: j, timed_out: false, exit_code: null, seconds: 0,
+                skipped: true });
+            }
+            break;
+          }
         }
         if (o.typecheck && cfg.typecheck) checked = typecheckHere(session, snap, cfg, o.writeDir, say);
         return [a, f, r] as const;

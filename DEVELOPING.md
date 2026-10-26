@@ -90,7 +90,8 @@ fields are in `skills/arnx/references/json.md` and `check-json.md`; `tests/json-
           agentRound       localbrain.ts the brain's round starts with its tools (with --hunt, the tool-less hunters
                                          too); after each final reply, the facts
           runAgent         agent.ts      the model reads, writes tests, runs them (tools only, no shell)
-        runTests x3        outcomes.ts   the adapter's command and report -> passed / failed / error, per run
+        runTests x3        outcomes.ts   the adapter's command and report -> passed / failed / error, per run;
+                                         after a run times out the rest are skipped (no report)
         classify           outcomes.ts   failed in all 3 runs = finding; anything else never is
         beforeStage        testround.ts  findings' files x3 on a snapshot of the change's base, same image
           judgeBefore      before.ts     regression / pre-existing / new-code / changed / unknown, per finding
@@ -232,7 +233,8 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   suspects, where a listed suspect went (`hunt.merged` has `duplicate`).
 - `test.files`, `test.run`, `test.run_missing`, `test.classified` (`testround.ts`): generated files, each result of each
   repeat (`func`; `run_seconds` for runs that were not carried), the class of each test; a run without a report says
-  `timed_out`, `exit_code` and `seconds`.
+  `timed_out`, `exit_code` and `seconds`. After a final run times out the others are not run (a hanging test would
+  hang again): each says `skipped` and counts as a run without a report.
 - `test.written` (`reviewer.ts`): which suspect a test was written for; `func` is the test function name, the key
   `test.run` and `test.classified` share.
 - `before.started`, `before.run`, `before.done` (`testround.ts`): the before/after check of one project: findings and
