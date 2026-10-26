@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
 import { adapterFor, getAdapter, LANGUAGES } from "./adapters";
+import type { CopyOnly } from "./baked";
 import { digest, type ReviewConfig } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
 import { globRegex } from "./secrets";
@@ -61,7 +62,11 @@ export interface Limits { cpus: string; memory: string; pids: number; tmp: strin
 export const DEFAULT_LIMITS: Limits = { cpus: "2", memory: "4g", pids: 512, tmp: "1g" };
 
 export interface RunResult { exitCode: number | null; output: string; timedOut: boolean; seconds: number }
-export interface Runner { run(command: string, timeout: number): RunResult }
+export interface Runner {
+  run(command: string, timeout: number): RunResult;
+  /** Set when the image holds a copy of the code that runs reach (baked.ts): where, and the files only it holds. */
+  copies?(output: string): CopyOnly;
+}
 /** Runs `body` with a ready session for the config's environment and tears it down afterwards. `envFrom`: the
  * snapshot whose manifests pick the image, when it is not `snap` (the before/after check runs the code before the
  * change in the change's image); `key`: that image's key, taken before runs could change those manifests (cargo

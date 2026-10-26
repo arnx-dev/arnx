@@ -3,8 +3,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseReviewConfig } from "../src/config";
 import { PROMPT_VERSION, reviewSystem, reviewTask } from "../src/prompts";
+import type { SessionFactory } from "../src/sandbox";
 import { ownTestsInWriteDir, testRound, writeDirOf, COPY_SUFFIX } from "../src/testround";
-import { answerRound, type FakeSession, fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
+import { answerRound, FakeSession, fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
@@ -96,6 +97,27 @@ test("a round whose environment runs no test stops before the agent writes one",
     .rejects.toThrow(/the test environment runs no test at this commit[\s\S]*custom build command for `fetcher/);
   expect(sessions[0]!.commands).toHaveLength(1);
   expect(readFileSync(join(out, "probe.log"), "utf8")).toContain("fetcher v1.0.0");
+});
+
+// A setup whose tests relied on a file the install made only in the image's copy of the code stopped after the
+// upgrade with "runs no test" and no word of that copy.
+test("a round stopped by the probe on an image holding a copy of the code says so and what to do", async () => {
+  const repo = gitRepo(tmp());
+  const model = new ScriptedAgent([[text('{"tests": []}')]]);
+  const output = "Error: ENOENT: no such file or directory, open '/src/packages/core/default.db'";
+  const factory = (files: string[]): SessionFactory => async (_cfg, snap, _log, body) => {
+    const s = new FakeSession(snap, () => [null, output, false], { probe: "ignore" });
+    return body({ run: (c) => s.run(c), copies: () => ({ roots: ["/opt/app"], files }) });
+  };
+  const round = (files: string[]) => testRound(repo, null, CFG, { ...answerRound(model, CFG),
+    writeDir: writeDirOf(CFG), budgetUsd: 1.0, runs: 3, outDir: join(tmp(), "o"), sessionFactory: factory(files) });
+  await expect(round(["packages/core/default.db"])).rejects.toThrow(/the test environment runs no test at this commit/);
+  await expect(round(["packages/core/default.db"])).rejects.toThrow("\nmain: packages/core/default.db exists only " +
+    "in the image's copy of the code (/opt/app), not in /src. Set the project up again: arnx setup --project main");
+  await expect(round(["a.db", "b.db", "c.db", "d.db"])).rejects.toThrow("\nmain: a.db, b.db, c.db and 1 more exist " +
+    "only in the image's copy of the code (/opt/app), not in /src.");
+  await expect(round([])).rejects.toThrow("\nmain: the image holds a copy of the code (/opt/app); a setup that " +
+    "relied on it can stop here since arnx 0.1.2. Set the project up again: arnx setup --project main");
 });
 
 test("a round clears only generated files, never the project's own tests", async () => {
