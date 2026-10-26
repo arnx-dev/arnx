@@ -1,14 +1,14 @@
 // arnx remove: what arnx put in this repository, listed (nothing deleted), then deleted with --yes: .arnx/,
-// .arnxignore, the skill in the repository, this repository's environment images and the pins arnx keeps for it
-// outside the repository. Files git tracks are never deleted here: arnx prints the `git rm` that removes them, so the
-// removal shows in a commit. Accepted tests (.arnx/tests/) are the repository's own tests once committed: kept
-// unless --tests.
+// .arnxignore, the skill in the repository, this repository's environment images (with the build cache of those made
+// from the code, as `arnx env prune` removes it) and the pins arnx keeps for it outside the repository. Files git
+// tracks are never deleted here: arnx prints the `git rm` that removes them, so the removal shows in a commit. Accepted
+// tests (.arnx/tests/) are the repository's own tests once committed: kept unless --tests.
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, rmdirSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 import { git } from "./change";
 import { ACCEPTED_RECORD } from "./check";
-import { type EnvImage, repoImages } from "./envprune";
+import { type CacheRecord, type EnvImage, markedBuild, repoImages, sourceCache } from "./envprune";
 import { ArnxError } from "./errors";
 import { FILE as IGNORE_FILE } from "./ignore";
 import { docker } from "./sandbox";
@@ -134,8 +134,11 @@ export function planRemove(repo: string, o: { tests: boolean; pins: string | nul
 }
 
 /** Deletes what the plan lists that may be deleted here: untracked files (then the folders they leave empty), the
- * images and the pin file. Returns what could not be deleted, and why. */
-export function applyRemove(repo: string, plan: RemovePlan): [string, string][] {
+ * images (and the build cache of those made from the code) and the pin file. Returns what could not be deleted, and
+ * why, the build cache records removed, and how many images an older arnx made from the code went without theirs
+ * (envprune.ts pruneEnv). */
+export function applyRemove(repo: string, plan: RemovePlan)
+  : { failed: [string, string][]; cache: CacheRecord[]; cacheNotFound: number } {
   const failed: [string, string][] = [];
   const dirs = new Set<string>();
   for (const p of plan.untracked) {
@@ -160,10 +163,15 @@ export function applyRemove(repo: string, plan: RemovePlan): [string, string][] 
       // still in use or not ours to remove: left
     }
   }
+  const removed: string[] = [];
+  // Asked before the images go: their history is gone with them.
+  const unmarked = (plan.images ?? []).map((i) => i.tag).filter((t) => t.includes("-src-") && !markedBuild(t));
   for (const img of plan.images ?? []) {
     const r = docker(["image", "rm", img.tag]);
-    if (r.status !== 0) failed.push([img.tag, (r.stderr || r.stdout).trim().split("\n")[0] ?? ""]);
+    if (r.status === 0) removed.push(img.tag);
+    else failed.push([img.tag, (r.stderr || r.stdout).trim().split("\n")[0] ?? ""]);
   }
+  const cache = sourceCache(removed);
   if (plan.pins) {
     try {
       rmSync(plan.pins, { force: true });
@@ -171,5 +179,5 @@ export function applyRemove(repo: string, plan: RemovePlan): [string, string][] 
       failed.push([plan.pins, (e as Error).message]);
     }
   }
-  return failed;
+  return { failed, cache, cacheNotFound: removed.filter((t) => unmarked.includes(t)).length };
 }

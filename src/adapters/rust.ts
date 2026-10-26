@@ -12,6 +12,9 @@ const GENERATED = /^arnx_generated_[a-z0-9_]+\.rs$/;
 // What accept keeps: arnx_<tag>_<name>.rs in tests/, never a generated file.
 const KEPT = /^arnx_(?!generated_)[a-z0-9_]+\.rs$/;
 const CONFIG = "/src/.arnx-run/nextest.toml";
+// Where the profile below puts nextest's report. It stays in the snapshot between runs, so each run deletes it first:
+// a run whose build fails writes none, and must not pass off the last run's as its own.
+const JUNIT = "/src/.arnx-run/nextest/arnx/junit.xml";
 // nextest keeps its store (and so the JUnit file) under the workspace's target/nextest, whatever CARGO_TARGET_DIR is;
 // an absolute store directory puts the report at a known place.
 const PROFILE = `[store]
@@ -194,9 +197,10 @@ export const rust: Adapter = {
     writeFileSync(join(snapshot, ".arnx-run", "nextest.toml"), PROFILE);
   },
   command: (testCommand, targets, reportPath) =>
-    `${WORKSPACE} [ -f "$ws/Cargo.lock" ] || cp ${LOCK} "$ws/Cargo.lock" 2>/dev/null; ${PACKAGE} cd "$ws" && ` +
+    `rm -f ${JUNIT}; ${WORKSPACE} [ -f "$ws/Cargo.lock" ] || cp ${LOCK} "$ws/Cargo.lock" 2>/dev/null; ${PACKAGE} ` +
+    `cd "$ws" && ` +
     `${testCommand.replaceAll("{targets}", targetFlags(targets))} --config-file ${CONFIG} --profile arnx; s=$?; ` +
-    `cp /src/.arnx-run/nextest/arnx/junit.xml ${shQuote(reportPath)} 2>/dev/null; exit $s`,
+    `cp ${JUNIT} ${shQuote(reportPath)} 2>/dev/null; exit $s`,
   parseReport: (text, _runner, _root, exists = () => false) => parseNextest(text, exists),
   skip,
   drop,

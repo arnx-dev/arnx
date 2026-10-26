@@ -9,13 +9,17 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
 - Each test environment is a Docker image (`arnx-env:<hash>`), built again when the install steps or the dependency
   files change; Rust images can take several GB. With `context = "precise"` (`.arnx/config.toml`), each one also
   gets a code indexer layer (`arnx-env:<hash>-scip1`, about 0.7 GB for Python and TypeScript; the indexer runs with
-  no network). When the install copies your code into the image (`cp -r . /opt/app`), arnx builds one more image per
+  no network). When the install copies your code into the image (`cp -r . /opt/app`, or `pip install .` when your
+  tests import the installed package rather than the code in /src), arnx builds one more image per
   version of the code it tests (`arnx-env:<hash>-src-<hash>`), reused for that code. `arnx env prune` removes this
   repository's images that no proven project uses now and are a week old (`--keep-days N`, `--dry-run` to list them
   first, `--all-repos` for other repositories' old images too), and with each image made from your code the build
-  cache records its build left, each by its id; the rest of Docker's build cache is not touched.
+  cache records its build left, each by its id; the rest of Docker's build cache is not touched. Such images built
+  by arnx before 0.1.3 do not say which records are theirs: prune removes the image, leaves the cache, and says so
+  (`docker builder prune` removes all of Docker's unused build cache, if you want that).
 - `arnx remove` lists everything arnx put in the repository (`.arnx/`, `.arnxignore`, the skill folders), this
-  repository's test images and the pins arnx keeps for it outside the repository; `arnx remove --yes` deletes them.
+  repository's test images and the pins arnx keeps for it outside the repository; `arnx remove --yes` deletes them,
+  with the build cache of the images made from your code (as `arnx env prune` removes it).
   Files you committed are left for the `git rm` it prints, so the removal shows in a commit. Accepted tests are your
   tests by then: kept unless `--tests`. Your arnx cloud login and the arnx program itself are not touched.
 - Your model keys stay in the arnx process. Files that usually hold secrets, and text that looks like a key, are

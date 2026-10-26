@@ -67,6 +67,7 @@ Every other field is the command's own, in snake_case. Paths are relative to the
 | `coverage` | object | With an environment set up: `projects` (each `{ name, owned, used, untracked: { owned, used } }`, file counts), `uncovered` (each `{ path, reason, files, untracked }`: what no project tests, and why), `unexplained` (source files no project owns or uses and no `uncovered` entry names). Absent otherwise. |
 | `prompts` | object | Only when `.arnx/prompts.toml` overrides a key in use (with arnx cloud, only the fix prompt's `fix.*` keys are): `{ overridden, notes }`, the keys and doctor's notes on them (a default arnx changed since you copied it, a placeholder the step needs dropped). |
 | `jev` | object | Only when doctor shows a JEV line: `{ on, key_set, detail }` (`on`: `jev = true` in the config; `key_set`: `JEV_API_KEY` is set). Experimental, never a check. |
+| `old_images` | object | Only when this repository has images `arnx env prune` would remove (Docker running): `{ count, size }` (`size` like `6.5GB`). Never a check. |
 | `telemetry` | object | `{ enabled, reason }`: `reason` is why it is off (`in .arnx/config.toml`, `ARNX_TELEMETRY is set`, …), `null` when enabled. |
 
 | `result` | Exit | When |
@@ -266,6 +267,7 @@ answers as `review.md` holds them now (latest review, or the id given).
 | `unlabelled` | number | `arnx-env` images without arnx's labels, always left alone. |
 | `cache_records` | number | Build cache records removed (or, with `dry_run`, to remove) with the images made from the code (`-src-` tags). |
 | `cache_size` | string | Their total size (`2.4GB`). |
+| `cache_not_found` | number | Of those images, the ones an arnx before 0.1.3 built: their build cache cannot be found, so it stays (`docker builder prune` removes all unused build cache). |
 
 | `result` | Exit | When |
 |---|---|---|
@@ -286,6 +288,8 @@ answers as `review.md` holds them now (latest review, or the id given).
 | `pins` | string or null | The pin file arnx keeps for this clone outside it. |
 | `kept_tests` | array of strings | Accepted test files left in place (without `--tests`). |
 | `failed` | array | `{ path, error }` per file or image that could not be deleted. |
+| `cache_records` | number | With `--yes`: build cache records removed with the images made from the code (`-src-` tags), as `env prune` removes them. |
+| `cache_size` | string | With `--yes`: their total size (`2.4GB`). |
 | `next` | array of strings | `arnx remove --yes` after a list. |
 
 | `result` | Exit | When |

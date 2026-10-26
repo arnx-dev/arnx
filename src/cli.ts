@@ -40,7 +40,7 @@ import { acceptData, checkData, reportTelemetry, reviewData, type Sender, setupD
 import { Progress, type Live } from "./progress";
 import { runReview } from "./reviewer";
 import { envOwner, requireDocker } from "./sandbox";
-import { ageDays, type EnvImage, pruneEnv, totalSize } from "./envprune";
+import { ageDays, type CacheRecord, type EnvImage, KEEP_DAYS, oldImages, pruneEnv, totalSize } from "./envprune";
 import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSettings, missingKeys, modelRefs, type ModelsMode,
   modelsMode,
   modelsSetting, recordCloudModels, recordConsent, type Settings, settingsPath, untrackedSetting, withModels,
@@ -154,6 +154,8 @@ export interface CliDeps {
   color?: boolean;
   colorErr?: boolean;
   dockerOk(): [boolean, string];
+  /** This repository's images `arnx env prune` would remove (default: envprune's oldImages; tests replace it). */
+  oldImages?: (repo: string) => EnvImage[];
   /** stdout is a terminal a person reads (not a pipe, a log or --json): init's first run shows the banner there. */
   banner?: boolean;
   /** A person at a terminal can answer (stdin and stdout are terminals). */
@@ -231,6 +233,17 @@ async function ask(prompt: string): Promise<string | null> {
     rl.close();
   }
 }
+
+/** env prune's and remove's line on images an older arnx made from the code, whose build cache cannot be found. */
+const olderCacheLine = (k: number) => `${k} image${k === 1 ? "" : "s"} built by an older arnx left build cache arnx ` +
+  "cannot find; `docker builder prune` removes all unused build cache (your choice).";
+
+/** doctor's and setup's line on the images `arnx env prune` would remove. */
+const oldImagesLine = (images: EnvImage[]) => {
+  const one = images.length === 1;
+  return `Images: ${images.length} unused environment image${one ? "" : "s"} (${totalSize(images)}); ` +
+    `arnx env prune removes ${one ? "it" : "them"}`;
+};
 
 export function dockerOk(): [boolean, string] {
   try {
@@ -684,6 +697,8 @@ class Commands {
     this.d.out(telemetry);
     if (promptsLine) this.d.out(`Prompts: ${promptsLine}`);
     for (const note of promptNotes) this.d.out(`  ${note}`);
+    const old = checks.some(([ok, name]) => name === "Docker" && ok) ? this.oldImages(repo) : [];
+    if (old.length) this.d.out(oldImagesLine(old));
     this.d.out("");
     const issues = checks.filter(([ok]) => ok === false).length;
     const ready = checks.every(([ok]) => ok);
@@ -706,6 +721,7 @@ class Commands {
         unexplained: coverage.unexplained } } : {}),
       ...(jev && s ? { jev: { on: !!s.jev, key_set: !!this.d.env.JEV_API_KEY, detail: jev } } : {}),
       ...(overrides.length ? { prompts: { overridden: overrides.map((o) => o.key), notes: promptNotes } } : {}),
+      ...(old.length ? { old_images: { count: old.length, size: totalSize(old) } } : {}),
       telemetry: { enabled: telemetry.startsWith("Telemetry: on"),
         reason: telemetry.startsWith("Telemetry: on") ? null
           : telemetry.replace(/^Telemetry: (?:disabled|off) ?/, "").replace(/^\((.*)\)$/, "$1") } });
@@ -914,7 +930,18 @@ class Commands {
     const red = projects.reduce((k, p) => k + p.accepted_failing, 0);
     if (red) this.d.out(stillRed(red));
     this.sayWorthALook(repo, file, o);
+    const old = this.oldImages(repo);
+    if (old.length) this.d.out(oldImagesLine(old));
     this.d.out(nextStep(repo));
+  }
+
+  /** This repository's images `arnx env prune` would remove; none when Docker does not answer. */
+  private oldImages(repo: string): EnvImage[] {
+    try {
+      return this.d.oldImages?.(repo) ?? [];
+    } catch {
+      return [];
+    }
   }
 
   /** "Worth a look" after a passing proof: only what applies, nothing when nothing does. */
@@ -1112,11 +1139,12 @@ class Commands {
       return under.length && under.length === t.files ? [t.path.replace(/\/$/, "")] : under.sort();
     });
     const gitLine = gitRm.length ? `git rm -r --quiet ${gitRm.map(shellWord).join(" ")}` : null;
-    const json = (failed: [string, string][]) => ({ dry_run: !yes,
+    const json = (failed: [string, string][], cache: CacheRecord[] = []) => ({ dry_run: !yes,
       deleted: plan.untracked.filter((p) => !failed.some(([f]) => f === p)), tracked: plan.tracked, git_rm: gitLine,
       images: images.map((i) => ({ tag: i.tag, size: i.size })), docker_checked: plan.images !== null,
       pins: plan.pins ? this.shown(plan.pins) : null, kept_tests: plan.keptTests,
-      failed: failed.map(([path, error]) => ({ path, error })) });
+      failed: failed.map(([path, error]) => ({ path, error })),
+      ...(yes ? { cache_records: cache.length, cache_size: totalSize(cache) } : {}) });
     if (!plan.targets.length && !images.length && !plan.pins) {
       this.d.out("Nothing of arnx's in this repository.");
       this.emit("ok", 0, { ...json([]), state: "nothing" });
@@ -1145,20 +1173,21 @@ class Commands {
       this.emit("ok", 0, { ...json([]), state: "listed", next: ["arnx remove --yes"] });
       return 0;
     }
-    const failed = applyRemove(repo, plan);
+    const { failed, cache, cacheNotFound } = applyRemove(repo, plan);
     const done = plan.untracked.length + images.length + (plan.pins ? 1 : 0) - failed.length;
     this.d.out(failed.length ? `Removed ${n(done, "item")}; ${failed.length} could not be removed:`
       : `✓ Removed arnx from this repository${tracked.size ? ", except committed files" : ""}.`);
     for (const [what, why] of failed) this.d.out(`  ${what}: ${why}`);
+    if (cacheNotFound) this.d.out(olderCacheLine(cacheNotFound));
     if (gitLine) say("Remove the committed files in a commit:", `  ${gitLine}`);
     this.d.out(`Kept: ${kept.join("; ")}.`);
-    this.emit(failed.length ? "fail" : "ok", failed.length ? 2 : 0, { ...json(failed), state: "removed" });
+    this.emit(failed.length ? "fail" : "ok", failed.length ? 2 : 0, { ...json(failed, cache), state: "removed" });
     return failed.length ? 2 : 0;
   }
 
   async env(a: Args): Promise<number> {
     if (a.positionals[0] !== "prune") throw new ArnxError("usage: arnx env prune [--keep-days N] [--all-repos] [--dry-run]");
-    const days = (a.values["keep-days"] as string | undefined) ?? "7";
+    const days = (a.values["keep-days"] as string | undefined) ?? String(KEEP_DAYS);
     if (!/^\d+$/.test(days)) throw new ArnxError("--keep-days takes a whole number of days");
     const repo = this.repo();
     const now = Date.now();
@@ -1175,6 +1204,7 @@ class Commands {
         this.d.out(`${dryRun ? "Would remove" : "Removed"} their build cache: ${n(r.cache.length, "record")} ` +
           `(${totalSize(r.cache)}).`);
       }
+      if (r.cacheNotFound) this.d.out(olderCacheLine(r.cacheNotFound));
     } else {
       this.d.out("No environment image to remove.");
     }
@@ -1190,7 +1220,8 @@ class Commands {
       size: i.size });
     this.emit(r.failed.length ? "fail" : "ok", r.failed.length ? 2 : 0, { dry_run: dryRun, keep_days: Number(days),
       removed: r.removed.map(image), failed: r.failed.map(([i, why]) => ({ ...image(i), error: why })),
-      unlabelled: r.unlabelled, cache_records: r.cache.length, cache_size: totalSize(r.cache) });
+      unlabelled: r.unlabelled, cache_records: r.cache.length, cache_size: totalSize(r.cache),
+      cache_not_found: r.cacheNotFound });
     return r.failed.length ? 2 : 0;
   }
 
@@ -1828,7 +1859,7 @@ function parse(argv: string[]): Parsed {
 }
 
 export async function main(argv: string[], deps: Partial<CliDeps> = {}): Promise<number> {
-  const d: CliDeps = { cwd: process.cwd(), env: process.env, ask, dockerOk,
+  const d: CliDeps = { cwd: process.cwd(), env: process.env, ask, dockerOk, oldImages,
     interactive: !!(process.stdin.isTTY && process.stdout.isTTY),
     banner: !!process.stdout.isTTY,
     out: (line) => process.stdout.write(line + "\n"), err: (line) => process.stderr.write(line + "\n"),
