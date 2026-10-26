@@ -5,22 +5,23 @@ import { ModelError } from "./errors";
 import { withRole } from "./events";
 import { type JsonModel, type ModelUse, tally, type Trace } from "./llm";
 import type { Say } from "./progress";
-import { EXPLAIN_SCHEMA, EXPLAIN_SYSTEM, explainUser } from "./prompts";
+import { DEFAULT_PROMPTS, EXPLAIN_SCHEMA, explainUser, type Prompts } from "./prompts";
 import { type Finding, type Group, rankGroups, SEVERITIES } from "./report";
 
 const FIELDS = ["title", "input", "actual", "expected", "consequence"] as const;
 const MAX = { title: 160, input: 400, actual: 400, expected: 400, consequence: 400 };
 
 export async function explain(findings: Finding[], o: { model: JsonModel; diff: string; sources: Record<string, string>;
-  budgetUsd: number; use: ModelUse; trace?: Trace; progress?: Say }): Promise<Group[]> {
+  budgetUsd: number; use: ModelUse; trace?: Trace; progress?: Say; prompts?: Prompts }): Promise<Group[]> {
   if (!findings.length || o.use.costUsd >= o.budgetUsd) return [];
   o.progress?.("grouping findings");
   const started = performance.now();
   const secs = () => Math.round((performance.now() - started) / 100) / 10;
   let data: Record<string, unknown>;
   try {
+    const system = (o.prompts ?? DEFAULT_PROMPTS).explainSystem();
     const [reply, cost, usage, unknown] = await withRole("explain",
-      () => o.model.completeJson(EXPLAIN_SYSTEM, explainUser(o.diff, findings, o.sources), EXPLAIN_SCHEMA));
+      () => o.model.completeJson(system, explainUser(o.diff, findings, o.sources), EXPLAIN_SCHEMA));
     tally(o.use, cost, usage, unknown);
     data = reply;
     o.trace?.({ step: "explain", outcome: "ok", secs: secs(), cost_usd: cost });

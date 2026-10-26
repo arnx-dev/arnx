@@ -199,6 +199,9 @@ export interface Brain {
   /** The name a remote brain's work goes by in usage lines and the report: its tier and harness, never a model name
    * (absent for the local brain, whose models are named). */
   readonly label?: string;
+  /** The repository's own prompts this brain runs (.arnx/prompts.toml): the keys and the hash of every template in
+   * use, recorded with the review. Absent when it runs arnx's defaults, or its own (arnx cloud). */
+  readonly overrides?: { keys: string[]; hash: string };
   /** The review opens, before any round: a remote brain takes its budget hold here (and can refuse to start). */
   start?(x: ReviewStart): Promise<ReviewOpened | void>;
   /** One agent round. The CLI starts a review or answer round only once the sandbox has run a test, so a round the

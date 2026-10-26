@@ -36,7 +36,8 @@ A brain never runs a test or reads a file except through a tool call the CLI run
 Tests never call a model. `tests/helpers/fakes.ts` holds a scripted agent, a fake JSON model and a fake Docker
 session. `tests/golden.test.ts` compares against files captured from arnx's first version: the
 review.yaml hash, the env image key, the prompts, review.md and the settings file must stay byte-identical, so files
-written by either version keep working.
+written by either version keep working. `tests/prompts-frozen.test.ts` holds every prompt built from
+`src/prompts.toml` to the text 0.1.2 built (`tests/fixtures/prompts-0.1.2.json`) and `PROMPT_VERSION` to its value.
 
 The source uses only `node:` built-ins, `fetch` and four dependencies (`@anthropic-ai/sdk`, `yaml`, `smol-toml`,
 `fast-xml-parser`), and no Bun-only APIs: the Node bundle must run on Node 20 or later. `tests/clean.test.ts`
@@ -67,6 +68,7 @@ Accepted tests are written into the project's own test folders.
 | `env prune` | Remove this repository's environment images no approved project uses, older than `--keep-days` (7); `--all-repos`, `--dry-run`. An image made from the code (`<key>-src-<hash>`, baked.ts) also takes the build cache records its build left, each by id, found from the step marked with its tag | Docker's image labels, `docker buildx du` | nothing | no | yes |
 | `login`, `logout`, `credits` | arnx cloud: a device login (RFC 8628), its deletion, the balance (no answer: "arnx cloud unavailable", exit 2; "not open yet" only on arnx cloud's `not_open`) | the config directory, `/v1/account` | `~/.config/arnx/credentials.json` (0600) | no | no |
 | `cloud on`, `cloud off` | arnx cloud's models for this repository, or the user's keys again: asks the cloud consent once, changes only `[cloud] models` | `.arnx/config.toml` | `.arnx/config.toml` | no | no |
+| `prompts` | List the prompt keys, marking those `.arnx/prompts.toml` overrides; `copy KEY` writes arnx's default of KEY there with `KEY_base` (its hash), keeping the file's other content; a key already there is printed instead, nothing written | `.arnx/prompts.toml` | `.arnx/prompts.toml` (copy) | no | no |
 | `skill install` | Write the arnx skill for coding agents (`skills/arnx/`, embedded in the build) to `.agents/skills/arnx/` and `.claude/skills/arnx/`, or under `~/` with `--user`; a different copy only with `--force`. `init` names the command until the repository has it | nothing | `.agents/skills/arnx/`, `.claude/skills/arnx/` | no | no |
 
 Exit codes: 0 no confirmed findings, 1 confirmed findings, 2 the run could not finish, 3 setup needed, 4 (`check`
@@ -375,6 +377,28 @@ adapter's `kept`), so tests kept under the older names
 (`test_<id>_<name>.py`, `<name>.r<id>.test.ts`) keep running. Accepting again under other marks can rename a file:
 the copy under its old name is removed.
 
+## Prompts
+
+The default text of every prompt is `src/prompts.toml`, grouped by step (`[review]`, `[hunt]`, `[prove]`, `[rank]`,
+`[questions]`, `[challenge]`, `[answer]`, `[explain]`, `[setup]`, and `[fix]`: the fix prompt's opening, rules and
+answers heading, `fixprompt.ts`); `prompts.ts` imports it as text (so the binary and the Node bundle carry it),
+and keeps the keys with the placeholders the code fills (`PLACEHOLDERS`), the JSON reply schemas and the builders
+(`Prompts`; the free functions build arnx's own). `PROMPT_VERSION` hashes the 23 texts that decide what is found, in
+0.1.2's order, so it changes only when that text does.
+
+A repository overrides single keys in `.arnx/prompts.toml` (`userprompts.ts`); every key it leaves out is arnx's.
+`reviewer.ts`, `setup.ts` and `accept.ts` give the LocalBrain they build `promptsFor(repo)`; the file is read there
+and refused when it names an unknown key or a placeholder its key does not offer. A brain running overrides says so
+(`Brain.overrides`): review.json gets `prompt_overrides` and `prompts_hash` (the hash of the 24 texts a model is
+sent), the header of review.md names them; without overrides both are absent and every file is what it was. arnx
+cloud runs its own prompts: `setup` and `review` print `CLOUD_PROMPTS` once when the file overrides one of them, and
+nothing of it is sent. The `fix` keys are no model's: `accept` reads the file first and builds fix-prompt.md with
+them, with arnx cloud too, and names them (a line, the prompt's last line, `fix_prompt_overrides` in --json); a
+review does not list them, and doctor checks the file under arnx cloud too. The file is read from the working tree:
+a change that edits it (base against head, or the working tree) is reviewed with its own version, which the review
+says at its start, in review.md's header and as `prompts_file_edited` in review.json.
+Approval's stamp covers review.yaml only, so editing the file needs no approve. Telemetry carries nothing about it.
+
 ## Modules
 
 | Module | Responsibility |
@@ -397,7 +421,8 @@ the copy under its old name is removed.
 | `typecheck.ts` | The project's own type check: tsc's output read, errors on the change against those before it, in words |
 | `llm.ts` | Agent clients (Anthropic Messages, or a Responses API: OpenAI, and generic tables that copy either API); JSON calls via either; prices |
 | `agent.ts` | The tool loop and its confined tools; hard budget |
-| `prompts.ts` | Every prompt, frozen; `PROMPT_VERSION` changes with any edit |
+| `prompts.ts` | Every prompt: the default text read from `prompts.toml` (imported as text, so every build carries it), the keys and their placeholders, the builders (`Prompts`); `PROMPT_VERSION` changes with any edit of the text |
+| `userprompts.ts` | `.arnx/prompts.toml`: per-key overrides read (unknown keys and placeholders refused), copied, checked by doctor; with arnx cloud, one line and nothing sent |
 | `brain.ts` | The `Brain` interface: agent rounds (review, answer, setup), judge, finish; what the CLI hands over |
 | `localbrain.ts` | `LocalBrain`: the prompts and models of a review with the user's keys; follow-ups, the hunt, the judging |
 | `cloudbrain.ts` | `CloudBrain`: the Brain over arnx cloud's v1 contract (arnx models); builds each call's inputs, runs the brain's tool calls with the CLI's tools, records hunt and billing |

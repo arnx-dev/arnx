@@ -60,11 +60,12 @@ Every other field is the command's own, in snake_case. Paths are relative to the
 | Field | Type | Meaning |
 |---|---|---|
 | `ready` | boolean | A review can run now. |
-| `checks` | array | Every check, in doctor's order, each `{ name, ok, detail }`: `name` is `configuration`, `models`, `keys` (your own keys) or `login` and `credits` (arnx cloud), `docker`, `languages` (only when it fails: the repository is written only in languages arnx does not review), `consent`, `environment`; `ok` is `true` (✓), `false` (✗) or `null` (·, not done yet: the flow does it next, not a problem); `detail` is the line's text. |
+| `checks` | array | Every check, in doctor's order, each `{ name, ok, detail }`: `name` is `configuration`, `models`, `keys` (your own keys) or `login` and `credits` (arnx cloud), `docker`, `languages` (only when it fails: the repository is written only in languages arnx does not review), `consent`, `environment`, `prompts` (only when `.arnx/prompts.toml` does not read); `ok` is `true` (✓), `false` (✗) or `null` (·, not done yet: the flow does it next, not a problem); `detail` is the line's text. |
 | `next` | string or null | The command to run next; `null` while a check fails (fix the `ok: false` ones). |
 | `models` | string | `byom` (your own keys) or `cloud` (arnx cloud). Absent when the models in effect are unknown (no configuration, or a bad `ARNX_MODELS`). |
 | `providers` | array | The provider tables a role uses, each `{ name, api, host, key_env, key_set }` (`key_env` is the variable's name; its value is never shown). Empty when only built-in providers are used. |
 | `coverage` | object | With an environment set up: `projects` (each `{ name, owned, used, untracked: { owned, used } }`, file counts), `uncovered` (each `{ path, reason, files, untracked }`: what no project tests, and why), `unexplained` (source files no project owns or uses and no `uncovered` entry names). Absent otherwise. |
+| `prompts` | object | Only when `.arnx/prompts.toml` overrides a key in use (with arnx cloud, only the fix prompt's `fix.*` keys are): `{ overridden, notes }`, the keys and doctor's notes on them (a default arnx changed since you copied it, a placeholder the step needs dropped). |
 | `jev` | object | Only when doctor shows a JEV line: `{ on, key_set, detail }` (`on`: `jev = true` in the config; `key_set`: `JEV_API_KEY` is set). Experimental, never a check. |
 | `telemetry` | object | `{ enabled, reason }`: `reason` is why it is off (`in .arnx/config.toml`, `ARNX_TELEMETRY is set`, …), `null` when enabled. |
 
@@ -303,6 +304,23 @@ answers as `review.md` holds them now (latest review, or the id given).
 |---|---|---|
 | `ok` | 0 | Installed, or already there. A folder holding another skill without `--force` is an `error`. |
 
+### prompts
+
+`arnx prompts` and `arnx prompts copy KEY`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `prompts` | array | `arnx prompts`: every key, each `{ key, overridden, default_changed, placeholders }`: `overridden`, `.arnx/prompts.toml` replaces it; `default_changed`, arnx's default changed since you copied it; `placeholders`, the ones the key may use. |
+| `file` | string | `.arnx/prompts.toml`. |
+| `cloud` | boolean | `arnx prompts`: arnx cloud runs this repository's models, so its own prompts run, not yours. |
+| `key` | string | `copy`: the key. |
+| `written` | boolean | `copy`: `false` when the file has the key already (nothing written; arnx's default is printed to compare). |
+| `base` | string | `copy`: the hash of arnx's default, as `<name>_base` records it. |
+
+| `result` | Exit | When |
+|---|---|---|
+| `ok` | 0 | Listed, or copied (or already there). An unknown key, or a file that does not read, is an `error`. |
+
 ### accept
 
 `arnx accept [id] --json` (no id: the latest review). Nothing is asked: answers that need the consent to send code
@@ -318,6 +336,7 @@ stop it with an `error` object (`arnx consent` first, or `--no-answers`).
 | `answers` | array | One entry per answered question, then one per rewrite: see below. Empty with `--no-answers`. |
 | `check` | object or null | The accepted tests run on the code as it is now: `failing`, each `{ project, test_id, message }` (the runner's failure message), and `passing`, a number. null with `--no-check`. |
 | `fix_prompt` | string | The fix prompt for the coding agent (`.arnx/reviews/<id>/fix-prompt.md`); `arnx prompt --json` gives its text. |
+| `fix_prompt_overrides` | array of strings | Only when `.arnx/prompts.toml` overrides the fix prompt's keys: those keys (`fix.rules`, …), which the fix prompt also names. |
 | `next` | array of strings | The next steps, as the text says them: `give the fix prompt to your coding agent`, then `arnx check`, while accepted tests fail (or were not run); else `commit the fix and the accepted tests together` (or `commit the accepted tests`); empty when nothing was kept. |
 
 Each answer:

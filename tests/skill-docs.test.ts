@@ -46,7 +46,7 @@ const written = () => ["hunt", "plain"].map((n) =>
 function full(): Record<string, unknown> {
   const f = finding("F1", "tests/g/test_a.py::test_a", "test_a", "tests/g/test_a.py", "assert 1 == 2", "off by one",
     "confirmed", "yes");
-  const r: Review = sampleReview({ findings: [{ ...f, dependsOn: "Q1", suspect: "S1", judge: "openai:x", shallow: "existence",
+  const r: Review = sampleReview({ promptOverrides: ["hunt.task"], promptsHash: "abc123def456", promptsFileEdited: true, findings: [{ ...f, dependsOn: "Q1", suspect: "S1", judge: "openai:x", shallow: "existence",
     before: { status: "regression", detail: "passes before", runs: ["passed", "passed", "passed"] } }],
   groups: [{ findings: ["F1"], title: "t", input: "i", actual: "a", expected: "e", consequence: "c", severity: "high" }],
   untested: [{ project: "main", files: ["a.py"], of: 2 }],

@@ -149,9 +149,9 @@ its own, under "Type check": it never fails a test, turns a run into no report, 
    `arnx setup` proves the place: its run of your suite carries a one-line test in `.arnx/tests/`, and setup stops
    if your runner collects it (a pytest `norecursedirs`, say, that drops the default hidden-folder rule).
 3. Fix the code, or hand `arnx prompt` (also in `.arnx/reviews/<id>/fix-prompt.md`; `accept --copy` puts it on the
-   clipboard) to your coding agent: the failing tests, what each bug is, your answers, and the rules. `arnx check`
-   runs the accepted tests in the proven sandbox, services included, on your working tree, and lists what still
-   fails.
+   clipboard) to your coding agent: the failing tests, what each bug is, your answers, and the rules (yours with
+   `arnx prompts copy fix.rules`). `arnx check` runs the accepted tests in the proven sandbox, services included,
+   on your working tree, and lists what still fails.
 4. When `arnx check` passes, commit the fixes together with `.arnx/tests/` and `.arnx/accepted-tests.json`: they now
    guard against the bugs coming back, each time `arnx check` runs. Read them first: they are code a model wrote.
 

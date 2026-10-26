@@ -20,6 +20,7 @@ import { closers } from "./interrupt";
 import { addUsage, type AgentModel, allPrices, FallbackJson, type JsonModel, type ModelUse, newUse,
   type Trace } from "./llm";
 import { LocalBrain } from "./localbrain";
+import { changeEditsPrompts, PROMPTS_EDITED, promptsFor } from "./userprompts";
 import { baseName, funcOf, ownerFile } from "./outcomes";
 import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, withCalls } from "./outage";
 import { CONTEXT_LIMIT, contextPack } from "./context";
@@ -235,6 +236,9 @@ export async function runReview(repo: string, o: { settings: Settings;
   if (change.leftOut) {
     o.progress?.(`left out ${change.leftOut.length} accepted test file(s) not committed yet`);
   }
+  // The local brain reads .arnx/prompts.toml from the working tree: a change that edits it is reviewed with its own.
+  const promptsEdited = !o.brain && changeEditsPrompts(repo, change);
+  if (promptsEdited) o.progress?.(PROMPTS_EDITED);
   const routing = route(file, change.files, s.maxProjects);
   if (!routing.routed.length) {
     const paths = routing.uncovered.map((u) => `${u.path} (${u.reason})`).join(", ");
@@ -293,6 +297,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     const local = (): LocalBrain => {
       if (!o.agentModel || !o.challenger) throw new Error("runReview: the local brain needs agentModel and challenger");
       return new LocalBrain({ agentModel: o.agentModel, prices: allPrices(s), challenger: o.challenger,
+        prompts: promptsFor(repo),
         ...(o.hunter ? { hunter: o.hunter } : {}), ...(o.ranker ? { ranker: o.ranker } : {}), secondHunter,
         ...(o.secondHuntWaitMs === undefined ? {} : { secondHuntWaitMs: o.secondHuntWaitMs }) });
     };
@@ -612,7 +617,10 @@ export async function runReview(repo: string, o: { settings: Settings;
     const review: Review = {
       id: rid, change: describe(change), filesChanged: change.files.length, added: added(change),
       removed: removed(change), reviewer: reviewerRef, challenger: challengerRef,
-      promptVersion: brain.version, findings, questions: questions.slice(0, s.maxQuestions),
+      promptVersion: brain.version,
+      ...(brain.overrides ? { promptOverrides: brain.overrides.keys, promptsHash: brain.overrides.hash } : {}),
+      ...(promptsEdited ? { promptsFileEdited: true as const } : {}),
+      findings, questions: questions.slice(0, s.maxQuestions),
       flaky, errors, passed, testsWritten: written, missingRuns, notSent: [...notSent].sort(),
       ...(change.ignored ? { ignoredChanged: change.ignored } : {}),
       ...(change.lockfiles ? { lockfilesChanged: change.lockfiles } : {}),

@@ -11,8 +11,8 @@ import { changedSources } from "./untested";
 import { ModelError } from "./errors";
 import { withRole } from "./events";
 import { type JsonModel, type ModelUse, newUse, tally } from "./llm";
-import { HUNT_SCHEMA, huntSystem, MAX_SUSPECTS, RANK_SCHEMA, rankSystem, rankTask, type Scope, secondHuntTask,
-  type Suspect } from "./prompts";
+import { DEFAULT_PROMPTS, HUNT_SCHEMA, MAX_SUSPECTS, type Prompts, RANK_SCHEMA, type Scope, type Suspect }
+  from "./prompts";
 import type { Say } from "./progress";
 import type { ScipIndex } from "./scip";
 import { inPool } from "./challenge";
@@ -54,7 +54,7 @@ export function mergeSuspects(first: Suspect[], second: Suspect[]): Suspect[] {
  * are `o.changedDefinitions` when given, else read from the snapshot at `root` (none without either). Its attempts
  * are logged to hunt-second.jsonl in `o.outDir`, when given. */
 export async function secondHunt(root: string | null, cfg: ReviewConfig, o: { model: JsonModel; diff: string;
-  context: string; scope: Scope; outDir?: string; progress?: Say; changedDefinitions?: string })
+  context: string; scope: Scope; outDir?: string; progress?: Say; changedDefinitions?: string; prompts?: Prompts })
   : Promise<{ suspects: Suspect[]; use: ModelUse }> {
   const say = (m: string) => o.progress?.(`${cfg.name}: ${m}`);
   const use = newUse(o.model.ref);
@@ -65,9 +65,10 @@ export async function secondHunt(root: string | null, cfg: ReviewConfig, o: { mo
   }
   try {
     const defs = o.changedDefinitions ?? (root === null ? "" : changedDefinitions(root, o.diff, o.scope.owned));
-    const user = secondHuntTask(cfg, o.diff, o.context, defs, o.scope);
+    const p = o.prompts ?? DEFAULT_PROMPTS;
+    const user = p.secondHuntTask(cfg, o.diff, o.context, defs, o.scope);
     const [reply, cost, usage, unknown] = await withRole("second-hunt",
-      () => o.model.completeJson(huntSystem(), user, HUNT_SCHEMA));
+      () => o.model.completeJson(p.huntSystem(), user, HUNT_SCHEMA));
     tally(use, cost, usage, unknown);
     return { suspects: parseSuspects(reply, o.model.ref.replace(/^[a-z]+:/, "")), use };
   } catch (e) {
@@ -123,20 +124,22 @@ export function huntParts(root: string, cfg: ReviewConfig, diff: string, owned: 
 /** One tool-less hunter per part of a big change, in parallel; each part's suspects in its own list. The parts are
  * `o.parts` when given, else built from the snapshot at `root` (huntParts; none without either). */
 export async function partHunts(root: string | null, cfg: ReviewConfig, o: { model: JsonModel; diff: string;
-  owned: string[]; searchDirs: string[]; scope: Scope; outDir?: string; progress?: Say; parts?: HuntPart[] })
+  owned: string[]; searchDirs: string[]; scope: Scope; outDir?: string; progress?: Say; parts?: HuntPart[];
+  prompts?: Prompts })
   : Promise<{ lists: Suspect[][]; use: ModelUse }> {
   const use = newUse(o.model.ref);
   const parts = o.parts ?? (root === null ? [] : huntParts(root, cfg, o.diff, o.owned, o.searchDirs));
   if (!parts.length) return { lists: [], use };
   o.progress?.(`${cfg.name}: hunting the change in ${parts.length} parts`);
   const by = o.model.ref.replace(/^[a-z]+:/, "");
+  const p = o.prompts ?? DEFAULT_PROMPTS;
   const lists: Suspect[][] = parts.map(() => []);
   await inPool(parts.map((part, index) => ({ part, index })), PART_CONCURRENCY, async ({ part, index }) => {
     const diff = sliceDiff(o.diff, part.files);
-    const user = secondHuntTask(cfg, diff, part.context, part.changedDefinitions, o.scope);
+    const user = p.secondHuntTask(cfg, diff, part.context, part.changedDefinitions, o.scope);
     try {
       const [reply, cost, usage, unknown] = await withRole("part-hunt",
-        () => o.model.completeJson(huntSystem(), user, HUNT_SCHEMA), { part: index + 1 });
+        () => o.model.completeJson(p.huntSystem(), user, HUNT_SCHEMA), { part: index + 1 });
       tally(use, cost, usage, unknown);
       lists[index] = parseSuspects(reply, by);
     } catch (e) {
@@ -161,14 +164,15 @@ export function interleave(lists: Suspect[][], max = MAX_PROVE): Suspect[] {
 /** All hunters' suspects, repeats (same claim, same place) removed, ranked by the reviewer model by harm if real; at
  * most `max`. Without a ranker, or when ranking fails, the lists are taken in turn. Renumbered S1, S2, … */
 export async function rankSuspects(lists: Suspect[][], o: { model: JsonModel | null; use: ModelUse; max?: number;
-  progress?: (m: string) => void }): Promise<Suspect[]> {
+  progress?: (m: string) => void; prompts?: Prompts }): Promise<Suspect[]> {
   const max = o.max ?? MAX_PROVE;
   const all = interleave(lists, Infinity);
   const model = o.model;
   if (all.length <= max || !model) return all.slice(0, max);
+  const p = o.prompts ?? DEFAULT_PROMPTS;
   try {
     const [reply, cost, usage, unknown] = await withRole("rank",
-      () => model.completeJson(rankSystem(), rankTask(all), RANK_SCHEMA));
+      () => model.completeJson(p.rankSystem(), p.rankTask(all), RANK_SCHEMA));
     tally(o.use, cost, usage, unknown);
     const byId = new Map(all.map((s) => [s.id, s]));
     const order = (Array.isArray(reply.order) ? reply.order : []).map((x) => byId.get(String(x).trim()))

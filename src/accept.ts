@@ -18,6 +18,8 @@ import { type AgentModel, allPrices } from "./llm";
 import { baseName, funcOf, ownerFile, type TestResult } from "./outcomes";
 import { fixPrompt } from "./fixprompt";
 import { LocalBrain } from "./localbrain";
+import { isModelKey } from "./prompts";
+import { promptsFor } from "./userprompts";
 import { defaultMarks, firstLine, groupsOf, load, type Marks, parseMarks, parseReports, type Review, wrapMarkdown }
   from "./report";
 import { sayingDocker, type SessionFactory } from "./sandbox";
@@ -94,6 +96,8 @@ export interface AcceptResult {
   sources: Record<string, MarkSource>;
   /** Over every review in precision.jsonl, after this one was recorded (see precisionOf). */
   precision: Precision;
+  /** The fix prompt's keys .arnx/prompts.toml overrode (fix-prompt.md names them too). */
+  fixOverrides: string[];
 }
 
 export type MarkSource = "default" | "chosen";
@@ -373,7 +377,8 @@ export function reportedFiles(files: Record<string, string>, replies: string[], 
  * LocalBrain over `agentModel`) turns each answer into tests. */
 export function makeAnswerRunner(repo: string, file: ReviewFile, settings: Settings, agentModel: AgentModel | null,
                                  sessionFactory: SessionFactory = dockerSession, progress?: Say,
-                                 brain: Brain = new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings) }))
+                                 brain: Brain = new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings),
+                                   prompts: promptsFor(repo) }))
   : AnswerRunner {
   return async (qid, question, answer, diff, outDir, project) => {
     const cfg = file.projects.find((p) => p.name === project) ?? file.projects[0]!;
@@ -407,6 +412,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
                                   pins?: string | null } = {})
   : Promise<AcceptResult> {
   const review = load(rdir);
+  const prompts = promptsFor(repo); // read first: a prompts file that does not read stops accept before it writes
   const done = join(rdir, "accepted.json");
   if (existsSync(done) && !o.again) {
     throw new ArnxError(`review ${review.id} was already accepted; pass --again to apply edited marks`);
@@ -578,7 +584,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   const red = review.findings.filter((f) => keeps.findings[f.id] === "real")
     .map((f) => ({ id: f.id, testId: f.testId, project: f.project, explanation: f.explanation }));
   const result = { review, marks, kept, answers, rewrites, setAside, dest, red, moved, sources,
-    precision: precisionOf(log) };
-  writeFileSync(join(rdir, "fix-prompt.md"), wrapMarkdown(fixPrompt(result, settings)));
+    precision: precisionOf(log), fixOverrides: prompts.overridden.filter((k) => !isModelKey(k)) };
+  writeFileSync(join(rdir, "fix-prompt.md"), wrapMarkdown(fixPrompt(result, settings, prompts)));
   return result;
 }

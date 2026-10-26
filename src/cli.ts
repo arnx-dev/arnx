@@ -57,6 +57,9 @@ import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, next
 import { isoSeconds } from "./util";
 import { spend } from "./spend";
 import { installSkills, SKILL_DIRS, skillDirsShown, skillStates, userSkillRoot } from "./skill";
+import { DEFAULTS, isModelKey, PLACEHOLDERS, PROMPT_KEYS, type PromptKey, textHash } from "./prompts";
+import { CLOUD_PROMPTS, copyDefault, hasOverrides, type Override, overrideWarnings, PROMPTS_FILE, promptsPath,
+  readOverrides } from "./userprompts";
 import { recheckJson, recheckReview, recheckSummary } from "./recheck";
 import { applyRemove, planRemove } from "./remove";
 import { versionLine } from "./version";
@@ -104,6 +107,7 @@ Prepare, once per repository
   consent [--cloud] [--yes]             agree now to send code (otherwise asked on the first send)
   allow-secret PATH...                  send files whose key-like text is a test fixture
   skill install [--user] [--force]      the arnx skill for coding agents
+  prompts [copy KEY]                    the prompts; copy one to .arnx/prompts.toml to edit it
   env prune [--keep-days N] [--all-repos] [--dry-run]
                                         remove old test images
   remove [--yes] [--tests]              what arnx put in this repository: listed, deleted with --yes
@@ -195,6 +199,7 @@ const COMMANDS: Record<string, { options: Options; positionals: number }> = Obje
   next: { options: { ...MODELS }, positionals: 0 },
   "allow-secret": { options: {}, positionals: 1000 },
   skill: { options: { user: { type: "boolean" }, force: { type: "boolean" } }, positionals: 1 },
+  prompts: { options: {}, positionals: 2 },
   env: { options: { "keep-days": { type: "string" }, "all-repos": { type: "boolean" }, "dry-run": { type: "boolean" } },
     positionals: 1 },
   remove: { options: { yes: { type: "boolean" }, tests: { type: "boolean" } }, positionals: 0 },
@@ -466,6 +471,59 @@ class Commands {
     return 0;
   }
 
+  /** The prompt keys, the ones .arnx/prompts.toml overrides marked; `copy KEY` writes arnx's default of KEY there. */
+  async prompts(a: Args): Promise<number> {
+    const [sub, key] = a.positionals;
+    if (sub !== undefined && !(sub === "copy" && key)) throw new ArnxError("usage: arnx prompts [copy KEY]");
+    const repo = this.repo();
+    if (key) return this.copyPrompt(repo, key);
+    const mine = new Map(readOverrides(repo).map((o) => [o.key, o]));
+    const changed = (o: Override | undefined) => !!o && o.base !== null && o.base !== textHash(DEFAULTS[o.key]);
+    const width = Math.max(...PROMPT_KEYS.map((k) => k.length));
+    for (const k of PROMPT_KEYS) {
+      const o = mine.get(k);
+      this.d.out(o ? `${k.padEnd(width)}  yours${changed(o) ? "; arnx changed its default since" : ""}` : k);
+    }
+    this.d.out("");
+    this.d.out(mine.size ? `${mine.size} yours, in ${PROMPTS_FILE}.` : "To change one: arnx prompts copy KEY");
+    const cloud = mine.size > 0 && this.cloudOn(repo, a);
+    if (cloud) this.d.out(CLOUD_PROMPTS);
+    this.emit("ok", 0, { file: PROMPTS_FILE, cloud, prompts: PROMPT_KEYS.map((k) => ({ key: k, overridden: mine.has(k),
+      default_changed: changed(mine.get(k)), placeholders: [...PLACEHOLDERS[k]] })) });
+    return 0;
+  }
+
+  /** arnx's default of `key` into .arnx/prompts.toml; when the file has the key already, the default is printed. */
+  private copyPrompt(repo: string, key: string): number {
+    const written = copyDefault(repo, key) === "written";
+    const k = key as PromptKey; // copyDefault refused any other
+    const base = textHash(DEFAULTS[k]);
+    if (written) {
+      this.d.out(`Wrote arnx's ${key} to ${PROMPTS_FILE}; edit it there.`);
+    } else {
+      this.d.out(DEFAULTS[k]);
+      this.d.err(`${key} is in ${PROMPTS_FILE} already; nothing written. Above: arnx's default ` +
+        `(${key.split(".")[1]}_base = "${base}").`);
+    }
+    this.emit("ok", 0, { key, written, file: PROMPTS_FILE, base });
+    return 0;
+  }
+
+  /** Whether arnx cloud runs this repository's models (false when the config does not read). */
+  private cloudOn(repo: string, a: Args): boolean {
+    try {
+      return cloudModels(this.settings(repo, a).s);
+    } catch (e) {
+      if (e instanceof ArnxError) return false;
+      throw e;
+    }
+  }
+
+  /** With arnx cloud, the one line about the repository's own prompts (they are not used, nothing of them is sent). */
+  private cloudPrompts(repo: string): void {
+    if (hasOverrides(repo)) this.d.out(CLOUD_PROMPTS);
+  }
+
   /** `~/…` for a path under the home directory. */
   private shown(path: string): string {
     const home = this.d.env.HOME;
@@ -582,6 +640,22 @@ class Commands {
         checks.push([false, "Environment", e.message]);
       }
     }
+    // The repository's own prompts: a file that does not read stops a review on the user's keys, and accept also with
+    // arnx cloud (it builds the fix prompt here), so it is a ✗ either way. arnx cloud runs its own model prompts.
+    const cloudOn = !!s && cloudModels(s);
+    let all: Override[] = [];
+    if (existsSync(promptsPath(repo))) {
+      try {
+        all = readOverrides(repo);
+      } catch (e) {
+        if (!(e instanceof ArnxError)) throw e;
+        checks.push([false, "Prompts", e.message]);
+      }
+    }
+    const overrides = cloudOn ? all.filter((o) => !isModelKey(o.key)) : all; // the ones in use
+    const promptsLine = [...overrides.length ? [`yours for ${overrides.map((o) => o.key).join(", ")}`] : [],
+      ...cloudOn && all.some((o) => isModelKey(o.key)) ? [CLOUD_PROMPTS] : []].join("; ");
+    const promptNotes = overrideWarnings(overrides);
     // The provider tables a role uses, under Models (a table no role names is not shown).
     const used = new Set(s ? modelRefs(s).map((r) => r.provider) : []);
     const unused = settings && !cloudModels(settings) ? unusedKeysNote(repo, this.d.env) : null;
@@ -599,6 +673,8 @@ class Commands {
     if (jev) this.d.out(`JEV (experimental): ${jev}`);
     const telemetry = telemetryLine(telemetryStatus(this.d.env, this.telemetrySetting()), this.telemetryOpen);
     this.d.out(telemetry);
+    if (promptsLine) this.d.out(`Prompts: ${promptsLine}`);
+    for (const note of promptNotes) this.d.out(`  ${note}`);
     this.d.out("");
     const issues = checks.filter(([ok]) => ok === false).length;
     const ready = checks.every(([ok]) => ok);
@@ -620,6 +696,7 @@ class Commands {
           untracked: u.untracked ?? 0 })),
         unexplained: coverage.unexplained } } : {}),
       ...(jev && s ? { jev: { on: !!s.jev, key_set: !!this.d.env.JEV_API_KEY, detail: jev } } : {}),
+      ...(overrides.length ? { prompts: { overridden: overrides.map((o) => o.key), notes: promptNotes } } : {}),
       telemetry: { enabled: telemetry.startsWith("Telemetry: on"),
         reason: telemetry.startsWith("Telemetry: on") ? null
           : telemetry.replace(/^Telemetry: (?:disabled|off) ?/, "").replace(/^\((.*)\)$/, "$1") } });
@@ -752,6 +829,7 @@ class Commands {
     const failureModel = jev ? jevModel(jev, join(outDir, "jev.jsonl")) : undefined;
     const started = this.clock();
     const cloud = await this.cloudBrain(repo, s, mode);
+    if (cloud) this.cloudPrompts(repo);
     const result = await this.withProgress(a, (progress) => runSetup(repo, s,
       cloud ? null : this.d.setupModel ?? makeAgentModel(s, this.d.env), { outDir, project, add, progress, failureModel,
         untracked, localPins: localPinsPath(this.d.env, repo),
@@ -1110,7 +1188,10 @@ class Commands {
     const s = await this.agreed(repo, ready.s, mode);
     await this.reprove(repo, a, "arnx review", untracked);
     const cloud = await this.cloudBrain(repo, s, mode);
-    if (cloud) return this.reviewWith(repo, s, a, cloud, untracked);
+    if (cloud) {
+      this.cloudPrompts(repo);
+      return this.reviewWith(repo, s, a, cloud, untracked);
+    }
     const agentModel = makeAgentModel(s, this.d.env);
     // Verdict calls give up on a stalled attempt sooner than hunt calls (see makeChallenger).
     const challenger = makeChallenger(s, this.d.env);
@@ -1230,6 +1311,9 @@ class Commands {
     }
     for (const [qid, ids] of byAnswer) this.d.out(`${ids.join(", ")} set aside: your answer to ${qid} has its own test`);
     for (const p of tests) this.d.out(`  kept: ${relative(repo, p)}`);
+    if (result.fixOverrides.length) {
+      this.d.out(`Fix prompt: yours for ${result.fixOverrides.join(", ")} (${PROMPTS_FILE})`);
+    }
     const answers: { question: string; result: string; tests: string[]; cost_usd: number; rewrite_of: string[] | null }[]
       = [];
     for (const ans of result.answers) {
@@ -1311,7 +1395,8 @@ class Commands {
       : tests.length ? [real.length ? "commit the fix and the accepted tests together" : "commit the accepted tests"] : [];
     this.emit("ok", 0, { review_id: result.review.id, kept: tests.map(rel),
       dest: tests.length ? rel(result.dest) || "." : null, issues, marks, answers, check: checked,
-      fix_prompt: rel(promptPath), next });
+      fix_prompt: rel(promptPath),
+      ...(result.fixOverrides.length ? { fix_prompt_overrides: result.fixOverrides } : {}), next });
     await this.sendTelemetry("accept", () => acceptData(result, tests.length));
     return 0;
   }
@@ -1757,6 +1842,7 @@ async function run(command: string, args: Args, commands: Commands, d: CliDeps):
       case "logout": return await commands.logout();
       case "credits": return await commands.credits();
       case "skill": return await commands.skill(args);
+      case "prompts": return await commands.prompts(args);
       case "remove": return await commands.remove(args);
       default: return await commands.accept(args);
     }
