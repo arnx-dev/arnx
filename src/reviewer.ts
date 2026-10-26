@@ -22,7 +22,7 @@ import { addUsage, type AgentModel, allPrices, FallbackJson, type JsonModel, typ
 import { LocalBrain } from "./localbrain";
 import { changeEditsPrompts, PROMPTS_EDITED, promptsFor } from "./userprompts";
 import { baseName, funcOf, ownerFile } from "./outcomes";
-import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, withCalls } from "./outage";
+import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, resumes, withCalls } from "./outage";
 import { CONTEXT_LIMIT, contextPack } from "./context";
 import type { Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
@@ -48,16 +48,13 @@ export const PROJECT_CONCURRENCY = 2;
 interface SavedVerdict { verdict: string; reason: string; dependsOn: string | null; judge: string | null;
   model: string; cost: number }
 
-/** The roles whose work a resume does again: the project rounds a failed call stopped, and the judging. */
-const REDONE = new Set(["reviewer", "challenge", "explain", "merge-questions"]);
-
 /** Whether a review's report says a provider outage cut work that a resume does again. A report without one finished:
  * there is nothing to resume. Not once its findings were accepted. */
 export function cutByOutage(rdir: string): boolean {
   if (existsSync(join(rdir, "accepted.json"))) return false;
   try {
     const r = JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")) as { provider_failures?: ProviderFailure[] };
-    return (r.provider_failures ?? []).some((f) => f.kind === "unavailable" && f.roles.some((x) => REDONE.has(x)));
+    return (r.provider_failures ?? []).some(resumes);
   } catch {
     return false;
   }

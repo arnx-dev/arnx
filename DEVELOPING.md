@@ -225,7 +225,8 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   attempt; `auth`: 401 or 403). The same outcomes, kept in memory by `outage.ts`, become review.json's
   `provider_failures` and the sentence after the review's status. A review with an `unavailable` failure of the
   reviewer or the judging (`cutByOutage`, not once accepted) resumes like an interrupted one: `--resume` tests again
-  the project rounds a failed call stopped (their verdicts dropped), keeps the others and judges again.
+  the project rounds a failed call stopped (their verdicts dropped), keeps the others and judges again. Its status
+  line and `arnx next` then name `arnx review --resume`.
 - `agent.turn` (`agent.ts`): one agent turn: stop reason, tools called, `paths` (the path argument of each `read_file`,
   `list_dir` and `grep` call, in order; never contents), tool errors, writes, test runs.
 - `hunt.list`, `hunt.suspect`, `hunt.merged`, `hunt.dropped` (`localbrain.ts`): each hunter's list, the ranked

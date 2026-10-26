@@ -9,7 +9,7 @@ import { CloudBrain } from "../src/cloudbrain";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { ModelError } from "../src/errors";
 import { AnthropicAgent, PRICES, ResponsesAgent, ResponsesJson } from "../src/llm";
-import { exitCode, load, summary } from "../src/report";
+import { exitCode, failureLine, load, summary } from "../src/report";
 import { runReview } from "../src/reviewer";
 import { defaultSettings, parseModelRef } from "../src/settings";
 import { type FakeCloud, fakeCloud, TOKEN } from "./helpers/cloudfake";
@@ -110,7 +110,7 @@ test("the challenger down on every call: the status names the provider, the outa
   const line = summary(review, "review.md").split("\n")[1]!;
   // The second opinion, then the grouping of the findings: both calls fail, so both are missing.
   expect(line).toBe("myprovider (llm.example.com) unavailable: HTTP 503 on every call (2 calls, 4 attempts each); " +
-    "missing: the second opinions, the grouping of findings. Run `arnx review` again when it is back.");
+    "missing: the second opinions, the grouping of findings. Run `arnx review --resume` when it is back.");
   expect(readFileSync(join(rdir, "review.md"), "utf8")).toContain("myprovider (llm.example.com) unavailable: HTTP 503 on every call");
   const json = JSON.parse(readFileSync(join(rdir, "review.json"), "utf8"));
   expect(json.provider_failures).toEqual([{ provider: "myprovider", name: "myprovider (llm.example.com)", kind: "unavailable", detail: "HTTP 503",
@@ -125,6 +125,13 @@ test("the challenger down on every call: the status names the provider, the outa
     "review.json"), "utf8");
   expect(all).not.toContain(KEY);
   expect(summary(review, "")).not.toContain("No ready deployment");
+});
+
+test("an outage of the hunt only: a resume does not redo the hunt, so the line says run the review again", () => {
+  const f = { provider: "myprovider", name: "myprovider (llm.example.com)", kind: "unavailable" as const,
+    detail: "HTTP 503", calls: 1, failed: 1, attempts: 4, roles: ["part-hunt"], missing: ["part-hunt"] };
+  expect(failureLine(f)).toBe("myprovider (llm.example.com) unavailable: HTTP 503 on every call (1 call, 4 attempts); " +
+    "missing: the part hunts. Run `arnx review` again when it is back.");
 });
 
 test("a refused key names the variable to check", async () => {
@@ -148,7 +155,7 @@ test("the reviewer's provider down: incomplete, and the reviewer's tests are wha
   expect(exitCode(review)).toBe(2);
   expect(summary(review, "").split("\n")[1]).toBe("Incomplete: `main` produced no tests: the reviewer's model " +
     "call failed. myprovider (llm.example.com) unavailable: HTTP 503 on every call (1 call, 4 attempts); missing: the reviewer's tests. Run " +
-    "`arnx review` again when it is back.");
+    "`arnx review --resume` when it is back.");
 });
 
 test("some calls failed: how many of how many, and which role", async () => {
@@ -183,8 +190,8 @@ test("arnx cloud's models down: the status says so without naming a vendor", asy
   const { review, rdir } = await runReview(repo, { settings: SETTINGS, brain, sessionFactory: fakeFactory(runs) });
   const said = summary(review, "");
   expect(said.split("\n")[1]).toBe("Incomplete: `main` produced no tests: the reviewer's model call failed. " +
-    "arnx cloud's models unavailable: every project round (1) stopped on a failed model call. Run `arnx review` " +
-    "again later.");
+    "arnx cloud's models unavailable: every project round (1) stopped on a failed model call. Run " +
+    "`arnx review --resume` later.");
   const all = said + readFileSync(join(rdir, "review.md"), "utf8") + readFileSync(join(rdir, "review.json"), "utf8");
   expect(all).not.toMatch(VENDORS);
   expect(review.providerFailures).toEqual([{ provider: "arnx", name: "arnx cloud", kind: "unavailable",
