@@ -18,6 +18,7 @@ import { type AgentModel, allPrices } from "./llm";
 import { baseName, funcOf, ownerFile, type TestResult } from "./outcomes";
 import { fixPrompt } from "./fixprompt";
 import { LocalBrain } from "./localbrain";
+import { promptsFor } from "./userprompts";
 import { defaultMarks, firstLine, groupsOf, load, type Marks, parseMarks, parseReports, type Review, wrapMarkdown }
   from "./report";
 import { sayingDocker, type SessionFactory } from "./sandbox";
@@ -373,7 +374,8 @@ export function reportedFiles(files: Record<string, string>, replies: string[], 
  * LocalBrain over `agentModel`) turns each answer into tests. */
 export function makeAnswerRunner(repo: string, file: ReviewFile, settings: Settings, agentModel: AgentModel | null,
                                  sessionFactory: SessionFactory = dockerSession, progress?: Say,
-                                 brain: Brain = new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings) }))
+                                 brain: Brain = new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings),
+                                   prompts: promptsFor(repo) }))
   : AnswerRunner {
   return async (qid, question, answer, diff, outDir, project) => {
     const cfg = file.projects.find((p) => p.name === project) ?? file.projects[0]!;

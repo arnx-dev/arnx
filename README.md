@@ -188,7 +188,7 @@ broke and how long setup took.
 
 ## Try it, and tell us
 
-Point arnx at a real repository, swap the models, edit the prompts in `src/prompts.ts`, and
+Point arnx at a real repository, swap the models, edit the prompts (`arnx prompts copy KEY`), and
 [open an issue](https://github.com/arnx-dev/arnx/issues) with what happened: a bug it caught, a finding that was
 wrong, a setup that failed, a layout it does not understand, a model mix that did better. `.arnx/precision.jsonl`
 holds your marks with no code in it. See [CONTRIBUTING.md](CONTRIBUTING.md); how arnx works inside:

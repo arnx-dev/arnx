@@ -15,8 +15,9 @@ and tell us what happened. Issues and pull requests on GitHub are the place for 
 - **Other models.** Any model for any job (`[models]` in `.arnx/config.toml`, generic tables for any endpoint that
   copies the Anthropic or OpenAI API; [docs/MODELS.md](docs/MODELS.md)). DeepSeek, Kimi and OpenRouter are written
   commented out because we have not run them ourselves yet: you may be first.
-- **Other prompts.** They all live in `src/prompts.ts`. Build your own arnx with them (`bun install && bun run smoke`
-  gives `dist/arnx`) and run it on your code.
+- **Other prompts.** Try one on your code without a build: `arnx prompts copy KEY` writes arnx's text of that key to
+  `.arnx/prompts.toml` to edit ([docs/MODELS.md](docs/MODELS.md#make-it-yours)). The defaults are in
+  `src/prompts.toml`.
 - **Rust.** It works but is the least tested language: a setup that fails on a real workspace is as useful to us as a
   found bug.
 - **Language adapters.** Everything language-specific is in `src/adapters/` (Python, TypeScript, Rust): the test
@@ -56,9 +57,9 @@ issues go by email, not in an issue: see [SECURITY.md](SECURITY.md).
    also runs real containers.
 4. Keep the change focused, add a test that fails without it, and keep CLI messages short.
 
-A pull request that changes `src/prompts.ts` changes `PROMPT_VERSION` and the reviews we measure, so tell us what it
+A pull request that changes `src/prompts.toml` changes `PROMPT_VERSION` and the reviews we measure, so tell us what it
 catches that the current prompts miss, with reviews to show it. A prompt you only want for yourself does not need to
-come back here: keep your build.
+come back here: keep it in your `.arnx/prompts.toml`.
 
 ## Licence
 

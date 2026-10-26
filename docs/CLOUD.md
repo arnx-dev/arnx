@@ -13,7 +13,8 @@ judges the findings, at effort `low`, `medium` or `high`. No model key needed.
   files and `.arnxignore` paths left out), the tests in your Docker, the before/after check and the report. A finding
   is still a test arnx ran three times and saw fail every time.
 - **Sent to arnx cloud:** what a model provider gets with your own keys: the diff, the files the agent reads, the
-  tests it writes and their output. arnx cloud passes them on to its model providers.
+  tests it writes and their output. arnx cloud passes them on to its model providers. Your own prompts
+  (`.arnx/prompts.toml`) are not sent: arnx cloud runs its own, and arnx says so in one line.
 - **Price:** prepaid credit in US dollars; each review shows what it was billed, per role. New accounts start with
   $5 free. Credits and top-ups: https://arnx.dev/credits. Terms: https://arnx.dev/terms; privacy:
   https://arnx.dev/privacy.

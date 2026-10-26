@@ -25,6 +25,7 @@ import { isSecretPath, type SecretPin } from "./secrets";
 import { type AgentModel, allPrices, type Tool } from "./llm";
 import { ownerFile, runTests } from "./outcomes";
 import { LocalBrain } from "./localbrain";
+import { promptsFor } from "./userprompts";
 import type { Say } from "./progress";
 import { copyManifests, dockerSteps, envKey, type Runner, type SessionFactory } from "./sandbox";
 import { loadSettings, refString, type Settings, settingsPath } from "./settings";
@@ -874,7 +875,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const ws = new Workspace(snap, { extra: { try_project: [TRY_PROJECT, tryProject], propose: [PROPOSE, propose] } });
     const current = existing ? readFileSync(reviewConfigPath(repo), "utf8") : "";
     const detection = detectReadable(repo, untracked);
-    const brain: Brain = o.brain ?? new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings) });
+    const brain: Brain = o.brain ?? new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings),
+      prompts: promptsFor(repo) });
     // The agent reading files is one milestone, said once until a project runs or a proposal goes in; which files it
     // read stays in the transcript.
     let reading = false;

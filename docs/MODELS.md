@@ -68,12 +68,17 @@ Any model for any job, any mix of vendors: try it. The harness above is the one 
 works. A cheap reviewer with a strong second opinion, a local model behind a generic table, two vendors arguing:
 `arnx doctor` tells you what is wired up, and the review's cost line tells you what it spent.
 
-The prompts are yours to change too. They all live in `src/prompts.ts`: clone the repository, edit them, then
-`bun install && bun run smoke` builds `dist/arnx` with your prompts in it ([DEVELOPING.md](../DEVELOPING.md) has the
-rest). Whatever the prompt says, a finding is still a test that failed in every run in Docker, so a prompt cannot
-make arnx report a failure that did not happen. It can make arnx write tests that expect the wrong thing: those
-fail for real and still need your mark, so a worse prompt shows up as more findings you mark intended, noise or
-rewrite.
+The prompts are yours to change too, one key at a time. `arnx prompts` lists the keys (`review.task`, `hunt.task`,
+`challenge.task`, ...); `arnx prompts copy hunt.task` writes arnx's text of that key into `.arnx/prompts.toml`, where
+you edit it. The file holds only the keys you changed: every other key follows arnx's defaults, also after an upgrade.
+A key keeps the `$placeholders` its default offers (arnx refuses others, naming the ones it has); `arnx doctor` warns
+when arnx changed the default you copied (`<name>_base` records it) and when you dropped a placeholder the step needs,
+such as `$diff`. Each review names your keys and the hash of the prompts it ran, in review.json and review.md's
+header. The file is not part of the approval: editing it needs no `arnx approve`. With arnx cloud its own prompts run
+(arnx says so in one line and sends nothing of yours). The defaults are in `src/prompts.toml`. Whatever the prompt
+says, a finding is still a test that failed in every run in Docker, so a prompt cannot make arnx report a failure that
+did not happen. It can make arnx write tests that expect the wrong thing: those fail for real and still need your
+mark, so a worse prompt shows up as more findings you mark intended, noise or rewrite.
 
 Found a combination or a prompt that catches more? Open an issue with the review's numbers: we'll try it in our own
 measurements.

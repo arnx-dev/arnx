@@ -1,6 +1,6 @@
 #!/bin/sh
 # Both build outputs must start and report the version; the Node bundle must also run a real command, and both must
-# carry the arnx skill.
+# carry the arnx skill and the prompts.
 set -eu
 cd "$(dirname "$0")/.."
 root=$(pwd)
@@ -25,4 +25,7 @@ cmp "$repo/.claude/skills/arnx/SKILL.md" "$root/skills/arnx/SKILL.md"
 rm -rf "$repo/.claude"
 (cd "$repo" && "$root/dist/arnx" skill install) >/dev/null
 cmp "$repo/.claude/skills/arnx/references/review-json.md" "$root/skills/arnx/references/review-json.md"
+# Both builds carry the default prompts (src/prompts.toml, imported as text at build time).
+(cd "$repo" && node "$root/dist/cli.js" prompts) | grep -qx "hunt.task"
+(cd "$repo" && "$root/dist/arnx" prompts) | grep -qx "setup.task"
 echo "smoke ok: $want (binary and Node bundle)"

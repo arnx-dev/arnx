@@ -18,6 +18,7 @@ import { closers } from "./interrupt";
 import { addUsage, type AgentModel, allPrices, FallbackJson, type JsonModel, type ModelUse, newUse,
   type Trace } from "./llm";
 import { LocalBrain } from "./localbrain";
+import { promptsFor } from "./userprompts";
 import { baseName, funcOf, ownerFile } from "./outcomes";
 import { type CallRecord, cloudFailure, providerFailures, withCalls } from "./outage";
 import { contextPack } from "./context";
@@ -274,6 +275,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     const local = (): LocalBrain => {
       if (!o.agentModel || !o.challenger) throw new Error("runReview: the local brain needs agentModel and challenger");
       return new LocalBrain({ agentModel: o.agentModel, prices: allPrices(s), challenger: o.challenger,
+        prompts: promptsFor(repo),
         ...(o.hunter ? { hunter: o.hunter } : {}), ...(o.ranker ? { ranker: o.ranker } : {}), secondHunter,
         ...(o.secondHuntWaitMs === undefined ? {} : { secondHuntWaitMs: o.secondHuntWaitMs }) });
     };
@@ -579,7 +581,9 @@ export async function runReview(repo: string, o: { settings: Settings;
     const review: Review = {
       id: rid, change: describe(change), filesChanged: change.files.length, added: added(change),
       removed: removed(change), reviewer: reviewerRef, challenger: challengerRef,
-      promptVersion: brain.version, findings, questions: questions.slice(0, s.maxQuestions),
+      promptVersion: brain.version,
+      ...(brain.overrides ? { promptOverrides: brain.overrides.keys, promptsHash: brain.overrides.hash } : {}),
+      findings, questions: questions.slice(0, s.maxQuestions),
       flaky, errors, passed, testsWritten: written, missingRuns, notSent: [...notSent].sort(),
       ...(change.ignored ? { ignoredChanged: change.ignored } : {}),
       ...(change.lockfiles ? { lockfilesChanged: change.lockfiles } : {}),

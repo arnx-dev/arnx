@@ -4,20 +4,21 @@
 import { ModelError } from "./errors";
 import { withRole } from "./events";
 import { type JsonModel, type ModelUse, tally } from "./llm";
-import { MERGE_SCHEMA, mergeSystem, mergeTask } from "./prompts";
+import { DEFAULT_PROMPTS, MERGE_SCHEMA, type Prompts } from "./prompts";
 
 /** The questions kept, and for each question given the index of the one it became. */
 export interface Merged { questions: string[]; into: number[] }
 
 export async function mergeQuestions(questions: string[], o: { model: JsonModel | null; use: ModelUse;
-  progress?: (m: string) => void }): Promise<Merged> {
+  progress?: (m: string) => void; prompts?: Prompts }): Promise<Merged> {
   const unchanged = { questions, into: questions.map((_q, i) => i) };
   const model = o.model;
   if (questions.length < 2 || !model) return unchanged;
+  const p = o.prompts ?? DEFAULT_PROMPTS;
   let reply: Record<string, unknown>;
   try {
     const [data, cost, usage, unknown] = await withRole("merge-questions",
-      () => model.completeJson(mergeSystem(), mergeTask(questions), MERGE_SCHEMA));
+      () => model.completeJson(p.mergeSystem(), p.mergeTask(questions), MERGE_SCHEMA));
     tally(o.use, cost, usage, unknown);
     reply = data;
   } catch (e) {

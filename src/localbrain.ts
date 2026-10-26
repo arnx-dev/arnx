@@ -12,8 +12,7 @@ import { clip, emit, hypId } from "./events";
 import { explain } from "./explain";
 import { partHunts, parseSuspects, rankSuspects, sameSuspect, secondHunt } from "./hunt";
 import { type AgentModel, FallbackJson, type JsonModel, type ModelUse, newUse, parseJsonObject } from "./llm";
-import { answerTask, askedTask, coverageTask, huntTask, PROMPT_VERSION, proveTask, reviewSystem, reviewTask,
-  setupSystem, setupTask, type Suspect, untestedSuspectsTask } from "./prompts";
+import { DEFAULT_PROMPTS, PROMPT_VERSION, type Prompts, type Suspect } from "./prompts";
 import { mergeQuestions } from "./questions";
 import { type Finding, parseReports, questionTexts } from "./report";
 import type { Prices } from "./settings";
@@ -55,6 +54,8 @@ export interface LocalModels {
   secondHunter?: JsonModel | null;
   /** How long the tests wait for the second hunter (default SECOND_HUNT_WAIT_MS). */
   secondHuntWaitMs?: number;
+  /** The prompts (default: arnx's own; with the user's keys, the repository's overrides: userprompts.ts). */
+  prompts?: Prompts;
 }
 
 /** The hunt of one review round: started before the sandbox is up, finished when the reviewer replies to it. */
@@ -68,8 +69,13 @@ interface Hunt {
 
 export class LocalBrain implements Brain {
   readonly version = PROMPT_VERSION;
+  readonly overrides?: { keys: string[]; hash: string };
+  private readonly p: Prompts;
 
-  constructor(readonly m: LocalModels) {}
+  constructor(readonly m: LocalModels) {
+    this.p = m.prompts ?? DEFAULT_PROMPTS;
+    if (this.p.overridden.length) this.overrides = { keys: [...this.p.overridden], hash: this.p.hash };
+  }
 
   agentRound<K extends RoundKind>(kind: K, input: RoundInputs[K], tools: Promise<RoundTools>): Promise<RoundResult> {
     if (kind === "review") return this.review(input as ReviewInput, tools);
@@ -115,7 +121,7 @@ export class LocalBrain implements Brain {
       if (db.length) {
         say(`no database test yet for ${db.map((m) => posix.basename(m)).join(", ")}; asking for one`);
       }
-      return coverageTask(missing, { files: db, names: x.dbNames });
+      return this.p.coverageTask(missing, { files: db, names: x.dbNames });
     };
     // The hunt's record on each final, for a caller without hunt.json.
     const huntOf = () => (hunt?.state.record ? { hunt: hunt.state.record } : {});
@@ -126,8 +132,8 @@ export class LocalBrain implements Brain {
     } };
     // The steps list only the calls that reach the CLI: a write or a run while the hunt is open is refused here.
     const reaching = (calls: ToolCall[]) => (hunting ? calls.filter((c) => !CLOSED_TOOLS.has(c.name)) : calls);
-    const opts = this.loop(t, x, reviewSystem(cfg, x.envTests),
-      hunt?.user ?? reviewTask(cfg, x.diff, x.maxQuestions, x.scoped ? x.scope : undefined), decide, reaching);
+    const opts = this.loop(t, x, this.p.reviewSystem(cfg, x.envTests),
+      hunt?.user ?? this.p.reviewTask(cfg, x.diff, x.maxQuestions, x.scoped ? x.scope : undefined), decide, reaching);
     const agent = await runAgent(this.m.agentModel, ws, opts);
     // A report that reached the budget is asked nothing more, but it is still the round's final (a hunt reply is not).
     const end = opts.unasked();
@@ -143,7 +149,7 @@ export class LocalBrain implements Brain {
   private async answer(x: AnswerInput, tools: Promise<RoundTools>): Promise<RoundResult> {
     const t = await tools;
     x.progress?.(`${x.cfg.name}: the reviewer is writing tests`);
-    const opts = this.loop(t, x, reviewSystem(x.cfg), answerTask(x.cfg, x.question, x.answer, x.diff),
+    const opts = this.loop(t, x, this.p.reviewSystem(x.cfg), this.p.answerTask(x.cfg, x.question, x.answer, x.diff),
       async (reply, turn) => {
         t.onStep?.({ type: "final", turn, text: reply, report: parseReports([reply]) });
         return null;
@@ -158,7 +164,7 @@ export class LocalBrain implements Brain {
   /** The setup agent: it proves projects with try_project and submits the file with propose. */
   private async setup(x: SetupInput, tools: Promise<RoundTools>): Promise<RoundResult> {
     const t = await tools;
-    let user = setupTask(x.hints);
+    let user = this.p.setupTask(x.hints);
     if (x.withheld) {
       user += `\n\nThese files are left out of the copy you see and of the sandbox, because they hold text that looks ` +
         `like a key: ${x.withheld}. Code that needs them cannot build or run here; do not recreate ` +
@@ -172,7 +178,7 @@ export class LocalBrain implements Brain {
         `keep every existing project exactly as it is.\n<review.yaml>\n${x.current}</review.yaml>`;
     }
     let last = 0, unasked: { text: string; turn: number } | null = null;
-    const agent = await runAgent(this.m.agentModel, t, { system: setupSystem(), user, budgetUsd: x.budgetUsd,
+    const agent = await runAgent(this.m.agentModel, t, { system: this.p.setupSystem(), user, budgetUsd: x.budgetUsd,
       prices: this.m.prices, transcript: transcriptOf(x),
       onTurn: (turn, names, cost, said, calls) => {
         last = turn;
@@ -208,7 +214,7 @@ export class LocalBrain implements Brain {
         unasked = null;
         replies.push(reply);
         const next = await decide(reply, last);
-        return next === null ? null : next + askedTask(questionTexts(replies));
+        return next === null ? null : next + this.p.askedTask(questionTexts(replies));
       },
       onTurn: (turn: number, names: string[], cost: number, said: string, calls: ToolCall[]) => {
         last = turn;
@@ -226,11 +232,13 @@ export class LocalBrain implements Brain {
     const state: RoundHunt = { suspects: null, second: null, extras: [], late: null };
     // What the tool-less hunters read: given (a brain without the snapshot), or read from the snapshot.
     const root = h.root ?? null;
+    const prompts = this.p;
     const other = m.secondHunter ? secondHunt(root, cfg, { model: m.secondHunter, diff, context: h.context, scope,
-      outDir: x.outDir, progress: x.progress,
+      outDir: x.outDir, progress: x.progress, prompts,
       ...(h.changedDefinitions === undefined ? {} : { changedDefinitions: h.changedDefinitions }) }) : null;
     const parts = m.hunter ? partHunts(root, cfg, { model: m.hunter, diff, owned: scope.owned,
-      searchDirs: h.searchDirs, scope, outDir: x.outDir, progress: x.progress, ...(h.parts ? { parts: h.parts } : {}) })
+      searchDirs: h.searchDirs, scope, outDir: x.outDir, progress: x.progress, prompts,
+      ...(h.parts ? { parts: h.parts } : {}) })
       : null;
     const afterHunt = async (reply: string) => {
       const mine = parseSuspects(parseJsonObject(reply), m.agentModel.model);
@@ -247,7 +255,7 @@ export class LocalBrain implements Brain {
       if (split) state.extras.push(split.use);
       const lists = [mine, ...split?.lists ?? [], theirs?.suspects ?? []];
       const rankUse = newUse(m.ranker?.ref ?? "");
-      const hunted = await rankSuspects(lists, { model: m.ranker ?? null, use: rankUse,
+      const hunted = await rankSuspects(lists, { model: m.ranker ?? null, use: rankUse, prompts,
         progress: (msg) => x.progress?.(`${cfg.name}: ${msg}`) });
       state.suspects = hunted;
       const named = [{ source: "reviewer", list: mine },
@@ -278,7 +286,7 @@ export class LocalBrain implements Brain {
       state.record = record;
       if (x.outDir) writeFileSync(join(x.outDir, "hunt.json"), JSON.stringify(record, null, 2) + "\n");
       x.progress?.(`${cfg.name}: ${hunted.length} suspect${hunted.length === 1 ? "" : "s"} to test`);
-      return { message: proveTask(cfg, hunted, x.maxQuestions),
+      return { message: prompts.proveTask(cfg, hunted, x.maxQuestions),
         spent: (theirs?.use.costUsd ?? 0) + (split?.use.costUsd ?? 0) + rankUse.costUsd };
     };
     const afterTests = (reply: string) => {
@@ -291,9 +299,9 @@ export class LocalBrain implements Brain {
       if (!left.length) return null;
       x.progress?.(`${cfg.name}: ${left.length} suspect${left.length === 1 ? "" : "s"} without a test; ` +
         "asking the reviewer to test them or say why they cannot run here");
-      return untestedSuspectsTask(left);
+      return prompts.untestedSuspectsTask(left);
     };
-    return { user: huntTask(cfg, diff, h.context, x.scoped ? scope : undefined), afterHunt, afterTests, state };
+    return { user: prompts.huntTask(cfg, diff, h.context, x.scoped ? scope : undefined), afterHunt, afterTests, state };
   }
 
   /** The second hunter, arrived after the tests started: its cost counts; its suspects are kept in hunt.json, not
@@ -321,7 +329,7 @@ export class LocalBrain implements Brain {
     let merged: Judged["questions"] = null;
     if (questions.length > 1 && merger && o.budgetLeft() > 0) {
       const use = newUse(merger.ref);
-      merged = await mergeQuestions(questions, { model: merger, use, progress: o.progress });
+      merged = await mergeQuestions(questions, { model: merger, use, progress: o.progress, prompts: this.p });
       if (merged.questions.length < questions.length) {
         o.progress?.(`${questions.length - merged.questions.length} repeated question` +
           `${questions.length - merged.questions.length === 1 ? "" : "s"} merged`);
@@ -335,14 +343,14 @@ export class LocalBrain implements Brain {
     const timedOut = new Set<string>();
     const spent = findings.length ? await challenge(findings, { model: challenger, diff: o.diff, timedOut,
       diffOf: (f) => diffs[f.project] ?? o.diff, sources: o.sources, budgetUsd: remaining, questions: asked,
-      trace: o.trace, progress: o.progress, skip, onJudged: (f, cost) => o.judged?.(f, cost) }) : null;
+      trace: o.trace, progress: o.progress, skip, onJudged: (f, cost) => o.judged?.(f, cost), prompts: this.p }) : null;
     // The grouping call is skipped only when the second model answered none of the findings in time (any timeout
     // kind, by the error's flag; the older message test is kept).
     const stalled = findings.length > 0 && findings.every((f) => f.reason === `not challenged: ${STALLED}` ||
       timedOut.has(f.id) || f.reason.includes("no reply within"));
     if (spent && stalled) o.trace({ step: "explain", outcome: "skipped", reason: STALLED });
     const groups = spent && !stalled ? await explain(findings, { model: challenger, diff: o.diff, sources: o.sources,
-      budgetUsd: remaining, use: spent, trace: o.trace, progress: o.progress }) : [];
+      budgetUsd: remaining, use: spent, trace: o.trace, progress: o.progress, prompts: this.p }) : [];
     // A challenger with a fallback keeps its own per-model use (second opinions and grouping, both models).
     const uses = challenger instanceof FallbackJson ? challenger.uses : spent ? [spent] : [];
     return { questions: merged, groups, uses };

@@ -122,6 +122,10 @@ export interface Review {
   reviewer: string;
   challenger: string;
   promptVersion: string;
+  /** The keys .arnx/prompts.toml overrode, and the hash of every prompt template the review ran (absent without
+   * overrides, and with arnx cloud, which runs its own prompts). */
+  promptOverrides?: string[];
+  promptsHash?: string;
   findings: Finding[];
   questions: string[];
   flaky: string[];
@@ -232,12 +236,14 @@ function duration(seconds: number): string {
   return m ? `${m}m${String(s).padStart(2, "0")}s` : `${s}s`;
 }
 
-/** Who reviewed: the reviewer, the second opinion and the prompts' version; with arnx cloud, only its tier (the harness
- * is arnx cloud's own business: review.json keeps it, the report does not show it). */
+/** Who reviewed: the reviewer, the second opinion and the prompts' version (and the keys .arnx/prompts.toml overrode,
+ * with the hash of the prompts run); with arnx cloud, only its tier (the harness is arnx cloud's own business:
+ * review.json keeps it, the report does not show it). */
 function modelsLine(r: Review): string {
   const c = CLOUD_MODEL.exec(r.reviewer);
+  const yours = r.promptOverrides?.length ? `, yours for ${r.promptOverrides.join(", ")} (${r.promptsHash})` : "";
   return c ? `- Models: arnx cloud ${c[1]}`
-    : `- Reviewer: ${r.reviewer} · Second opinion: ${r.challenger} · Prompts: ${r.promptVersion}`;
+    : `- Reviewer: ${r.reviewer} · Second opinion: ${r.challenger} · Prompts: ${r.promptVersion}${yours}`;
 }
 
 /** arnx cloud's models as review.json names them: "arnx:<tier>/<harness>", and "/<role>" in usage. */
