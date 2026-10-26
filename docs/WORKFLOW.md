@@ -152,8 +152,9 @@ its own, under "Type check": it never fails a test, turns a run into no report, 
    clipboard) to your coding agent: the failing tests, what each bug is, your answers, and the rules (yours with
    `arnx prompts copy fix.rules`). `arnx check` runs the accepted tests in the proven sandbox, services included,
    on your working tree, and lists what still fails.
-4. When `arnx check` passes, commit the fixes together with `.arnx/tests/` and `.arnx/accepted-tests.json`: they now
-   guard against the bugs coming back, each time `arnx check` runs. Read them first: they are code a model wrote.
+4. When `arnx check` passes, commit the fixes together with `.arnx/tests/`, `.arnx/accepted-tests.json` and
+   `.arnx/answer-watch.json` (when there is one): they now guard against the bugs coming back, each time `arnx check`
+   runs. Read them first: they are code a model wrote.
 
 Accepted tests are pinned. `accept` records the sha256 of each file it writes in `.arnx/accepted-tests.json`, with
 the file's accepted tests (so `arnx check` tells them from the other tests the review wrote into it), and
@@ -165,7 +166,11 @@ A fresh clone or CI has no such copy and trusts the committed record, so a commi
 diff: `arnx review` of that change names the accepted tests and pins it edits or removes.
 Changed by mistake: `arnx accept --again <id>` copies the review's tests back (your edits are lost); `arnx check`
 also names `git checkout -- <file>` when the committed copy is the accepted one. Changed on purpose:
-`arnx accept --keep-edits` records the accepted tests as they are now. `arnx check --json` prints the result as JSON
+`arnx accept --keep-edits` records the accepted tests as they are now. An answer's test can ask for the opposite of an
+accepted test: `accept` records, for each answer test that fails, the accepted tests that pass beside it
+(`.arnx/answer-watch.json`, committed with the tests), and when a later `arnx check` finds the answer's test passing
+and one of those failing it says `Q1's test now passes and F3's fails: they may contradict` (the exit code is
+unchanged); decide which one holds. `arnx check --json` prints the result as JSON
 (each project's passed and failed tests, the overall result, the changed files) for programs and coding agents.
 
 Tests an older arnx kept inside your projects (`tests/arnx/`, with expected-fail markers) are in your own test run:

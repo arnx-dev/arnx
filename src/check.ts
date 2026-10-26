@@ -25,7 +25,7 @@ export const CHECK_TIMEOUT = 900;
  * `reviews`: a failed test → the review that accepted its file, when known. */
 export interface ProjectCheck { project: string; files: string[]; passed: string[]; failed: TestResult[];
   skipped: number; noReport: boolean; accepted?: string[]; reason?: string; log?: string | null;
-  reviews?: Record<string, string> }
+  reviews?: Record<string, string>; workdir?: string }
 
 /** The accepted tests, as `file::test` (repository-relative, parameters dropped): those accept recorded per file in
  * ACCEPTED_RECORD, else (a record by an older arnx) from each accepted review's marks. `files`: the kept files the
@@ -220,7 +220,7 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       const failed = ran.filter((t) => t.outcome === "failed" || t.outcome === "error");
       const reviews = Object.fromEntries(failed.map((t) => [t.testId, reviewOf(known!, cfg.workdir, t.testId)])
         .filter(([, r]) => r));
-      out.push({ project: cfg.name, files, noReport: missing.length > 0,
+      out.push({ project: cfg.name, workdir: cfg.workdir, files, noReport: missing.length > 0,
         passed: ran.filter((t) => t.outcome === "passed").map((t) => t.testId), failed, reviews,
         skipped: results.filter((t) => t.outcome === "skipped").length,
         accepted: ran.filter((t) => isAccepted(known!, cfg.workdir, t.testId)).map((t) => t.testId),
@@ -232,7 +232,119 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
   return out;
 }
 
-/** A list of failing tests, as accept and check print it: the test name after the last `::`, then its first message
+// --- answers that may contradict accepted tests ----------------------------------------------------------------------
+// An answer's test can ask for the opposite of an accepted test, so that no code passes both; one run cannot tell. At
+// accept, each answer test that fails on the code is recorded with the accepted tests of its project that pass; a
+// later check that finds the answer's test passing and one of those failing names the pair. Evidence over two
+// versions of the code, not proof (the fix may just be wrong): one line and the JSON, never the exit code.
+
+export const ANSWER_WATCH = ".arnx/answer-watch.json";
+/** A recorded test: its id (F3, Q2; else its name), its review ("" unknown) and its key (repository-relative). */
+interface Watched { id: string; review: string; test: string }
+interface WatchEntry { review: string; answer: string; test: string; passing: Watched[] }
+export interface MayContradict { answer: string; accepted: string; review: string; accepted_review: string;
+  answer_test: string; accepted_test: string }
+
+/** A test the runner reported (relative to its project's workdir) as `file::name`, repository-relative. */
+const runKey = (workdir: string | undefined, testId: string) => {
+  const [file, rest] = splitId(testId);
+  return testKey(posix.join(workdir ?? ".", file), rest);
+};
+/** An accepted test id (`.arnx/tests/...::name`, or the path it runs from) as runKey gives it. */
+const keptKey = (id: string) => {
+  const [file, rest] = splitId(id);
+  return testKey(runPath(file), rest);
+};
+
+/** Each accepted test's id and review, from the accepted reviews in .arnx/reviews/. */
+function acceptedLabels(repo: string): Map<string, { id: string; review: string }> {
+  const out = new Map<string, { id: string; review: string }>();
+  const base = join(repo, ".arnx", "reviews");
+  for (const name of existsSync(base) ? readdirSync(base) : []) {
+    const rdir = join(base, name);
+    if (!existsSync(join(rdir, "accepted.json"))) continue;
+    try {
+      const done = JSON.parse(readFileSync(join(rdir, "accepted.json"), "utf8")) as { marks?: Record<string, string>;
+        moved?: Record<string, string>; disagree?: Record<string, string[]>; set_aside?: Record<string, string> };
+      const review = load(rdir);
+      const moved = done.moved ?? {};
+      for (const f of review.findings) {
+        if (f.file && done.marks?.[f.id] === "real" && !done.set_aside?.[f.id]) {
+          out.set(keptKey(placed(moved, f.file, f.testId)), { id: f.id, review: review.id });
+        }
+      }
+      for (const [qid, tests] of Object.entries(done.disagree ?? {})) {
+        for (const t of tests) out.set(keptKey(placed(moved, null, t)), { id: qid, review: review.id });
+      }
+    } catch {
+      continue;
+    }
+  }
+  return out;
+}
+
+function readWatch(repo: string): WatchEntry[] {
+  try {
+    const d = JSON.parse(readFileSync(join(repo, ANSWER_WATCH), "utf8")) as { answers?: unknown };
+    return Array.isArray(d.answers) ? d.answers.filter((e): e is WatchEntry => !!e && typeof e === "object" &&
+      typeof e.answer === "string" && typeof e.test === "string" && Array.isArray(e.passing)) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** At accept, after its check: record each answer test of `review` that fails now (`disagree`: the answer rounds'
+ * failing tests, `moved`: where accept put them) with the accepted tests of its project that pass, replacing the
+ * review's earlier entries. */
+export function recordAnswerWatch(repo: string, review: string, disagree: Record<string, string[]>,
+  moved: Record<string, string>, results: ProjectCheck[]): void {
+  const labels = acceptedLabels(repo);
+  const entries: WatchEntry[] = [];
+  for (const [answer, tests] of Object.entries(disagree)) {
+    for (const t of tests) {
+      const test = keptKey(placed(moved, null, t));
+      const r = results.find((x) => x.failed.some((f) => runKey(x.workdir, f.testId) === test));
+      if (!r) continue;
+      const passing = r.passed.filter((id) => !r.accepted || r.accepted.includes(id)).map((id) => runKey(r.workdir, id))
+        .filter((k) => k !== test).map((k) => ({ id: labels.get(k)?.id ?? k.split("::").at(-1)!,
+          review: labels.get(k)?.review ?? "", test: k }));
+      if (passing.length) entries.push({ review, answer, test, passing });
+    }
+  }
+  const answers = [...readWatch(repo).filter((e) => e.review !== review), ...entries];
+  const path = join(repo, ANSWER_WATCH);
+  if (!answers.length) {
+    rmSync(path, { force: true });
+    return;
+  }
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify({ schema_version: 1, answers }, null, 2) + "\n");
+}
+
+/** Recorded answer tests that pass now while one of the accepted tests that passed with them at accept fails. */
+export function mayContradict(repo: string, results: ProjectCheck[]): MayContradict[] {
+  const keys = (pick: (r: ProjectCheck) => string[]) =>
+    new Set(results.flatMap((r) => pick(r).map((id) => runKey(r.workdir, id))));
+  const passed = keys((r) => r.passed);
+  const failed = keys((r) => r.failed.map((t) => t.testId));
+  const out = new Map<string, MayContradict>();
+  for (const e of readWatch(repo)) {
+    if (!passed.has(e.test)) continue;
+    for (const p of e.passing) {
+      if (!failed.has(p.test)) continue;
+      out.set(`${e.review} ${e.answer} ${p.review} ${p.id}`, { answer: e.answer, accepted: p.id, review: e.review,
+        accepted_review: p.review, answer_test: e.test, accepted_test: p.test });
+    }
+  }
+  return [...out.values()];
+}
+
+/** check's line per pair; the accepted test's review is named when it is another review's. */
+export const contradictionLines = (pairs: MayContradict[]): string[] => pairs.map((p) =>
+  `${p.answer}'s test now passes and ${p.accepted}'s${p.accepted_review && p.accepted_review !== p.review
+    ? ` (review ${p.accepted_review})` : ""} fails: they may contradict`);
+
+/** A list of failing tests, as accept and check print it:/** A list of failing tests, as accept and check print it: the test name after the last `::`, then its first message
  * line. One file: the names alone; several: each file once, its tests under it. `multi`: several projects ran, so
  * each file (or name) says its project. `mark` and `why` shape the ✗ and the message (accept colours and cuts it). */
 export function failingList(failing: { project: string; t: TestResult }[], multi: boolean,
@@ -637,7 +749,8 @@ export function changedSummary(changed: ChangedTest[], repo: string): string {
 export const CHECK_SCHEMA_VERSION = 1;
 const RESULTS = ["pass", "fail", "no-report", "nothing-accepted", "tests-changed"] as const;
 
-export function checkJson(results: ProjectCheck[], code: number, changed: ChangedTest[] = []): string {
+export function checkJson(results: ProjectCheck[], code: number, changed: ChangedTest[] = [],
+  contradict: MayContradict[] = []): string {
   return JSON.stringify({ schema_version: CHECK_SCHEMA_VERSION, command: "check",
     result: RESULTS[code] ?? "fail", exit_code: code,
     projects: results.map((r) => {
@@ -648,5 +761,5 @@ export function checkJson(results: ProjectCheck[], code: number, changed: Change
           accepted: acc(t.testId) })),
         skipped: r.skipped };
     }),
-    changed }, null, 2);
+    changed, may_contradict: contradict }, null, 2);
 }

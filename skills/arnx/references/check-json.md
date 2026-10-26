@@ -25,6 +25,7 @@ the path each test runs from; `files` are where they are kept.
 | `exit_code` | number | 0, 1, 2, 3 or 4, the same as the process exit code. |
 | `projects` | array | One entry per project with accepted tests: see [Each project](#each-project). Empty when nothing ran. |
 | `changed` | array | Accepted test files edited or deleted since `arnx accept` recorded them, or whose entry in `.arnx/accepted-tests.json` was changed or removed: see [Each changed file](#each-changed-file). Non-empty only with `tests-changed`. |
+| `may_contradict` | array | Pairs of an answer's test and an accepted test that may ask for opposite things: see [Each possible contradiction](#each-possible-contradiction). Empty when none. Never changes `result` or the exit code. |
 
 ## Each project
 
@@ -56,6 +57,23 @@ the path each test runs from; `files` are where they are kept.
 | `path` | string | The accepted file, relative to the repository. |
 | `review` | string | The review whose `arnx accept` wrote it. |
 | `change` | string | `modified` or `deleted` (the file differs from its recorded sha256, or is gone), `repinned` (its entry in `.arnx/accepted-tests.json`, its sha256 or its `tests`, was changed, and not by `arnx accept` on this machine) or `unpinned` (its entry was removed, or the whole file). |
+
+## Each possible contradiction
+
+At `arnx accept`, each answer test (from the user's answer to a question, or a rewrite) that fails on the code is
+recorded in `.arnx/answer-watch.json` with the accepted tests of its project that pass then. When `arnx check` finds
+the answer's test passing and one of those failing, it names the pair: the change that made one pass broke the other,
+so they may ask for opposite things (or the fix is wrong). Plain `arnx check` prints one line per pair: `Q1's test now
+passes and F3's fails: they may contradict`. Which one holds is the user's call.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `answer` | string | The answer whose test passes now: `Q1` (a question) or `R1` (a rewrite). |
+| `accepted` | string | The accepted test that fails now: its finding (`F3`) or answer (`Q2`), else its test name. |
+| `review` | string | The review the answer belongs to. |
+| `accepted_review` | string | The review that accepted the failing test; empty when unknown. |
+| `answer_test` | string | The answer's test, repository-relative, at the path it runs from (`path::name`). |
+| `accepted_test` | string | The failing accepted test, the same way. |
 
 ## Results
 
