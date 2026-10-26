@@ -153,6 +153,15 @@ test("grep refuses a long pattern", async () => {
   await expect(new Workspace(root).call("grep", { pattern: "a".repeat(501) })).rejects.toThrow(ToolError);
 });
 
+test("grep stops a pattern that backtracks without end", async () => {
+  // about 10 s unbounded under Bun, minutes under Node
+  writeFileSync(join(root, "slow.txt"), "a".repeat(600) + "\n");
+  const started = Date.now();
+  await expect(new Workspace(root).call("grep", { pattern: "a*a*a*b" })).rejects.toThrow("pattern too slow");
+  expect(Date.now() - started).toBeLessThan(4000);
+  expect(await new Workspace(root).call("grep", { pattern: "needle" })).toContain("latin.txt:1:");
+});
+
 test("grep skips files over the size limit", async () => {
   writeFileSync(join(root, "big.txt"), "needle\n" + "x".repeat(2_000_001));
   const out = await new Workspace(root).call("grep", { pattern: "needle" });
