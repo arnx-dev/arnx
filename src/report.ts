@@ -5,7 +5,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AdapterId } from "./adapters/types";
 import { type Before, type FixStatus, isPreExisting } from "./before";
-import { type Blanked, describeBlanked } from "./change";
+import { type Blanked, describeBlanked, someNames } from "./change";
 import { ArnxError } from "./errors";
 import { type ModelUse, parseJsonObject } from "./llm";
 import { type ProviderFailure, resumes } from "./outage";
@@ -130,6 +130,8 @@ export interface Review {
   promptsHash?: string;
   /** The change itself edits .arnx/prompts.toml, and the review ran its version (absent otherwise). */
   promptsFileEdited?: true;
+  /** Accepted tests (or their pins in .arnx/accepted-tests.json) the change edits or removes (absent when none). */
+  acceptedTestsEdited?: string[];
   findings: Finding[];
   questions: string[];
   flaky: string[];
@@ -522,6 +524,7 @@ export function render(r: Review): string {
     ...untrackedLines(r).map((l) => `- ${l}`),
     modelsLine(r),
     ...(r.promptsFileEdited ? ["- This change edits .arnx/prompts.toml; the review used its version."] : []),
+    ...(r.acceptedTestsEdited ? [`- This change edits accepted tests: ${someNames(r.acceptedTestsEdited, 5)}.`] : []),
     `- ${r.usage?.length ? costLine(r) : `Cost: $${r.costUsd.toFixed(2)}`} · ${duration(r.seconds)} · Agent stopped: ${r.stop}`, "",
     "## Status", "", ...statusLines(r), "",
     marksIssues(r)

@@ -81,7 +81,7 @@ After the user says they accepted:
 | Exit | `result` | What to do |
 |---|---|---|
 | 0 | `pass` | Go to 5. |
-| 1 | `fail` | Fix the code for each `failed` test, run again. After 3 rounds still failing, stop and report. |
+| 1 | `fail` | Fix the code for each `failed` test, run again. After 3 rounds still failing, stop and report. A `may_contradict` pair (an answer's test passes now, an accepted test fails): stop and show the user the pair; which one holds is theirs. |
 | 2 | `no-report` | Tests did not report (timeout, runner). Report it; do not loop. |
 | 3 | `nothing-accepted` | Nothing was accepted: ask the user whether they ran `arnx accept <id>`. |
 | 4 | `tests-changed` | An accepted test file, or its entry in `.arnx/accepted-tests.json`, changed since accept; nothing ran. Do not touch them: report each `changed` entry to the user. Restoring (`arnx accept --again <id>`; plain `arnx check` names a `git checkout` when the committed copy is the accepted one) or keeping the edit (`--keep-edits`) is theirs. |

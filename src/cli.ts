@@ -11,7 +11,8 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { accept, findAccepted, findReview, makeAnswerRunner, recordChosen } from "./accept";
-import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, failingList, keepEdits,
+import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, contradictionLines,
+  failingList, keepEdits, mayContradict, recordAnswerWatch,
   legacyAccepted, moveOut,
   localPinsPath, TESTS_CHANGED } from "./check";
 import { colorFor, colorLines, paint } from "./color";
@@ -1426,6 +1427,9 @@ class Commands {
       } finally {
         cp.stop();
       }
+      // What passes beside each answer test that fails now: a later check names a pair that swapped.
+      recordAnswerWatch(repo, result.review.id, Object.fromEntries(result.answers.map((x) => [x.qid, x.disagree])),
+        result.moved, results);
       const failing = results.flatMap((r) => r.failed.map((t) => ({ project: r.project, t })));
       const passing = results.reduce((n, r) => n + r.passed.length, 0);
       checked = { failing: failing.map(({ project, t }) => ({ project, test_id: t.testId, message: t.message })),
@@ -1662,8 +1666,13 @@ class Commands {
       progress.stop();
     }
     const [text, code] = checkSummary(results);
-    if (json) this.emitRaw(checkJson(results, code));
-    else this.d.out(colorLines(text, paint(!!this.d.color)));
+    const pairs = mayContradict(repo, results);
+    // Said before the summary's Next line, if it has one.
+    const lines = text.split("\n");
+    const at = lines.at(-1)!.startsWith("Next:") ? lines.length - 1 : lines.length;
+    lines.splice(at, 0, ...contradictionLines(pairs));
+    if (json) this.emitRaw(checkJson(results, code, [], pairs));
+    else this.d.out(colorLines(lines.join("\n"), paint(!!this.d.color)));
     await this.sendTelemetry("check", () => checkData(results, code, (performance.now() - started) / 1000));
     return code;
   }

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { excludePathspecs, firstUnpinned, hasSecretContent, isSecretEnvName, isSecretPath, secretPins }
   from "../src/secrets";
+import { AWS_KEY, AWS_KEY_2, PRIVATE_KEY, SLACK_TOKEN } from "./helpers/fakekeys";
 
 test("test_secret_paths", () => {
   for (const p of [".env", "app/.env.production", "deploy/key.pem", "id_rsa", "home/.netrc", "credentials-prod.json"]) {
@@ -10,8 +11,8 @@ test("test_secret_paths", () => {
 });
 
 test("test_secret_content", () => {
-  expect(hasSecretContent("-----BEGIN RSA PRIVATE KEY-----\nabc")).toBe(true);
-  expect(hasSecretContent("aws = 'AKIAABCDEFGHIJKLMNOP'")).toBe(true);
+  expect(hasSecretContent(`${PRIVATE_KEY}\nabc`)).toBe(true);
+  expect(hasSecretContent(`aws = '${AWS_KEY_2}'`)).toBe(true);
   expect(hasSecretContent("token: ghp_" + "a".repeat(36))).toBe(true);
   expect(hasSecretContent("ANTHROPIC=sk-ant-" + "x".repeat(30))).toBe(true);
   expect(hasSecretContent("def key_for(user): return user.id")).toBe(false);
@@ -30,11 +31,11 @@ test("current OpenAI key shapes are secrets too (project, service-account and ad
 test("a key starts a token: sk- or AKIA inside a longer word is not a key", () => {
   expect(hasSecretContent("task-" + "a".repeat(40))).toBe(false);
   expect(hasSecretContent("desk-" + "B".repeat(40))).toBe(false);
-  expect(hasSecretContent("XAKIAABCDEFGHIJKLMNOP")).toBe(false);
+  expect(hasSecretContent(`X${AWS_KEY_2}`)).toBe(false);
   for (const before of ["", " ", "=", "\"", "'", ":", "_", "-", "\n", "(", "/"]) {
     expect(hasSecretContent(`${before}sk-${"a".repeat(40)}`)).toBe(true);
     expect(hasSecretContent(`${before}sk-ant-${"x".repeat(30)}`)).toBe(true);
-    expect(hasSecretContent(`${before}AKIAABCDEFGHIJKLMNOP`)).toBe(true);
+    expect(hasSecretContent(`${before}${AWS_KEY_2}`)).toBe(true);
   }
 });
 
@@ -50,14 +51,14 @@ test("test_exclude_pathspecs_cover_arnx_dir", () => {
 });
 
 test("a file's key-shaped strings are pinned by short hashes; it is kept only while every one is pinned", () => {
-  const fixture = "AWS = 'AKIAIOSFODNN7EXAMPLE'\nGH = 'ghp_" + "a".repeat(36) + "'\nAGAIN = 'AKIAIOSFODNN7EXAMPLE'\n";
+  const fixture = `AWS = '${AWS_KEY}'\nGH = 'ghp_` + "a".repeat(36) + `'\nAGAIN = '${AWS_KEY}'\n`;
   const pins = secretPins(fixture);
   expect(pins).toHaveLength(2); // unique strings
   expect(pins.every((p) => /^[0-9a-f]{16}$/.test(p))).toBe(true);
   expect(pins.join("")).not.toContain("AKIA");
   expect(firstUnpinned(fixture, pins)).toBeNull();
   expect(firstUnpinned(fixture, [])).toEqual({ line: 1, label: "AKIA…" });
-  expect(firstUnpinned(fixture + "NEW = 'xoxb-1234567890-abc'\n", pins)).toEqual({ line: 4, label: "xoxb-…" });
-  expect(firstUnpinned("-----BEGIN RSA PRIVATE KEY-----\n", [])).toEqual({ line: 1, label: "a private key" });
+  expect(firstUnpinned(fixture + `NEW = '${SLACK_TOKEN}'\n`, pins)).toEqual({ line: 4, label: "xoxb-…" });
+  expect(firstUnpinned(`${PRIVATE_KEY}\n`, [])).toEqual({ line: 1, label: "a private key" });
   expect(firstUnpinned("def key_for(user): return user.id", [])).toBeNull();
 });

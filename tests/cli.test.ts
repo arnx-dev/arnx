@@ -13,6 +13,7 @@ import { commit, gitRepo } from "./helpers/gitutil";
 import { finding, sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
 import { PROJECTS } from "./helpers/yaml";
+import { AWS_KEY_2 } from "./helpers/fakekeys";
 
 const tmp = useTmp();
 const RID = "20261011-a1b2c3";
@@ -394,7 +395,7 @@ test("doctor notes keys set after a key-less init that no model uses", async () 
 
 test("allow-secret marks the file and says it may be sent from now on", async () => {
   const repo = gitRepo(tmp());
-  writeFileSync(join(repo, "detect.py"), 'AWS = "AKIAABCDEFGHIJKLMNOP"\n');
+  writeFileSync(join(repo, "detect.py"), `AWS = "${AWS_KEY_2}"\n`);
   const cli = new Cli({ cwd: repo });
   expect(await cli.run("allow-secret", "detect.py")).toBe(0);
   expect(cli.stdout).toBe(["! detect.py: 1 key-like string (AKIA… line 1)",

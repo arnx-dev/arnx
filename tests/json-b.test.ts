@@ -16,6 +16,7 @@ import { junitXml } from "./helpers/junit";
 import { finding, sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
 import { PROJECTS } from "./helpers/yaml";
+import { AWS_KEY } from "./helpers/fakekeys";
 
 const tmp = useTmp();
 const RID = "20261011-a1b2c3";
@@ -158,7 +159,7 @@ test("triage --json draws nothing and changes nothing: the marks and answers as 
 
 test("allow-secret --json: each file's key-like strings by kind and line, never the text", async () => {
   const repo = gitRepo(tmp());
-  const key = "AKIAIOSFODNN7EXAMPLE";
+  const key = AWS_KEY;
   writeFileSync(join(repo, "detect.py"), `A = 1\nAWS = '${key}'\n`);
   const cli = new Cli({ cwd: repo });
   expect(await cli.run("allow-secret", "detect.py", "--json")).toBe(0);

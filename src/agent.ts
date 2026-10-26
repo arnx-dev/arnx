@@ -5,6 +5,7 @@ import { spend } from "./spend";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync,
   writeFileSync } from "node:fs";
 import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
+import { Worker } from "node:worker_threads";
 import { python } from "./adapters/python";
 import type { Adapter } from "./adapters/types";
 import { ModelError } from "./errors";
@@ -19,6 +20,7 @@ export const READ_LIMIT = 400;
 export const GREP_LIMIT = 100;
 export const GREP_PATTERN_LIMIT = 500;
 export const GREP_FILE_LIMIT = 2_000_000;
+export const GREP_TIME_LIMIT_MS = 2000;
 export const WRITE_LIMIT = 200_000;
 export const MAX_TOKENS = 16_000;
 export const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv", ".arnx-run", ".mypy_cache",
@@ -27,6 +29,131 @@ export const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv"
 /** A tool call the model got wrong; the message goes back to the model. */
 export class ToolError extends Error {
   override name = "ToolError";
+}
+
+const SIMPLER = "simplify it, e.g. no nested or stacked quantifiers like (a+)+ or a*a*";
+const tooSlow = (after = "") => new ToolError(`pattern too slow${after}: ${SIMPLER}`);
+
+// Characters two atoms are tried on: they overlap when one of these matches both.
+const PROBES = [..." \t", ...Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i))];
+
+/** Whether two quantified atoms (`a`, `\w`, `.`, `[a-z]`) can match the same character. */
+function overlap(a: string, b: string): boolean {
+  if (a === b || a === "." || b === ".") return true;
+  try {
+    const [x, y] = [new RegExp(`^(?:${a})$`), new RegExp(`^(?:${b})$`)];
+    return PROBES.some((c) => x.test(c) && y.test(c));
+  } catch {
+    return false;
+  }
+}
+
+/** The usual shapes of a pattern that backtracks without end, found without running it: a repeated group holding a
+ * quantifier ((a+)+, (\w+\s?)*), or two unbounded quantifiers in a row on atoms that overlap (a*a*, \w+\d*). Others
+ * are left to the worker's time limit. */
+export function backtracks(pattern: string): boolean {
+  // Per open group: whether it holds a quantifier, and the last atom quantified without bound (null after any other).
+  const frames: { quantified: boolean; prev: string | null }[] = [{ quantified: false, prev: null }];
+  let atom: { text: string; group: boolean; quantified: boolean } | null = null;
+  for (let i = 0; i < pattern.length; i++) {
+    const frame = frames.at(-1)!;
+    const c = pattern[i]!;
+    const q = /^(?:[*+?]|\{(\d+)(,(\d*))?\})/.exec(pattern.slice(i));
+    if (q && atom) {
+      i += q[0].length - 1;
+      if (pattern[i + 1] === "?") i++; // lazy
+      const unbounded = q[0] === "*" || q[0] === "+" || (q[2] !== undefined && q[3] === "");
+      const repeats = q[0] !== "?" && !(q[1] !== undefined && q[2] === undefined) && q[3] !== "1" && q[3] !== "0";
+      if (repeats && atom.group && atom.quantified) return true;
+      if (unbounded && !atom.group && frame.prev !== null && overlap(frame.prev, atom.text)) return true;
+      if (q[1] === undefined || q[2] !== undefined) frame.quantified = true;
+      frame.prev = unbounded && !atom.group ? atom.text : null;
+      atom = null;
+      continue;
+    }
+    if (atom) frame.prev = null; // the last atom went unquantified
+    atom = null;
+    if (c === "\\") {
+      const text = pattern.slice(i, i + 2);
+      i++;
+      // \b and \B match no character; a back reference is no atom to compare
+      if (!/^\\[bB1-9]$/.test(text)) atom = { text, group: false, quantified: false };
+    } else if (c === "[") {
+      let j = i + 1;
+      if (pattern[j] === "^") j++;
+      if (pattern[j] === "]") j++;
+      while (j < pattern.length && pattern[j] !== "]") j += pattern[j] === "\\" ? 2 : 1;
+      atom = { text: pattern.slice(i, j + 1), group: false, quantified: false };
+      i = j;
+    } else if (c === "(") {
+      const prefix = /^\((?:\?(?:[:=!]|<[=!]|<[A-Za-z_$][\w$]*>))?/.exec(pattern.slice(i))![0];
+      i += prefix.length - 1;
+      frames.push({ quantified: false, prev: null });
+    } else if (c === ")" && frames.length > 1) {
+      const inner = frames.pop()!;
+      frames.at(-1)!.quantified ||= inner.quantified;
+      atom = { text: "", group: true, quantified: inner.quantified };
+    } else if (c === "|") {
+      frame.prev = null;
+    } else if (c !== "^" && c !== "$") {
+      atom = { text: c === "." ? "." : c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&"), group: false, quantified: false };
+    }
+  }
+  return false;
+}
+
+// The model's pattern runs in a worker thread: a pattern that backtracks without end (a*a*a*b on a long line) would
+// otherwise hang arnx, and a match cannot be stopped from inside the thread running it. On the time limit the worker
+// is terminated (Bun may leave it running until arnx exits; it no longer blocks anything).
+const MATCH_WORKER = `const { parentPort } = require("node:worker_threads");
+let rx = null;
+parentPort.on("message", (m) => {
+  if (m.pattern !== undefined) { rx = new RegExp(m.pattern); return; }
+  const out = [];
+  for (let i = 0; i < m.lines.length && out.length < m.max; i++) if (rx.test(m.lines[i])) out.push(i);
+  parentPort.postMessage(out);
+});`;
+
+/** Matches lines against one grep's pattern until its deadline. */
+class Matcher {
+  private worker: Worker | null = null;
+
+  constructor(private readonly pattern: string, private readonly deadline: number) {}
+
+  /** The indexes of up to `max` matching lines; a ToolError once the deadline passes. */
+  match(lines: string[], max: number): Promise<number[]> {
+    const left = this.deadline - Date.now();
+    if (left <= 0) return Promise.reject(this.slow());
+    if (!this.worker) {
+      this.worker = new Worker(MATCH_WORKER, { eval: true });
+      this.worker.unref();
+      this.worker.postMessage({ pattern: this.pattern });
+    }
+    const worker = this.worker;
+    return new Promise((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer);
+        worker.off("message", onMessage);
+        worker.off("error", onError);
+      };
+      const onMessage = (out: number[]) => { done(); resolve(out); };
+      const onError = (e: Error) => { done(); this.close(); reject(e); };
+      const timer = setTimeout(() => { done(); this.close(); reject(this.slow()); }, left);
+      worker.on("message", onMessage);
+      worker.on("error", onError);
+      worker.postMessage({ lines, max });
+    });
+  }
+
+  close(): void {
+    const worker = this.worker;
+    this.worker = null;
+    worker?.terminate().catch(() => {});
+  }
+
+  private slow(): ToolError {
+    return tooSlow(` (over ${GREP_TIME_LIMIT_MS / 1000} s)`);
+  }
 }
 
 /** An error result already worded where the tool ran (a remote CLI's `ToolError: ...`): the model gets its message
@@ -186,16 +313,26 @@ export class Workspace {
     return body + (more > 0 ? `\n... ${more} more lines (start_line=${start + chunk.length})` : "");
   }
 
-  private grep(pattern: string, path: string): string {
+  private async grep(pattern: string, path: string): Promise<string> {
     if (pattern.length > GREP_PATTERN_LIMIT) {
       throw new ToolError(`pattern too long (over ${GREP_PATTERN_LIMIT} characters)`);
     }
-    let rx: RegExp;
     try {
-      rx = new RegExp(pattern);
+      new RegExp(pattern);
     } catch (e) {
       throw new ToolError(`invalid pattern: ${(e as Error).message}`);
     }
+    // Refused before any worker starts: under Bun a terminated worker keeps its core busy until arnx exits.
+    if (backtracks(pattern)) throw tooSlow();
+    const matcher = new Matcher(pattern, Date.now() + GREP_TIME_LIMIT_MS);
+    try {
+      return await this.grepFiles(matcher, path);
+    } finally {
+      matcher.close();
+    }
+  }
+
+  private async grepFiles(matcher: Matcher, path: string): Promise<string> {
     const hits: string[] = [];
     for (const fp of this.walk(this.resolvePath(path))) {
       let data: Buffer;
@@ -207,8 +344,7 @@ export class Workspace {
       }
       if (isBinary(data)) continue;
       const lines = splitLines(data.toString("utf8"));
-      for (let i = 0; i < lines.length; i++) {
-        if (!rx.test(lines[i]!)) continue;
+      for (const i of await matcher.match(lines, GREP_LIMIT - hits.length)) {
         hits.push(`${this.rel(fp)}:${i + 1}: ${lines[i]!.trimEnd().slice(0, 200)}`);
         if (hits.length >= GREP_LIMIT) return hits.join("\n") + `\n... (truncated at ${GREP_LIMIT} matches)`;
       }

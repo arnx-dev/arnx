@@ -4,7 +4,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CHANGES, type ChangedTest, checkJson, checkSummary, type ProjectCheck } from "../src/check";
+import { CHANGES, type ChangedTest, checkJson, checkSummary, type MayContradict, type ProjectCheck } from "../src/check";
 import { type ReviewRecheck, recheckJson } from "../src/recheck";
 import { FIX_STATUSES } from "../src/before";
 import { type Review, save } from "../src/report";
@@ -46,7 +46,8 @@ const written = () => ["hunt", "plain"].map((n) =>
 function full(): Record<string, unknown> {
   const f = finding("F1", "tests/g/test_a.py::test_a", "test_a", "tests/g/test_a.py", "assert 1 == 2", "off by one",
     "confirmed", "yes");
-  const r: Review = sampleReview({ promptOverrides: ["hunt.task"], promptsHash: "abc123def456", promptsFileEdited: true, findings: [{ ...f, dependsOn: "Q1", suspect: "S1", judge: "openai:x", shallow: "existence",
+  const r: Review = sampleReview({ promptOverrides: ["hunt.task"], promptsHash: "abc123def456", promptsFileEdited: true,
+    acceptedTestsEdited: [".arnx/tests/tests/arnx/r1/test_a.py"], findings: [{ ...f, dependsOn: "Q1", suspect: "S1", judge: "openai:x", shallow: "existence",
     before: { status: "regression", detail: "passes before", runs: ["passed", "passed", "passed"] } }],
   groups: [{ findings: ["F1"], title: "t", input: "i", actual: "a", expected: "e", consequence: "c", severity: "high" }],
   untested: [{ project: "main", files: ["a.py"], of: 2 }],
@@ -133,14 +134,17 @@ test("review-json.md names each fix-proof status review.json can write", () => {
 const project: ProjectCheck = { project: "svc", files: ["svc/tests/arnx/r1/test_x.py"], passed: ["a"], skipped: 1,
   noReport: false, failed: [{ testId: "t::b", fileAttr: "", name: "b", outcome: "failed", message: "assert 0" }] };
 const changed: ChangedTest[] = [{ path: "tests/arnx/r1/test_x.py", review: "r1", change: "modified" }];
+const contradiction: MayContradict = { answer: "Q1", accepted: "F3", review: "r1", accepted_review: "r1",
+  answer_test: "tests/arnx/r1/answers/test_q.py::test_q", accepted_test: "tests/arnx/r1/test_x.py::test_f" };
 
 test("check --json writes every field check-json.md documents, and nothing it does not", () => {
   const C = tables("check-json.md");
-  expect(Object.keys(C)).toEqual(["Fields", "Each project", "Each failed test", "Each changed file", "Results",
+  expect(Object.keys(C)).toEqual(["Fields", "Each project", "Each failed test", "Each changed file",
+    "Each possible contradiction", "Results",
     "With --review", "Each rechecked finding", "Results with --review"]);
   const doc = named("check-json.md");
   const undocumented = (o: object) => Object.keys(o).filter((k) => !doc.has(k));
-  for (const json of [checkJson([project], checkSummary([project])[1]), checkJson([], 4, changed)]) {
+  for (const json of [checkJson([project], checkSummary([project])[1], [], [contradiction]), checkJson([], 4, changed)]) {
     const j = JSON.parse(json);
     expect(missing(j, C.Fields!, true)).toEqual([]);
     expect(undocumented(j)).toEqual([]);
@@ -151,6 +155,10 @@ test("check --json writes every field check-json.md documents, and nothing it do
         expect(missing(t, C["Each failed test"]!, true)).toEqual([]);
         expect(undocumented(t)).toEqual([]);
       }
+    }
+    for (const c of j.may_contradict) {
+      expect(missing(c, C["Each possible contradiction"]!, true)).toEqual([]);
+      expect(undocumented(c)).toEqual([]);
     }
     for (const c of j.changed) {
       expect(missing(c, C["Each changed file"]!, true)).toEqual([]);

@@ -1,7 +1,7 @@
 import { beforeEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { runAgent, ToolError, Workspace } from "../src/agent";
+import { backtracks, runAgent, ToolError, Workspace } from "../src/agent";
 import { ModelError } from "../src/errors";
 import { type Attempt, billedError, PRICES, type Reply } from "../src/llm";
 import { ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -160,6 +160,31 @@ test("a model error is written to the transcript with its timeout flag and attem
 
 test("grep refuses a long pattern", async () => {
   await expect(new Workspace(root).call("grep", { pattern: "a".repeat(501) })).rejects.toThrow(ToolError);
+});
+
+test("grep refuses the usual backtracking shapes before matching anything", async () => {
+  for (const p of ["(a+)+", "(a*)*", "(\\w+\\s?)*", "x(?:ab?)+y", "((a+)b)*", "(a+){2,}", "a*a*", "\\w+\\d*", ".*.*",
+    "[a-z]+[a-z]*", "a+\\w+"]) {
+    expect(backtracks(p)).toBe(true);
+  }
+  for (const p of ["needle", "def \\w+\\(", "(foo|bar)+", "\\s*\\w+", "[a-z]+[0-9]+", "(\\w+)\\s*=", "a*b*",
+    "import .*", "x{2}(ab){3}", "a*ba*", "(a{2})+", "a\\*a*", "[(a+)]+", "\\(a+\\)+"]) {
+    expect(backtracks(p)).toBe(false);
+  }
+  writeFileSync(join(root, "slow.txt"), "a".repeat(600) + "\n");
+  const started = Date.now();
+  await expect(new Workspace(root).call("grep", { pattern: "a*a*a*b" })).rejects.toThrow("pattern too slow");
+  expect(Date.now() - started).toBeLessThan(500);
+});
+
+test("grep stops a pattern that backtracks without end", async () => {
+  // a shape the check above lets through: about 7 s unbounded under Bun, longer under Node
+  writeFileSync(join(root, "slow.txt"), "a".repeat(400) + "\n");
+  const started = Date.now();
+  expect(backtracks("a*.?a*.?a*b")).toBe(false);
+  await expect(new Workspace(root).call("grep", { pattern: "a*.?a*.?a*b" })).rejects.toThrow("pattern too slow");
+  expect(Date.now() - started).toBeLessThan(4000);
+  expect(await new Workspace(root).call("grep", { pattern: "needle" })).toContain("latin.txt:1:");
 });
 
 test("grep skips files over the size limit", async () => {
