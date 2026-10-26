@@ -19,6 +19,7 @@ const tmp = useTmp();
 const PEM = "-----BEGIN " + "PRIVATE KEY-----";
 const PEM_END = "-----END " + "PRIVATE KEY-----";
 const BODY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7";
+const NO_DIGITS = "MIIEowIBAAKCAQEA" + "x".repeat(48);
 const GH = "ghp_" + "a".repeat(36);
 const SK = "sk-" + "A".repeat(40);
 
@@ -84,8 +85,20 @@ test("a private key in a comment is blanked with its body; a body outside the co
   expect(blanked("a.ts", block)).toEqual({ lines: [2, 3, 4, 5], text: "/*\n\n\n\n\n * Keep this.\n */\n" });
   const hashes = `# ${PEM}\n# ${BODY}\n# ${PEM_END}\nx = 1\n`;
   expect(blanked("a.py", hashes)).toEqual({ lines: [1, 2, 3], text: "#\n#\n#\nx = 1\n" });
-  expect(withheld("a.py", `# ${PEM}\nBODY = """\n${BODY}\n"""\n`)).toEqual({ line: 3, label: "a private key" });
-  expect(withheld("a.py", `# ${PEM}\n${BODY}\n`)).toEqual({ line: 2, label: "a private key" });
+  // The block up to its END line must lie in the comment; otherwise the file is withheld, the header named.
+  const RSA = "-----BEGIN RSA " + "PRIVATE KEY-----";
+  expect(withheld("a.py", `# ${PEM}\nBODY = """\n${BODY}\n"""\n`)).toEqual({ line: 1, label: "a private key" });
+  expect(withheld("a.py", `# ${PEM}\n${BODY}\n`)).toEqual({ line: 1, label: "a private key" });
+  expect(withheld("a.ts", `// ${RSA}\nconst body = "${BODY}";\n`)).toEqual({ line: 1, label: "a private key" });
+  expect(withheld("a.ts", `// ${RSA}\nconst body = "${NO_DIGITS}";\n`)).toEqual({ line: 1, label: "a private key" });
+  expect(withheld("a.ts", `// ${PEM}\nconst PEM =\n  "${BODY}" +\n  "${BODY}";\n`))
+    .toEqual({ line: 1, label: "a private key" });
+  expect(withheld("a.ts", `/*\n * ${PEM}\n */\nconst x = 1;\n/*\n * ${BODY}\n * ${PEM_END}\n */\n`))
+    .toEqual({ line: 2, label: "a private key" });
+  // A header with no END line: a placeholder only while the file holds no key body anywhere.
+  const far = Array.from({ length: 60 }, (_, i) => `const a${i} = ${i};`).join("\n");
+  expect(withheld("a.ts", `// ${PEM}\n${far}\nconst b = "${BODY}";\n`)).toEqual({ line: 1, label: "a private key" });
+  expect(blanked("a.ts", `/** e.g. key: "${PEM}..." */\n${far}\n`).lines).toEqual([1]);
 });
 
 test("other files are withheld as before, and pinned keys are left alone", () => {
