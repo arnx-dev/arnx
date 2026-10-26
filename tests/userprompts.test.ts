@@ -85,11 +85,29 @@ test("unknown steps, keys and placeholders are refused, naming the valid ones", 
   expect(err('task = "x"\n')).toContain("unknown key task; the steps are review,");
   expect(err('[hunt]\ntask = "Look at $diff"\n')).toBe(".arnx/prompts.toml: hunt.task has $diff; it offers " +
     "$no_tests, $max_suspects");
-  expect(err('[rank]\nsystem = "costs $USD"\n')).toBe(".arnx/prompts.toml: rank.system has $USD; it offers none");
+  expect(err('[rank]\nsystem = "costs $USD"\n')).toBe(".arnx/prompts.toml: rank.system has $USD; it offers none " +
+    "($$ writes a $)");
+  expect(err('[rank]\nsystem = "costs $$USD"\n')).toBe("accepted");
   expect(err("[rank]\nsystem = 3\n")).toBe(".arnx/prompts.toml: rank.system must be text");
   expect(err("[rank\n")).toStartWith(".arnx/prompts.toml: ");
   expect(err('[rank]\nsystem_base = "abc"\n')).toBe("accepted"); // a base without its text is ignored
   expect(parseOverrides('[rank]\nsystem_base = "abc"\n')).toEqual([]);
+});
+
+test("$$ in an override writes a literal $, with placeholders or without", () => {
+  // No default holds $$, so arnx's own prompts are built exactly as before.
+  for (const key of PROMPT_KEYS) expect(`${key}: ${DEFAULTS[key].includes("$$")}`).toBe(`${key}: false`);
+  const overrides = parseOverrides('[rank]\nsystem = "Cost in $$USD, home $$HOME."\n' +
+    '[hunt]\ntask = "Use $$HOME and $$$max_suspects; $no_tests"\nno_tests = "No $$PATH."\n' +
+    '[fix]\nrules = "Keep $$1."\n');
+  expect(overrides.map((o) => o.key)).toEqual(["hunt.task", "hunt.no_tests", "rank.system", "fix.rules"]);
+  const p = new Prompts({ ...DEFAULTS, ...Object.fromEntries(overrides.map((o) => [o.key, o.text])) },
+    overrides.map((o) => o.key));
+  expect(p.rankSystem()).toBe("Cost in $USD, home $HOME.");
+  expect(p.fixRules()).toBe("Keep $1.");
+  expect(p.huntTask(parseReviewConfig(YAML), "d", "c")).toEndWith("Use $HOME and $8; No $PATH.");
+  // $$diff is no placeholder: doctor still says the key drops $diff.
+  expect(overrideWarnings(parseOverrides('[review]\ntask = "Test $$diff"\n'))).toEqual(["review.task drops $diff"]);
 });
 
 test("arnx prompts lists the keys and marks yours; copy writes the default with its base", async () => {

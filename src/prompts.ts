@@ -1,8 +1,9 @@
 // The prompts. Their default text is src/prompts.toml, grouped by step and imported as text, so the binary, the Node
 // bundle and a checkout loaded at run time all carry it; any edit there changes PROMPT_VERSION, which is recorded with
 // every review. A repository may replace single keys (.arnx/prompts.toml, see userprompts.ts). Templates use $name
-// placeholders, filled in one pass, so code, diffs and braces in repository content need no escaping. Words that
-// depend on the reviewed repository's language come from its adapter.
+// placeholders, filled in one pass, so code, diffs and braces in repository content need no escaping; `$$` writes a
+// `$` (no default holds one, so arnx's own prompts read the same). Words that depend on the reviewed repository's
+// language come from its adapter.
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -64,10 +65,15 @@ export const NEEDED: Partial<Record<PromptKey, readonly string[]>> = {
   "answer.task": ["question", "answer"], "setup.task": ["hints"],
 };
 
-const PLACEHOLDER = /\$([_a-z][_a-z0-9]*)/gi;
+// `$$` first, so `$$name` is a `$` and the word, not a placeholder.
+const PLACEHOLDER = /\$\$|\$([_a-z][_a-z0-9]*)/gi;
 
 /** The placeholders a template uses, each once, in order. */
-export const placeholdersIn = (text: string) => [...new Set([...text.matchAll(PLACEHOLDER)].map((m) => m[1]!))];
+export const placeholdersIn = (text: string) => [...new Set([...text.matchAll(PLACEHOLDER)].map((m) => m[1])
+  .filter((p): p is string => p !== undefined))];
+
+/** A template used as written: only its `$$` become `$`. */
+const literal = (text: string) => text.replace(/\$\$/g, "$");
 
 /** A text's short hash: an override's `<name>_base`. */
 export const textHash = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 12);
@@ -85,9 +91,10 @@ function readDefaults(text: string): Templates {
 
 export const DEFAULTS: Templates = readDefaults(DEFAULT_TOML);
 
-/** string.Template.substitute: one pass, inserted text is never re-scanned. */
+/** string.Template.substitute: one pass, inserted text is never re-scanned; `$$` is a `$`. */
 function substitute(template: string, values: Record<string, string | number>): string {
-  return template.replace(PLACEHOLDER, (_m, name: string) => {
+  return template.replace(PLACEHOLDER, (_m, name: string | undefined) => {
+    if (name === undefined) return "$";
     if (!(name in values)) throw new Error(`prompt template: no value for $${name}`);
     return String(values[name]);
   });
@@ -154,14 +161,14 @@ export class Prompts {
   }
 
   huntSystem(): string {
-    return this.t["hunt.system"];
+    return literal(this.t["hunt.system"]);
   }
 
   /** The first message of a hunted review: the change, then the hunt. */
   huntTask(cfg: ReviewConfig, diff: string, context: string, scope?: Scope): string {
     return substitute(this.t["hunt.opening"], { diff: clip(diff), scope: scopeText(cfg, scope),
       context: context || "(none found)" }) +
-      substitute(this.t["hunt.task"], { no_tests: this.t["hunt.no_tests"], max_suspects: MAX_SUSPECTS });
+      substitute(this.t["hunt.task"], { no_tests: literal(this.t["hunt.no_tests"]), max_suspects: MAX_SUSPECTS });
   }
 
   /** The second hunter's task: the same opening and hunt, without tools, with the changed definitions whole. */
@@ -179,7 +186,7 @@ export class Prompts {
   }
 
   mergeSystem(): string {
-    return this.t["questions.system"];
+    return literal(this.t["questions.system"]);
   }
 
   mergeTask(questions: string[]): string {
@@ -192,7 +199,7 @@ export class Prompts {
   }
 
   rankSystem(): string {
-    return this.t["rank.system"];
+    return literal(this.t["rank.system"]);
   }
 
   rankTask(suspects: Suspect[]): string {
@@ -223,7 +230,7 @@ export class Prompts {
   }
 
   setupSystem(): string {
-    return this.t["setup.system"];
+    return literal(this.t["setup.system"]);
   }
 
   /** The setup task, with hints: what the detector found and the language-specific advice of each adapter present. */
@@ -232,7 +239,7 @@ export class Prompts {
   }
 
   challengeSystem(): string {
-    return this.t["challenge.system"];
+    return literal(this.t["challenge.system"]);
   }
 
   challengeUser(diff: string, testFile: string, testSource: string, testId: string, failure: string,
@@ -252,7 +259,7 @@ export class Prompts {
   }
 
   explainSystem(): string {
-    return this.t["explain.system"];
+    return literal(this.t["explain.system"]);
   }
 
   /** The fix prompt's opening: the review it fixes and the change. */
@@ -261,11 +268,11 @@ export class Prompts {
   }
 
   fixRules(): string {
-    return this.t["fix.rules"];
+    return literal(this.t["fix.rules"]);
   }
 
   fixDecided(): string {
-    return this.t["fix.decided"];
+    return literal(this.t["fix.decided"]);
   }
 }
 

@@ -23,6 +23,7 @@ export interface Override { key: PromptKey; text: string; base: string | null }
 
 const STEPS = [...new Set(PROMPT_KEYS.map((k) => k.split(".")[0]!))];
 const isKey = (k: string): k is PromptKey => k in PLACEHOLDERS;
+const ANY_PLACEHOLDER = new Set<string>(Object.values(PLACEHOLDERS).flat());
 const stepKeys = (step: string) => PROMPT_KEYS.filter((k) => k.startsWith(`${step}.`))
   .map((k) => k.slice(step.length + 1));
 const isTable = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null &&
@@ -44,7 +45,7 @@ export function readOverrides(repo: string): Override[] {
 }
 
 /** Refuses what arnx would not use: an unknown step or key, a value that is not text, a $placeholder the key does not
- * offer. A `<name>_base` without its text is ignored. */
+ * offer (`$$` is a literal `$`). A `<name>_base` without its text is ignored. */
 export function parseOverrides(text: string): Override[] {
   let doc: Record<string, unknown>;
   try {
@@ -67,7 +68,9 @@ export function parseOverrides(text: string): Override[] {
     const t = texts.get(key)!;
     const offered: readonly string[] = PLACEHOLDERS[key];
     const unknown = placeholdersIn(t).filter((p) => !offered.includes(p));
-    if (unknown.length) throw bad(`${key} has $${unknown[0]}; it offers ${listed(offered, "$")}`);
+    // A name no key offers is most likely meant as text: say how to write a `$`.
+    const text = unknown.length && !ANY_PLACEHOLDER.has(unknown[0]!) ? " ($$ writes a $)" : "";
+    if (unknown.length) throw bad(`${key} has $${unknown[0]}; it offers ${listed(offered, "$")}${text}`);
     return { key, text: t, base: bases.get(key) ?? null };
   });
 }
@@ -139,7 +142,8 @@ export function tomlText(text: string, width = 116): string {
 
 const NEW_FILE = `# Your prompts: each key here replaces arnx's default of that key (\`arnx prompts\` lists them);
 # every key left out follows arnx's defaults, also after an upgrade. <name>_base is the default you copied: doctor
-# says when arnx changes it. Placeholders ($diff) are filled in; a key may use only those its default offers.
+# says when arnx changes it. Placeholders ($diff) are filled in; a key may use only those its default offers. $$ writes
+# a literal $.
 `;
 
 /** Writes arnx's default of `key` into .arnx/prompts.toml with the hash it was copied from, keeping everything the file

@@ -388,7 +388,8 @@ and keeps the keys with the placeholders the code fills (`PLACEHOLDERS`), the JS
 
 A repository overrides single keys in `.arnx/prompts.toml` (`userprompts.ts`); every key it leaves out is arnx's.
 `reviewer.ts`, `setup.ts` and `accept.ts` give the LocalBrain they build `promptsFor(repo)`; the file is read there
-and refused when it names an unknown key or a placeholder its key does not offer. A brain running overrides says so
+and refused when it names an unknown key or a placeholder its key does not offer. `$$` writes a literal `$` (in keys
+with placeholders or without); no default holds `$$`, so arnx's own prompts build as before. A brain running overrides says so
 (`Brain.overrides`): review.json gets `prompt_overrides` and `prompts_hash` (the hash of the 24 texts a model is
 sent), the header of review.md names them; without overrides both are absent and every file is what it was. arnx
 cloud runs its own prompts: `setup` and `review` print `CLOUD_PROMPTS` once when the file overrides one of them, and

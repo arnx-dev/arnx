@@ -72,7 +72,7 @@ The prompts are yours to change too, one key at a time. `arnx prompts` lists the
 `challenge.task`, ..., and `fix.rules`, the rules the fix prompt gives your coding agent); `arnx prompts copy
 hunt.task` writes arnx's text of that key into `.arnx/prompts.toml`, where you edit it. The file holds only the keys
 you changed: every other key follows arnx's defaults, also after an upgrade. A key keeps the `$placeholders` its
-default offers (arnx refuses others, naming the ones it has); `arnx doctor` warns when arnx changed the default you
+default offers (arnx refuses others, naming the ones it has; `$$` writes a literal `$`, as in `$$HOME`); `arnx doctor` warns when arnx changed the default you
 copied (`<name>_base` records it) and when you dropped a placeholder the step needs, such as `$diff`. Each review
 names your keys and the hash of the prompts it ran, in review.json and review.md's header; a change that edits
 `.arnx/prompts.toml` is reviewed with its own version, and the review says so. `arnx accept` names the fix prompt's
