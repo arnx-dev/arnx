@@ -1,11 +1,11 @@
 // Setup asks nothing about the environment: it proves it, stamps it and ends with what is worth a look. A
 // review.yaml changed since its proof is proven again before a review or a check uses it.
 import { expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { approvalStamp, isFileApproved, parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { whatNext } from "../src/next";
-import { type Runner, type SessionFactory } from "../src/sandbox";
+import { type Runner, sandboxOptions, type SessionFactory } from "../src/sandbox";
 import { approvalChecks } from "../src/setupview";
 import { Cli } from "./helpers/cli";
 import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -49,6 +49,15 @@ async function changed(): Promise<string> {
     .replace("python:3.12", "python:3.13"));
   expect(approvalStamp(repo)).toMatchObject({ current: false });
   return repo;
+}
+
+/** A docker that only answers `docker info` (approve checks Docker runs; its suites run in a fake session). */
+function dockerThatRuns(): string {
+  const dir = join(tmp(), "bin");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "docker"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(dir, "docker"), 0o755);
+  return join(dir, "docker");
 }
 
 const proven = (repo: string) => isFileApproved(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")));
@@ -114,17 +123,20 @@ test("install lines downloading from outside the package registries are worth a 
     "shop: install downloads from gitlab.example.com (not a package registry)"]);
 });
 
-test("review proves a changed review.yaml again first, in one line, and goes on", async () => {
+test("review proves a changed review.yaml again first and goes on; without a copy of the proven file, it says so",
+  async () => {
   const repo = await changed();
   const runs: string[] = [];
   const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS], runs), ask: async () => {
     throw new Error("asked");
   } });
   await cli.run("review", "--range", "HEAD..HEAD", "--quiet");
-  expect(cli.out[0]).toBe(".arnx/review.yaml changed since its proof: running its suites again");
+  expect(cli.out).toEqual([".arnx/review.yaml changed since its proof (no copy of the proven file to compare): running its suites again"]);
   expect(runs).toEqual(["shop"]);
   expect(proven(repo)).toBe(true);
   expect(cli.stderr).not.toContain("arnx approve");
+  expect(readFileSync(join(repo, ".arnx", "setup", "approval.md"), "utf8"))
+    .toContain("\nChanged since the last proof: no copy of the proven file to compare\n");
 });
 
 test("a re-proof that fails stops the review before any model call, naming the failing test", async () => {
@@ -142,10 +154,66 @@ test("check proves a changed review.yaml again before running the accepted tests
   const runs: string[] = [];
   const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS], runs), checkSessions: suites([PASS]) });
   expect(await cli.run("check", "--quiet")).toBe(3); // no accepted tests yet: reached after the proof
-  expect(cli.out).toEqual([".arnx/review.yaml changed since its proof: running its suites again",
+  expect(cli.out).toEqual([".arnx/review.yaml changed since its proof (no copy of the proven file to compare): running its suites again",
     "No accepted tests yet: arnx accept keeps them after a review."]);
   expect(runs).toEqual(["shop"]);
   expect(proven(repo)).toBe(true);
+});
+
+test("a weakened test_command and a file added to known_failing are named before the suites run, then worth a look",
+  async () => {
+  const repo = await shop();
+  writeFileSync(reviewConfigPath(repo), GOOD);
+  const first = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]) });
+  await first.run("review", "--range", "HEAD..HEAD", "--quiet"); // proves it, and keeps a copy of what it proved
+  expect(first.out).toEqual([".arnx/review.yaml is not proven yet: running its suites"]);
+  expect(existsSync(join(repo, ".arnx", "setup", "proven-review.yaml"))).toBe(true);
+  writeFileSync(reviewConfigPath(repo), readFileSync(reviewConfigPath(repo), "utf8")
+    .replace("python -m pytest -q {targets}", "python -m pytest -q -k 'not pricing' {targets}")
+    .replace("    test_command:", "    known_failing: [tests/test_pricing.py]\n    test_command:"));
+  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]) });
+  await cli.run("review", "--range", "HEAD..HEAD", "--quiet");
+  const changes = [
+    "  shop: test_command `python -m pytest -q {targets}` → `python -m pytest -q -k 'not pricing' {targets}`",
+    "  shop: known_failing added tests/test_pricing.py",
+  ];
+  expect(cli.out).toEqual([[".arnx/review.yaml changed since its proof:", ...changes, "Running its suites again."]
+    .join("\n"), ["", "Worth a look:",
+    "  ! shop: 1 test file(s) set aside as known failing (1 with no reason in notes): tests/test_pricing.py", ""]
+    .join("\n")]);
+  expect(readFileSync(join(repo, ".arnx", "setup", "approval.md"), "utf8"))
+    .toContain(["", "Changed since the last proof:", ...changes.map((c) => `- ${c.trim()}`), ""].join("\n"));
+  // Proven again: the next run says nothing, and the copy is the new proof.
+  const again = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]) });
+  await again.run("review", "--range", "HEAD..HEAD", "--quiet");
+  expect(again.out).toEqual([]);
+  expect(readFileSync(join(repo, ".arnx", "setup", "proven-review.yaml"), "utf8"))
+    .toBe(readFileSync(reviewConfigPath(repo), "utf8"));
+});
+
+test("approve says what changed since the last proof, projects added or removed too", async () => {
+  const saved = sandboxOptions.docker;
+  try {
+    sandboxOptions.docker = dockerThatRuns();
+    const repo = await shop();
+    writeFileSync(reviewConfigPath(repo), GOOD);
+    const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]) });
+    expect(await cli.run("approve", "--quiet")).toBe(0);
+    expect(cli.stdout).not.toContain("changed since");
+    writeFileSync(reviewConfigPath(repo), readFileSync(reviewConfigPath(repo), "utf8")
+      .replace("  shop:", "  store:").replace("- pip install pytest", "- pip install pytest\n      - pip install requests"));
+    cli.out.length = 0;
+    expect(await cli.run("approve", "--quiet")).toBe(0);
+    expect(cli.stdout).toContain(["", ".arnx/review.yaml changed since its proof:", "  project shop removed",
+      "  project store added", "Running its suites again."].join("\n"));
+    writeFileSync(reviewConfigPath(repo), readFileSync(reviewConfigPath(repo), "utf8")
+      .replace("pip install requests", "pip install httpx").replace("image: python:3.12", "image: python:3.13"));
+    cli.out.length = 0;
+    expect(await cli.run("approve", "--quiet")).toBe(0);
+    expect(cli.stdout).toContain("\n  store: install changed\n  store: image changed\n");
+  } finally {
+    sandboxOptions.docker = saved;
+  }
 });
 
 test("next and doctor send a changed review.yaml to review, not to approve", async () => {

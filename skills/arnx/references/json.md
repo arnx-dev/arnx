@@ -168,8 +168,8 @@ stamps it (the proof; nobody is asked). With `--json` the consent to send code n
 
 `arnx approve` proves `.arnx/review.yaml` again: it runs every project's suite (or one, with `--project`) and stamps
 the file. Nothing is asked (`--yes` is accepted and changes nothing). `review`, `check` and `accept` run the same proof
-by themselves when the file changed since its proof. Each proof is recorded, with its warnings, in
-`.arnx/setup/approval.md` (a local file).
+by themselves when the file changed since its proof; each first says on stderr what changed since the last proof.
+Each proof is recorded, with those changes and its warnings, in `.arnx/setup/approval.md` (a local file).
 
 | Field | Type | Meaning |
 |---|---|---|

@@ -1,7 +1,9 @@
 // What setup and approve show a developer: what is about to happen and roughly what it costs, one line per project
 // to judge, what is worth a look once the environment is proven, and what to do next.
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, filesAt, git, leftOutUntracked, resolveChange, someNames, untrackedLine } from "./change";
-import { readSecretPins, type ReviewFile, secretPinsOf } from "./config";
+import { parseReviewFile, readSecretPins, type ReviewFile, secretPinsOf } from "./config";
 import { detect } from "./detect";
 import { ArnxError } from "./errors";
 import { refString, type Settings, untrackedSetting } from "./settings";
@@ -12,6 +14,8 @@ const MIN_PER_PROJECT = [1, 3];
 const USD_PER_PROJECT = [0.03, 0.1];
 
 export const REVIEW_FILE = ".arnx/review.yaml";
+/** A copy of review.yaml as its last proof stamped it (a local file): what a changed file is compared with. */
+export const PROVEN_COPY = ".arnx/setup/proven-review.yaml";
 
 /** Shown before setup starts: the steps, what is sent, and a rough estimate from the layout found without a model.
  * `untracked`: the agent reads untracked files too (--untracked; default `[review] untracked`). */
@@ -149,4 +153,67 @@ export function nextStep(repo: string, untracked = untrackedSetting(repo)): stri
     if (!(e instanceof ArnxError)) throw e;
     return `Next: arnx review, once there is a change (${e.message})`;
   }
+}
+
+/** What changed in review.yaml since its proof, one line per change; null without a copy of the proven file (an
+ * older arnx proved it, or the copy is of another proof). */
+export function changesSinceProof(repo: string, now: ReviewFile): string[] | null {
+  const path = join(repo, PROVEN_COPY);
+  if (!existsSync(path)) return null;
+  let old: ReviewFile;
+  try {
+    old = parseReviewFile(readFileSync(path, "utf8"));
+  } catch (e) {
+    if (e instanceof ArnxError) return null;
+    throw e;
+  }
+  const sha = (f: ReviewFile) => (f.raw.approved as { sha256?: unknown } | undefined)?.sha256;
+  return sha(old) !== undefined && sha(old) === sha(now) ? describeChanges(old, now) : null;
+}
+
+type Raw = Record<string, unknown>;
+/** Equal as data (the YAML's whole numbers are bigints). */
+const same = (a: unknown, b: unknown) => {
+  const text = (v: unknown) => JSON.stringify(v, (_k, x: unknown) => typeof x === "bigint" ? `${x}n` : x);
+  return text(a) === text(b);
+};
+const clipped = (s: string) => s.length > 80 ? `${s.slice(0, 79)}…` : s;
+/** The keys a change is described by; any other key that changed is named as it is. */
+const NAMED = new Set(["test_command", "install", "known_failing", "env", "services", "owns", "uses", "approved"]);
+
+/** Projects added or removed, then per project: test_command (old → new), install, known_failing (added and
+ * removed files), env, services, owns, uses, and any other key by name; then the file's own keys. */
+export function describeChanges(old: ReviewFile, now: ReviewFile): string[] {
+  const out: string[] = [];
+  for (const p of old.projects) if (!now.projects.some((q) => q.name === p.name)) out.push(`project ${p.name} removed`);
+  for (const p of now.projects) if (!old.projects.some((q) => q.name === p.name)) out.push(`project ${p.name} added`);
+  const spec = (f: ReviewFile, name: string): Raw => (f.legacy ? f.raw : (f.raw.projects as Record<string, Raw>)[name]) ?? {};
+  for (const p of now.projects) {
+    const o = old.projects.find((q) => q.name === p.name);
+    if (!o) continue;
+    const who = now.legacy ? "" : `${p.name}: `;
+    if (o.testCommand !== p.testCommand) {
+      out.push(`${who}test_command \`${clipped(o.testCommand)}\` → \`${clipped(p.testCommand)}\``);
+    }
+    if (!same(o.install, p.install)) out.push(`${who}install changed`);
+    const added = p.knownFailing.filter((k) => !o.knownFailing.includes(k));
+    const removed = o.knownFailing.filter((k) => !p.knownFailing.includes(k));
+    if (added.length) out.push(`${who}known_failing added ${added.join(", ")}`);
+    if (removed.length) out.push(`${who}known_failing removed ${removed.join(", ")}`);
+    for (const [key, a, b] of [["env", o.env, p.env], ["services", o.services, p.services], ["owns", o.owns, p.owns],
+      ["uses", o.uses, p.uses]] as const) {
+      if (!same(a, b)) out.push(`${who}${key} changed`);
+    }
+    const before = spec(old, p.name), after = spec(now, p.name);
+    const other = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+      .filter((k) => !NAMED.has(k) && !same(before[k], after[k])).sort();
+    if (other.length) out.push(`${who}${other.join(", ")} changed`);
+  }
+  if (!now.legacy) {
+    // Services are told per project, where they are used.
+    const keys = ["version", "allow_env_names", "uncovered", "allow_secret_looking"]
+      .filter((k) => !same(old.raw[k], now.raw[k]));
+    if (keys.length) out.push(`${keys.join(", ")} changed`);
+  }
+  return out;
 }

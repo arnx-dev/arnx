@@ -51,8 +51,8 @@ import { isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, type ProjectProof, runSetup,
   type SetupResult, stillRed }
   from "./setup";
-import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, REVIEW_FILE, setupPreview,
-  worthALook }
+import { approvalScreen, approvalWarnings, changesSinceProof, type FilesSummary, filesSummary, nextStep, PROVEN_COPY,
+  REVIEW_FILE, setupPreview, worthALook }
   from "./setupview";
 import { isoSeconds } from "./util";
 import { spend } from "./spend";
@@ -818,9 +818,30 @@ class Commands {
     this.d.out("✓ Environment proven");
     const red = projects.reduce((k, p) => k + p.accepted_failing, 0);
     if (red) this.d.out(stillRed(red));
+    this.sayWorthALook(repo, file, o);
+    this.d.out(nextStep(repo));
+  }
+
+  /** "Worth a look" after a passing proof: only what applies, nothing when nothing does. */
+  private sayWorthALook(repo: string, file: ReviewFile, o: { proofs?: ProjectProof[]; untracked?: boolean }): void {
     const look = worthALook(file, repo, o);
     if (look.length) this.d.out(["", "Worth a look:", ...look.map((l) => `  ! ${l}`), ""].join("\n"));
-    this.d.out(nextStep(repo));
+  }
+
+  /** Before the suites of a file stamped before run again: what changed since its proof, compared with the copy the
+   * proof kept (PROVEN_COPY). Null for a file never proven or unchanged; "no-copy" when there is no copy to compare
+   * (an older arnx proved it); else the changes, which the approval record keeps. */
+  private sayChanges(repo: string, file: ReviewFile): string[] | "no-copy" | null {
+    if (isFileApproved(file) || approvalStamp(repo) === null) return null;
+    const changes = changesSinceProof(repo, file);
+    if (!changes?.length) {
+      this.d.out(`${REVIEW_FILE} changed since its proof${changes ? "" : " (no copy of the proven file to compare)"}: ` +
+        "running its suites again");
+      return changes ?? "no-copy";
+    }
+    this.d.out([`${REVIEW_FILE} changed since its proof:`, ...changes.map((c) => `  ${c}`), "Running its suites again."]
+      .join("\n"));
+    return changes;
   }
 
   /** A review.yaml changed since its proof (or never proven) is proven again before a review, a check or accept uses
@@ -830,14 +851,16 @@ class Commands {
     if (!existsSync(reviewConfigPath(repo)) || isSeedFile(repo)) return; // the command itself says to run setup
     const file = loadReviewFile(repo, { requireApproved: false });
     if (isFileApproved(file)) return;
-    const stamped = approvalStamp(repo) !== null;
-    const why = stamped ? "changed since its proof" : "is not proven yet";
-    this.d.out(`${REVIEW_FILE} ${why}: running its suites${stamped ? " again" : ""}`);
-    const r = await this.approveRun(repo, a, undefined, undefined, { warnings: approvalWarnings(file) });
+    // A changed file says what changed first: a weakened test_command or a new known_failing entry is never silent.
+    const changes = this.sayChanges(repo, file);
+    if (changes === null) this.d.out(`${REVIEW_FILE} is not proven yet: running its suites`);
+    const why = changes === null ? "is not proven yet" : "changed since its proof";
+    const r = await this.approveRun(repo, a, undefined, undefined, { warnings: approvalWarnings(file), changes });
     if (r.code !== 0) {
       throw new SetupRequired(`${REVIEW_FILE} ${why}, and its suites fail:\n${r.detail}\nNext: fix ${REVIEW_FILE}, ` +
         `then ${command}`);
     }
+    this.sayWorthALook(repo, file, { untracked: untrackedSetting(repo) });
   }
 
   /** A failed setup's last attempt: `.arnx/review.yaml`, unapproved, unless that file is approved (a failed attempt
@@ -888,9 +911,10 @@ class Commands {
 
   /** The proof: runs the suites and stamps the file. `untracked`: the suites run with untracked files too, as setup
    * proved them (default: `[review] untracked`). `warnings`: what is worth a look, recorded with the proof in
-   * .arnx/setup/approval.md (a local file; review.yaml stays as it is). Says nothing but progress. */
+   * .arnx/setup/approval.md (a local file; review.yaml stays as it is) with `changes` (sayChanges). The stamped file
+   * is copied to PROVEN_COPY, what the next change is compared with. Says nothing but progress. */
   private async approveRun(repo: string, a: Args, project: string | undefined, untracked: boolean | undefined,
-                           o: { warnings: string[]; since?: number })
+                           o: { warnings: string[]; since?: number; changes?: string[] | "no-copy" | null })
     : Promise<{ code: number; projects: ApprovedProject[]; detail: string; record: string | null }> {
     // Who ran the proof: the git user (a coding agent running arnx is not told apart from its user).
     const by = git(repo, ["config", "user.name"], [0, 1]).trim() || "unknown";
@@ -906,7 +930,11 @@ class Commands {
     const record = APPROVAL_RECORD;
     const sha = createHash("sha256").update(readFileSync(reviewConfigPath(repo))).digest("hex").slice(0, 12);
     mkdirSync(dirname(join(repo, record)), { recursive: true });
+    copyFileSync(reviewConfigPath(repo), join(repo, PROVEN_COPY));
+    const changed = o.changes === "no-copy" ? ["Changed since the last proof: no copy of the proven file to compare", ""]
+      : o.changes?.length ? ["Changed since the last proof:", ...o.changes.map((c) => `- ${c}`), ""] : [];
     writeFileSync(join(repo, record), ["# Environment proven", "", `${at} · by ${by} · ${REVIEW_FILE} sha256 ${sha}`, "",
+      ...changed,
       ...(o.warnings.length ? ["Worth a look:", ...o.warnings.map((w) => `- ${w}`)] : ["Worth a look: nothing"]), ""]
       .join("\n"));
     return { code: 0, projects, detail, record };
@@ -1051,8 +1079,9 @@ class Commands {
     this.d.out("");
     // Nothing is asked (--yes is still taken): the proof runs and the file is stamped.
     requireDocker();
+    const changes = this.sayChanges(repo, file);
     const r = await this.approveRun(repo, a, a.values.project as string | undefined, undefined,
-      { warnings: approvalWarnings(file) });
+      { warnings: approvalWarnings(file), changes });
     if (r.code === 0) this.provenEnd(repo, file, r.projects, { untracked });
     else this.d.out(`Not proven:\n${r.detail}`);
     this.emit(r.code === 0 ? "ok" : "fail", r.code, { approved: r.code === 0, projects: r.projects,

@@ -35,9 +35,14 @@ the package registries (`curl`, `wget`, `git clone`), files allowed although the
 project tests. The same list, with who ran the proof (the git user), is in `.arnx/setup/approval.md`. Open
 `.arnx/review.yaml` in an editor for the full file.
 
-A `.arnx/review.yaml` changed since its proof (edited by hand, or by `arnx allow-secret`) is proven again before the
-next `review`, `check` or `accept` uses it: one line, the suites, a new stamp. When a suite fails there, the command
-stops and names the failing tests (exit 3). `arnx approve` runs the same proof on its own.
+A `.arnx/review.yaml` changed since its proof (edited by hand, in a pull request, or by `arnx allow-secret`) is
+noticed and proven again before the next `review`, `check` or `accept` uses it. First it says what changed since the
+last proof, per project: `test_command` (old → new), `install`, files added to or removed from `known_failing`, `env`,
+`services`, `owns`, `uses`, any other key by name, and projects added or removed. It compares with the copy the last
+proof kept in `.arnx/setup/proven-review.yaml` (a local file; without it, as after a proof by an older arnx or in a
+fresh clone, it says there is no copy to compare). Then the suites run and the file is stamped again, followed by what
+is worth a look; the changes go into `.arnx/setup/approval.md` too. When a suite fails there, the command stops and
+names the failing tests (exit 3). `arnx approve` runs the same proof on its own, saying the same.
 
 ### Rust crates
 
