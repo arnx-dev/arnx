@@ -199,6 +199,33 @@ test("grep's time limit counts matching only: a literal grep over 6,000 files fi
   }
 }, 30_000);
 
+test("a regex grep skips lines over 10,000 characters and says so; a literal one still searches them", async () => {
+  mkdirSync(join(root, "web"), { recursive: true });
+  writeFileSync(join(root, "web", "app.min.js"), "var a=1;".repeat(112_500) + "\nneedle zzz\n");
+  writeFileSync(join(root, "web", "b.js"), "x".repeat(20_000) + "needle\n" + "abc zzz\n");
+  const ws = new Workspace(root);
+  const started = Date.now();
+  expect(await ws.call("grep", { pattern: "\\w+.*zzz", path: "web" })).toBe("web/app.min.js:2: needle zzz\n" +
+    "web/b.js:2: abc zzz\n2 lines over 10,000 characters skipped (minified or generated)");
+  expect(Date.now() - started).toBeLessThan(1500);
+  expect(await ws.call("grep", { pattern: "needle", path: "web" })).toBe("web/app.min.js:2: needle zzz\n" +
+    `web/b.js:1: ${"x".repeat(200)}`);
+});
+
+test("a grep stopped by its time limit returns the matches it found, then why it stopped", async () => {
+  mkdirSync(join(root, "part"), { recursive: true });
+  // the first batch (over 1 MB) holds the match; the second holds a line the pattern backtracks on
+  writeFileSync(join(root, "part", "a0.txt"), "b\n" + `${"x".repeat(100)}\n`.repeat(11_000));
+  writeFileSync(join(root, "part", "a1.txt"), "a".repeat(400) + "\n");
+  grepLimits.ms = 300;
+  try {
+    expect(await new Workspace(root).call("grep", { pattern: "a*.?a*.?a*b", path: "part" })).toBe("part/a0.txt:1: b\n" +
+      "... stopped: pattern too slow (over 0.3 s): simplify it, e.g. no nested or stacked quantifiers like (a+)+ or a*a*a*");
+  } finally {
+    grepLimits.ms = 2000;
+  }
+});
+
 test("grep skips files over the size limit", async () => {
   writeFileSync(join(root, "big.txt"), "needle\n" + "x".repeat(2_000_001));
   const out = await new Workspace(root).call("grep", { pattern: "needle" });
