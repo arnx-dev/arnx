@@ -10,7 +10,7 @@ import type { Billed, Brain, Totals } from "./brain";
 import { inPool } from "./challenge";
 import { shallowKind } from "./shallow";
 import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, withRole } from "./events";
-import { added, type Change, describe, EMPTY_TREE, filesAt, git, removed, resolveChange, sliceDiff, someNames,
+import { added, type Change, describe, EMPTY_TREE, filesAt, removed, resolveChange, sliceDiff, someNames,
   untrackedLine } from "./change";
 import { loadReviewFile, type ReviewConfig, reviewConfigPath, secretPinsOf } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
@@ -34,8 +34,8 @@ import type { Say } from "./progress";
 import { route } from "./route";
 import { isSecretPath } from "./secrets";
 import { cloudModels, refString, type Settings } from "./settings";
-import { dockerSession, ownTestsInWriteDir, ownTestsProblem, type Round, testRound, typecheckRound, writeDirOf }
-  from "./testround";
+import { collect, dockerSession, ownTestsInWriteDir, ownTestsProblem, type Round, testRound, typecheckRound,
+  writeDirOf } from "./testround";
 import { logUsage } from "./usage";
 import { randomHex } from "./util";
 import { buildInfo, VERSION } from "./version";
@@ -169,18 +169,19 @@ export function buildFindings(rnd: Round, report: AgentReport): Finding[] {
 }
 
 /** The project's own test files that mention one of its environment variables, so the reviewer can copy their
- * setup (a database connection, the schema). Read from the working tree; at most `max`. */
-export function envTests(repo: string, cfg: ReviewConfig, max = 6): string[] {
+ * setup (a database connection, the schema). Read from the round's snapshot (`snap`): the files the reviewer can
+ * read, staged and untracked ones included when the review sends them; at most `max`. */
+export function envTests(snap: string, cfg: ReviewConfig, max = 6): string[] {
   const names = Object.keys(cfg.env);
-  if (!names.length) return [];
+  if (!names.length || !existsSync(join(snap, cfg.workdir))) return [];
   const adapter = adapterFor(cfg);
-  const files = git(repo, ["ls-files", "-z", "--", cfg.workdir === "." ? "." : cfg.workdir]).split("\0")
-    .filter((p) => p && adapter.isTestFile(posix.basename(p)) && !isSecretPath(p));
+  const files = collect(snap, cfg.workdir === "." ? "" : cfg.workdir, /./)
+    .filter((p) => adapter.isTestFile(posix.basename(p)) && !isSecretPath(p));
   const out: string[] = [];
   for (const p of files) {
     let body: string;
     try {
-      body = readFileSync(join(repo, p), "utf8");
+      body = readFileSync(join(snap, p), "utf8");
     } catch {
       continue;
     }
@@ -372,7 +373,6 @@ export async function runReview(repo: string, o: { settings: Settings;
       const outDir = file.legacy ? rdir : join(rdir, "projects", cfg.name);
       const scope = file.legacy ? { owned: change.files, used: [] } : { owned, used };
       const projectBudget = s.reviewBudgetUsd * AGENT_SHARE / n;
-      const env = envTests(repo, cfg);
       const opts = { brain, budgetUsd: projectBudget, writeDir, runs: s.runs, outDir,
         sessionFactory: o.sessionFactory ?? dockerSession, progress: o.progress, coverage: scope.owned,
         untracked: !!change.withUntracked,
@@ -396,8 +396,8 @@ export async function runReview(repo: string, o: { settings: Settings;
             if (!r.index) o.progress?.(`${cfg.name} (${i + 1}/${n}): no code index (${clip(r.reason ?? "", 80)}); context by names`);
             index = r.index;
           }
-          return { kind: "review" as const, input: { cfg, diff, scope, scoped: !file.legacy, envTests: env,
-            maxQuestions: s.maxQuestions, dbNames: databaseEnv(cfg.env, cfg.services),
+          return { kind: "review" as const, input: { cfg, diff, scope, scoped: !file.legacy,
+            envTests: envTests(snap, cfg), maxQuestions: s.maxQuestions, dbNames: databaseEnv(cfg.env, cfg.services),
             // Part hunters build their context packs from the snapshot; with an index they get them built here.
             ...(o.hunt ? { hunt: { context: contextPack(snap, diff, scope.owned, searchDirs, CONTEXT_LIMIT, index),
               root: snap, searchDirs, ...(index ? { parts: huntParts(snap, cfg, diff, scope.owned, searchDirs, index) }
