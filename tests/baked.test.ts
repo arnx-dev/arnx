@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, cpSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { bakedKey, commandPaths, differing, findCopies, reached, scopeFiles } from "../src/baked";
+import { bakedKey, commandPaths, differing, findCopies, onlyInCopies, reached, scopeFiles } from "../src/baked";
 import { parseReviewConfig } from "../src/config";
 import { cacheRecords, sourceRecords } from "../src/envprune";
 import { dockerSteps, envKey, sandboxOptions } from "../src/sandbox";
@@ -143,6 +143,48 @@ test("an image made from the code is marked with its tag and reused for the same
     expect(docker.builds()).toHaveLength(2);
   } finally {
     Object.assign(sandboxOptions, saved);
+  }
+});
+
+test("files only the image's copy holds: those the output names first, then those beside the code", () => {
+  const snap = write(tmp(), { "packages/core/index.js": "i", "packages/core/a.js": "a", "app/tests/gen/t.js": "t" });
+  const copies = [{ root: "/opt/app", scope: "", files: ["packages/core/a.js", "packages/core/index.js"] }];
+  const image = ["/opt/app/packages/core/index.js", "/opt/app/packages/core/a.js", "/opt/app/packages/core/z.bin",
+    "/opt/app/packages/core/default.db", "/opt/app/dist/bundle.js", "/opt/app/dist/named.js", "/opt/other/x.db",
+    "/opt/app/app/tests/gen/old.js"];
+  const output = "Error: ENOENT: open '/src/packages/core/default.db'\nat dist/named.js:1 (not dist/bundle.jsx)";
+  expect(onlyInCopies(copies, image, snap, output, "app/tests/gen")).toEqual(["dist/named.js",
+    "packages/core/default.db", "packages/core/z.bin"]);
+});
+
+test("a session on an image holding a copy of the code can say what only that copy holds", async () => {
+  const saved = sandboxOptions.docker;
+  try {
+    const cfg = parseReviewConfig(BAKED);
+    const snap = write(tmp(), { "app/requirements.txt": `# ${Date.now()}\n`, "app/a.py": "A", "app/b.py": "B",
+      "app/c.py": "C" });
+    const dir = tmp();
+    // The image's copy matches the code (no rebuild) and also holds the database its install made.
+    writeFileSync(join(dir, "docker"), `#!/bin/sh
+case "$1" in
+  info) echo 27;;
+  image) [ "$3" = 'arnx-env:${envKey(cfg, snap)}' ] || exit 1;;
+  run) case "$*" in
+    *sha256sum*) cat > /dev/null; for f in A B C; do l=$(echo $f | tr A-C a-c);
+      echo "$(printf $f | sha256sum | cut -d' ' -f1)  /opt/app/$l.py"; done;;
+    *) printf '/opt/app/a.py\n/opt/app/b.py\n/opt/app/c.py\n/opt/app/data/gen.db\n/opt/app/x.db\n';;
+  esac;;
+esac
+exit 0
+`);
+    chmodSync(join(dir, "docker"), 0o755);
+    sandboxOptions.docker = join(dir, "docker");
+    mkdirSync(join(snap, "app", "data"));
+    const said = await dockerSession(cfg, snap, join(tmp(), "build.log"),
+      async (s) => s.copies?.("Error: ENOENT: no such file or directory, open '/src/app/data/gen.db'"));
+    expect(said).toEqual({ roots: ["/opt/app"], files: ["app/data/gen.db", "app/x.db"] });
+  } finally {
+    sandboxOptions.docker = saved;
   }
 });
 

@@ -379,7 +379,7 @@ the copy under its old name is removed.
 | `ignore.ts` | `.arnxignore` matching, and the proposal of data-like files for `init` |
 | `change.ts` | Resolve the change; build the snapshot |
 | `sandbox.ts` | Docker: env image, locked-down runs, services, timeouts, cleanup of live sessions |
-| `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, kept when runs reach them, compared with the code to test; the key of an image made from the code (its files, not the tests or reports beside it) |
+| `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, kept when runs reach them, compared with the code to test; the key of an image made from the code (its files, not the tests or reports beside it); when a round's probe runs no test, the files only the copy holds (named in the stop message with `arnx setup --project NAME`) |
 | `outcomes.ts` | Run tests through the adapter; classify results across runs |
 | `before.ts` | The before/after check's comparison: a finding's runs on the code before the change against its failure |
 | `typecheck.ts` | The project's own type check: tsc's output read, errors on the change against those before it, in words |

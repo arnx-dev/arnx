@@ -8,7 +8,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { type AgentResult, Workspace } from "./agent";
 import { adapterFor } from "./adapters";
-import { bakedError, bakedIn, bakedKey, rebuildText } from "./baked";
+import { bakedError, bakedIn, bakedKey, type BakedCopy, copyOnly, type CopyOnly, copyStopText, rebuildText }
+  from "./baked";
 import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
   fixText, judgeBefore, judgeFix, notChecked, SKIP_REASONS } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
@@ -51,8 +52,10 @@ export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, e
   // of that code (keyed on it: later sessions and reviews of the same code reuse it). The before/after check copies its
   // code in once the session is up: a copy that differs from it then refuses the first run.
   let guard: ((s: Session) => Runner) | null = null;
+  let copies: BakedCopy[] = [];
   if (existsSync(snap) && readdirSync(snap).length) {
     const baked = bakedIn(cfg, image, snap);
+    copies = baked?.copies ?? [];
     if (baked?.differ.length) {
       dockerSteps.say?.(rebuildText(cfg, baked));
       const own = bakedKey(image.slice(image.indexOf(":") + 1), cfg, baked.copies, snap);
@@ -72,8 +75,10 @@ export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, e
     };
   }
   const session = await new Session(image, cfg, snap).start();
+  const runner = guard ? guard(session) : session;
   try {
-    return await body(guard ? guard(session) : session);
+    return await body(copies.length ? { run: (command, timeout) => runner.run(command, timeout),
+      copies: (output) => copyOnly(cfg, image, copies, snap, output) } : runner);
   } finally {
     session.close();
   }
@@ -242,11 +247,12 @@ export function probeRun(session: Runner, snap: string, cfg: ReviewConfig, dir: 
 /** Why a round stops before its brain writes a test: the environment runs no test at this commit (a member's
  * manifest that builds differently from the image, a build script that downloads). Every test would go without a
  * report, and the review would read as one that found nothing. */
-export function probeFailure(cfg: ReviewConfig, result: RunResult, log: string): ArnxError {
+export function probeFailure(cfg: ReviewConfig, result: RunResult, log: string, copies?: CopyOnly): ArnxError {
   const why = result.timedOut ? "timed out" : `exited ${result.exitCode ?? "?"} without a report`;
   const tail = result.output.trim().split("\n").slice(-6).map((l) => `  ${l}`).join("\n");
   return new ArnxError(`${cfg.name}: the test environment runs no test at this commit: arnx's one-line test ` +
-    `${why}. The review stopped before writing tests (output: ${log})${tail ? `\n${tail}` : ""}`);
+    `${why}. The review stopped before writing tests (output: ${log})${tail ? `\n${tail}` : ""}` +
+    (copies ? `\n${copyStopText(cfg, copies)}` : ""));
 }
 
 export async function testRound(repo: string, head: string | null, cfg: ReviewConfig, o: {
@@ -303,7 +309,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         if (!probe.seen) {
           const log = join(o.outDir, "probe.log");
           writeFileSync(log, probe.result.output);
-          throw probeFailure(cfg, probe.result, log);
+          throw probeFailure(cfg, probe.result, log, session.copies?.(probe.result.output));
         }
         let counter = 0;
         // Runs name the generated test files, never the tests directory: for some languages (Rust) that directory

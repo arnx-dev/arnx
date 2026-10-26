@@ -231,6 +231,59 @@ export function bakedKey(key: string, cfg: ReviewConfig, copies: BakedCopy[], sn
   return `${key}-src-${h.digest("hex").slice(0, 12)}`;
 }
 
+/** Where an image holds copies of the code, and the files (repository paths) only those copies hold. */
+export interface CopyOnly { roots: string[]; files: string[] }
+
+/** Files the copies hold that the snapshot does not (repository paths), outside the generated tests' folder `tests`:
+ * those the output names first, then those beside the code (their folder is in the snapshot), shallowest first. A
+ * whole folder only the copy has (a build's output) counts only when the output names its file. */
+export function onlyInCopies(copies: BakedCopy[], imagePaths: string[], snap: string, output: string, tests: string)
+  : string[] {
+  const named: string[] = [], beside: string[] = [];
+  // Every path the output names, and each tail of it (`/src/a/b.db` names `a/b.db` and `b.db`).
+  const mentioned = new Set<string>();
+  for (const token of output.match(/[\w@+.-][\w@+./-]*/g) ?? []) {
+    const parts = token.replace(/\.+$/, "").split("/");
+    for (let i = 0; i < parts.length; i++) mentioned.add(parts.slice(i).join("/"));
+  }
+  for (const c of copies) {
+    const prefix = c.root === "/" ? "/" : `${c.root}/`;
+    for (const p of imagePaths) {
+      if (!p.startsWith(prefix)) continue;
+      const rel = inScope(c.scope, p.slice(prefix.length));
+      if (rel.startsWith(`${tests}/`) || existsSync(join(snap, rel))) continue;
+      if (mentioned.has(rel)) named.push(rel);
+      else if (existsSync(join(snap, posix.dirname(rel)))) beside.push(rel);
+    }
+  }
+  const depth = (p: string) => p.split("/").length;
+  return [...new Set([...named.sort(),
+    ...beside.sort((a, b) => depth(a) - depth(b) || a.localeCompare(b))])];
+}
+
+/** The image's copies reached by runs, and the files only they hold (the output's first). */
+export function copyOnly(cfg: ReviewConfig, image: string, copies: BakedCopy[], snap: string, output: string)
+  : CopyOnly {
+  const tests = posix.normalize(posix.join(cfg.workdir, cfg.testsDir));
+  return { roots: [...new Set(copies.map((c) => c.root))],
+    files: onlyInCopies(copies, imageFiles(image), snap, output, tests) };
+}
+
+/** Said when the environment runs no test and the image holds a copy of the code: before 0.1.2 the tests could run
+ * on that copy as setup left it, files the install made there included. */
+export function copyStopText(cfg: ReviewConfig, c: CopyOnly): string {
+  const at = c.roots.join(", ");
+  const again = `Set the project up again: arnx setup --project ${cfg.name}`;
+  if (!c.files.length) {
+    return `${cfg.name}: the image holds a copy of the code (${at}); a setup that relied on it can stop here since ` +
+      `arnx 0.1.2. ${again}`;
+  }
+  const more = c.files.length - 3;
+  const list = more > 0 ? `${c.files.slice(0, 3).join(", ")} and ${more} more` : c.files.join(", ");
+  return `${cfg.name}: ${list} exist${c.files.length === 1 ? "s" : ""} only in the image's copy of the code (${at}), ` +
+    `not in /src. ${again}`;
+}
+
 const where = (b: Baked) => [...new Set(b.copies.map((c) => c.root))].join(", ");
 
 /** Said when the image holds an older copy of the code, so an image of this code is used (built if missing). */
