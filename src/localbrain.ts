@@ -12,7 +12,7 @@ import { clip, emit, hypId } from "./events";
 import { explain } from "./explain";
 import { partHunts, parseSuspects, rankSuspects, sameSuspect, secondHunt } from "./hunt";
 import { type AgentModel, FallbackJson, type JsonModel, type ModelUse, newUse, parseJsonObject } from "./llm";
-import { DEFAULT_PROMPTS, PROMPT_VERSION, type Prompts, type Suspect } from "./prompts";
+import { DEFAULT_PROMPTS, isModelKey, PROMPT_VERSION, type Prompts, type Suspect } from "./prompts";
 import { mergeQuestions } from "./questions";
 import { type Finding, parseReports, questionTexts } from "./report";
 import type { Prices } from "./settings";
@@ -74,7 +74,8 @@ export class LocalBrain implements Brain {
 
   constructor(readonly m: LocalModels) {
     this.p = m.prompts ?? DEFAULT_PROMPTS;
-    if (this.p.overridden.length) this.overrides = { keys: [...this.p.overridden], hash: this.p.hash };
+    const keys = this.p.overridden.filter(isModelKey); // the fix prompt's keys are no model's
+    if (keys.length) this.overrides = { keys, hash: this.p.hash };
   }
 
   agentRound<K extends RoundKind>(kind: K, input: RoundInputs[K], tools: Promise<RoundTools>): Promise<RoundResult> {

@@ -1,7 +1,9 @@
 // Every prompt arnx builds, on fixed inputs: tests/prompts-frozen.test.ts holds them to the text arnx 0.1.2 built
 // (tests/fixtures/prompts-0.1.2.json), whatever file the templates live in.
 import { parseReviewConfig, parseReviewFile } from "../../src/config";
+import { fixPrompt } from "../../src/fixprompt";
 import * as P from "../../src/prompts";
+import { sampleReview } from "./review";
 import { GOOD, PROJECTS, ROUND_CFG } from "./yaml";
 
 const TS = `
@@ -74,6 +76,17 @@ export function promptCases(p: P.Prompts = P.DEFAULT_PROMPTS): Record<string, st
   out["explainUser"] = P.explainUser(diff, [{ id: "F1", testId: "t.py::a", message: "boom", explanation: "",
     reason: "r", verdict: "confirmed", file: "t.py" }, { id: "F2", testId: "t.py::b", message: "m", explanation: "e",
     reason: "", verdict: null, file: null }], { "t.py": "def test_a(): ..." });
+  // The fix prompt: what accept hands the owner's coding agent.
+  const review = sampleReview({ questions: ["Should invites expire?", "Who may invite?"],
+    groups: [{ findings: ["F1"], title: "Any member can invite", input: "a member invites", actual: "invited",
+      expected: "refused", consequence: "anyone can add people" }] });
+  out["fixPrompt"] = fixPrompt({ review, marks: { findings: { F1: "real", F2: "noise" }, severity: { F1: "high" },
+    answers: { Q1: "yes, after $7 days" } },
+  answers: [{ qid: "Q1", files: {}, keep: { "app/tests/g/answers/test_expiry.py": new Set(["test_expires"]) },
+    skip: {}, disagree: ["tests/g/answers/test_expiry.py::test_expires"], costUsd: 0.1, stop: "end_turn", base: "" }],
+  moved: { "app/tests/g/test_i.py": "app/tests/arnx/r1/g/test_1_i.py" } }, undefined, p);
+  out["fixPrompt/empty"] = fixPrompt({ review: sampleReview({ findings: [], change: "uncommitted ($HOME)" }),
+    marks: { findings: {}, severity: {}, answers: {} }, answers: [], moved: {} }, undefined, p);
   out["PROMPT_VERSION"] = P.PROMPT_VERSION;
   return out;
 }

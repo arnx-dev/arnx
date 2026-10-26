@@ -1,8 +1,10 @@
 // The fix prompt: what an accepted review hands to the developer's own coding agent. arnx proves the bugs and writes
 // the tests that define "fixed"; it does not write the fix. The prompt gives the agent the failing tests, each bug's
 // expected and actual result, the reviewer's likely cause, the owner's answers as intended behaviour, the questions still open, and the
-// rules: change the product code, never the accepted tests, and run `arnx check` until it passes.
+// rules: change the product code, never the accepted tests, and run `arnx check` until it passes. Its opening, the
+// rules and the answers' heading are the `fix` keys of src/prompts.toml, which .arnx/prompts.toml can override.
 import type { AcceptResult } from "./accept";
+import { DEFAULT_PROMPTS, type Prompts } from "./prompts";
 import { groupsOf } from "./report";
 import { SHALLOW_NOTE } from "./shallow";
 import type { Settings } from "./settings";
@@ -59,30 +61,13 @@ function testsOf(fs: AcceptResult["review"]["findings"], moved: Record<string, s
   return out;
 }
 
+/** `p`: the prompts with the repository's overrides (default: arnx's own). */
 export function fixPrompt(r: Pick<AcceptResult, "review" | "marks" | "answers" | "moved"> &
-  Partial<Pick<AcceptResult, "rewrites" | "setAside">>, _settings?: Settings): string {
+  Partial<Pick<AcceptResult, "rewrites" | "setAside">>, _settings?: Settings, p: Prompts = DEFAULT_PROMPTS): string {
   const { review, marks, moved } = r;
   const setAside = r.setAside ?? {};
   const rewrites = r.rewrites ?? [];
-  const out: string[] = [`# Fix the bugs proven by arnx review ${review.id}`, "",
-    `Change: ${review.change}.`, "",
-    "You are fixing bugs in this repository. Each one was proven by a test that fails on the current code, and its " +
-    "owner marked it real. The tests define what \"fixed\" means; the descriptions below say what each one shows.", "",
-    "## Rules", "",
-    "- Change the product code, not the tests. Never edit, skip, delete, weaken or copy the accepted tests in " +
-    "`.arnx/tests/`. They are not part of the project's own test run: only `arnx check` runs them.",
-    "- Fix the cause. Special-casing a test's exact input is not a fix.",
-    "- Fix the behaviour, not the test's view of it. Where an accepted test checks the code's text, only that " +
-    "something exists, or relies on a mock that behaves unlike the real service, make the behaviour right and say " +
-    "what the test cannot show. Do not shape the code to a mock or to a source-text match.",
-    "- Where a question below is still open, leave that behaviour as it is and say so.",
-    "- Run `arnx check` after the fixes. If tests still fail, investigate and fix the underlying issue. If you are " +
-    "blocked or unsure (a missing variable or service, unclear expected behaviour), stop and report what still fails " +
-    "and why.",
-    "- Also run the project's own test suite.",
-    "- Finish with a short summary per bug: what was wrong, what you changed, which tests pass, and what they do not " +
-    "prove (an upstream API contract, a real service, behaviour no test exercises). Passing tests are evidence for " +
-    "what they check, not proof that the bug is gone everywhere.", ""];
+  const out: string[] = [p.fixIntro(review.id, review.change), "", p.fixRules(), ""];
 
   // A finding marked rewrite is a real bug too; its test was set aside, and its rewrite's tests stand in for it.
   const real = new Set(review.findings.filter((f) => marks.findings[f.id] === "real" || marks.findings[f.id] === "rewrite")
@@ -146,9 +131,7 @@ export function fixPrompt(r: Pick<AcceptResult, "review" | "marks" | "answers" |
   const decided = [...answered, ...rewrites.map((w) => [w.id, `${w.question} (rewrite of ${w.findings.join(", ")})`,
     w.reason] as const)];
   if (decided.length) {
-    out.push("## Behaviour the owner decided", "",
-      "These answers are the intended behaviour. Where the code differs, the listed tests fail now; make them pass.",
-      "");
+    out.push(p.fixDecided(), "");
     for (const [qid, q, answer] of decided) {
       out.push(`- ${qid}: ${q}`, `  - Owner: "${answer.trim()}"`);
       const a = r.answers.find((x) => x.qid === qid);

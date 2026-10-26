@@ -28,8 +28,9 @@ test("every built prompt is byte-equal to 0.1.2's", () => {
 test("src/prompts.toml holds every key, each using exactly the placeholders the code fills", () => {
   const toml = readFileSync(join(import.meta.dir, "..", "src", "prompts.toml"), "utf8");
   const steps = [...toml.matchAll(/^\[([a-z]+)\]$/gm)].map((m) => m[1]);
-  expect(steps).toEqual(["review", "hunt", "prove", "rank", "questions", "challenge", "answer", "explain", "setup"]);
-  expect(PROMPT_KEYS).toHaveLength(24);
+  expect(steps).toEqual(["review", "hunt", "prove", "rank", "questions", "challenge", "answer", "explain", "setup",
+    "fix"]);
+  expect(PROMPT_KEYS).toHaveLength(27);
   for (const key of PROMPT_KEYS) {
     expect([key, ...placeholdersIn(DEFAULTS[key])].sort()).toEqual([key, ...PLACEHOLDERS[key]].sort());
     for (const p of NEEDED[key] ?? []) expect(PLACEHOLDERS[key] as readonly string[]).toContain(p);

@@ -16,7 +16,8 @@ import type { ReviewConfig } from "./config";
 export const DIFF_LIMIT = 200_000;
 
 /** Every prompt key (`step.name`, in the order of src/prompts.toml) and the placeholders the code fills in it. A key
- * with none is sent as written. */
+ * with none is used as written. The `fix` keys are the fix prompt, which arnx hands to the owner's coding agent and
+ * sends to no model. */
 export const PLACEHOLDERS = {
   "review.system": ["runner", "services", "workdir", "notes"],
   "review.env_hint": ["names", "tests"],
@@ -42,10 +43,15 @@ export const PLACEHOLDERS = {
   "explain.system": [],
   "setup.system": [],
   "setup.task": ["hints"],
+  "fix.intro": ["id", "change"],
+  "fix.rules": [],
+  "fix.decided": [],
 } as const satisfies Record<string, readonly string[]>;
 
 export type PromptKey = keyof typeof PLACEHOLDERS;
 export const PROMPT_KEYS = Object.keys(PLACEHOLDERS) as PromptKey[];
+/** The keys a model is sent: all but the fix prompt's. */
+export const isModelKey = (k: PromptKey) => !k.startsWith("fix.");
 export type Templates = Readonly<Record<PromptKey, string>>;
 
 /** The placeholders that carry what the step is about (the change, the suspects, the failure): doctor warns about an
@@ -122,9 +128,9 @@ function scopeText(cfg: ReviewConfig, scope: Scope | undefined): string {
 export class Prompts {
   constructor(readonly t: Templates = DEFAULTS, readonly overridden: readonly PromptKey[] = []) {}
 
-  /** The hash of every template in use, in key order: recorded with the keys overridden. */
+  /** The hash of every template a model is sent, in key order: recorded with the keys overridden. */
   get hash(): string {
-    return textHash(PROMPT_KEYS.map((k) => this.t[k]).join("\0"));
+    return textHash(PROMPT_KEYS.filter(isModelKey).map((k) => this.t[k]).join("\0"));
   }
 
   /** `envTests`: the project's own test files that read one of its environment variables. */
@@ -247,6 +253,19 @@ export class Prompts {
 
   explainSystem(): string {
     return this.t["explain.system"];
+  }
+
+  /** The fix prompt's opening: the review it fixes and the change. */
+  fixIntro(id: string, change: string): string {
+    return substitute(this.t["fix.intro"], { id, change });
+  }
+
+  fixRules(): string {
+    return this.t["fix.rules"];
+  }
+
+  fixDecided(): string {
+    return this.t["fix.decided"];
   }
 }
 

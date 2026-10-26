@@ -409,6 +409,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
                                   pins?: string | null } = {})
   : Promise<AcceptResult> {
   const review = load(rdir);
+  const prompts = promptsFor(repo); // read first: a prompts file that does not read stops accept before it writes
   const done = join(rdir, "accepted.json");
   if (existsSync(done) && !o.again) {
     throw new ArnxError(`review ${review.id} was already accepted; pass --again to apply edited marks`);
@@ -581,6 +582,6 @@ export async function accept(repo: string, rdir: string, settings: Settings,
     .map((f) => ({ id: f.id, testId: f.testId, project: f.project, explanation: f.explanation }));
   const result = { review, marks, kept, answers, rewrites, setAside, dest, red, moved, sources,
     precision: precisionOf(log) };
-  writeFileSync(join(rdir, "fix-prompt.md"), wrapMarkdown(fixPrompt(result, settings)));
+  writeFileSync(join(rdir, "fix-prompt.md"), wrapMarkdown(fixPrompt(result, settings, prompts)));
   return result;
 }

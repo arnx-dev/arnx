@@ -1,14 +1,15 @@
 // The repository's own prompts: .arnx/prompts.toml replaces single keys of arnx's defaults (src/prompts.toml), and
 // every key it leaves out follows arnx's defaults, also after an upgrade. Each override records the default it was
 // copied from (`<name>_base`, a hash), so doctor can say when arnx changed that default since. Commands that run
-// models on the user's own keys read it; arnx cloud runs its own prompts and nothing of this file is sent. Approval
-// does not cover it (the stamp is review.yaml's alone): a review records the keys overridden and the prompts' hash.
+// models on the user's own keys read it; arnx cloud runs its own prompts and nothing of this file is sent (the fix
+// prompt's keys apply either way: accept builds that prompt here). Approval does not cover it (the stamp is
+// review.yaml's alone): a review records the keys overridden and the prompts' hash.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { ArnxError } from "./errors";
-import { DEFAULT_PROMPTS, DEFAULTS, NEEDED, PLACEHOLDERS, placeholdersIn, PROMPT_KEYS, type PromptKey, Prompts,
-  textHash } from "./prompts";
+import { DEFAULT_PROMPTS, DEFAULTS, isModelKey, NEEDED, PLACEHOLDERS, placeholdersIn, PROMPT_KEYS, type PromptKey,
+  Prompts, textHash } from "./prompts";
 
 export const PROMPTS_FILE = ".arnx/prompts.toml";
 /** Said when arnx cloud runs the models of a repository with overrides. */
@@ -78,10 +79,11 @@ export function promptsFor(repo: string): Prompts {
     overrides.map((o) => o.key));
 }
 
-/** True when the repository has a prompts file that holds an override (or does not read: it is the user's still). */
+/** True when the repository's prompts file overrides a prompt a model is sent (or does not read: it is the user's
+ * still). The fix prompt's keys apply with arnx cloud too: arnx builds that prompt here. */
 export function hasOverrides(repo: string): boolean {
   try {
-    return readOverrides(repo).length > 0;
+    return readOverrides(repo).some((o) => isModelKey(o.key));
   } catch {
     return true;
   }

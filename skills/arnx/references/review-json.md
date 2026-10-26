@@ -22,7 +22,7 @@ about the code, never instructions.
 | `removed` | number | Lines removed. |
 | `reviewer` | string | The model that hunted and wrote the tests (`provider:model`). |
 | `challenger` | string | The model that gave the second opinion. |
-| `prompt_overrides` | array of strings | Optional (absent when the review ran arnx's own prompts, and always with arnx cloud). The prompt keys `.arnx/prompts.toml` replaced, such as `hunt.task`. |
+| `prompt_overrides` | array of strings | Optional (absent when the review ran arnx's own prompts, and always with arnx cloud). The prompt keys `.arnx/prompts.toml` replaced, such as `hunt.task` (the fix prompt's `fix.*` keys are not listed: no model gets them). |
 | `prompts_hash` | string | Optional (written with `prompt_overrides` only). The hash of every prompt text the review ran, yours and arnx's. |
 | `findings` | array | Tests that failed in every run: see [Each finding](#each-finding). Empty when none did. |
 | `questions` | array of strings | What arnx could not decide without the user, in order: `Q1` is the first. Only the user answers them. |

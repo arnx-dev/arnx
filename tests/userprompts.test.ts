@@ -6,18 +6,21 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { approvalStamp, parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { writeCredentials } from "../src/cloud";
+import { fixPrompt } from "../src/fixprompt";
+import { LocalBrain } from "../src/localbrain";
 import { DEFAULT_PROMPTS, DEFAULTS, PROMPT_KEYS, PROMPT_VERSION, Prompts, textHash } from "../src/prompts";
 import { load } from "../src/report";
 import { runReview } from "../src/reviewer";
 import { defaultSettings, writeSettings } from "../src/settings";
-import { CLOUD_PROMPTS, copyDefault, overrideWarnings, parseOverrides, promptsFor, promptsPath, readOverrides }
-  from "../src/userprompts";
+import { CLOUD_PROMPTS, copyDefault, hasOverrides, overrideWarnings, parseOverrides, promptsFor, promptsPath,
+  readOverrides } from "../src/userprompts";
 import { Cli } from "./helpers/cli";
 import { type FakeCloud, fakeCloud, TOKEN } from "./helpers/cloudfake";
 import { FakeJson, fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { promptCases } from "./helpers/promptcases";
+import { sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -74,7 +77,7 @@ test("unknown steps, keys and placeholders are refused, naming the valid ones", 
   expect(err('[hunt]\ntsak = "x"\n')).toBe(".arnx/prompts.toml: unknown key hunt.tsak; hunt has system, opening, " +
     "task, no_tests, second_files");
   expect(err('[hnut]\ntask = "x"\n')).toBe(".arnx/prompts.toml: unknown key hnut; the steps are review, hunt, prove, " +
-    "rank, questions, challenge, answer, explain, setup (`arnx prompts` lists the keys)");
+    "rank, questions, challenge, answer, explain, setup, fix (`arnx prompts` lists the keys)");
   expect(err('task = "x"\n')).toContain("unknown key task; the steps are review,");
   expect(err('[hunt]\ntask = "Look at $diff"\n')).toBe(".arnx/prompts.toml: hunt.task has $diff; it offers " +
     "$no_tests, $max_suspects");
@@ -131,7 +134,7 @@ test("arnx prompts --json: every key, overridden or not, with its placeholders",
   expect(await cli.run("prompts", "--json")).toBe(0);
   const json = JSON.parse(cli.stdout) as { prompts: { key: string; overridden: boolean; default_changed: boolean;
     placeholders: string[] }[]; cloud: boolean; file: string };
-  expect(json.prompts).toHaveLength(24);
+  expect(json.prompts).toHaveLength(27);
   expect(json.prompts.find((p) => p.key === "rank.system")).toEqual({ key: "rank.system", overridden: true,
     default_changed: true, placeholders: [] });
   expect(json.prompts.find((p) => p.key === "hunt.task")).toEqual({ key: "hunt.task", overridden: false,
@@ -248,4 +251,17 @@ test("with arnx cloud, one line says your prompts are not used, and nothing of t
   } finally {
     c.stop();
   }
+});
+
+test("the fix prompt's keys: they change fix-prompt.md, are no model's prompts, and apply with arnx cloud too", () => {
+  const repo = approvedRepo();
+  writePrompts(repo, '[fix]\nrules = """\n## Rules\n\n- Fix it, then commit."""\nintro = "# Fix review $id"\n');
+  const p = promptsFor(repo);
+  const text = fixPrompt({ review: sampleReview({ findings: [] }), marks: { findings: {}, severity: {}, answers: {} },
+    answers: [], moved: {} }, undefined, p);
+  expect(text.startsWith("# Fix review 20261011-a1b2c3\n\n## Rules\n\n- Fix it, then commit.\n")).toBe(true);
+  // A brain records none of them, and arnx cloud's line is not said for them.
+  expect(new LocalBrain({ agentModel: new ScriptedAgent([]), prices: {}, prompts: p }).overrides).toBeUndefined();
+  expect(p.hash).toBe(DEFAULT_PROMPTS.hash);
+  expect(hasOverrides(repo)).toBe(false);
 });

@@ -331,3 +331,38 @@ inside a folder the configuration includes (for example __tests__/unit/arnx_gene
 holds the project's own tests; do not change the project's own configuration.
 - Record untested or unsupported paths under uncovered with a reason instead of leaving them out.
 - Stop when propose accepts the file. Then reply with a short summary of what you chose and why."""
+
+# The fix prompt: what `arnx accept` writes to fix-prompt.md for your coding agent. arnx sends it to no model, so it
+# is not part of PROMPT_VERSION, and it is built on this machine also with arnx cloud.
+[fix]
+intro = """
+# Fix the bugs proven by arnx review $id
+
+Change: $change.
+
+You are fixing bugs in this repository. Each one was proven by a test that fails on the current code, and its owner \
+marked it real. The tests define what "fixed" means; the descriptions below say what each one shows."""
+
+rules = """
+## Rules
+
+- Change the product code, not the tests. Never edit, skip, delete, weaken or copy the accepted tests in \
+`.arnx/tests/`. They are not part of the project's own test run: only `arnx check` runs them.
+- Fix the cause. Special-casing a test's exact input is not a fix.
+- Fix the behaviour, not the test's view of it. Where an accepted test checks the code's text, only that something \
+exists, or relies on a mock that behaves unlike the real service, make the behaviour right and say what the test \
+cannot show. Do not shape the code to a mock or to a source-text match.
+- Where a question below is still open, leave that behaviour as it is and say so.
+- Run `arnx check` after the fixes. If tests still fail, investigate and fix the underlying issue. If you are \
+blocked or unsure (a missing variable or service, unclear expected behaviour), stop and report what still fails and \
+why.
+- Also run the project's own test suite.
+- Finish with a short summary per bug: what was wrong, what you changed, which tests pass, and what they do not \
+prove (an upstream API contract, a real service, behaviour no test exercises). Passing tests are evidence for what \
+they check, not proof that the bug is gone everywhere."""
+
+# Opens the owner's answers (and rewrites), when there are some.
+decided = """
+## Behaviour the owner decided
+
+These answers are the intended behaviour. Where the code differs, the listed tests fail now; make them pass."""

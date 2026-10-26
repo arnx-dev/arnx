@@ -361,17 +361,20 @@ the copy under its old name is removed.
 ## Prompts
 
 The default text of every prompt is `src/prompts.toml`, grouped by step (`[review]`, `[hunt]`, `[prove]`, `[rank]`,
-`[questions]`, `[challenge]`, `[answer]`, `[explain]`, `[setup]`); `prompts.ts` imports it as text (so the binary and
-the Node bundle carry it), and keeps the keys with the placeholders the code fills (`PLACEHOLDERS`), the JSON reply
-schemas and the builders (`Prompts`; the free functions build arnx's own). `PROMPT_VERSION` hashes the 23 texts that
-decide what is found, in 0.1.2's order, so it changes only when that text does.
+`[questions]`, `[challenge]`, `[answer]`, `[explain]`, `[setup]`, and `[fix]`: the fix prompt's opening, rules and
+answers heading, `fixprompt.ts`); `prompts.ts` imports it as text (so the binary and the Node bundle carry it),
+and keeps the keys with the placeholders the code fills (`PLACEHOLDERS`), the JSON reply schemas and the builders
+(`Prompts`; the free functions build arnx's own). `PROMPT_VERSION` hashes the 23 texts that decide what is found, in
+0.1.2's order, so it changes only when that text does.
 
 A repository overrides single keys in `.arnx/prompts.toml` (`userprompts.ts`); every key it leaves out is arnx's.
 `reviewer.ts`, `setup.ts` and `accept.ts` give the LocalBrain they build `promptsFor(repo)`; the file is read there
 and refused when it names an unknown key or a placeholder its key does not offer. A brain running overrides says so
-(`Brain.overrides`): review.json gets `prompt_overrides` and `prompts_hash` (the hash of all 24 texts in use), the
-header of review.md names them; without overrides both are absent and every file is what it was. arnx cloud runs its
-own prompts: `setup` and `review` print `CLOUD_PROMPTS` once when the file has overrides, and nothing of it is sent.
+(`Brain.overrides`): review.json gets `prompt_overrides` and `prompts_hash` (the hash of the 24 texts a model is
+sent), the header of review.md names them; without overrides both are absent and every file is what it was. arnx
+cloud runs its own prompts: `setup` and `review` print `CLOUD_PROMPTS` once when the file overrides one of them, and
+nothing of it is sent. The `fix` keys are no model's: `accept` reads the file first and builds fix-prompt.md with
+them, with arnx cloud too, and a review does not list them.
 Approval's stamp covers review.yaml only, so editing the file needs no approve. Telemetry carries nothing about it.
 
 ## Modules
