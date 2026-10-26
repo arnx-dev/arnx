@@ -1,10 +1,11 @@
 // A review cut off halfway (a dropped connection) continues with --resume: finished project rounds and verdicts are
 // kept, not paid for again.
 import { beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
-import { runReview } from "../src/reviewer";
+import { ModelError } from "../src/errors";
+import { resumable, runReview } from "../src/reviewer";
 import type { SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { FakeJson, FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -85,4 +86,56 @@ test("verdicts given before an interruption are not asked again", async () => {
 test("--resume with nothing unfinished says so", async () => {
   await expect(runReview(repo, { projectConcurrency: 1, settings: SETTINGS, agentModel: new ScriptedAgent([]), challenger: new FakeJson([]),
     resume: true })).rejects.toThrow("nothing to resume");
+});
+
+/** An agent that answers `steps`, then fails every call as a provider that is down. */
+function downAfter(steps: ReturnType<typeof text>[][]): ScriptedAgent {
+  const agent = new ScriptedAgent(steps);
+  const answer = agent.create.bind(agent);
+  agent.create = async (x) => {
+    if (agent.steps.length) return answer(x);
+    agent.calls.push({ system: x.system, tools: x.tools.map((t) => t.name), messages: [...x.messages] });
+    const e = new ModelError("HTTP 503");
+    e.fault = { kind: "unavailable", detail: "HTTP 503" };
+    throw e;
+  };
+  return agent;
+}
+
+test("a review an outage cut resumes: the round it stopped runs again, the finished one is kept", async () => {
+  const session: SessionFactory = async (_c, snap, _l, body) => body(failing(snap));
+  // feed finishes; the reviewer's provider is down by the time pay starts
+  const first = downAfter(steps("feed"));
+  const cut = await runReview(repo, { projectConcurrency: 1, settings: SETTINGS, agentModel: first,
+    challenger: new FakeJson([{ verdict: "confirmed", reason: "a" }]), sessionFactory: session });
+  expect(cut.review.providerFailures?.[0]).toMatchObject({ kind: "unavailable", roles: ["reviewer"] });
+  expect(cut.review.projectStats!.map((p) => p.stop)).toEqual(["end_turn", "api_error: HTTP 503"]);
+  const diffSha = JSON.parse(readFileSync(join(cut.rdir, "state.json"), "utf8")).diff_sha256 as string;
+  expect(resumable(repo, diffSha)).toBe(cut.rdir);
+  const second = new ScriptedAgent(steps("pay"));
+  const { review } = await runReview(repo, { projectConcurrency: 1, settings: SETTINGS, agentModel: second,
+    challenger: new FakeJson([{ verdict: "confirmed", reason: "b" }]), sessionFactory: session, resume: true });
+  expect(review.id).toBe(cut.review.id);
+  expect(second.calls).toHaveLength(2);
+  expect(review.findings.map((f) => [f.project, f.verdict])).toEqual([["feed", "confirmed"], ["pay", "confirmed"]]);
+  expect(review.providerFailures).toBeUndefined();
+  expect(resumable(repo, diffSha)).toBeNull();
+});
+
+test("a review that finished is not resumed, nor one whose outage left nothing a resume does again", async () => {
+  const session: SessionFactory = async (_c, snap, _l, body) => body(failing(snap));
+  const done = await runReview(repo, { projectConcurrency: 1, settings: SETTINGS,
+    agentModel: new ScriptedAgent([...steps("feed"), ...steps("pay")]),
+    challenger: new FakeJson([{ verdict: "confirmed", reason: "a" }, { verdict: "confirmed", reason: "b" }]),
+    sessionFactory: session });
+  const diffSha = JSON.parse(readFileSync(join(done.rdir, "state.json"), "utf8")).diff_sha256 as string;
+  expect(resumable(repo, diffSha)).toBeNull();
+  await expect(runReview(repo, { projectConcurrency: 1, settings: SETTINGS, agentModel: new ScriptedAgent([]),
+    challenger: new FakeJson([]), resume: true })).rejects.toThrow("nothing to resume");
+  // Only the second hunter was down: the rounds finished, and a resume keeps them as they are.
+  const file = join(done.rdir, "review.json");
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), provider_failures: [{
+    provider: "other", name: "Other", kind: "unavailable", detail: "HTTP 503", calls: 2, failed: 2, attempts: 8,
+    roles: ["second-hunt"], missing: ["second-hunt"] }] }));
+  expect(resumable(repo, diffSha)).toBeNull();
 });
