@@ -95,7 +95,7 @@ test("next walks a repository with no commits to review; after setup it says wha
   writeSettings(repo, SETTINGS);
   expect(whatNext(repo).command).toBe("arnx setup");
   writeFileSync(reviewConfigPath(repo), YAML);
-  expect(whatNext(repo).command).toBe("arnx approve");
+  expect(whatNext(repo).command).toBe("arnx review"); // the review proves it first
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(YAML), "Dev", "2026-10-20"));
   expect(whatNext(repo)).toMatchObject({ command: "arnx review",
     where: "all files (no commits yet), not reviewed yet" });

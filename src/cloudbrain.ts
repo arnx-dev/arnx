@@ -193,9 +193,9 @@ export class CloudBrain implements Brain {
     return this.setupRound(input as SetupInput, tools);
   }
 
-  /** One project's round. The start goes out at once (the brain hunts while the sandbox is built); the hunt's
-   * context packs, the part hunters' inputs and the changed definitions are built here on the snapshot, as
-   * LocalBrain's hunters read them (hunt.ts huntParts, changedDefinitions). */
+  /** One project's round, started once the sandbox has run a test (testRound's probe). The hunt's context packs,
+   * the part hunters' inputs and the changed definitions are built here on the snapshot, as LocalBrain's hunters read
+   * them (hunt.ts huntParts, changedDefinitions). */
   private async reviewRound(x: ReviewInput, tools: Promise<RoundTools>): Promise<RoundResult> {
     const { cfg, diff, scope } = x;
     const id = this.reviewId();

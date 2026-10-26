@@ -8,7 +8,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { type AgentResult, Workspace } from "./agent";
 import { adapterFor } from "./adapters";
-import { bakedError, bakedIn, bakedKey, rebuildText } from "./baked";
+import { bakedError, bakedIn, bakedKey, type BakedCopy, copyOnly, type CopyOnly, copyStopText, rebuildText }
+  from "./baked";
 import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
   fixText, judgeBefore, judgeFix, notChecked, SKIP_REASONS } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
@@ -47,14 +48,18 @@ export interface Round {
 export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, envFrom, key) => {
   requireDocker();
   let image = await ensureEnv(cfg, envFrom ?? snap, buildLog, key);
-  // An image holding an older copy of the code (baked.ts) is built again for the code in the snapshot. The before/after
-  // check copies its code in once the session is up: a copy that differs from it then refuses the first run.
+  // An image holding an older copy of the code (baked.ts) is built again for the code in the snapshot, once per version
+  // of that code (keyed on it: later sessions and reviews of the same code reuse it). The before/after check copies its
+  // code in once the session is up: a copy that differs from it then refuses the first run.
   let guard: ((s: Session) => Runner) | null = null;
+  let copies: BakedCopy[] = [];
   if (existsSync(snap) && readdirSync(snap).length) {
     const baked = bakedIn(cfg, image, snap);
+    copies = baked?.copies ?? [];
     if (baked?.differ.length) {
       dockerSteps.say?.(rebuildText(cfg, baked));
-      image = await ensureEnv(cfg, snap, buildLog, bakedKey(image.slice(image.indexOf(":") + 1), baked.copies, snap));
+      const own = bakedKey(image.slice(image.indexOf(":") + 1), cfg, baked.copies, snap);
+      image = await ensureEnv(cfg, snap, buildLog, own, { mark: true });
     }
   } else {
     guard = (s) => {
@@ -70,8 +75,10 @@ export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, e
     };
   }
   const session = await new Session(image, cfg, snap).start();
+  const runner = guard ? guard(session) : session;
   try {
-    return await body(guard ? guard(session) : session);
+    return await body(copies.length ? { run: (command, timeout) => runner.run(command, timeout),
+      copies: (output) => copyOnly(cfg, image, copies, snap, output) } : runner);
   } finally {
     session.close();
   }
@@ -240,15 +247,16 @@ export function probeRun(session: Runner, snap: string, cfg: ReviewConfig, dir: 
 /** Why a round stops before its brain writes a test: the environment runs no test at this commit (a member's
  * manifest that builds differently from the image, a build script that downloads). Every test would go without a
  * report, and the review would read as one that found nothing. */
-export function probeFailure(cfg: ReviewConfig, result: RunResult, log: string): ArnxError {
+export function probeFailure(cfg: ReviewConfig, result: RunResult, log: string, copies?: CopyOnly): ArnxError {
   const why = result.timedOut ? "timed out" : `exited ${result.exitCode ?? "?"} without a report`;
   const tail = result.output.trim().split("\n").slice(-6).map((l) => `  ${l}`).join("\n");
   return new ArnxError(`${cfg.name}: the test environment runs no test at this commit: arnx's one-line test ` +
-    `${why}. The review stopped before writing tests (output: ${log})${tail ? `\n${tail}` : ""}`);
+    `${why}. The review stopped before writing tests (output: ${log})${tail ? `\n${tail}` : ""}` +
+    (copies ? `\n${copyStopText(cfg, copies)}` : ""));
 }
 
 export async function testRound(repo: string, head: string | null, cfg: ReviewConfig, o: {
-  brain: Brain; ask: (snap: string) => RoundAsk; writeDir: string; budgetUsd: number;
+  brain: Brain; ask: (snap: string) => RoundAsk | Promise<RoundAsk>; writeDir: string; budgetUsd: number;
   runs: number; outDir: string; sessionFactory?: SessionFactory; progress?: Say;
   /** Changed files the round should cover: after each final reply the brain is told which of them no test names
    * yet, and which hold SQL that no test connecting to the database names. */
@@ -282,18 +290,9 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
     for (const rel of collect(snap, o.writeDir, adapter.writable)) rmSync(join(snap, rel), { force: true });
     // The image's key before any run: runs may write a manifest into the snapshot (cargo's Cargo.lock).
     headKey = envKey(cfg, snap);
-    // The brain starts at once (a hunt needs no sandbox); its tools arrive once the session is up. A session that
-    // fails before then fails the brain's round too.
-    let open!: (t: RoundTools) => void, fail!: (e: unknown) => void;
-    const tools = new Promise<RoundTools>((resolve, reject) => {
-      [open, fail] = [resolve, reject];
-    });
-    tools.catch(() => {});
-    const ask = o.ask(snap);
+    // With `context = "precise"` the hunt's context waits for the project's code index (built in its environment).
+    const ask = await o.ask(snap);
     const base = { budgetUsd: o.budgetUsd, outDir: o.outDir, ...(o.progress ? { progress: o.progress } : {}) };
-    const round = ask.kind === "review" ? o.brain.agentRound("review", { ...ask.input, ...base }, tools)
-      : o.brain.agentRound("answer", { ...ask.input, ...base }, tools);
-    round.catch(() => {});
     const read = (p: string) => {
       try {
         return readFileSync(join(snap, p), "utf8");
@@ -310,7 +309,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         if (!probe.seen) {
           const log = join(o.outDir, "probe.log");
           writeFileSync(log, probe.result.output);
-          throw probeFailure(cfg, probe.result, log);
+          throw probeFailure(cfg, probe.result, log, session.copies?.(probe.result.output));
         }
         let counter = 0;
         // Runs name the generated test files, never the tests directory: for some languages (Rust) that directory
@@ -331,13 +330,16 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const ws = new Workspace(snap, { writeDir: o.writeDir, runTests: run, adapter, runner: cfg.runner });
         // The facts the brain decides its follow-ups on: what the generated tests name, computed here.
         const coverage = o.coverage ?? [];
-        open({ tools: () => ws.tools(), call: (name, args) => ws.call(name, args),
+        const tools: RoundTools = { tools: () => ws.tools(), call: (name, args) => ws.call(name, args),
           facts: () => {
             const now = generatedNow();
             return { untestedFiles: untestedFiles(coverage, now, adapter),
               dbUntested: dbUntested(coverage, read, now, adapter, dbNames), generatedFiles: Object.keys(now) };
-          } });
-        const done = await round;
+          } };
+        // The brain starts only now, the hunt too: a review the probe stops has made no model call.
+        const done = await (ask.kind === "review"
+          ? o.brain.agentRound("review", { ...ask.input, ...base }, Promise.resolve(tools))
+          : o.brain.agentRound("answer", { ...ask.input, ...base }, Promise.resolve(tools)));
         hunt = done.hunt;
         const a = done.agent;
         const f = generatedNow();
@@ -390,9 +392,6 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         }
         if (o.typecheck && cfg.typecheck) checked = typecheckHere(session, snap, cfg, o.writeDir, say);
         return [a, f, r] as const;
-      }).catch((e: unknown) => {
-        fail(e);
-        throw e;
       });
     const classes = o.before ? classify(results) : null;
     const failing = classes?.findings ?? [];

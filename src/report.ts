@@ -122,6 +122,12 @@ export interface Review {
   reviewer: string;
   challenger: string;
   promptVersion: string;
+  /** The keys .arnx/prompts.toml overrode, and the hash of every prompt template the review ran (absent without
+   * overrides, and with arnx cloud, which runs its own prompts). */
+  promptOverrides?: string[];
+  promptsHash?: string;
+  /** The change itself edits .arnx/prompts.toml, and the review ran its version (absent otherwise). */
+  promptsFileEdited?: true;
   findings: Finding[];
   questions: string[];
   flaky: string[];
@@ -232,12 +238,14 @@ function duration(seconds: number): string {
   return m ? `${m}m${String(s).padStart(2, "0")}s` : `${s}s`;
 }
 
-/** Who reviewed: the reviewer, the second opinion and the prompts' version; with arnx cloud, only its tier (the harness
- * is arnx cloud's own business: review.json keeps it, the report does not show it). */
+/** Who reviewed: the reviewer, the second opinion and the prompts' version (and the keys .arnx/prompts.toml overrode,
+ * with the hash of the prompts run); with arnx cloud, only its tier (the harness is arnx cloud's own business:
+ * review.json keeps it, the report does not show it). */
 function modelsLine(r: Review): string {
   const c = CLOUD_MODEL.exec(r.reviewer);
+  const yours = r.promptOverrides?.length ? `, yours for ${r.promptOverrides.join(", ")} (${r.promptsHash})` : "";
   return c ? `- Models: arnx cloud ${c[1]}`
-    : `- Reviewer: ${r.reviewer} · Second opinion: ${r.challenger} · Prompts: ${r.promptVersion}`;
+    : `- Reviewer: ${r.reviewer} · Second opinion: ${r.challenger} · Prompts: ${r.promptVersion}${yours}`;
 }
 
 /** arnx cloud's models as review.json names them: "arnx:<tier>/<harness>", and "/<role>" in usage. */
@@ -504,6 +512,7 @@ export function render(r: Review): string {
     `- Change: ${r.change}, ${r.filesChanged} files, +${r.added} −${r.removed}`,
     ...untrackedLines(r).map((l) => `- ${l}`),
     modelsLine(r),
+    ...(r.promptsFileEdited ? ["- This change edits .arnx/prompts.toml; the review used its version."] : []),
     `- ${r.usage?.length ? costLine(r) : `Cost: $${r.costUsd.toFixed(2)}`} · ${duration(r.seconds)} · Agent stopped: ${r.stop}`, "",
     "## Status", "", ...statusLines(r), "",
     marksIssues(r)
@@ -635,7 +644,7 @@ export function render(r: Review): string {
   if (r.lockfilesChanged?.length) out.push(`- Changed lockfiles (in the sandbox, not reviewed): ${ticks(r.lockfilesChanged)}`);
   if (r.notSent.length) {
     out.push(`- Files left out because they looked like secrets: ${ticks(r.notSent)}. If one is a test fixture, not a ` +
-      "secret: `arnx allow-secret PATH`, then `arnx approve`");
+      "secret: `arnx allow-secret PATH`, then `arnx review` again");
   }
   const stats = r.projectStats ?? [];
   if (stats.length && (multi(r) || stats.some(troubled))) {

@@ -28,13 +28,16 @@ We answer as soon as we can, agree with you on a fix and a date to disclose, and
 
 - Docker shares the host kernel: it is not a perfect boundary for hostile code. Review code you do not trust before
   you run setup on it.
-- Image builds and test runs are restricted differently. Builds run your approved install steps with network access,
-  to install dependencies. Test runs get no network (or an internal one reaching only the services you approved), no
+- Image builds and test runs are restricted differently. Builds run the install steps in `.arnx/review.yaml` with network
+  access, to install dependencies; setup writes them without asking and lists any `curl`, `wget` or `git clone` from
+  outside the package registries under "Worth a look". Test runs get no network (or an internal one reaching only the
+  services in `.arnx/review.yaml`), no
   host environment beyond the variables in `.arnx/review.yaml`, no capabilities, and CPU, memory and process limits.
   Model keys are never passed to either.
 - The secrets filter is a heuristic, not a complete detector of confidential data; `.arnxignore` is yours to extend.
 - `arnx allow-secret PATH` deliberately lets the key-shaped strings of a test fixture through (pinned in
-  `.arnx/review.yaml`, which then needs approving again). Use it only for fake keys, never real credentials.
+  `.arnx/review.yaml`, which is then proven again before the next review). Use it only for fake keys, never real
+  credentials.
 - Accepted tests run outside the sandbox once you commit them, in your own test runner: read them first.
 
 See [docs/SAFETY.md](docs/SAFETY.md#what-runs-where) for the full set of boundaries.

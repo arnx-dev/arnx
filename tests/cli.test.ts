@@ -262,7 +262,7 @@ test("doctor shows each project and the coverage map", async () => {
   expect(await cli.run("doctor")).toBe(0);
   expect(cli.stdout).toMatch(/✓ Consent: given \d{4}-\d\d-\d\d\n/);
   expect(cli.stdout).toContain("\nReady for review.\nNext: arnx review");
-  expect(cli.stdout).toContain("✓ Environment: approved (2 projects: pay, feed)");
+  expect(cli.stdout).toContain("✓ Environment: proven (2 projects: pay, feed)");
   expect(cli.stdout).toContain("- pay: owns 1 files, uses 0");
   expect(cli.stdout).toContain("- not tested: infra/ (0 files): Terraform; no adapter");
   expect(cli.stdout).toContain("- not explained: 1 source files");

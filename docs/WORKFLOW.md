@@ -5,7 +5,7 @@ The flow, what each step writes, and what its results mean. Start with the [READ
 
     arnx init → arnx setup → arnx review → arnx triage → arnx accept → arnx prompt → arnx check
 
-Commit `.arnx/config.toml` and `.arnx/review.yaml`: the next branch, a teammate's clone and CI reuse the approved
+Commit `.arnx/config.toml` and `.arnx/review.yaml`: the next branch, a teammate's clone and CI reuse the proven
 environment without running setup again.
 
 Lost? `arnx next` says where the repository is in this flow and the command to run now. `arnx doctor` says what is
@@ -27,10 +27,24 @@ runs`). Reviews then run only the tests arnx writes. A `test_command` that delet
 `sed -i`, `tee`, `> file`) is refused: every run must see the repository as it is.
 
 Before it starts, setup says what it will do and gives a rough time and cost estimate. While it runs, it shows on
-stderr each model reply, each file it reads and each suite it runs (`--quiet` turns this off; `approve` does the
-same). It then shows one line per project and what to check before approving: tests skipped for want of a service
-or variable, test files set aside as known failing, and commands that ignore their own errors. Open
+stderr each model reply, each file it reads and each suite it runs (`--quiet` turns this off). It then shows one
+line per project, runs every suite once more and stamps `.arnx/review.yaml` with a hash (the proof); nothing is asked.
+It ends with what is worth a look, only what applies: test files set aside as known failing, tests skipped for want
+of a service or variable, commands that ignore their own errors (`|| true`), install lines that download from outside
+the package registries (`curl`, `wget`, `git clone`), files allowed although they look like secrets, and what no
+project tests. The same list, with who ran the proof (the git user), is in `.arnx/setup/approval.md`. Open
 `.arnx/review.yaml` in an editor for the full file.
+
+A `.arnx/review.yaml` changed since its proof (edited by hand, in a pull request, or by `arnx allow-secret`) is
+noticed and proven again before the next `review`, `check` or `accept` uses it. First it says what changed since the
+last proof, per project: `test_command` (old → new), `install`, files added to or removed from `known_failing`, `env`,
+`services`, `owns`, `uses`, any other key by name, and projects added or removed. It compares with the copy the last
+proof kept in `.arnx/setup/proven-review.yaml` (a local file; without it, as after a proof by an older arnx or in a
+fresh clone, it says there is no copy to compare), stamp or not; a file whose stamp holds but whose content is not
+that copy's (a stamp recomputed by hand) counts as changed too. With `--json`, the command's object says so in
+`reproved`. Then the suites run and the file is stamped again, followed by what
+is worth a look; the changes go into `.arnx/setup/approval.md` too. When a suite fails there, the command stops and
+names the failing tests (exit 3). `arnx approve` runs the same proof on its own, saying the same.
 
 ### Rust crates
 
@@ -55,6 +69,14 @@ branch) plus any uncommitted work, as a pull request would show it; on the defau
 the last commit. `arnx review --range A..B` picks any other span. In a repository with no commits yet, the change is
 every file git does not ignore (less what `.arnxignore` and the secrets filter leave out), so there is no code before
 it for the before/after check; over the size limit, commit part of the files first and review the rest.
+
+The hunter also reads where the project uses each function the change touches, two levels out, found by name. With
+`context = "precise"` under `[review]` in `.arnx/config.toml`, arnx first indexes each project's code in its test
+image (scip-python, scip-typescript or rust-analyzer; no network) and follows the function itself, so another
+module's function or constant with the same name stays out. Indexing adds about 10 to 50 seconds per project to a
+review and builds one extra layer per test image; when the index cannot be built, the review goes on by name. Setup
+then also checks the map once: a `uses` entry the project's code never refers to, or code it refers to outside its
+`owns` and `uses`, goes back to the setup agent as a hint.
 
 What a review sends, and what it leaves out (untracked files, `.arnxignore`, secrets):
 [SAFETY.md](SAFETY.md#what-a-review-sends).
@@ -127,9 +149,9 @@ its own, under "Type check": it never fails a test, turns a run into no report, 
    `arnx setup` proves the place: its run of your suite carries a one-line test in `.arnx/tests/`, and setup stops
    if your runner collects it (a pytest `norecursedirs`, say, that drops the default hidden-folder rule).
 3. Fix the code, or hand `arnx prompt` (also in `.arnx/reviews/<id>/fix-prompt.md`; `accept --copy` puts it on the
-   clipboard) to your coding agent: the failing tests, what each bug is, your answers, and the rules. `arnx check`
-   runs the accepted tests in the approved sandbox, services included, on your working tree, and lists what still
-   fails.
+   clipboard) to your coding agent: the failing tests, what each bug is, your answers, and the rules (yours with
+   `arnx prompts copy fix.rules`). `arnx check` runs the accepted tests in the proven sandbox, services included,
+   on your working tree, and lists what still fails.
 4. When `arnx check` passes, commit the fixes together with `.arnx/tests/` and `.arnx/accepted-tests.json`: they now
    guard against the bugs coming back, each time `arnx check` runs. Read them first: they are code a model wrote.
 
@@ -152,13 +174,13 @@ Accept before fixing: a test you saw fail before the fix and pass after it is go
 behaviour it checks, provided the test checks the right thing (that is what your mark says).
 
 Or fix first: `arnx check --review [id]` (no id: the latest review) runs that review's confirmed tests, from
-`.arnx/reviews/<id>/`, on the working tree in the approved sandbox and says per finding fixed, still failing or no
+`.arnx/reviews/<id>/`, on the working tree in the proven sandbox and says per finding fixed, still failing or no
 report (exit 0, 1, 2; 3 when there is no such review). The review already saw them fail 3 times on the bug; a fix
 counts when its test passes in every run (`runs`, 3 by default), and one failing run is enough to say it still fails.
 Nothing is accepted, copied or recorded, and no model is called. `--json` for programs and coding agents.
 
 What `arnx check` establishes: the accepted tests, unedited (their pins match), pass on your working tree in the
-approved sandbox. It says nothing about behaviour no accepted test checks, and an accepted test that encodes a wrong
+proven sandbox. It says nothing about behaviour no accepted test checks, and an accepted test that encodes a wrong
 expectation passes or fails for the wrong reason: mark it rewrite in its review and accept again (`arnx check` points
 there when one fails).
 
@@ -168,7 +190,7 @@ The arnx skill lets a coding agent (Claude Code, and others that read Agent Skil
 finished a change it runs `arnx review` once, after saying what it may cost, and hands you the findings, questions and
 cost, changing no code. Once you have run `arnx triage` and `arnx accept`, it runs `arnx check`, fixes the code from
 `arnx prompt` until `arnx check` passes, then runs each touched project's full suite with the accepted tests in it (a
-passing `arnx check` covers only the accepted tests), and reports. Setup, approve, marking findings, answering
+passing `arnx check` covers only the accepted tests), and reports. Setup, marking findings, answering
 questions, `arnx accept`, `arnx init`, any login and commits stay yours: the skill tells the agent never to run them,
 and never to edit accepted tests (`arnx check` would refuse them anyway). Without arnx installed, the
 agent shows you the install line and runs it only when you say yes. Code no project covers is reported as "Not reviewed

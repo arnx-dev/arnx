@@ -1,5 +1,5 @@
 // Setup: an agent reads the repository and proposes `.arnx/review.yaml` as a list of projects, proving each one by
-// building its environment and running its existing suite. The user approves; approval runs the suites once more and
+// building its environment and running its existing suite. Nobody is asked: the proof runs the suites once more and
 // stamps the file.
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync,
   writeFileSync } from "node:fs";
@@ -21,16 +21,20 @@ import { describeHints, diagnose, firstErrors, firstLine, type Hint, missingLeft
 import type { FailureModel } from "./jev";
 import { ArnxError } from "./errors";
 import { loadIgnore, matcher } from "./ignore";
+import { projectIndex } from "./indexer";
 import { isSecretPath, type SecretPin } from "./secrets";
 import { type AgentModel, allPrices, type Tool } from "./llm";
 import { ownerFile, runTests } from "./outcomes";
 import { LocalBrain } from "./localbrain";
+import { promptsFor } from "./userprompts";
 import type { Say } from "./progress";
 import { copyManifests, dockerSteps, envKey, type Runner, type SessionFactory } from "./sandbox";
+import type { ScipIndex } from "./scip";
 import { loadSettings, refString, type Settings, settingsPath } from "./settings";
 import { runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
 import { SOURCE } from "./untested";
 import { otherLanguageOf } from "./languages";
+import { fileReferences, usesHints } from "./usescheck";
 import { agentUse, logUsage } from "./usage";
 import { randomHex } from "./util";
 import { VERSION } from "./version";
@@ -103,17 +107,22 @@ function withoutAccepted(results: TestResult[] | null, cfg: ReviewConfig, accept
 }
 
 /** Why tests were skipped, grouped: `"TEST_DATABASE_URL not set" (8)`. A skip that asks for a service or a
- * variable means the environment lacks it, which a passing suite hides. */
+ * variable means the environment lacks it, which a passing suite hides. Skips the report gives no reason for (a
+ * conditional skip) name their files, so they are not taken for known_failing files. */
 export function skipReasons(results: TestResult[] | null, max = 5): string[] {
   const counts = new Map<string, number>();
+  const silent = new Set<string>();
   for (const t of results ?? []) {
     if (t.outcome !== "skipped") continue;
     const first = t.message.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
-    const reason = first.replace(/^\S+:\d+: /, "").replace(/^Skipped: /, "").slice(0, 160) || "no reason given";
+    const reason = first.replace(/^\S+:\d+: /, "").replace(/^Skipped: /, "").slice(0, 160);
+    if (!reason && t.fileAttr) silent.add(t.fileAttr);
     counts.set(reason, (counts.get(reason) ?? 0) + 1);
   }
+  const files = [...silent].sort();
+  const where = files.length ? `, in ${files.slice(0, 3).join(", ")}${files.length > 3 ? ", …" : ""}` : "";
   const sorted = [...counts].sort((a, b) => b[1] - a[1]);
-  const shown = sorted.slice(0, max).map(([r, n]) => `"${r}" (${n})`);
+  const shown = sorted.slice(0, max).map(([r, n]) => r ? `"${r}" (${n})` : `no reason given (${n}${where})`);
   if (sorted.length > max) shown.push(`${sorted.length - max} more reasons`);
   return shown;
 }
@@ -591,7 +600,9 @@ type SetupOptions = { outDir: string; sessionFactory?: SessionFactory; project?:
   /** The judgement side (default: LocalBrain over `agentModel`). */
   brain?: Brain;
   /** This machine's record of the accepted tests' pins (localPinsPath). */
-  localPins?: string | null };
+  localPins?: string | null;
+  /** Builds a project's code index for the map check (`context = "precise"`; default: in its Docker environment). */
+  indexer?: typeof projectIndex };
 
 /** The allowed files of a review.yaml no setup has approved yet (a seed, or a failed setup's last attempt); none when
  * it does not read as YAML: secret-looking files then stay out. */
@@ -627,7 +638,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
   const state = { accepted: null as string | null, lastTried: null as string | null, summary: "no project tried",
     proven: new Map<string, string>(), attempts: 0, proofs: new Map<string, ProjectProof>(),
     final: null as ReviewFile | null, lastFailing: new Map<string, { env: string; files: string[] }>(),
-    failing: [] as string[], failingProject: null as string | null, problem: "", needed: null as NeededFile[] | null };
+    failing: [] as string[], failingProject: null as string | null, problem: "", needed: null as NeededFile[] | null,
+    usesChecked: false };
   const tmp = tempDir("arnx-setup-");
   // Docker steps of this setup, with their durations.
   dockerSteps.log = (line) => {
@@ -684,7 +696,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       state.lastTried = pins.length ? `${args.yaml.trimEnd()}\n${secretPinsYaml(pins)}` : args.yaml;
       try {
         const own = parseReviewFile(args.yaml);
-        if ("approved" in own.raw) return "invalid: remove the approved key; only the user approves";
+        if ("approved" in own.raw) return "invalid: remove the approved key; arnx stamps the file after its proof";
         if ("allow_secret_looking" in own.raw) {
           return "invalid: remove allow_secret_looking; only the user allows secret-looking files, and setup adds " +
             "their list itself";
@@ -867,6 +879,25 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         return `refused: propose ran the projects changed since they were proven, and these do not run:\n` +
           failed.join("\n\n");
       }
+      // With a code index (`context = "precise"`), the map is checked once against what each project's code refers
+      // to: what it finds goes back as hints, and the same file proposed again is accepted.
+      if (settings.context === "precise" && !state.usesChecked) {
+        state.usesChecked = true;
+        say("checking the map against the code");
+        const indexes: ScipIndex[] = [];
+        for (const p of f.projects) {
+          const r = await (o.indexer ?? projectIndex)(p, snap, join(o.outDir, "index", p.name));
+          if (r.index) indexes.push(r.index);
+        }
+        const hints = indexes.length ? usesHints(f, fileReferences(indexes)) : [];
+        emit("setup.uses_check", { indexed: indexes.length, projects: f.projects.length,
+          hints: hints.map((h) => ({ project: h.project, kind: h.kind })) });
+        if (hints.length) {
+          say(`the code does not bear out ${hints.length} map entr${hints.length === 1 ? "y" : "ies"}; asking the agent`);
+          return "refused once: the projects' code (from their code indexes) does not match these parts of the map:\n" +
+            hints.map((h) => `- ${h.text}`).join("\n") + "\nFix them, or propose the same file again to keep it as it is.";
+        }
+      }
       state.accepted = text;
       state.final = f;
       return `accepted:\n${describeCoverage(map)}\nStop here and summarise.`;
@@ -874,7 +905,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const ws = new Workspace(snap, { extra: { try_project: [TRY_PROJECT, tryProject], propose: [PROPOSE, propose] } });
     const current = existing ? readFileSync(reviewConfigPath(repo), "utf8") : "";
     const detection = detectReadable(repo, untracked);
-    const brain: Brain = o.brain ?? new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings) });
+    const brain: Brain = o.brain ?? new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings),
+      prompts: promptsFor(repo) });
     // The agent reading files is one milestone, said once until a project runs or a proposal goes in; which files it
     // read stays in the transcript.
     let reading = false;
@@ -951,10 +983,10 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
   if (o.project) {
     const prev = (f.raw.approved as { projects?: Record<string, string> } | undefined)?.projects;
     if (!f.projects.some((p) => p.name === o.project)) return [false, `no project ${o.project} in review.yaml`, []];
-    if (!prev) return [false, "no earlier approval with per-project hashes; run `arnx approve` without --project", []];
+    if (!prev) return [false, "no earlier proof with per-project hashes; run `arnx approve` without --project", []];
     const changed = f.projects.filter((p) => p.name !== o.project && prev[p.name] !== projectDigest(f, p.name));
     if (changed.length) {
-      return [false, `${changed.map((p) => p.name).join(", ")} changed since it was approved; run \`arnx approve\` ` +
+      return [false, `${changed.map((p) => p.name).join(", ")} changed since its proof; run \`arnx approve\` ` +
         "without --project", []];
     }
     run = f.projects.filter((p) => p.name === o.project);

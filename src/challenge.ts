@@ -4,7 +4,7 @@ import { ModelError } from "./errors";
 import { clip, emit, hypId, withRole } from "./events";
 import { type JsonModel, type ModelUse, newUse, tally, type Trace } from "./llm";
 import type { Say } from "./progress";
-import { CHALLENGE_SCHEMA, CHALLENGE_SYSTEM, challengeUser } from "./prompts";
+import { CHALLENGE_SCHEMA, DEFAULT_PROMPTS, type Prompts } from "./prompts";
 import type { Finding } from "./report";
 import { pyRepr } from "./util";
 
@@ -36,8 +36,10 @@ export async function challenge(findings: Finding[], o: { model: JsonModel; diff
   /** Second opinions at once (default CONCURRENCY). */
   concurrency?: number;
   /** Filled with the ids of findings whose call ran out of time (any timeout kind). */
-  timedOut?: Set<string> }): Promise<ModelUse> {
+  timedOut?: Set<string>;
+  prompts?: Prompts }): Promise<ModelUse> {
   const questions = o.questions ?? [];
+  const p = o.prompts ?? DEFAULT_PROMPTS;
   const use = newUse(o.model.ref);
   const trace = (line: Record<string, unknown>) => o.trace?.({ step: "challenge", ...line });
   // Findings are judged CONCURRENCY at a time. One timed-out call leaves only its finding unchecked; after two
@@ -64,12 +66,12 @@ export async function challenge(findings: Finding[], o: { model: JsonModel; diff
     o.progress?.(`second opinion on ${f.id} (${++started}/${pending.length})`);
     const t0 = performance.now();
     const secs = () => Math.round((performance.now() - t0) / 100) / 10;
-    const user = challengeUser(o.diffOf?.(f) ?? o.diff, f.file || "(unknown file)", o.sources[f.file ?? ""] ?? "",
+    const user = p.challengeUser(o.diffOf?.(f) ?? o.diff, f.file || "(unknown file)", o.sources[f.file ?? ""] ?? "",
       f.testId, f.message, f.explanation, questions);
     let data: Record<string, unknown>, callCost = 0, by: string | undefined;
     try {
       const [reply, cost, usage, unknown, model] = await withRole("challenge",
-        () => o.model.completeJson(CHALLENGE_SYSTEM, user, CHALLENGE_SCHEMA), { finding: f.id, project: f.project });
+        () => o.model.completeJson(p.challengeSystem(), user, CHALLENGE_SCHEMA), { finding: f.id, project: f.project });
       tally(use, cost, usage, unknown);
       [data, callCost, by] = [reply, cost, model];
       trace({ finding: f.id, outcome: "ok", secs: secs(), cost_usd: cost });

@@ -120,7 +120,7 @@ test("approve --project reruns one project, and only when the others are unchang
   writeFileSync(reviewConfigPath(repo), newPay.replace("services: [db, mq]", "services: [db]"));
   [ok, detail] = await approveFile(repo, { by: "Dev", at: "x", project: "pay", sessionFactory: passing });
   expect(ok).toBe(false);
-  expect(detail).toContain("feed changed since it was approved");
+  expect(detail).toContain("feed changed since its proof");
   ran = [];
   [ok] = await approveFile(repo, { by: "Dev", at: "x", sessionFactory: passing });
   expect(ok).toBe(true);

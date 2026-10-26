@@ -1,14 +1,23 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { cpSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { bakedKey, commandPaths, differing, findCopies, reached, scopeFiles } from "../src/baked";
+import { bakedKey, commandPaths, differing, findCopies, onlyInCopies, reached, scopeFiles } from "../src/baked";
 import { parseReviewConfig } from "../src/config";
-import { dockerSteps } from "../src/sandbox";
+import { cacheRecords, sourceRecords } from "../src/envprune";
+import { dockerSteps, envKey, sandboxOptions } from "../src/sandbox";
 import { dockerSession } from "../src/testround";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
+
+const BAKED = `
+version: 1
+image: python:3.12-slim
+workdir: app
+install: ["mkdir -p /opt/app && cp -r . /opt/app"]
+test_command: cd /opt/app && python -m pytest -q {targets}
+`;
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 
@@ -75,25 +84,111 @@ test("a copy counts only when runs reach it: by a named path, or a symlink under
     .toBe(false);
 });
 
-test("the rebuilt image's key follows the code it holds", () => {
-  const snap = write(tmp(), { "web/src/a.ts": "1", "web/b.ts": "b", "web/package.json": "{}" });
-  const copies = [{ root: "/opt/web", scope: "web", files: ["b.ts", "src/a.ts"] }];
-  const first = bakedKey("abc", copies, snap);
+test("the rebuilt image's key follows the code it holds, not the tests or reports beside it", () => {
+  const cfg = parseReviewConfig(BAKED);
+  const snap = write(tmp(), { "app/a.py": "1", "app/b.py": "b", "app/requirements.txt": "x" });
+  const copies = [{ root: "/opt/app", scope: "app", files: ["a.py", "b.py"] }];
+  const first = bakedKey("abc", cfg, copies, snap);
   expect(first).toMatch(/^abc-src-[0-9a-f]{12}$/);
-  expect(bakedKey("abc", copies, snap)).toBe(first);
-  writeFileSync(join(snap, "web/src/a.ts"), "2");
-  expect(bakedKey("abc", copies, snap)).not.toBe(first);
+  // generated tests, an accepted test put in place from .arnx/tests, the runners' reports: same code, same image
+  write(snap, { [`app/${cfg.testsDir}/test_gen.py`]: "g", "app/tests/arnx/r1/test_k.py": "k",
+    ".arnx/tests/app/tests/arnx/r1/test_k.py": "k", ".arnx-run/final-1.xml": "<x/>" });
+  expect(bakedKey("abc", cfg, copies, snap)).toBe(first);
+  writeFileSync(join(snap, "app/a.py"), "2");
+  expect(bakedKey("abc", cfg, copies, snap)).not.toBe(first);
+});
+
+/** A docker holding `images` that lists /opt/app/{a,b,c}.py in every image, each hashed as `old`, and builds by
+ * saving the Dockerfile and adding the tag. */
+function bakedDocker(images: string[]): { builds: () => string[] } {
+  const dir = tmp();
+  writeFileSync(join(dir, "images"), images.map((t) => `${t}\n`).join(""));
+  const old = sha("old");
+  writeFileSync(join(dir, "docker"), `#!/bin/sh
+case "$1" in
+  info) echo 27;;
+  image) grep -qxF "$3" '${join(dir, "images")}' || exit 1;;
+  build) n=$(ls '${dir}' | grep -c '^build-'); cat > '${dir}'/build-$n; echo "$3" >> '${join(dir, "images")}';;
+  run) case "$*" in
+    *sha256sum*) cat > /dev/null; for f in a b c; do echo "${old}  /opt/app/$f.py"; done;;
+    *) printf '/opt/app/a.py\n/opt/app/b.py\n/opt/app/c.py\n';;
+  esac;;
+esac
+exit 0
+`);
+  chmodSync(join(dir, "docker"), 0o755);
+  sandboxOptions.docker = join(dir, "docker");
+  return { builds: () => readdirSync(dir).filter((f) => f.startsWith("build-")).sort()
+    .map((f) => readFileSync(join(dir, f), "utf8")) };
+}
+
+test("an image made from the code is marked with its tag and reused for the same code", async () => {
+  const saved = { docker: sandboxOptions.docker, buildkit: sandboxOptions.buildkit };
+  try {
+    sandboxOptions.buildkit = false;
+    const cfg = parseReviewConfig(BAKED);
+    const code = { "app/requirements.txt": `# ${Date.now()}\n`, "app/a.py": "new", "app/b.py": "B", "app/c.py": "C" };
+    const one = write(join(tmp(), "one"), code);
+    const docker = bakedDocker([`arnx-env:${envKey(cfg, one)}`]);
+    const open = (snap: string) => dockerSession(cfg, snap, join(tmp(), "build.log"), async () => null);
+    await open(one);
+    expect(docker.builds()).toHaveLength(1);
+    const tag = `arnx-env:${bakedKey(envKey(cfg, one), cfg, [{ root: "/opt/app", scope: "app", files: ["a.py"] }],
+      one)}`;
+    expect(docker.builds()[0]).toContain(`COPY . /src\nRUN : ${tag}\n`);
+    // The same code in a later session (the generated tests now in place) uses that image.
+    await open(write(join(tmp(), "two"), { ...code, [`app/${cfg.testsDir}/test_gen.py`]: "g" }));
+    expect(docker.builds()).toHaveLength(1);
+    await open(write(join(tmp(), "three"), { ...code, "app/a.py": "newer" }));
+    expect(docker.builds()).toHaveLength(2);
+  } finally {
+    Object.assign(sandboxOptions, saved);
+  }
+});
+
+test("files only the image's copy holds: those the output names first, then those beside the code", () => {
+  const snap = write(tmp(), { "packages/core/index.js": "i", "packages/core/a.js": "a", "app/tests/gen/t.js": "t" });
+  const copies = [{ root: "/opt/app", scope: "", files: ["packages/core/a.js", "packages/core/index.js"] }];
+  const image = ["/opt/app/packages/core/index.js", "/opt/app/packages/core/a.js", "/opt/app/packages/core/z.bin",
+    "/opt/app/packages/core/default.db", "/opt/app/dist/bundle.js", "/opt/app/dist/named.js", "/opt/other/x.db",
+    "/opt/app/app/tests/gen/old.js"];
+  const output = "Error: ENOENT: open '/src/packages/core/default.db'\nat dist/named.js:1 (not dist/bundle.jsx)";
+  expect(onlyInCopies(copies, image, snap, output, "app/tests/gen")).toEqual(["dist/named.js",
+    "packages/core/default.db", "packages/core/z.bin"]);
+});
+
+test("a session on an image holding a copy of the code can say what only that copy holds", async () => {
+  const saved = sandboxOptions.docker;
+  try {
+    const cfg = parseReviewConfig(BAKED);
+    const snap = write(tmp(), { "app/requirements.txt": `# ${Date.now()}\n`, "app/a.py": "A", "app/b.py": "B",
+      "app/c.py": "C" });
+    const dir = tmp();
+    // The image's copy matches the code (no rebuild) and also holds the database its install made.
+    writeFileSync(join(dir, "docker"), `#!/bin/sh
+case "$1" in
+  info) echo 27;;
+  image) [ "$3" = 'arnx-env:${envKey(cfg, snap)}' ] || exit 1;;
+  run) case "$*" in
+    *sha256sum*) cat > /dev/null; for f in A B C; do l=$(echo $f | tr A-C a-c);
+      echo "$(printf $f | sha256sum | cut -d' ' -f1)  /opt/app/$l.py"; done;;
+    *) printf '/opt/app/a.py\n/opt/app/b.py\n/opt/app/c.py\n/opt/app/data/gen.db\n/opt/app/x.db\n';;
+  esac;;
+esac
+exit 0
+`);
+    chmodSync(join(dir, "docker"), 0o755);
+    sandboxOptions.docker = join(dir, "docker");
+    mkdirSync(join(snap, "app", "data"));
+    const said = await dockerSession(cfg, snap, join(tmp(), "build.log"),
+      async (s) => s.copies?.("Error: ENOENT: no such file or directory, open '/src/app/data/gen.db'"));
+    expect(said).toEqual({ roots: ["/opt/app"], files: ["app/data/gen.db", "app/x.db"] });
+  } finally {
+    sandboxOptions.docker = saved;
+  }
 });
 
 // ---- Docker integration: real containers. Run with ARNX_DOCKER_TESTS=1. ----
-
-const BAKED = `
-version: 1
-image: python:3.12-slim
-workdir: app
-install: ["mkdir -p /opt/app && cp -r . /opt/app"]
-test_command: cd /opt/app && python -m pytest -q {targets}
-`;
 
 describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: code baked into the image", () => {
   // Each test gets its own image: a manifest no other test has keys it.
@@ -114,9 +209,18 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: code baked into the ima
       const v = image = Date.now();
       expect(await read(write(join(tmp(), "one"), code(v)))).toBe(`VALUE = ${v}`);
       expect(said.filter((m) => m.includes("older copy"))).toEqual([]);
-      expect(await read(write(join(tmp(), "two"), code(v + 1)))).toBe(`VALUE = ${v + 1}`);
+      const two = write(join(tmp(), "two"), code(v + 1));
+      expect(await read(two)).toBe(`VALUE = ${v + 1}`);
       expect(said.filter((m) => m.includes("older copy"))).toEqual(
         ["main: the test image holds an older copy of the code (/opt/app); using one made from this code"]);
+      // Its build cache records are found from its marked step (read only: nothing is pruned here).
+      const cfg = parseReviewConfig(BAKED);
+      const tag = `arnx-env:${bakedKey(envKey(cfg, two), cfg, [{ root: "/opt/app", scope: "app", files: [] }], two)}`;
+      if (sandboxOptions.buildkit) {
+        const found = sourceRecords(cacheRecords(), [tag]).map((r) => r.description);
+        expect(found.some((d) => d.endsWith(`/bin/sh -c : ${tag}`))).toBe(true);
+        expect(found.some((d) => d.includes("cp -r . /opt/app"))).toBe(true);
+      }
     } finally {
       dockerSteps.say = saved;
     }

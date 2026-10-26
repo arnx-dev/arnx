@@ -1,5 +1,5 @@
-// `.arnx/review.yaml`: the test environment the user approved. A run refuses a config that is missing, unapproved,
-// or changed since approval (the stamp holds a hash of everything else in the file). The hash is the one Python
+// `.arnx/review.yaml`: the test environment setup proved. A run refuses a config that is missing, unproven, or
+// changed since its proof (the stamp, kept under its old name `approved`, holds a hash of everything else in the file). The hash is the one Python
 // arnx computed (json.dumps with sorted keys over the parsed YAML), so files stamped by either version stay valid.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -308,7 +308,11 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
     ...typeof spec.test_command === "string" && runner !== "node" && afterTargets(spec.test_command) !== null
       ? [`test_command: \`${afterTargets(spec.test_command)}\` comes after {targets}: arnx adds the runner's report ` +
         "options at the end, so they would go to that command and no report is written. End test_command with the " +
-        "runner's own options"] : []].map((p) => at + p);
+        "runner's own options"] : [],
+    ...typeof spec.test_command === "string" && runner !== "node" && quotedTargets(spec.test_command)
+      ? ["test_command: {targets} is inside quotes: arnx adds the runner's report options at the end, after the " +
+        "closing quote, so no report is written. Leave the runner and {targets} outside the quotes (make build && " +
+        "<runner> {targets})"] : []].map((p) => at + p);
   problems.push(...commandProblems);
   const command = commandProblems.length ? "" : spec.test_command as string;
   let typecheck: string | undefined;
@@ -456,6 +460,23 @@ export function afterTargets(command: string): string | null {
   return m ? rest.slice(m.index).trim() : null;
 }
 
+/** Whether the last {targets} in a test command sits inside quotes (`sh -c "make; pytest {targets}"`): the report
+ * options arnx appends would follow the closing quote and go to the shell, not the runner. */
+export function quotedTargets(command: string): boolean {
+  const end = command.lastIndexOf("{targets}");
+  let quote = "";
+  for (let i = 0; i < end; i++) {
+    const c = command[i]!;
+    if (quote === "'") {
+      if (c === "'") quote = "";
+    } else if (c === "\\") i++;
+    else if (quote === "\"") {
+      if (c === "\"") quote = "";
+    } else if (c === "'" || c === "\"") quote = c;
+  }
+  return quote !== "";
+}
+
 /** Why a test_command that writes is refused, naming what writes. A setup approved before the rule fails here on any
  * command after an upgrade, so it says how to fix it. */
 const writes = (part: string) => `test_command: must not delete or write files (rm, mv, cp, sed -i, tee, > file): ` +
@@ -467,7 +488,8 @@ export function loadReviewFile(repo: string, { requireApproved = true } = {}): R
   if (!existsSync(path)) throw new SetupRequired("no .arnx/review.yaml; run `arnx setup`");
   const f = parseReviewFile(readFileSync(path, "utf8"));
   if (requireApproved && !isFileApproved(f)) {
-    throw new SetupRequired(".arnx/review.yaml is not approved, or changed since it was approved; run `arnx approve`");
+    throw new SetupRequired(".arnx/review.yaml is not proven, or changed since its proof; run `arnx approve` to prove " +
+      "it");
   }
   return f;
 }

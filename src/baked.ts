@@ -6,12 +6,12 @@
 // or, when that code is not there yet (the before/after check), refuses. A copy made only to install from
 // (`cp -r packages /opt/deps && bun install`, its links pointing back to /src) is left alone.
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
-import { docker, dockerSteps } from "./sandbox";
+import { docker, dockerSteps, REPORT_DIR } from "./sandbox";
 import { globRegex } from "./secrets";
 
 /** A copy of a snapshot folder (`scope`, relative to the repository; "" for the repository) at `root` in the image:
@@ -128,14 +128,27 @@ export function differing(copies: BakedCopy[], imageHashes: Map<string, string>,
   return [...out].sort();
 }
 
+/** Where `arnx accept` keeps tests (testround.ts DOME); `arnx check` puts each in place from there. */
+const KEPT = ".arnx/tests";
+
+/** What in a scope is not the code under test (relative to the scope): the generated tests' folder (it changes during
+ * a round), and in the repository's scope arnx's own folder, the runners' reports and the accepted tests a check put
+ * in place. */
+function notCode(cfg: ReviewConfig, snap: string, scope: string): string[] {
+  const tests = posix.normalize(posix.join(projectOf(cfg), cfg.testsDir));
+  const rel = (p: string) => (scope ? posix.relative(scope, p) : p);
+  const kept = existsSync(join(snap, KEPT)) ? (readdirSync(join(snap, KEPT), { recursive: true }) as string[])
+    .map((p) => p.split("\\").join("/")).filter((p) => statSync(join(snap, KEPT, p)).isFile()) : [];
+  return [tests, ".arnx", REPORT_DIR, ...kept].filter((p) => !scope || p.startsWith(`${scope}/`)).map(rel);
+}
+
+const projectOf = (cfg: ReviewConfig) => posix.normalize(cfg.workdir).replace(/^\.$/, "").replace(/\/$/, "");
+
 /** The scopes a copy is looked for in: the project's folder (an install that copies `.`) and the repository's. */
 function scopesOf(cfg: ReviewConfig, snap: string): { scope: string; files: string[] }[] {
-  const project = posix.normalize(cfg.workdir).replace(/^\.$/, "").replace(/\/$/, "");
-  // The generated tests' folder changes during a round; whatever the image holds there is not the code under test.
-  const tests = posix.normalize(posix.join(project, cfg.testsDir));
-  const rel = (s: string) => (s ? posix.relative(s, tests) : tests);
-  const scopes = [{ scope: project, files: scopeFiles(snap, project, [rel(project)]) }];
-  if (project) scopes.push({ scope: "", files: scopeFiles(snap, "", [tests]) });
+  const project = projectOf(cfg);
+  const scopes = [{ scope: project, files: scopeFiles(snap, project, notCode(cfg, snap, project)) }];
+  if (project) scopes.push({ scope: "", files: scopeFiles(snap, "", notCode(cfg, snap, "")) });
   return scopes;
 }
 
@@ -203,16 +216,72 @@ export function bakedIn(cfg: ReviewConfig, image: string, snap: string): Baked |
   return { copies, differ: differing(copies, hashes, snap) };
 }
 
-/** The image key for the code in the snapshot: the environment's key and a hash of the scopes the copies came from. */
-export function bakedKey(key: string, copies: BakedCopy[], snap: string): string {
+/** The image key for the code in the snapshot: the environment's key and a hash of the code in the scopes the copies
+ * came from. Tests and reports beside the code do not count, so every session on the same code (a round, its answer
+ * rounds, a check) and every later review of it use one image. */
+export function bakedKey(key: string, cfg: ReviewConfig, copies: BakedCopy[], snap: string): string {
   const h = createHash("sha256");
-  for (const scope of [...new Set(copies.map((c) => c.scope))].sort()) {
-    for (const f of scopeFiles(snap, scope)) {
+  const wanted = new Set(copies.map((c) => c.scope));
+  for (const { scope, files } of scopesOf(cfg, snap).filter((s) => wanted.has(s.scope))) {
+    for (const f of files) {
       const rel = inScope(scope, f);
       h.update(`${rel}\0`).update(readFileSync(join(snap, rel))).update("\0");
     }
   }
   return `${key}-src-${h.digest("hex").slice(0, 12)}`;
+}
+
+/** Where an image holds copies of the code, and the files (repository paths) only those copies hold. */
+export interface CopyOnly { roots: string[]; files: string[] }
+
+/** Files the copies hold that the snapshot does not (repository paths), outside the generated tests' folder `tests`:
+ * those the output names first, then those beside the code (their folder is in the snapshot), shallowest first. A
+ * whole folder only the copy has (a build's output) counts only when the output names its file. */
+export function onlyInCopies(copies: BakedCopy[], imagePaths: string[], snap: string, output: string, tests: string)
+  : string[] {
+  const named: string[] = [], beside: string[] = [];
+  // Every path the output names, and each tail of it (`/src/a/b.db` names `a/b.db` and `b.db`).
+  const mentioned = new Set<string>();
+  for (const token of output.match(/[\w@+.-][\w@+./-]*/g) ?? []) {
+    const parts = token.replace(/\.+$/, "").split("/");
+    for (let i = 0; i < parts.length; i++) mentioned.add(parts.slice(i).join("/"));
+  }
+  for (const c of copies) {
+    const prefix = c.root === "/" ? "/" : `${c.root}/`;
+    for (const p of imagePaths) {
+      if (!p.startsWith(prefix)) continue;
+      const rel = inScope(c.scope, p.slice(prefix.length));
+      if (rel.startsWith(`${tests}/`) || existsSync(join(snap, rel))) continue;
+      if (mentioned.has(rel)) named.push(rel);
+      else if (existsSync(join(snap, posix.dirname(rel)))) beside.push(rel);
+    }
+  }
+  const depth = (p: string) => p.split("/").length;
+  return [...new Set([...named.sort(),
+    ...beside.sort((a, b) => depth(a) - depth(b) || a.localeCompare(b))])];
+}
+
+/** The image's copies reached by runs, and the files only they hold (the output's first). */
+export function copyOnly(cfg: ReviewConfig, image: string, copies: BakedCopy[], snap: string, output: string)
+  : CopyOnly {
+  const tests = posix.normalize(posix.join(cfg.workdir, cfg.testsDir));
+  return { roots: [...new Set(copies.map((c) => c.root))],
+    files: onlyInCopies(copies, imageFiles(image), snap, output, tests) };
+}
+
+/** Said when the environment runs no test and the image holds a copy of the code: before 0.1.2 the tests could run
+ * on that copy as setup left it, files the install made there included. */
+export function copyStopText(cfg: ReviewConfig, c: CopyOnly): string {
+  const at = c.roots.join(", ");
+  const again = `Set the project up again: arnx setup --project ${cfg.name}`;
+  if (!c.files.length) {
+    return `${cfg.name}: the image holds a copy of the code (${at}); a setup that relied on it can stop here since ` +
+      `arnx 0.1.2. ${again}`;
+  }
+  const more = c.files.length - 3;
+  const list = more > 0 ? `${c.files.slice(0, 3).join(", ")} and ${more} more` : c.files.join(", ");
+  return `${cfg.name}: ${list} exist${c.files.length === 1 ? "s" : ""} only in the image's copy of the code (${at}), ` +
+    `not in /src. ${again}`;
 }
 
 const where = (b: Baked) => [...new Set(b.copies.map((c) => c.root))].join(", ");

@@ -32,6 +32,18 @@ test("ids the review does not have are dropped, and a finding is kept in its fir
   expect(groups).toEqual([group(["F1"], "a"), group(["F2"], "b")]);
 });
 
+test("a field over its length ends at a word with an ellipsis, never mid-word", async () => {
+  // A 400-character cut used to end "whether the finding is real i".
+  const long = "word ".repeat(79) + "whether the finding is real is yours to decide.";
+  const model = new FakeJson([{ groups: [group(["F1"], "t", { consequence: long, input: "short" })] }]);
+  const [g] = await explain([f(1)], { model, diff: "d", sources: {}, budgetUsd: 1, use: newUse(model.ref) });
+  expect(g!.consequence.length).toBeLessThanOrEqual(400);
+  expect(g!.consequence.endsWith("…")).toBe(true);
+  expect(long.startsWith(g!.consequence.slice(0, -1))).toBe(true);
+  expect(long[g!.consequence.length - 1]).toBe(" ");
+  expect(g!.input).toBe("short");
+});
+
 test("a failed call or no budget leaves the findings ungrouped; a billed failure still counts", async () => {
   const use = newUse("openai:gpt-5.5-2026-04-23");
   const failed = new ModelError("HTTP 500");

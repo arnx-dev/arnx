@@ -270,4 +270,41 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: projects", () => {
       rmSync(join(snap, ".."), { recursive: true, force: true });
     }
   }, 1_800_000);
+
+  test("Rust: a session's runs keep the build; a changed file is rebuilt; another session starts from the image", async () => {
+    const repo = repoFrom("rust-calc", RUST_YAML);
+    const [ok] = await approveFile(repo, { by: "Dev", at: "2026-10-12" });
+    expect(ok).toBe(true);
+    const cfg = parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")).projects.find((p) => p.name === "calc")!;
+    const fresh = () => {
+      const snap = join(mkdtempSync(join(tmpdir(), "arnx-kept-")), "repo");
+      snapshot(repo, null, snap);
+      writeFileSync(join(snap, "tests/arnx_kept.rs"), RUST_TEST);
+      return snap;
+    };
+    const head = fresh();
+    try {
+      const runs = await dockerSession(cfg, head, join(tmp(), "build.log"), async (s) => {
+        const first = s.run("cargo nextest run", 600);
+        const second = s.run("cargo nextest run", 600);
+        const lib = join(head, "src/lib.rs");
+        writeFileSync(lib, readFileSync(lib, "utf8").replace("a + b", "a - b"));
+        return [first, second, s.run("cargo nextest run", 600)];
+      });
+      expect(runs[0]!.output).toContain("Compiling rust-calc");
+      expect(runs[1]!.exitCode).toBe(0);
+      expect(runs[1]!.output).not.toContain("Compiling rust-calc"); // the first run's build was kept
+      expect(runs[2]!.output).toContain("Compiling rust-calc");
+      expect(runs[2]!.exitCode).not.toBe(0); // the changed add is what runs
+    } finally {
+      rmSync(join(head, ".."), { recursive: true, force: true });
+    }
+    const other = fresh();
+    try {
+      const run = await dockerSession(cfg, other, join(tmp(), "build.log"), async (s) => s.run("cargo nextest run", 600));
+      expect(run.exitCode).toBe(0); // the other session's subtracting build is not here
+    } finally {
+      rmSync(join(other, ".."), { recursive: true, force: true });
+    }
+  }, 1_800_000);
 });

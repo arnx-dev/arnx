@@ -5,6 +5,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseReviewConfig, parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { pruneEnv, repoId } from "../src/envprune";
+import { LAYER_VERSION } from "../src/indexer";
 import { ensureEnv, envKey, envOwner, sandboxOptions } from "../src/sandbox";
 import { Cli } from "./helpers/cli";
 import { gitRepo } from "./helpers/gitutil";
@@ -14,10 +15,11 @@ import { CFG } from "./helpers/yaml";
 const tmp = useTmp();
 
 /** A docker that lists `images` (one "tag\tid\tsize\tlabels" line each, labels as k=v,k=v), logs its arguments,
- * and fails `image rm` of a tag in `inUse`. */
-function fakeDocker(images: string[], inUse: string[] = []): { calls: () => string[][] } {
+ * fails `image rm` of a tag in `inUse`, and prints `cache` for `buildx du --verbose`. */
+function fakeDocker(images: string[], inUse: string[] = [], cache = ""): { calls: () => string[][] } {
   const dir = tmp();
   const log = join(dir, "calls");
+  writeFileSync(join(dir, "cache"), cache);
   writeFileSync(join(dir, "images"), images.map((l) => {
     const [tag, , size, raw = ""] = l.split("\t");
     const labels = raw ? JSON.stringify(Object.fromEntries(raw.split(",").map((kv) => kv.split("=")))) : "null";
@@ -29,6 +31,7 @@ printf '%s\\037' "$@" >> '${log}'; echo >> '${log}'
 case "$1 $2" in
   "image ls") cut -f1,2 '${join(dir, "images")}';;
   "image rm") case "$3" in ${busy}) echo "conflict: image is in use" >&2; exit 1;; esac;;
+  "buildx du") cat '${join(dir, "cache")}';;
   "image inspect")
     [ "$3" = "--format" ] || exit 1
     shift 4
@@ -78,6 +81,8 @@ test("prune removes this repository's images no approved project uses, past the 
     const me = repoId(repo);
     const docker = fakeDocker([
       `${current}\tid1\t1.2GB\t${labels(me, "main", 30)}`,
+      // the code indexer's layer on the current image (context = "precise") is current too
+      `${current}-${LAYER_VERSION}\tid7\t0.7GB\t${labels(me, "main", 30)}`,
       `arnx-env:old1\tid2\t5GB\t${labels(me, "main", 30)}`,
       `arnx-env:recent\tid3\t5GB\t${labels(me, "main", 1)}`,
       `arnx-env:busy\tid4\t2GB\t${labels(me, "main", 30)}`,
@@ -116,6 +121,79 @@ test("arnx env prune lists what it removes and what it cannot", async () => {
     expect(cli.stdout).not.toContain("docker image rm");
     expect(await cli.run("env", "prune", "--keep-days", "x")).toBe(2);
     expect(await cli.run("env", "list")).toBe(2);
+  } finally {
+    sandboxOptions.docker = saved;
+  }
+});
+
+/** A build cache record as `docker buildx du --verbose` prints it. */
+const record = (id: string, parents: string[], description: string, size = "0B", type = "regular") =>
+  `ID:\t\t${id}\n${parents.length ? `Parents:\n${parents.map((p) => ` - ${p}\n`).join("")}` : ""}` +
+  `Created at:\t2026-10-12 10:00:00.1 +0000 UTC\nMutable:\tfalse\nReclaimable:\ttrue\nShared:\t\tfalse\n` +
+  `Size:\t\t${size}\nDescription:\t${description}\nUsage count:\t1\nLast used:\t2 weeks ago\nType:\t\t${type}\n`;
+
+test("prune removes an old source image with the build cache records its build left, by id", () => {
+  const saved = sandboxOptions.docker;
+  try {
+    const repo = gitRepo(tmp());
+    const me = repoId(repo);
+    const [a, b, c] = ["arnx-env:k1-src-aaaaaaaaaaaa", "arnx-env:k1-src-bbbbbbbbbbbb", "arnx-env:k1-src-cccccccccccc"];
+    const cache = [
+      record("base0", [], "pulled from docker.io/library/python:3.12-slim@sha256:00", "50MB"),
+      // the environment image's own build
+      record("envcopy", ["base0"], "[stage-0 2/4] COPY . /src", "10MB"),
+      record("envrun", ["envcopy"], "mount / from exec /bin/sh -c pip install pytest", "1GB"),
+      // a's build: its copy of the code, the marked step, the steps after it
+      record("copya", ["base0"], "[stage-0 2/5] COPY . /src", "300MB"),
+      record("marka", ["copya"], `mount / from exec /bin/sh -c : ${a}`),
+      record("worka", ["marka"], "[stage-0 4/5] WORKDIR /src/app"),
+      record("runa", ["worka"], "mount / from exec /bin/sh -c cp -r . /opt/app && pip install pytest", "2.35GB"),
+      // b (another install of the same code) was built from the same copy: it stays while b does (named as some
+      // BuildKit versions name the step)
+      record("markb", ["copya"], `[stage-0 3/5] RUN : ${b}`),
+      // c is in use, so neither it nor its records go
+      record("copyc", ["base0"], "[stage-0 2/5] COPY . /src", "300MB"),
+      record("markc", ["copyc"], `mount / from exec /bin/sh -c : ${c}`),
+      record("mount", [], "cached mount /arnx-cache from exec /bin/sh -c pip install pytest", "800MB", "exec.cachemount"),
+    ].join("\n");
+    const docker = fakeDocker([
+      `${a}\tid1\t2.4GB\t${labels(me, "main", 30)}`,
+      `${b}\tid2\t2.4GB\t${labels(me, "main", 1)}`,
+      `${c}\tid3\t2.4GB\t${labels(me, "main", 30)}`,
+      `arnx-env:k1\tid4\t1GB\t${labels(me, "main", 30)}`,
+    ], [c], cache);
+    // A dry run lists what would go (c too: only removing it shows it is in use) and prunes nothing.
+    const dry = pruneEnv(repo, { keepDays: 7, now: NOW, dryRun: true });
+    expect(dry.cache.map((r) => r.id)).toEqual(["runa", "markc", "worka", "copyc", "marka"]);
+    expect(docker.calls().filter((c) => c[0] === "buildx" && c[1] === "prune")).toEqual([]);
+    const r = pruneEnv(repo, { keepDays: 7, now: NOW });
+    expect(r.removed.map((i) => i.tag)).toEqual([a, "arnx-env:k1"]);
+    // Leaves first, one exact id per call, never a prune of everything; copya stays (b builds on it), and the
+    // environment image's build cache and the download cache are not touched.
+    expect(r.cache.map((x) => x.id)).toEqual(["runa", "worka", "marka"]);
+    expect(docker.calls().filter((c) => c[0] === "buildx" && c[1] === "prune"))
+      .toEqual(["runa", "worka", "marka"].map((id) => ["buildx", "prune", "-f", "--filter", `id=${id}`]));
+    // With b gone too, the copy they share goes.
+    expect(pruneEnv(repo, { keepDays: 0, now: NOW, dryRun: true }).cache.map((x) => x.id).sort())
+      .toEqual(["copya", "copyc", "marka", "markb", "markc", "runa", "worka"]);
+  } finally {
+    sandboxOptions.docker = saved;
+  }
+});
+
+test("arnx env prune names the build cache it removes with the images made from the code", async () => {
+  const saved = sandboxOptions.docker;
+  try {
+    const repo = gitRepo(tmp());
+    const tag = "arnx-env:k1-src-aaaaaaaaaaaa";
+    fakeDocker([`${tag}\tid1\t2.4GB\t${labels(repoId(repo), "main", 30.5, Date.now())}`], [],
+      [record("copya", ["base0"], "[stage-0 2/5] COPY . /src", "300MB"),
+        record("marka", ["copya"], `mount / from exec /bin/sh -c : ${tag}`),
+        record("runa", ["marka"], "mount / from exec /bin/sh -c cp -r . /opt/app && pip install pytest", "2.35GB")].join("\n"));
+    const cli = new Cli({ cwd: repo });
+    expect(await cli.run("env", "prune")).toBe(0);
+    expect(cli.stdout).toContain(`Removed 1 image (2.4GB):\n  ${tag} (main, 30 days old, 2.4GB)\n` +
+      "Removed their build cache: 3 records (2.6GB).\n");
   } finally {
     sandboxOptions.docker = saved;
   }

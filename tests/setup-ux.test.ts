@@ -7,7 +7,7 @@ import type { TestResult } from "../src/adapters/types";
 import { parseReviewFile } from "../src/config";
 import { defaultSettings } from "../src/settings";
 import { approveFile, describeTool, runSetup, skipReasons, unexplainedFailing } from "../src/setup";
-import { approvalChecks, approvalScreen, nextStep, projectTable, setupPreview } from "../src/setupview";
+import { approvalChecks, approvalScreen, nextStep, projectTable, setupPreview, worthALook } from "../src/setupview";
 import type { SessionFactory } from "../src/sandbox";
 import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
@@ -35,10 +35,15 @@ const skipping: SessionFactory = async (_cfg, snap, _log, body) =>
 const result = (m: ScriptedAgent, call: number) =>
   (m.calls[call]!.messages.at(-1)!.content as Record<string, unknown>[]).map((r) => String(r.content)).join("\n");
 
-test("skip reasons are grouped, without the file:line prefix", () => {
-  const t = (message: string): TestResult => ({ testId: "x", fileAttr: "f", name: "n", outcome: "skipped", message });
+test("skip reasons are grouped, without the file:line prefix; skips the report gives no reason for name their files",
+  () => {
+  const t = (message: string, fileAttr = "f"): TestResult => ({ testId: "x", fileAttr, name: "n", outcome: "skipped",
+    message });
   expect(skipReasons([t("a.py:3: needs DB"), t("b.py:9: needs DB"), t(""),
-    { ...t("x"), outcome: "passed" }])).toEqual(['"needs DB" (2)', '"no reason given" (1)']);
+    { ...t("x"), outcome: "passed" }])).toEqual(['"needs DB" (2)', "no reason given (1, in f)"]);
+  // A conditional skip (skipIf) carries no message: the files say which tests, not a known_failing entry, they are.
+  expect(skipReasons([t("", "src/b.test.ts"), t("", "src/a.test.ts"), t("", "src/b.test.ts"), t("", "src/c.test.ts"),
+    t("", "src/d.test.ts")])).toEqual(["no reason given (5, in src/a.test.ts, src/b.test.ts, src/c.test.ts, …)"]);
   expect(skipReasons(null)).toEqual([]);
 });
 
@@ -89,7 +94,7 @@ test("an uncovered reason split by a comma is refused, not read as a shorter rea
   expect(() => parseReviewFile(bad)).toThrow("quote a reason that holds a comma");
 });
 
-test("the approval screen names the file, one line per project, and what to check", () => {
+test("the setup screen names the file, one line per project; what is worth a look comes after the proof", () => {
   const file = parseReviewFile(COVERED.replace("install: [pip install pytest]",
     "install: [\"pip install pytest || true\"]\n    known_failing: [tests/test_live.py]"));
   const proofs = [{ name: "pay", summary: "1 passed, 2 skipped", skips: ['"needs DB" (2)'] },
@@ -104,7 +109,9 @@ test("the approval screen names the file, one line per project, and what to chec
   ]);
   const screen = approvalScreen(file, repo, { proofs });
   expect(screen.startsWith("  project")).toBe(true);
-  expect(screen).toContain("Not tested (a change here is reported as not tested):\n  /app.py");
+  expect(screen).not.toContain("! ");
+  expect(worthALook(file, repo, { proofs }).filter((l) => l.startsWith("not tested: "))).toEqual([
+    expect.stringMatching(/^not tested: \/app\.py \(/), "not tested: infra/ (1 file): Terraform; no adapter"]);
   expect(screen).not.toMatch(/setup agent's notes|The full file/);
   // No project has services: no services column.
   const plain = { ...file, projects: file.projects.map((p) => ({ ...p, services: [] })) };

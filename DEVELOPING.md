@@ -36,7 +36,8 @@ A brain never runs a test or reads a file except through a tool call the CLI run
 Tests never call a model. `tests/helpers/fakes.ts` holds a scripted agent, a fake JSON model and a fake Docker
 session. `tests/golden.test.ts` compares against files captured from arnx's first version: the
 review.yaml hash, the env image key, the prompts, review.md and the settings file must stay byte-identical, so files
-written by either version keep working.
+written by either version keep working. `tests/prompts-frozen.test.ts` holds every prompt built from
+`src/prompts.toml` to the text 0.1.2 built (`tests/fixtures/prompts-0.1.2.json`) and `PROMPT_VERSION` to its value.
 
 The source uses only `node:` built-ins, `fetch` and four dependencies (`@anthropic-ai/sdk`, `yaml`, `smol-toml`,
 `fast-xml-parser`), and no Bun-only APIs: the Node bundle must run on Node 20 or later. `tests/clean.test.ts`
@@ -54,8 +55,8 @@ Accepted tests are written into the project's own test folders.
 |---|---|---|---|---|---|
 | `init` | Write the harness, each role on it when its key is set (else commented, Claude standing in), the known providers and `telemetry = false`; write `.arnxignore` (data, dumps, images; fixtures kept) when absent. Asks nothing, checks nothing (doctor does; the first send asks the consent). Again: keeps what is there, creates what is missing, exit 0. `--force` rewrites the config, keeping the consents, `telemetry`, `[cloud]` and the user's provider tables | env keys, tracked and untracked files (not git-ignored) | `.arnx/config.toml`, `.arnx/.gitignore`, `.arnxignore` (only if absent) | no | no |
 | `doctor` | Say what is missing: Configuration, Models, Keys (or arnx cloud's Login and Credits), Docker (✗), then Consent and Environment (· when not done yet); coverage, JEV and the telemetry state (one line each, never a check); then "Ready for review." or "Not ready for review." and a Next line (the fix, or the flow's next command). setup and review run the same checks first and stop on a ✗ with its line | everything | nothing | no | checks it runs |
-| `setup` | doctor's checks, then the consent to send code (asked once; `--yes` gives it); an agent reads the repo and proposes a test environment, proving each proposal by running the existing suite (arnx's probe test for a project with no tests of its own); then asks to approve it and runs approve's step. `--project NAME` redoes one project, `--add` covers more; an approved file is set up again only with `--force` | the repo (snapshot) | `.arnx/review.yaml`, `.arnx/setup/` logs and `approval.md` | reviewer model | yes |
-| `approve` | The user accepts the environment: run every suite once more (accepted tests still red, matching their pins, do not block it: "N accepted tests still fail"), stamp the file with a hash, record the approval and its warnings | `.arnx/review.yaml`, `.arnx/accepted-tests.json` | the stamp in `.arnx/review.yaml`, `.arnx/setup/approval.md` | no | yes |
+| `setup` | doctor's checks, then the consent to send code (asked once; `--yes` gives it); an agent reads the repo and proposes a test environment, proving each proposal by running the existing suite (arnx's probe test for a project with no tests of its own); then runs approve's proof without asking (`--yes` gives only the consent) and ends with "Worth a look" (`worthALook` in `setupview.ts`: only what applies). `--project NAME` redoes one project, `--add` covers more; a proven file is set up again only with `--force` | the repo (snapshot) | `.arnx/review.yaml`, `.arnx/setup/` logs and `approval.md` | reviewer model | yes |
+| `approve` | The proof, asked nothing: run every suite once more (accepted tests still red, matching their pins, do not block it: "N accepted tests still fail"), stamp the file with a hash (the `approved:` key, its old name; `by` is the git user: arnx does not tell a coding agent from its user), record the proof and its warnings. `review`, `check` and `accept` run it themselves first when review.yaml changed since its proof (`reprove` in `cli.ts`; a failing proof stops them, exit 3). Both say first what changed since the last proof (`describeChanges` in `setupview.ts`, against the copy each proof keeps in `.arnx/setup/proven-review.yaml`, stamp or not; `proofState`: a stamp that holds over content other than the copy's is no proof; no copy: said, and the proof goes on), record it, and put it in the command's JSON (`reproved`); after a passing proof, "Worth a look" | `.arnx/review.yaml`, `.arnx/accepted-tests.json` | the stamp in `.arnx/review.yaml`, `.arnx/setup/approval.md`, `.arnx/setup/proven-review.yaml` | no | yes |
 | `review` | Write tests for the current change, run them 3 times, turn stable failures into findings, have a second model challenge each one | the change, the code, the approved environment | `.arnx/reviews/<id>/` | reviewer + challenger | yes |
 | `next` | Say where the repository is in the flow and the one command to run now (`next.ts`); with arnx cloud, the login or a top-up first | `.arnx/`, the change | nothing | no | no |
 | `triage` | Step through the findings in the terminal: marks, severity, answers | `.arnx/reviews/<id>/` | `review.md`, `triage.json` | no | no |
@@ -63,10 +64,11 @@ Accepted tests are written into the project's own test folders.
 | `prompt` | Print the fix prompt of the review accepted last (or the id given) | `.arnx/reviews/<id>/fix-prompt.md` | nothing | no | no |
 | `check` | Run the accepted tests in the approved sandbox, accepted tests told from the other tests in their files; refuse (exit 4) when a pinned file or its entry changed. `--review [id]`: run a review's confirmed tests on the working tree instead (`recheck.ts`), before anything is accepted | `tests/arnx/`, `.arnx/accepted-tests.json`; with `--review`, `.arnx/reviews/<id>/` | `.arnx/run/` logs | no | yes |
 | `consent` | Record the consent to send code (`--cloud`: to arnx cloud) without sending anything | `.arnx/config.toml` | `consent_at` or `cloud_consent_at` | no | no |
-| `allow-secret` | Pin the key-like strings of test-fixture files, so they are sent and copied; never shows the strings | the files named | `.arnx/review.yaml` (needs approving again) | no | no |
-| `env prune` | Remove this repository's environment images no approved project uses, older than `--keep-days` (7); `--all-repos`, `--dry-run` | Docker's image labels | nothing | no | yes |
+| `allow-secret` | Pin the key-like strings of test-fixture files, so they are sent and copied; never shows the strings | the files named | `.arnx/review.yaml` (proven again before the next review) | no | no |
+| `env prune` | Remove this repository's environment images no approved project uses, older than `--keep-days` (7); `--all-repos`, `--dry-run`. An image made from the code (`<key>-src-<hash>`, baked.ts) also takes the build cache records its build left, each by id, found from the step marked with its tag | Docker's image labels, `docker buildx du` | nothing | no | yes |
 | `login`, `logout`, `credits` | arnx cloud: a device login (RFC 8628), its deletion, the balance (no answer: "arnx cloud unavailable", exit 2; "not open yet" only on arnx cloud's `not_open`) | the config directory, `/v1/account` | `~/.config/arnx/credentials.json` (0600) | no | no |
 | `cloud on`, `cloud off` | arnx cloud's models for this repository, or the user's keys again: asks the cloud consent once, changes only `[cloud] models` | `.arnx/config.toml` | `.arnx/config.toml` | no | no |
+| `prompts` | List the prompt keys, marking those `.arnx/prompts.toml` overrides; `copy KEY` writes arnx's default of KEY there with `KEY_base` (its hash), keeping the file's other content; a key already there is printed instead, nothing written | `.arnx/prompts.toml` | `.arnx/prompts.toml` (copy) | no | no |
 | `skill install` | Write the arnx skill for coding agents (`skills/arnx/`, embedded in the build) to `.agents/skills/arnx/` and `.claude/skills/arnx/`, or under `~/` with `--user`; a different copy only with `--force`. `init` names the command until the repository has it | nothing | `.agents/skills/arnx/`, `.claude/skills/arnx/` | no | no |
 
 Exit codes: 0 no confirmed findings, 1 confirmed findings, 2 the run could not finish, 3 setup needed, 4 (`check`
@@ -81,10 +83,12 @@ fields are in `skills/arnx/references/json.md` and `check-json.md`; `tests/json-
       resolveChange        change.ts     uncommitted work, else the last commit, or --range A..B; no commits: every file
       testRound            testround.ts
         snapshot           change.ts     copy of the code at the change's head, secrets removed
-        agentRound         localbrain.ts the brain's round starts; with --hunt the tool-less hunters start now
         dockerSession      sandbox.ts    build the env image once, start services, internal network
           bakedIn          baked.ts      an older copy of the code in the image: use an image made from this code
-          (tools)          testround.ts  the brain gets the tools; after each final reply, the facts
+                                         (keyed on the code, kept for later sessions; `env prune` removes it)
+          probe            testround.ts  arnx's one-line test must pass, else the round stops before any model call
+          agentRound       localbrain.ts the brain's round starts with its tools (with --hunt, the tool-less hunters
+                                         too); after each final reply, the facts
           runAgent         agent.ts      the model reads, writes tests, runs them (tools only, no shell)
         runTests x3        outcomes.ts   the adapter's command and report -> passed / failed / error, per run
         classify           outcomes.ts   failed in all 3 runs = finding; anything else never is
@@ -219,7 +223,9 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   `attempts` (requests sent; for an OpenAI background call, creates sent, polls not counted), `unknown_usage`,
   `timed_out`, and on a failed call the provider caused, `fault` (`unavailable`: 5xx, 429 or no connection on every
   attempt; `auth`: 401 or 403). The same outcomes, kept in memory by `outage.ts`, become review.json's
-  `provider_failures` and the sentence after the review's status.
+  `provider_failures` and the sentence after the review's status. A review with an `unavailable` failure of the
+  reviewer or the judging (`cutByOutage`, not once accepted) resumes like an interrupted one: `--resume` tests again
+  the project rounds a failed call stopped (their verdicts dropped), keeps the others and judges again.
 - `agent.turn` (`agent.ts`): one agent turn: stop reason, tools called, `paths` (the path argument of each `read_file`,
   `list_dir` and `grep` call, in order; never contents), tool errors, writes, test runs.
 - `hunt.list`, `hunt.suspect`, `hunt.merged`, `hunt.dropped` (`localbrain.ts`): each hunter's list, the ranked
@@ -246,7 +252,10 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   `timed_out` when the call ran out of time.
 - `suspect.outcome`, `report.done` (`reviewer.ts`): what became of each suspect; the report's totals.
 - `setup.started`, `setup.attempt`, `setup.completed` (`setup.ts`): the setup agent's attempts and result;
-  `setup.withheld`: files left out of its snapshot as secret-looking (only when there are some).
+  `setup.withheld`: files left out of its snapshot as secret-looking (only when there are some); `setup.uses_check`
+  (`context = "precise"` only): the map against the code, with the projects indexed and each hint's project and kind.
+- `context.index` (`indexer.ts`, `context = "precise"` only): one project's code index: `ok`, `secs`, `files`, and
+  `reason` when the hunt's context fell back to names.
 
 Roles on `model.call` and `agent.turn`: `reviewer`, `part-hunt`, `second-hunt`, `rank`, `merge-questions`, `challenge`,
 `explain`, `setup`, `jev`, and `unknown` when no role is set (`withRole` sets one). Text fields are clipped (model-given
@@ -301,7 +310,7 @@ directory, read from the environment arnx was given (`XDG_CONFIG_HOME`, else `HO
 sent, which is what every test that does not set them gets), made at the first send. `TELEMETRY_OPEN` is true; the
 test CLI helper passes `telemetryOpen: false` unless a test opens it, so no test posts to the real endpoint.
 
-When on, `setup` (after approval, or when it stops), `review` (when it reports), `accept` and `check` end with
+When on, `setup` (after the proof, or when it stops), `review` (when it reports), `accept` and `check` end with
 `reportTelemetry`: one POST to `ARNX_TELEMETRY_URL` (default `https://api.arnx.dev/v1/telemetry`) of
 `{schema: 1, install_id, arnx_version, os, arch, event, at, data}`, awaited for at most `SEND_TIMEOUT_MS` (2 s:
 `main.ts` exits right after), one try, every error swallowed, the exit code unchanged. A command that throws sends
@@ -340,6 +349,18 @@ Implemented: Python (`adapters/python.ts`: pytest, JUnit xunit1, a text-based sk
 rewritten) and Rust (`adapters/rust.ts`: cargo-nextest JUnit; generated tests are integration tests in the crate's
 `tests/`). More languages are planned. JUnit walking shared by adapters is in `adapters/junit.ts`.
 
+Rust keeps its build within a session (`keepBuild`): the session's runs share one container, started at its first run
+with every limit a run has, so cargo starts each run from the target the last run left instead of compiling the
+workspace again from the image's. A session holds one snapshot, so one version of the code (the change's, or the
+base's for the before/after check); every later change to it is a file written between runs, and each run first
+touches those files inside the container (by Docker's clock, which cargo's builds use), so cargo's mtime check rebuilds
+what changed. A target never moves between sessions, and the container is removed by its exact name when the session
+closes (or on an interrupt); a closed session starts none. Before each run /tmp, /dev/shm and the target's tmp/ are
+emptied, and after it every process the run left is killed; a timeout kills the run's processes and keeps the
+container (one Docker does not answer in time is removed, and the run counts as timed out). An image with an
+entrypoint runs each command in a new container (docker.jsonl: `container` step with `kept: false`). The reasoning is
+at `Session` in `sandbox.ts`.
+
 Kept test files are named after what they protect, inside a folder that keeps the review id (`tests/arnx/r<id>/`,
 i.e. `accepted_tests_dir` under the project's root; while that is the default, TypeScript uses `__tests__/arnx/r<id>/`;
 Rust has no folder, as cargo builds only `tests/*.rs`, so the id is a prefix: `tests/arnx_<id>_<name>.rs`). The name
@@ -356,6 +377,28 @@ adapter's `kept`), so tests kept under the older names
 (`test_<id>_<name>.py`, `<name>.r<id>.test.ts`) keep running. Accepting again under other marks can rename a file:
 the copy under its old name is removed.
 
+## Prompts
+
+The default text of every prompt is `src/prompts.toml`, grouped by step (`[review]`, `[hunt]`, `[prove]`, `[rank]`,
+`[questions]`, `[challenge]`, `[answer]`, `[explain]`, `[setup]`, and `[fix]`: the fix prompt's opening, rules and
+answers heading, `fixprompt.ts`); `prompts.ts` imports it as text (so the binary and the Node bundle carry it),
+and keeps the keys with the placeholders the code fills (`PLACEHOLDERS`), the JSON reply schemas and the builders
+(`Prompts`; the free functions build arnx's own). `PROMPT_VERSION` hashes the 23 texts that decide what is found, in
+0.1.2's order, so it changes only when that text does.
+
+A repository overrides single keys in `.arnx/prompts.toml` (`userprompts.ts`); every key it leaves out is arnx's.
+`reviewer.ts`, `setup.ts` and `accept.ts` give the LocalBrain they build `promptsFor(repo)`; the file is read there
+and refused when it names an unknown key or a placeholder its key does not offer. A brain running overrides says so
+(`Brain.overrides`): review.json gets `prompt_overrides` and `prompts_hash` (the hash of the 24 texts a model is
+sent), the header of review.md names them; without overrides both are absent and every file is what it was. arnx
+cloud runs its own prompts: `setup` and `review` print `CLOUD_PROMPTS` once when the file overrides one of them, and
+nothing of it is sent. The `fix` keys are no model's: `accept` reads the file first and builds fix-prompt.md with
+them, with arnx cloud too, and names them (a line, the prompt's last line, `fix_prompt_overrides` in --json); a
+review does not list them, and doctor checks the file under arnx cloud too. The file is read from the working tree:
+a change that edits it (base against head, or the working tree) is reviewed with its own version, which the review
+says at its start, in review.md's header and as `prompts_file_edited` in review.json.
+Approval's stamp covers review.yaml only, so editing the file needs no approve. Telemetry carries nothing about it.
+
 ## Modules
 
 | Module | Responsibility |
@@ -371,21 +414,25 @@ the copy under its old name is removed.
 | `secrets.ts` | What is never sent or copied: secret file names, key-like text, credential variable names |
 | `ignore.ts` | `.arnxignore` matching, and the proposal of data-like files for `init` |
 | `change.ts` | Resolve the change; build the snapshot |
-| `sandbox.ts` | Docker: env image, locked-down runs, services, timeouts, cleanup of live sessions |
-| `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, kept when runs reach them, compared with the code to test |
+| `sandbox.ts` | Docker: env image, locked-down runs, services, timeouts, cleanup of live sessions; the container a Rust session's runs share |
+| `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, kept when runs reach them, compared with the code to test; the key of an image made from the code (its files, not the tests or reports beside it); when a round's probe runs no test, the files only the copy holds (named in the stop message with `arnx setup --project NAME`) |
 | `outcomes.ts` | Run tests through the adapter; classify results across runs |
 | `before.ts` | The before/after check's comparison: a finding's runs on the code before the change against its failure |
 | `typecheck.ts` | The project's own type check: tsc's output read, errors on the change against those before it, in words |
 | `llm.ts` | Agent clients (Anthropic Messages, or a Responses API: OpenAI, and generic tables that copy either API); JSON calls via either; prices |
 | `agent.ts` | The tool loop and its confined tools; hard budget |
-| `prompts.ts` | Every prompt, frozen; `PROMPT_VERSION` changes with any edit |
+| `prompts.ts` | Every prompt: the default text read from `prompts.toml` (imported as text, so every build carries it), the keys and their placeholders, the builders (`Prompts`); `PROMPT_VERSION` changes with any edit of the text |
+| `userprompts.ts` | `.arnx/prompts.toml`: per-key overrides read (unknown keys and placeholders refused), copied, checked by doctor; with arnx cloud, one line and nothing sent |
 | `brain.ts` | The `Brain` interface: agent rounds (review, answer, setup), judge, finish; what the CLI hands over |
 | `localbrain.ts` | `LocalBrain`: the prompts and models of a review with the user's keys; follow-ups, the hunt, the judging |
 | `cloudbrain.ts` | `CloudBrain`: the Brain over arnx cloud's v1 contract (arnx models); builds each call's inputs, runs the brain's tool calls with the CLI's tools, records hunt and billing |
 | `cloud.ts` | arnx cloud's HTTP side: credentials (per user, 0600), the device login, calls as JSON or server-sent events, retries, what 402 / 503 / unreachable mean |
 | `hunt.ts` | The hunt's pieces: suspects parsed and merged, the second hunter, part hunters, ranking |
+| `scip.ts` | A SCIP code index read (protobuf, no dependency): each occurrence's file, line, columns, symbol and roles |
+| `indexer.ts` | `context = "precise"`: a project's code index, built by its indexer in its environment image plus a layer, run as tests run; any failure falls back to names |
+| `usescheck.ts` | The map against the code: `uses` entries a project's code never refers to, files it refers to outside its map, referenced `uncovered` paths |
 | `testround.ts` | Snapshot + session + the brain's agent round over the tools + 3 runs, shared by review and answers |
-| `setup.ts` | The setup agent's tools, `runSuite`, approval |
+| `setup.ts` | The setup agent's tools, `runSuite`, the proof (`approveFile`) |
 | `jev.ts` | Experimental: JEV's hint on a setup failure no signature explains; asked only with `[setup] jev = true` and `JEV_API_KEY` |
 | `reviewer.ts` | One review, end to end: routing, rounds, findings, resume, the report |
 | `challenge.ts` | The second-model check |
@@ -428,7 +475,8 @@ CI, teammates) the committed pins are the trusted ones.
 - arnx never edits the user's code. `review` writes under `.arnx/`; `accept` writes only to `tests/arnx/` (a Rust crate:
   `tests/arnx_<id>_*.rs`) and `.arnx/` (and its local pins); `init` writes `.arnxignore` only when there is none; `skill install` writes only the skill
   folders.
-- A run refuses an environment that is unapproved or changed since approval.
+- A run uses only a proven environment: a review.yaml changed since its proof (or never proven) is proven again
+  before `review`, `check` or `accept` uses it, and a failing proof stops the command.
 - Repository content reaches the model as data, and the prompts say so.
 - `tests/clean.test.ts` keeps the tree publishable: only `node:` built-ins and declared dependencies, no private names.
 - Telemetry follows `telemetry` in `.arnx/config.toml` (init writes `false`: off unless the user turns it on), and `ARNX_TELEMETRY=0` or `DO_NOT_TRACK`

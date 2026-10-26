@@ -14,13 +14,16 @@ import { added, type Change, describe, EMPTY_TREE, filesAt, git, removed, resolv
   untrackedLine } from "./change";
 import { loadReviewFile, type ReviewConfig, reviewConfigPath, secretPinsOf } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
+import { huntParts } from "./hunt";
+import { projectIndex } from "./indexer";
 import { closers } from "./interrupt";
 import { addUsage, type AgentModel, allPrices, FallbackJson, type JsonModel, type ModelUse, newUse,
   type Trace } from "./llm";
 import { LocalBrain } from "./localbrain";
+import { changeEditsPrompts, PROMPTS_EDITED, promptsFor } from "./userprompts";
 import { baseName, funcOf, ownerFile } from "./outcomes";
-import { type CallRecord, cloudFailure, providerFailures, withCalls } from "./outage";
-import { contextPack } from "./context";
+import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, withCalls } from "./outage";
+import { CONTEXT_LIMIT, contextPack } from "./context";
 import type { Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
 import { type AgentReport, type Checked, type Finding, type FixProof, parseReports, type ProjectStat, type Review,
@@ -45,12 +48,27 @@ export const PROJECT_CONCURRENCY = 2;
 interface SavedVerdict { verdict: string; reason: string; dependsOn: string | null; judge: string | null;
   model: string; cost: number }
 
-/** The newest review of this same change (same diff) that has no report yet. */
+/** The roles whose work a resume does again: the project rounds a failed call stopped, and the judging. */
+const REDONE = new Set(["reviewer", "challenge", "explain", "merge-questions"]);
+
+/** Whether a review's report says a provider outage cut work that a resume does again. A report without one finished:
+ * there is nothing to resume. Not once its findings were accepted. */
+export function cutByOutage(rdir: string): boolean {
+  if (existsSync(join(rdir, "accepted.json"))) return false;
+  try {
+    const r = JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")) as { provider_failures?: ProviderFailure[] };
+    return (r.provider_failures ?? []).some((f) => f.kind === "unavailable" && f.roles.some((x) => REDONE.has(x)));
+  } catch {
+    return false;
+  }
+}
+
+/** The newest review of this same change (same diff) that has no report yet, or whose report a provider outage cut. */
 export function resumable(repo: string, diffSha: string): string | null {
   const dir = join(repo, ".arnx", "reviews");
   if (!existsSync(dir)) return null;
-  const open = readdirSync(dir).map((d) => join(dir, d)).filter((d) => !existsSync(join(d, "review.json")) &&
-    existsSync(join(d, "state.json"))).filter((d) => {
+  const open = readdirSync(dir).map((d) => join(dir, d)).filter((d) => existsSync(join(d, "state.json")) &&
+    (!existsSync(join(d, "review.json")) || cutByOutage(d))).filter((d) => {
     try {
       return (JSON.parse(readFileSync(join(d, "state.json"), "utf8")) as { diff_sha256?: string }).diff_sha256 === diffSha;
     } catch {
@@ -176,6 +194,8 @@ export async function runReview(repo: string, o: { settings: Settings;
   /** The reviewer and the second opinion of the local brain (not needed when `brain` is given). */
   agentModel?: AgentModel; challenger?: JsonModel;
   range?: string | null; sessionFactory?: SessionFactory; now?: Date; progress?: Say;
+  /** Builds a project's code index for `context = "precise"` (default: in its Docker environment). */
+  indexer?: typeof projectIndex;
   /** Look for defects before writing tests (default on). */
   hunt?: boolean;
   /** Hunts each part of a big change (tool-less); without it only the reviewer and the second hunter hunt. */
@@ -216,6 +236,9 @@ export async function runReview(repo: string, o: { settings: Settings;
   if (change.leftOut) {
     o.progress?.(`left out ${change.leftOut.length} accepted test file(s) not committed yet`);
   }
+  // The local brain reads .arnx/prompts.toml from the working tree: a change that edits it is reviewed with its own.
+  const promptsEdited = !o.brain && changeEditsPrompts(repo, change);
+  if (promptsEdited) o.progress?.(PROMPTS_EDITED);
   const routing = route(file, change.files, s.maxProjects);
   if (!routing.routed.length) {
     const paths = routing.uncovered.map((u) => `${u.path} (${u.reason})`).join(", ");
@@ -229,7 +252,7 @@ export async function runReview(repo: string, o: { settings: Settings;
   });
   if (crowded.length) {
     throw new SetupRequired(`${crowded.join("\n")}\nChange tests_dir in .arnx/review.yaml (or run \`arnx setup\`), ` +
-      "then `arnx approve`");
+      "then `arnx review` again");
   }
   const started = performance.now();
   // A review saves each finished project round and each verdict as it goes, so `--resume` continues one that was cut
@@ -274,6 +297,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     const local = (): LocalBrain => {
       if (!o.agentModel || !o.challenger) throw new Error("runReview: the local brain needs agentModel and challenger");
       return new LocalBrain({ agentModel: o.agentModel, prices: allPrices(s), challenger: o.challenger,
+        prompts: promptsFor(repo),
         ...(o.hunter ? { hunter: o.hunter } : {}), ...(o.ranker ? { ranker: o.ranker } : {}), secondHunter,
         ...(o.secondHuntWaitMs === undefined ? {} : { secondHuntWaitMs: o.secondHuntWaitMs }) });
     };
@@ -335,6 +359,8 @@ export async function runReview(repo: string, o: { settings: Settings;
     // review order, so ids, questions and the report do not depend on which finished first.
     interface Done { i: number; rnd: Round; hunted: Suspect[] | null; second: ModelUse | null; extras: ModelUse[];
       resumed: boolean }
+    // Projects whose kept round a failed model call stopped: tested again on resume.
+    const redone = new Set<string>();
     const runProject = async (i: number): Promise<Done> => {
       const { project: cfg, owned, used } = routing.routed[i]!;
       o.progress?.(`${cfg.name} (${i + 1}/${n}): preparing the test environment`);
@@ -361,20 +387,31 @@ export async function runReview(repo: string, o: { settings: Settings;
           ...(s.beforeCheck ? { base: change.base === EMPTY_TREE ? null : change.base } : {}) } } : {}),
         // The hunt reads the snapshot the tests run on: the context pack is built on it here, the hunters run in the
         // brain.
-        ask: (snap: string) => {
+        ask: async (snap: string) => {
           const searchDirs = [cfg.workdir, ...new Set(used.map((u) => posix.dirname(u)))];
+          let index = null;
+          if (o.hunt && s.context === "precise") {
+            o.progress?.(`${cfg.name} (${i + 1}/${n}): indexing the code`);
+            const r = await (o.indexer ?? projectIndex)(cfg, snap, outDir);
+            if (!r.index) o.progress?.(`${cfg.name} (${i + 1}/${n}): no code index (${clip(r.reason ?? "", 80)}); context by names`);
+            index = r.index;
+          }
           return { kind: "review" as const, input: { cfg, diff, scope, scoped: !file.legacy, envTests: env,
             maxQuestions: s.maxQuestions, dbNames: databaseEnv(cfg.env, cfg.services),
-            ...(o.hunt ? { hunt: { context: contextPack(snap, diff, scope.owned, searchDirs), root: snap,
-              searchDirs } } : {}) } };
+            // Part hunters build their context packs from the snapshot; with an index they get them built here.
+            ...(o.hunt ? { hunt: { context: contextPack(snap, diff, scope.owned, searchDirs, CONTEXT_LIMIT, index),
+              root: snap, searchDirs, ...(index ? { parts: huntParts(snap, cfg, diff, scope.owned, searchDirs, index) }
+                : {}) } } : {}) } };
         } };
       const roundFile = join(outDir, "round.json");
       let rnd: Round, kept = false, hunted: Suspect[] | null = null, projSecond: ModelUse | null = null;
       const projExtras: ModelUse[] = [];
-      if (resumed && existsSync(roundFile)) {
+      const saved = resumed && existsSync(roundFile) ? JSON.parse(readFileSync(roundFile, "utf8")) as { round: Round;
+        hunted: Suspect[] | null; second: ModelUse | null; extras: ModelUse[] } : null;
+      // A round a failed model call stopped (a provider outage) is tested again; its verdicts are dropped below.
+      if (saved?.round.agent.stop.startsWith("api_error")) redone.add(cfg.name);
+      if (saved && !redone.has(cfg.name)) {
         kept = true;
-        const saved = JSON.parse(readFileSync(roundFile, "utf8")) as { round: Round; hunted: Suspect[] | null;
-          second: ModelUse | null; extras: ModelUse[] };
         [rnd, hunted, projSecond] = [saved.round, saved.hunted, saved.second];
         projExtras.push(...saved.extras);
         o.progress?.(`${cfg.name} (${i + 1}/${n}): already tested before the interruption; kept`);
@@ -515,6 +552,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     const verdictsFile = join(rdir, "verdicts.json");
     const verdicts: Record<string, SavedVerdict> = resumed && existsSync(verdictsFile)
       ? JSON.parse(readFileSync(verdictsFile, "utf8")) : {};
+    for (const k of Object.keys(verdicts)) if (redone.has(k.split("::")[0]!)) delete verdicts[k];
     const priorUses: ModelUse[] = [];
     const j = await brain.judge(challenged, questions, diffs, { diff: change.diff, sources,
       maxQuestions: s.maxQuestions, budgetLeft: left, trace, progress: o.progress, questionProjects,
@@ -579,7 +617,10 @@ export async function runReview(repo: string, o: { settings: Settings;
     const review: Review = {
       id: rid, change: describe(change), filesChanged: change.files.length, added: added(change),
       removed: removed(change), reviewer: reviewerRef, challenger: challengerRef,
-      promptVersion: brain.version, findings, questions: questions.slice(0, s.maxQuestions),
+      promptVersion: brain.version,
+      ...(brain.overrides ? { promptOverrides: brain.overrides.keys, promptsHash: brain.overrides.hash } : {}),
+      ...(promptsEdited ? { promptsFileEdited: true as const } : {}),
+      findings, questions: questions.slice(0, s.maxQuestions),
       flaky, errors, passed, testsWritten: written, missingRuns, notSent: [...notSent].sort(),
       ...(change.ignored ? { ignoredChanged: change.ignored } : {}),
       ...(change.lockfiles ? { lockfilesChanged: change.lockfiles } : {}),
