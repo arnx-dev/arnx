@@ -138,3 +138,34 @@ test("a test_command that starts another command after {targets} is refused befo
     expect([c, said(c)]).toEqual([c, ""]);
   }
 });
+
+test("a test_command with {targets} inside quotes is refused: the report options would land after the closing quote",
+  () => {
+  const said = (c: string, yaml = YAML) => {
+    try {
+      parseReviewFile(yaml.replace("python -m pytest -q {targets}", c));
+      return "";
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  for (const c of ["sh -c \"make build; python -m pytest {targets}\"", "sh -c 'python -m pytest {targets}'",
+    "bash -lc \"cd app && python -m pytest {targets} -x\""]) {
+    expect([c, said(c)]).toEqual([c, expect.stringContaining("{targets} is inside quotes")]);
+  }
+  for (const c of ["python -m pytest -k \"not slow\" {targets}", "python -m pytest {targets} -k 'a or b'",
+    "echo \"it's\" && python -m pytest {targets}", "python -m pytest \\\"{targets}"]) {
+    expect([c, said(c)]).toEqual([c, ""]);
+  }
+  // Every runner that gets its options at the end; node's go in at --test, inside the quotes with it.
+  const ts = (runner: string, c: string) => "version: 1\nprojects:\n  app:\n    root: .\n    language: typescript\n" +
+    `    runner: ${runner}\n    image: node:22\n    test_command: ${c}\n`;
+  for (const [runner, c] of [["jest", "npx jest {targets}"], ["vitest", "npx vitest run {targets}"],
+    ["bun", "bun test {targets}"]]) {
+    expect(said("", ts(runner!, `sh -c "${c}"`))).toContain("{targets} is inside quotes");
+  }
+  expect(said("", ts("node", "sh -c \"node --test {targets}\""))).toBe("");
+  const rust = "version: 1\nprojects:\n  app:\n    root: .\n    language: rust\n    image: rust:1\n" +
+    "    test_command: sh -c \"cargo nextest run {targets}\"\n";
+  expect(said("", rust)).toContain("{targets} is inside quotes");
+});

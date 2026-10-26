@@ -308,7 +308,11 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
     ...typeof spec.test_command === "string" && runner !== "node" && afterTargets(spec.test_command) !== null
       ? [`test_command: \`${afterTargets(spec.test_command)}\` comes after {targets}: arnx adds the runner's report ` +
         "options at the end, so they would go to that command and no report is written. End test_command with the " +
-        "runner's own options"] : []].map((p) => at + p);
+        "runner's own options"] : [],
+    ...typeof spec.test_command === "string" && runner !== "node" && quotedTargets(spec.test_command)
+      ? ["test_command: {targets} is inside quotes: arnx adds the runner's report options at the end, after the " +
+        "closing quote, so no report is written. Leave the runner and {targets} outside the quotes (make build && " +
+        "<runner> {targets})"] : []].map((p) => at + p);
   problems.push(...commandProblems);
   const command = commandProblems.length ? "" : spec.test_command as string;
   let typecheck: string | undefined;
@@ -454,6 +458,23 @@ export function afterTargets(command: string): string | null {
   const rest = command.slice(i + "{targets}".length);
   const m = /\|\|?|;|&&?/.exec(rest.replace(/\d?>&\d?-?|&>>?/g, (r) => " ".repeat(r.length)));
   return m ? rest.slice(m.index).trim() : null;
+}
+
+/** Whether the last {targets} in a test command sits inside quotes (`sh -c "make; pytest {targets}"`): the report
+ * options arnx appends would follow the closing quote and go to the shell, not the runner. */
+export function quotedTargets(command: string): boolean {
+  const end = command.lastIndexOf("{targets}");
+  let quote = "";
+  for (let i = 0; i < end; i++) {
+    const c = command[i]!;
+    if (quote === "'") {
+      if (c === "'") quote = "";
+    } else if (c === "\\") i++;
+    else if (quote === "\"") {
+      if (c === "\"") quote = "";
+    } else if (c === "'" || c === "\"") quote = c;
+  }
+  return quote !== "";
 }
 
 /** Why a test_command that writes is refused, naming what writes. A setup approved before the rule fails here on any
