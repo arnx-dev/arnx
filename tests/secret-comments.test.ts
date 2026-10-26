@@ -37,15 +37,13 @@ const withheld = (path: string, text: string) => {
   return r && "withhold" in r ? r.withhold : null;
 };
 
-test("JS and TS: a JSDoc example and a trailing // comment are blanked, code and delimiters stay", () => {
+test("JS and TS: a JSDoc example and a whole-line comment are blanked; delimiters stay", () => {
   const doc = ["/**", " * A service account credential.", " * @example", ` * privateKey: "${PEM}..."`, " */",
     "export interface Credential { privateKey: string }", ""].join("\n");
   for (const path of ["src/auth.ts", "src/auth.tsx", "lib/auth.js", "lib/auth.mjs", "lib/auth.cjs"]) {
     expect(blanked(path, doc)).toEqual({ lines: [4], text: doc.replace(` * privateKey: "${PEM}..."`, "") });
   }
-  // The comment closes on the next line with code after it: only the comment's part of each line goes.
-  const trailing = `const n = 1; // e.g. ${GH}\nconst url = "http://example.com"; /* ${SK} */ run();\n`;
-  expect(blanked("a.ts", trailing).text).toBe('const n = 1; //\nconst url = "http://example.com"; /**/ run();\n');
+  expect(blanked("a.ts", `run();\n  // e.g. ${GH}\n/* ${SK} */\n`).text).toBe("run();\n  //\n/**/\n");
   // An opening line keeps its /*, so the comment still closes where it did.
   expect(blanked("a.ts", `/** token ${GH}\n * more\n */\nx();\n`).text).toBe("/*\n * more\n */\nx();\n");
 });
@@ -59,9 +57,26 @@ test("JS and TS: a key in a string, a template literal or after a regex literal 
   expect(withheld("a.ts", `// ${GH}\nconst k = "${SK}";\n`)).toEqual({ line: 2, label: "sk-…" });
 });
 
+test("a comment sharing its line with code, or opened after code, withholds the file: the lexer may misread it", () => {
+  const K = "sk-ant-" + "A".repeat(30);
+  expect(withheld("a.ts", `const n = 1; // e.g. ${GH}\n`)).toEqual({ line: 1, label: "ghp_…" });
+  expect(withheld("a.ts", `/* ${K} */ const a = 1;\n`)).toEqual({ line: 1, label: "sk-ant-…" });
+  expect(withheld("a.ts", `if (x) /[/*]/.test(s); const k = "${K}"; // */\n`)).toEqual({ line: 1, label: "sk-ant-…" });
+  expect(withheld("a.ts", `if (x) /[/*]/.test(s);\nconst k = "${K}";\n/* end */\n`))
+    .toEqual({ line: 2, label: "sk-ant-…" });
+  expect(withheld("a.tsx", `const a = <p>// ${K}</p>;\n`)).toEqual({ line: 1, label: "sk-ant-…" });
+  expect(withheld("a.ts", `// note\rconst k = "${K}";\n`)).toEqual({ line: 1, label: "sk-ant-…" });
+  expect(withheld("a.py", `x = f"{"#"} ${K}"\n`)).toEqual({ line: 1, label: "sk-ant-…" });
+  expect(withheld("a.py", `    return None  # or ${SK}\n`)).toEqual({ line: 1, label: "sk-…" });
+  expect(withheld("a.rs", `let a = cr"\\"; let k = "// ${K}";\n`)).toEqual({ line: 1, label: "sk-ant-…" });
+  expect(withheld("a.rs", `let a = cr"x\n// ${K}";\n`)).toEqual({ line: 2, label: "sk-ant-…" });
+  // Windows line ends: a whole-line comment is still one.
+  expect(blanked("a.ts", `x();\r\n// ${GH}\r\ny();\r\n`).text).toBe("x();\r\n//\r\ny();\r\n");
+});
+
 test("Python: a # comment is blanked; a key in a string or a docstring withholds the file", () => {
-  const src = `def connect():\n    # example: token = "${GH}"\n    return None  # or ${SK}\n`;
-  expect(blanked("app/client.py", src).text).toBe("def connect():\n    #\n    return None  #\n");
+  const src = `def connect():\n    # example: token = "${GH}"\n    # or ${SK}\n    return None\n`;
+  expect(blanked("app/client.py", src).text).toBe("def connect():\n    #\n    #\n    return None\n");
   expect(blanked("app/client.pyi", src).lines).toEqual([2, 3]);
   expect(withheld("app/client.py", `URL = "http://x#frag"; K = "${GH}"\n`)).toEqual({ line: 1, label: "ghp_…" });
   expect(withheld("app/client.py", `def f():\n    """Example:\n\n    key = ${GH}\n    """\n`))
@@ -74,8 +89,9 @@ test("Rust: line, doc and nested block comments are blanked; raw strings and cha
   // Nesting survives: the inner /* and */ stay.
   expect(blanked("src/lib.rs", `/* outer\n   /* inner ${GH}\n   */\n*/\nfn f() {}\n`).text)
     .toBe("/* outer\n/*\n   */\n*/\nfn f() {}\n");
-  expect(blanked("src/lib.rs", `let q = '"'; // ${GH}\nfn g<'a>(x: &'a str) {} // ${SK}\n`).text)
-    .toBe("let q = '\"'; //\nfn g<'a>(x: &'a str) {} //\n");
+  // A char literal and a lifetime do not open a string that would hide the comments below them.
+  expect(blanked("src/lib.rs", `let q = '"';\n// ${GH}\nfn g<'a>(x: &'a str) {}\n// ${SK}\n`).text)
+    .toBe("let q = '\"';\n//\nfn g<'a>(x: &'a str) {}\n//\n");
   expect(withheld("src/lib.rs", `let k = r#"// "${GH}"#;\n`)).toEqual({ line: 1, label: "ghp_…" });
   expect(withheld("src/lib.rs", `let k = "multi\n// ${GH}";\n`)).toEqual({ line: 2, label: "ghp_…" });
 });

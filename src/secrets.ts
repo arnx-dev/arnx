@@ -81,11 +81,19 @@ export function scanKeys(path: string, text: string, pins: readonly string[]): K
   const lines = text.split("\n");
   const starts: number[] = [];
   lines.reduce((at, l) => (starts.push(at), at + l.length + 1), 0);
-  // A line whose every non-blank character is inside a comment.
-  const covered = (i: number) => [...lines[i]!].every((ch, k) => /\s/.test(ch) || !!within(starts[i]! + k, starts[i]! + k + 1));
+  // A line holding nothing but comment: every non-blank character in a comment, each comment on it opened with only
+  // blanks before it on its line. A comment after code may be a misread regex, string or JSX text, so a key on such a
+  // line withholds the file.
+  const opensClean = (s: { start: number }) => /^\s*$/.test(text.slice(text.lastIndexOf("\n", s.start - 1) + 1, s.start));
+  const covered = (i: number) => {
+    const from = starts[i]!, to = from + lines[i]!.length;
+    return [...lines[i]!].every((ch, k) => /\s/.test(ch) || !!within(from + k, from + k + 1)) &&
+      spans.every((s) => s.end <= from || s.start >= to || opensClean(s));
+  };
   const blank = new Set<number>();
   for (const m of hits) {
     const at = lineOf(m.index) - 1;
+    if (!covered(at)) return { withhold: { line: at + 1, label: label(m[0]) } };
     blank.add(at);
     if (!m[0].startsWith("-----") || KEY_END.test(lines[at]!)) continue;
     // A private key header is blanked with its block only when the block up to its END line lies in the comment.
@@ -105,7 +113,7 @@ export function scanKeys(path: string, text: string, pins: readonly string[]): K
     // A line of comment marks alone (a closing */) holds nothing to blank.
     for (let i = at + 1; i <= end; i++) if (!/^[\s*/#!]*$/.test(lines[i]!)) blank.add(i);
   }
-  // A blanked line keeps its code and the comments' delimiters (an opening // or #, and /* and */ inside a block
+  // A blanked line keeps its blanks and the comments' delimiters (an opening // or #, and /* and */ inside a block
   // comment, so nesting and closing stay as they were); the rest of each comment goes.
   for (const i of blank) {
     let out = "";
