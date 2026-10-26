@@ -1,7 +1,8 @@
 // Docker sandbox. The environment image is built once per approved image, workdir and install commands plus the
 // dependency manifests; the build has network access, and on BuildKit its package downloads are cached across builds. Test runs get no network (or an internal network that reaches
 // only declared services), no environment except declared variables, resource limits, no capabilities, the user's
-// uid, and a throwaway copy of the repository at /src.
+// uid, and a throwaway copy of the repository at /src. Each run is a new container, except for an adapter that keeps
+// its build (Rust): its session's runs share one (see Session).
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -10,7 +11,7 @@ import { adapterFor, getAdapter, LANGUAGES } from "./adapters";
 import { digest, type ReviewConfig } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
 import { globRegex } from "./secrets";
-import { pyJson, randomHex, sleep } from "./util";
+import { pyJson, randomHex, shQuote, sleep } from "./util";
 
 /** The repository the running command works on (set by the command): environment images are labelled with it, so
  * `arnx env prune` can tell whose image is whose. */
@@ -265,12 +266,37 @@ export function cleanupLiveSessions(): void {
   for (const s of [...live]) s.close();
 }
 
-/** Services and network for one review; close() tears them down, including on errors and interrupts. */
+// The first process of a container that runs share: it sleeps, reaps what runs leave behind (a shell waits for its
+// children), and ends after a day, so a container left by an arnx that was killed stops on its own (--rm removes it).
+const KEEPALIVE = 'end=$(($(date +%s)+86400)); while :; do sleep 60; now=$(date +%s) || continue; ' +
+  '[ "${now:-0}" -lt "$end" ] || exit 0; done';
+// Every process in the container but its first and this shell.
+const KILL_ALL = "kill -9 -1 2>/dev/null; exit 0";
+// All Docker says when the container is no longer there.
+const GONE = /^Error response from daemon: (?:No such container|container \S+ is not running)[^\n]*$/i;
+
+/** Services and network for one review; close() tears them down, including on errors and interrupts.
+ *
+ * An adapter with `keepBuild` (Rust) runs every command of the session in one container, started at the first run,
+ * so the build a run left (cargo's target directory) is where the next run starts; a new container per run started
+ * from the image's prebuilt target and compiled the whole workspace again each time (minutes on a large one).
+ * Why cargo stays right: it trusts a build of a workspace crate when no source file that build read is newer than it
+ * (mtimes; registry dependencies are keyed by version, not by files). A session has one snapshot, so one version of
+ * the code (the change's, or the base's in the before/after check, never both), and each later change to it is a
+ * file arnx writes between runs (a run is synchronous: nothing writes during one), newer than every build before it,
+ * so cargo rebuilds what changed. The first run starts from the image's target as every run did before: the snapshot
+ * is extracted with fresh mtimes (`tar -m`), newer than that build, so an image built from other code is never taken
+ * for this code. A kept target never moves to another session (another snapshot, whose files may be older than its
+ * build), and the container is removed with its session, by its exact name. Before each run the container's /tmp,
+ * /dev/shm and the adapter's `emptied` directories are emptied, and after it every process the run left is killed,
+ * as a new container would have them; other files a run writes in the container stay for the session's next runs. */
 export class Session implements Runner {
   readonly id = randomHex(4);
   readonly network: string;
   private started: string[] = [];
   private networkCreated = false;
+  /** The container the runs share (keepBuild), once the first run started it. */
+  private box: string | null = null;
 
   constructor(readonly image: string, readonly cfg: ReviewConfig, readonly snapshot: string,
               readonly limits: Limits = DEFAULT_LIMITS) {
@@ -316,16 +342,65 @@ export class Session implements Runner {
 
   close(): void {
     if (!live.delete(this)) return;
+    this.dropBox();
     for (const name of this.started) docker(["rm", "-f", name]);
     if (this.networkCreated) docker(["network", "rm", this.network]);
   }
 
   run(command: string, timeout: number): RunResult {
-    const name = `arnx-${this.id}-run-${randomHex(3)}`;
+    const keep = adapterFor(this.cfg).keepBuild;
+    if (!keep) {
+      const name = `arnx-${this.id}-run-${randomHex(3)}`;
+      return this.spawnRun(this.argv(name, command), command, timeout, () => docker(["kill", name]));
+    }
+    let r = this.keptRun(command, timeout, keep.emptied);
+    // A container that went away (Docker restarted, removed by hand) is started again once; its build starts over.
+    if (r.exitCode !== 0 && !r.timedOut && GONE.test(r.output.trim())) {
+      this.dropBox();
+      r = this.keptRun(command, timeout, keep.emptied);
+    }
+    return r;
+  }
+
+  private argv(name: string, command: string): string[] {
     const user = `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`;
-    const [bin, ...args] = runArgv({ image: this.image, name, network: this.network, snapshot: this.snapshot,
+    return runArgv({ image: this.image, name, network: this.network, snapshot: this.snapshot,
       workdir: this.cfg.workdir, env: this.cfg.env, command, limits: this.limits, user,
       runEnv: adapterFor(this.cfg).runEnv });
+  }
+
+  /** One run in the session's shared container (started on first use, with every limit a run has). */
+  private keptRun(command: string, timeout: number, emptied: string[]): RunResult {
+    if (!this.box) {
+      const name = `arnx-${this.id}-build-${randomHex(3)}`;
+      const [, run, ...rest] = this.argv(name, KEEPALIVE);
+      live.add(this);
+      const t0 = performance.now();
+      const r = docker([run!, "-d", ...rest]);
+      stepLog({ step: "container", project: this.cfg.name, ok: r.status === 0, secs: secsSince(t0) });
+      if (r.status !== 0) {
+        return { exitCode: r.status, output: (r.stdout + r.stderr).slice(-OUTPUT_LIMIT), timedOut: false,
+          seconds: (performance.now() - t0) / 1000 };
+      }
+      this.box = name;
+    }
+    const box = this.box;
+    const empty = ["/tmp", "/dev/shm", ...emptied].flatMap((d) => [`${d}/*`, `${d}/.[!.]*`, `${d}/..?*`]).join(" ");
+    const wrapped = `rm -rf ${empty} 2>/dev/null; sh -c ${shQuote(command)}; s=$?; kill -9 -1 2>/dev/null; exit $s`;
+    return this.spawnRun([sandboxOptions.docker, "exec", box, "sh", "-c", wrapped], command, timeout, () => {
+      // Killing docker exec leaves the run going inside: its processes go, the container and its build stay.
+      if (docker(["exec", box, "sh", "-c", KILL_ALL], { timeout: 60 }).status !== 0) this.dropBox();
+    });
+  }
+
+  private dropBox(): void {
+    if (!this.box) return;
+    docker(["rm", "-f", this.box]);
+    this.box = null;
+  }
+
+  private spawnRun(argv: string[], command: string, timeout: number, onTimeout: () => void): RunResult {
+    const [bin, ...args] = argv;
     const started = performance.now();
     const r = spawnSync(bin!, args, { encoding: "utf8", timeout: timeout * 1000, killSignal: "SIGKILL",
       maxBuffer: MAX_BUFFER });
@@ -336,7 +411,7 @@ export class Session implements Runner {
     const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
     if (code === "ENOENT") throw new SetupRequired("Docker is not installed; arnx runs tests only inside Docker");
     if (code === "ETIMEDOUT") {
-      docker(["kill", name]);
+      onTimeout();
       return { exitCode: null, output: (r.stdout ?? "").slice(-OUTPUT_LIMIT) + "\n[timed out]", timedOut: true, seconds };
     }
     return { exitCode: r.status, output: ((r.stdout ?? "") + (r.stderr ?? "")).slice(-OUTPUT_LIMIT), timedOut: false,
