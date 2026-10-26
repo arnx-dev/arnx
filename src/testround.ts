@@ -282,19 +282,9 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
     for (const rel of collect(snap, o.writeDir, adapter.writable)) rmSync(join(snap, rel), { force: true });
     // The image's key before any run: runs may write a manifest into the snapshot (cargo's Cargo.lock).
     headKey = envKey(cfg, snap);
-    // The brain starts at once (a hunt needs no sandbox); its tools arrive once the session is up. A session that
-    // fails before then fails the brain's round too.
-    let open!: (t: RoundTools) => void, fail!: (e: unknown) => void;
-    const tools = new Promise<RoundTools>((resolve, reject) => {
-      [open, fail] = [resolve, reject];
-    });
-    tools.catch(() => {});
     // With `context = "precise"` the hunt's context waits for the project's code index (built in its environment).
     const ask = await o.ask(snap);
     const base = { budgetUsd: o.budgetUsd, outDir: o.outDir, ...(o.progress ? { progress: o.progress } : {}) };
-    const round = ask.kind === "review" ? o.brain.agentRound("review", { ...ask.input, ...base }, tools)
-      : o.brain.agentRound("answer", { ...ask.input, ...base }, tools);
-    round.catch(() => {});
     const read = (p: string) => {
       try {
         return readFileSync(join(snap, p), "utf8");
@@ -332,13 +322,16 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const ws = new Workspace(snap, { writeDir: o.writeDir, runTests: run, adapter, runner: cfg.runner });
         // The facts the brain decides its follow-ups on: what the generated tests name, computed here.
         const coverage = o.coverage ?? [];
-        open({ tools: () => ws.tools(), call: (name, args) => ws.call(name, args),
+        const tools: RoundTools = { tools: () => ws.tools(), call: (name, args) => ws.call(name, args),
           facts: () => {
             const now = generatedNow();
             return { untestedFiles: untestedFiles(coverage, now, adapter),
               dbUntested: dbUntested(coverage, read, now, adapter, dbNames), generatedFiles: Object.keys(now) };
-          } });
-        const done = await round;
+          } };
+        // The brain starts only now, the hunt too: a review the probe stops has made no model call.
+        const done = await (ask.kind === "review"
+          ? o.brain.agentRound("review", { ...ask.input, ...base }, Promise.resolve(tools))
+          : o.brain.agentRound("answer", { ...ask.input, ...base }, Promise.resolve(tools)));
         hunt = done.hunt;
         const a = done.agent;
         const f = generatedNow();
@@ -391,9 +384,6 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         }
         if (o.typecheck && cfg.typecheck) checked = typecheckHere(session, snap, cfg, o.writeDir, say);
         return [a, f, r] as const;
-      }).catch((e: unknown) => {
-        fail(e);
-        throw e;
       });
     const classes = o.before ? classify(results) : null;
     const failing = classes?.findings ?? [];

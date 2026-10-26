@@ -81,10 +81,11 @@ fields are in `skills/arnx/references/json.md` and `check-json.md`; `tests/json-
       resolveChange        change.ts     uncommitted work, else the last commit, or --range A..B; no commits: every file
       testRound            testround.ts
         snapshot           change.ts     copy of the code at the change's head, secrets removed
-        agentRound         localbrain.ts the brain's round starts; with --hunt the tool-less hunters start now
         dockerSession      sandbox.ts    build the env image once, start services, internal network
           bakedIn          baked.ts      an older copy of the code in the image: use an image made from this code
-          (tools)          testround.ts  the brain gets the tools; after each final reply, the facts
+          probe            testround.ts  arnx's one-line test must pass, else the round stops before any model call
+          agentRound       localbrain.ts the brain's round starts with its tools (with --hunt, the tool-less hunters
+                                         too); after each final reply, the facts
           runAgent         agent.ts      the model reads, writes tests, runs them (tools only, no shell)
         runTests x3        outcomes.ts   the adapter's command and report -> passed / failed / error, per run
         classify           outcomes.ts   failed in all 3 runs = finding; anything else never is

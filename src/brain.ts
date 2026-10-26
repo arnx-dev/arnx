@@ -201,8 +201,8 @@ export interface Brain {
   readonly label?: string;
   /** The review opens, before any round: a remote brain takes its budget hold here (and can refuse to start). */
   start?(x: ReviewStart): Promise<ReviewOpened | void>;
-  /** One agent round. The brain may start work that needs no tools (a tool-less hunt) at once; `tools` arrives once
-   * the sandbox is up. */
+  /** One agent round. The CLI starts a review or answer round only once the sandbox has run a test, so a round the
+   * environment cannot run costs nothing; `tools` may still arrive later. */
   agentRound<K extends RoundKind>(kind: K, input: RoundInputs[K], tools: Promise<RoundTools>): Promise<RoundResult>;
   /** Questions merged, a second opinion on each finding, findings grouped by cause. Findings that fail the same way
    * before the change are not sent. */
