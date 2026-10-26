@@ -103,17 +103,22 @@ function withoutAccepted(results: TestResult[] | null, cfg: ReviewConfig, accept
 }
 
 /** Why tests were skipped, grouped: `"TEST_DATABASE_URL not set" (8)`. A skip that asks for a service or a
- * variable means the environment lacks it, which a passing suite hides. */
+ * variable means the environment lacks it, which a passing suite hides. Skips the report gives no reason for (a
+ * conditional skip) name their files, so they are not taken for known_failing files. */
 export function skipReasons(results: TestResult[] | null, max = 5): string[] {
   const counts = new Map<string, number>();
+  const silent = new Set<string>();
   for (const t of results ?? []) {
     if (t.outcome !== "skipped") continue;
     const first = t.message.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
-    const reason = first.replace(/^\S+:\d+: /, "").replace(/^Skipped: /, "").slice(0, 160) || "no reason given";
+    const reason = first.replace(/^\S+:\d+: /, "").replace(/^Skipped: /, "").slice(0, 160);
+    if (!reason && t.fileAttr) silent.add(t.fileAttr);
     counts.set(reason, (counts.get(reason) ?? 0) + 1);
   }
+  const files = [...silent].sort();
+  const where = files.length ? `, in ${files.slice(0, 3).join(", ")}${files.length > 3 ? ", …" : ""}` : "";
   const sorted = [...counts].sort((a, b) => b[1] - a[1]);
-  const shown = sorted.slice(0, max).map(([r, n]) => `"${r}" (${n})`);
+  const shown = sorted.slice(0, max).map(([r, n]) => r ? `"${r}" (${n})` : `no reason given (${n}${where})`);
   if (sorted.length > max) shown.push(`${sorted.length - max} more reasons`);
   return shown;
 }

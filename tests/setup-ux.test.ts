@@ -35,10 +35,15 @@ const skipping: SessionFactory = async (_cfg, snap, _log, body) =>
 const result = (m: ScriptedAgent, call: number) =>
   (m.calls[call]!.messages.at(-1)!.content as Record<string, unknown>[]).map((r) => String(r.content)).join("\n");
 
-test("skip reasons are grouped, without the file:line prefix", () => {
-  const t = (message: string): TestResult => ({ testId: "x", fileAttr: "f", name: "n", outcome: "skipped", message });
+test("skip reasons are grouped, without the file:line prefix; skips the report gives no reason for name their files",
+  () => {
+  const t = (message: string, fileAttr = "f"): TestResult => ({ testId: "x", fileAttr, name: "n", outcome: "skipped",
+    message });
   expect(skipReasons([t("a.py:3: needs DB"), t("b.py:9: needs DB"), t(""),
-    { ...t("x"), outcome: "passed" }])).toEqual(['"needs DB" (2)', '"no reason given" (1)']);
+    { ...t("x"), outcome: "passed" }])).toEqual(['"needs DB" (2)', "no reason given (1, in f)"]);
+  // A conditional skip (skipIf) carries no message: the files say which tests, not a known_failing entry, they are.
+  expect(skipReasons([t("", "src/b.test.ts"), t("", "src/a.test.ts"), t("", "src/b.test.ts"), t("", "src/c.test.ts"),
+    t("", "src/d.test.ts")])).toEqual(["no reason given (5, in src/a.test.ts, src/b.test.ts, src/c.test.ts, …)"]);
   expect(skipReasons(null)).toEqual([]);
 });
 
