@@ -173,6 +173,32 @@ test("a review that throws records review.failed and throws the same error", asy
   expect(es.at(-1)!.data).toEqual({ error: "boom", name: "Error" });
 });
 
+// The hunters used to start while the sandbox was built, so a review the probe stopped had already paid for them.
+test("a review whose environment runs no test makes no model call and costs $0", async () => {
+  const repo = gitRepo(tmp());
+  const path = reviewConfigPath(repo);
+  mkdirSync(dirname(path));
+  writeFileSync(path, stamp(parseReviewConfig("version: 1\nimage: python:3.12-slim\n" +
+    "test_command: python -m pytest -q {targets}\n"), "Dev", "2026-10-11"));
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a - b\n");
+  const agent = new ScriptedAgent([[text(JSON.stringify({ suspects: [], questions: [] }))]]);
+  const [challenger, hunter, ranker, second] = [new FakeJson([]), new FakeJson([]), new FakeJson([]),
+    new FakeJson([{ suspects: [], questions: [] }])];
+  const { spend } = await import("../src/spend");
+  const before = spend.total;
+  const broken = (): [string | null, string, boolean] => [null, "error: failed to build `dep`", false];
+  await expect(runReview(repo, { settings: SETTINGS, agentModel: agent, challenger, hunter, ranker,
+    secondHunter: second, hunt: true, sessionFactory: fakeFactory(broken, [], { probe: "ignore" }), now: NOW }))
+    .rejects.toThrow(/the test environment runs no test at this commit/);
+  expect([agent.calls, challenger.calls, hunter.calls, ranker.calls, second.calls].map((c) => c.length))
+    .toEqual([0, 0, 0, 0, 0]);
+  expect(spend.total).toBe(before);
+  const [rid] = readdirSync(join(repo, ".arnx/reviews"));
+  const es = events(join(repo, ".arnx/reviews", rid!));
+  expect(ofType(es, "model.call")).toEqual([]);
+  expect(es.at(-1)!.type).toBe("review.failed");
+});
+
 describe("a resumed review", () => {
   // A resumed review continues the same log (copy of the first test in resume.test.ts).
   let repo = "";

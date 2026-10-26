@@ -57,7 +57,7 @@ export interface LocalModels {
   secondHuntWaitMs?: number;
 }
 
-/** The hunt of one review round: started before the sandbox is up, finished when the reviewer replies to it. */
+/** The hunt of one review round: started once the sandbox has run a test, finished when the reviewer replies to it. */
 interface Hunt {
   user: string;
   afterHunt: (reply: string) => Promise<{ message: string; spent: number }>;
@@ -83,7 +83,7 @@ export class LocalBrain implements Brain {
   private async review(x: ReviewInput, tools: Promise<RoundTools>): Promise<RoundResult> {
     const { cfg } = x;
     const say = (m: string) => x.progress?.(`${cfg.name}: ${m}`);
-    // The tool-less hunters start now, while the sandbox is being built.
+    // The tool-less hunters start now, beside the reviewer's own hunt.
     const hunt = x.hunt ? this.hunt(x, x.hunt) : null;
     const t = await tools;
     let hunting = hunt !== null;
