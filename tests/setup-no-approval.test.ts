@@ -85,6 +85,18 @@ test("setup at a terminal asks nothing: proves, stamps, ends with Next", async (
     .toMatch(/^# Environment proven\n\n\S+ · by Dev · \.arnx\/review\.yaml sha256 [0-9a-f]{12}\n\nWorth a look: nothing\n$/);
 });
 
+test("a proven setup ends with how many old images arnx env prune would remove", async () => {
+  const repo = await shop();
+  const model = new ScriptedAgent([[tool("try_project", { yaml: GOOD })], [tool("propose", { yaml: GOOD })],
+    [text("done")]]);
+  const old = { tag: "arnx-env:old", size: "1.2GB", repo: null, project: "shop", created: "2026-01-01T00:00:00Z" };
+  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: suites([PASS]),
+    approveSessions: suites([PASS]), oldImages: () => [old] });
+  expect(await cli.run("setup")).toBe(0);
+  expect(cli.stdout).toContain("\n✓ Environment proven\n" +
+    "Images: 1 unused environment image (1.2GB); arnx env prune removes it\nNext: arnx review");
+});
+
 test("setup ends with a worth-a-look block: set aside, not tested, allowed secrets, downloads", async () => {
   const repo = await shop();
   mkdirSync(join(repo, "docs"));

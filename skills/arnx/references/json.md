@@ -67,6 +67,7 @@ Every other field is the command's own, in snake_case. Paths are relative to the
 | `coverage` | object | With an environment set up: `projects` (each `{ name, owned, used, untracked: { owned, used } }`, file counts), `uncovered` (each `{ path, reason, files, untracked }`: what no project tests, and why), `unexplained` (source files no project owns or uses and no `uncovered` entry names). Absent otherwise. |
 | `prompts` | object | Only when `.arnx/prompts.toml` overrides a key in use (with arnx cloud, only the fix prompt's `fix.*` keys are): `{ overridden, notes }`, the keys and doctor's notes on them (a default arnx changed since you copied it, a placeholder the step needs dropped). |
 | `jev` | object | Only when doctor shows a JEV line: `{ on, key_set, detail }` (`on`: `jev = true` in the config; `key_set`: `JEV_API_KEY` is set). Experimental, never a check. |
+| `old_images` | object | Only when this repository has images `arnx env prune` would remove (Docker running): `{ count, size }` (`size` like `6.5GB`). Never a check. |
 | `telemetry` | object | `{ enabled, reason }`: `reason` is why it is off (`in .arnx/config.toml`, `ARNX_TELEMETRY is set`, …), `null` when enabled. |
 
 | `result` | Exit | When |

@@ -4,7 +4,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseReviewConfig, parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
-import { pruneEnv, repoId } from "../src/envprune";
+import { oldImages, pruneEnv, repoId } from "../src/envprune";
 import { LAYER_VERSION } from "../src/indexer";
 import { ensureEnv, envKey, envOwner, sandboxOptions } from "../src/sandbox";
 import { Cli } from "./helpers/cli";
@@ -194,6 +194,47 @@ test("arnx env prune names the build cache it removes with the images made from 
     expect(await cli.run("env", "prune")).toBe(0);
     expect(cli.stdout).toContain(`Removed 1 image (2.4GB):\n  ${tag} (main, 30 days old, 2.4GB)\n` +
       "Removed their build cache: 3 records (2.6GB).\n");
+  } finally {
+    sandboxOptions.docker = saved;
+  }
+});
+
+test("doctor says how many images arnx env prune would remove, and removes nothing", async () => {
+  const saved = sandboxOptions.docker;
+  try {
+    const repo = gitRepo(tmp());
+    const me = repoId(repo);
+    const now = Date.now();
+    const docker = fakeDocker([
+      `arnx-env:old1\tid1\t5GB\t${labels(me, "main", 30, now)}`,
+      `arnx-env:old2\tid2\t1.5GB\t${labels(me, "main", 10, now)}`,
+      `arnx-env:recent\tid3\t5GB\t${labels(me, "main", 1, now)}`,
+      `arnx-env:theirs\tid4\t3GB\t${labels("0123456789abcdef", "web", 30, now)}`,
+      "arnx-env:unlabelled\tid5\t4GB\t",
+    ]);
+    const cli = new Cli({ cwd: repo, oldImages });
+    await cli.run("doctor");
+    expect(cli.stdout).toContain("\nImages: 2 unused environment images (6.5GB); arnx env prune removes them\n");
+    expect(docker.calls().filter((c) => c[1] === "rm" || c[1] === "prune")).toEqual([]);
+    // Docker not running: no line, Docker is not asked.
+    const calls = docker.calls().length;
+    const down = new Cli({ cwd: repo, oldImages, dockerOk: () => [false, "not running"] });
+    await down.run("doctor");
+    expect(down.stdout).not.toContain("Images:");
+    expect(docker.calls()).toHaveLength(calls);
+  } finally {
+    sandboxOptions.docker = saved;
+  }
+});
+
+test("doctor shows no image line when there is nothing to prune", async () => {
+  const saved = sandboxOptions.docker;
+  try {
+    const repo = gitRepo(tmp());
+    fakeDocker([`arnx-env:recent\tid3\t5GB\t${labels(repoId(repo), "main", 1, Date.now())}`]);
+    const cli = new Cli({ cwd: repo, oldImages });
+    await cli.run("doctor");
+    expect(cli.stdout).not.toContain("Images:");
   } finally {
     sandboxOptions.docker = saved;
   }

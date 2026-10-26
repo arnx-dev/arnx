@@ -49,10 +49,13 @@ export const repoImages = (repo: string): EnvImage[] => envImages().labelled.fil
 
 export const ageDays = (img: EnvImage, now: number) => (now - Date.parse(img.created)) / DAY_MS;
 
-/** Removes (or with dryRun lists) this repository's images that are not an approved project's current environment
- * and are at least `keepDays` old; `allRepos` also takes other repositories' images that old. */
-export function pruneEnv(repo: string, o: { keepDays: number; now?: number; dryRun?: boolean; allRepos?: boolean })
-  : Pruned {
+/** The images `arnx env prune` keeps unless told otherwise: those under this many days old. */
+export const KEEP_DAYS = 7;
+
+/** This repository's images that are not an approved project's current environment and are at least `keepDays` old;
+ * `allRepos` also takes other repositories' images that old. What prune removes. */
+export function staleImages(repo: string, o: { keepDays: number; now?: number; allRepos?: boolean })
+  : { images: EnvImage[]; unlabelled: number } {
   const now = o.now ?? Date.now();
   let current: string[] = [];
   try {
@@ -64,10 +67,22 @@ export function pruneEnv(repo: string, o: { keepDays: number; now?: number; dryR
   }
   const me = repoId(repo);
   const { labelled, unlabelled } = envImages();
-  const removed: EnvImage[] = [], failed: [EnvImage, string][] = [];
-  for (const img of labelled) {
+  const images = labelled.filter((img) => {
     const mine = img.repo === me;
-    if (!(mine || o.allRepos) || (mine && current.includes(img.tag)) || ageDays(img, now) < o.keepDays) continue;
+    return (mine || o.allRepos) && !(mine && current.includes(img.tag)) && ageDays(img, now) >= o.keepDays;
+  });
+  return { images, unlabelled };
+}
+
+/** This repository's images prune would remove with its defaults, for doctor and the end of setup. */
+export const oldImages = (repo: string): EnvImage[] => staleImages(repo, { keepDays: KEEP_DAYS }).images;
+
+/** Removes (or with dryRun lists) staleImages, with the build cache of those made from the code. */
+export function pruneEnv(repo: string, o: { keepDays: number; now?: number; dryRun?: boolean; allRepos?: boolean })
+  : Pruned {
+  const { images, unlabelled } = staleImages(repo, o);
+  const removed: EnvImage[] = [], failed: [EnvImage, string][] = [];
+  for (const img of images) {
     if (o.dryRun) {
       removed.push(img);
       continue;
