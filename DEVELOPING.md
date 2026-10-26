@@ -347,6 +347,18 @@ Implemented: Python (`adapters/python.ts`: pytest, JUnit xunit1, a text-based sk
 rewritten) and Rust (`adapters/rust.ts`: cargo-nextest JUnit; generated tests are integration tests in the crate's
 `tests/`). More languages are planned. JUnit walking shared by adapters is in `adapters/junit.ts`.
 
+Rust keeps its build within a session (`keepBuild`): the session's runs share one container, started at its first run
+with every limit a run has, so cargo starts each run from the target the last run left instead of compiling the
+workspace again from the image's. A session holds one snapshot, so one version of the code (the change's, or the
+base's for the before/after check); every later change to it is a file written between runs, and each run first
+touches those files inside the container (by Docker's clock, which cargo's builds use), so cargo's mtime check rebuilds
+what changed. A target never moves between sessions, and the container is removed by its exact name when the session
+closes (or on an interrupt); a closed session starts none. Before each run /tmp, /dev/shm and the target's tmp/ are
+emptied, and after it every process the run left is killed; a timeout kills the run's processes and keeps the
+container (one Docker does not answer in time is removed, and the run counts as timed out). An image with an
+entrypoint runs each command in a new container (docker.jsonl: `container` step with `kept: false`). The reasoning is
+at `Session` in `sandbox.ts`.
+
 Kept test files are named after what they protect, inside a folder that keeps the review id (`tests/arnx/r<id>/`,
 i.e. `accepted_tests_dir` under the project's root; while that is the default, TypeScript uses `__tests__/arnx/r<id>/`;
 Rust has no folder, as cargo builds only `tests/*.rs`, so the id is a prefix: `tests/arnx_<id>_<name>.rs`). The name
@@ -378,7 +390,7 @@ the copy under its old name is removed.
 | `secrets.ts` | What is never sent or copied: secret file names, key-like text, credential variable names |
 | `ignore.ts` | `.arnxignore` matching, and the proposal of data-like files for `init` |
 | `change.ts` | Resolve the change; build the snapshot |
-| `sandbox.ts` | Docker: env image, locked-down runs, services, timeouts, cleanup of live sessions |
+| `sandbox.ts` | Docker: env image, locked-down runs, services, timeouts, cleanup of live sessions; the container a Rust session's runs share |
 | `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, kept when runs reach them, compared with the code to test; the key of an image made from the code (its files, not the tests or reports beside it); when a round's probe runs no test, the files only the copy holds (named in the stop message with `arnx setup --project NAME`) |
 | `outcomes.ts` | Run tests through the adapter; classify results across runs |
 | `before.ts` | The before/after check's comparison: a finding's runs on the code before the change against its failure |

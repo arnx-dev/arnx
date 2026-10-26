@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { python } from "../src/adapters/python";
-import { parseReviewConfig } from "../src/config";
+import { parseReviewConfig, parseReviewFile } from "../src/config";
 import { SetupRequired } from "../src/errors";
 import {
   cleanupLiveSessions, DEFAULT_LIMITS, dockerfile, ensureEnv, envKey, requireDocker, runArgv, sandboxOptions, Session,
-  dockerSteps, networkRetry,
+  dockerSteps, keptBox, networkRetry,
 } from "../src/sandbox";
 import { useTmp } from "./helpers/tmp";
 import { CFG } from "./helpers/yaml";
@@ -290,4 +290,256 @@ test("an image build does not block: timers (the progress spinner and clock) kee
     clearInterval(timer);
   }
   expect(ticks).toBeGreaterThanOrEqual(5);
+});
+
+// ---- Rust keeps its build: the runs of one session share one container. Fake Docker only: it logs each call and
+// never runs the command it is given. ----
+
+const RUST = `version: 1
+projects:
+  calc:
+    root: .
+    language: rust
+    runner: nextest
+    image: rust:1-bookworm
+    install: [cargo nextest run --no-run]
+    test_command: cargo nextest run {targets}
+`;
+const rustCfg = () => parseReviewFile(RUST).projects[0]!;
+const SEP = "\x1f";
+
+/** A fake docker that logs its arguments (one call per line) and answers `exec` from `exec` (sh, run with the call's
+ * number in $n), `image inspect` with `entrypoint`, `run -d` from `start` and the kill after a timeout from `kill`.
+ * `calls` leaves out the image inspections; `inspections` counts them. */
+function loggingDocker(dir: string, o: { exec?: string; entrypoint?: string; start?: string; kill?: string } = {}) {
+  const path = join(dir, "docker");
+  const log = join(dir, "calls");
+  const count = join(dir, "execs");
+  writeFileSync(path, `#!/bin/sh\nprintf '%s${SEP}' "$@" >> '${log}'\necho >> '${log}'\n` +
+    `case "$1" in\n  image) echo '${o.entrypoint ?? "null"}';;\n` +
+    `  run) [ "$2" = "-d" ] && { ${o.start ?? "echo cafe"}; };;\n` +
+    `  exec) case "$*" in *"kill -9 -1 2>/dev/null; exit 0"*) ${o.kill ?? "exit 0"};; esac\n` +
+    `    echo x >> '${count}'; n=$(wc -l < '${count}'); ${o.exec ?? "echo ran; exit 0"};;\nesac\nexit 0\n`);
+  chmodSync(path, 0o755);
+  const all = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n")
+    .map((l) => l.split(SEP).slice(0, -1)) : [];
+  return { path, calls: () => all().filter((c) => c[0] !== "image"),
+    inspections: () => all().filter((c) => c[0] === "image").length };
+}
+
+test("a Rust session's runs share one container, so the build a run leaves is there for the next", () => {
+  const fake = loggingDocker(tmp());
+  const s = new Session("img", rustCfg(), tmp());
+  withDocker(fake.path, () => {
+    expect(s.run("cargo nextest run a", 60)).toMatchObject({ exitCode: 0, output: "ran\n", timedOut: false });
+    expect(s.run("cargo nextest run b", 60).exitCode).toBe(0);
+    s.close();
+  });
+  const calls = fake.calls();
+  expect(calls.map((c) => c[0])).toEqual(["run", "exec", "exec", "rm"]);
+  const [start, first, second, removed] = calls as [string[], string[], string[], string[]];
+  // Started once, detached, with every limit a run has; removed at the end by its exact name.
+  const box = start[start.indexOf("--name") + 1]!;
+  expect(box).toMatch(new RegExp(`^arnx-${s.id}-build-[0-9a-f]{6}$`));
+  expect(start.slice(0, 3)).toEqual(["run", "-d", "--rm"]);
+  const joined = start.join(" ");
+  for (const part of ["--network none", "--cap-drop ALL", "--security-opt no-new-privileges", "--pids-limit 512",
+    "--memory 4g", "--memory-swap 4g", "--tmpfs /tmp:rw,exec,size=1g", `-v ${tmp()}:/src`,
+    "-e CARGO_TARGET_DIR=/opt/arnx-target"]) expect(joined).toContain(part);
+  expect(removed).toEqual(["rm", "-f", box]);
+  // Each run is the command in that container: what it left is cleared first (temporary files, the target's tmp/
+  // that tests write to), and its leftover processes are killed after.
+  for (const [call, cmd] of [[first, "cargo nextest run a"], [second, "cargo nextest run b"]] as const) {
+    expect(call.slice(0, 4)).toEqual(["exec", box, "sh", "-c"]);
+    expect(call[4]).toContain("rm -rf /tmp/* /tmp/.[!.]* /tmp/..?* /dev/shm/*");
+    expect(call[4]).toContain("/opt/arnx-target/tmp/*");
+    expect(call[4]).toContain(`sh -c '${cmd}'; s=$?; kill -9 -1 2>/dev/null; exit $s`);
+  }
+});
+
+test("a Python session still runs each command in a new container", () => {
+  const fake = loggingDocker(tmp());
+  const s = new Session("img", parseReviewConfig(CFG), tmp());
+  withDocker(fake.path, () => {
+    s.run("pytest -q a", 60);
+    s.run("pytest -q b", 60);
+    s.close();
+  });
+  const calls = fake.calls();
+  expect(calls.map((c) => c.slice(0, 2))).toEqual([["run", "--rm"], ["run", "--rm"]]);
+  expect(calls.map((c) => c.at(-1))).toEqual(["pytest -q a", "pytest -q b"]);
+});
+
+test("the head and the base session never share a container: each removes only its own", () => {
+  const fake = loggingDocker(tmp());
+  const cfg = rustCfg();
+  const head = new Session("img", cfg, join(tmp(), "head"));
+  const base = new Session("img", cfg, join(tmp(), "base"));
+  withDocker(fake.path, () => {
+    head.run("cargo nextest run", 60);
+    base.run("cargo nextest run", 60);
+    head.close();
+    cleanupLiveSessions(); // an interrupt: the base session is still live
+    cleanupLiveSessions();
+  });
+  const calls = fake.calls();
+  const boxes = calls.filter((c) => c[0] === "run").map((c) => c[c.indexOf("--name") + 1]!);
+  expect(boxes).toHaveLength(2);
+  expect(boxes[0]).not.toBe(boxes[1]);
+  expect(calls.filter((c) => c[0] === "run").map((c) => c[c.indexOf("-v") + 1]))
+    .toEqual([`${join(tmp(), "head")}:/src`, `${join(tmp(), "base")}:/src`]);
+  expect(calls.filter((c) => c[0] === "exec").map((c) => c[1])).toEqual(boxes);
+  expect(calls.filter((c) => c[0] === "rm")).toEqual([["rm", "-f", boxes[0]!], ["rm", "-f", boxes[1]!]]);
+});
+
+test("a run that times out in the shared container has its processes killed; the container and its build stay", () => {
+  const fake = loggingDocker(tmp(), { exec: 'case "$*" in *slow*) exec sleep 5;; esac; echo ran' });
+  const s = new Session("img", rustCfg(), tmp());
+  let slow, next;
+  withDocker(fake.path, () => {
+    slow = s.run("slow", 1);
+    next = s.run("cargo nextest run", 60);
+    s.close();
+  });
+  expect(slow).toMatchObject({ exitCode: null, timedOut: true });
+  expect(next).toMatchObject({ exitCode: 0, output: "ran\n" });
+  const calls = fake.calls();
+  const box = calls[0]![calls[0]!.indexOf("--name") + 1]!;
+  expect(calls.map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["exec", box], ["exec", box], ["exec", box],
+    ["rm", "-f"]]);
+  expect(calls[2]).toEqual(["exec", box, "sh", "-c", "kill -9 -1 2>/dev/null; exit 0"]);
+});
+
+test("a shared container that went away is started again once, and the run goes on there", () => {
+  const fake = loggingDocker(tmp(), { exec: '[ "$n" = 1 ] && { echo "Error response from daemon: No such ' +
+    'container: x" >&2; exit 1; }; echo ran' });
+  const s = new Session("img", rustCfg(), tmp());
+  let r;
+  withDocker(fake.path, () => {
+    r = s.run("cargo nextest run", 60);
+    s.close();
+  });
+  expect(r).toMatchObject({ exitCode: 0, output: "ran\n" });
+  const calls = fake.calls();
+  const boxes = calls.filter((c) => c[0] === "run").map((c) => c[c.indexOf("--name") + 1]!);
+  expect(calls.map((c) => c[0])).toEqual(["run", "exec", "rm", "run", "exec", "rm"]);
+  expect(calls.filter((c) => c[0] === "rm").map((c) => c[2])).toEqual(boxes);
+});
+
+test("a test that prints Docker's words is not taken for a container that went away", () => {
+  const fake = loggingDocker(tmp(), { exec: 'echo "panicked: Error response from daemon: No such container: x"; exit 1' });
+  const s = new Session("img", rustCfg(), tmp());
+  withDocker(fake.path, () => {
+    expect(s.run("cargo nextest run", 60).exitCode).toBe(1);
+    s.close();
+  });
+  expect(fake.calls().map((c) => c[0])).toEqual(["run", "exec", "rm"]);
+});
+
+test("an image whose entrypoint stays the first process runs each command in a new container, as before", () => {
+  const fake = loggingDocker(tmp(), { entrypoint: '["/usr/bin/tini","--"]' });
+  const lines: Record<string, unknown>[] = [];
+  dockerSteps.log = (l) => lines.push(l);
+  const s = new Session("img", rustCfg(), tmp());
+  try {
+    withDocker(fake.path, () => {
+      s.run("cargo nextest run a", 60);
+      s.run("cargo nextest run b", 60);
+      s.close();
+    });
+  } finally {
+    dockerSteps.log = null;
+  }
+  // The runs' kill would end that first process and the container with it.
+  expect(fake.inspections()).toBe(1);
+  expect(fake.calls().map((c) => c.slice(0, 2))).toEqual([["run", "--rm"], ["run", "--rm"]]);
+  expect(lines.filter((l) => l.step === "container")).toEqual([expect.objectContaining({ kept: false,
+    reason: "entrypoint" })]);
+});
+
+test("each kept run first touches, in the container, the files written since the last run there", () => {
+  const snap = join(tmp(), "snap");
+  mkdirSync(join(snap, "src"), { recursive: true });
+  mkdirSync(join(snap, "tests"), { recursive: true });
+  const old = new Date("2020-01-01T00:00:00Z");
+  for (const f of ["src/lib.rs", "tests/arnx_generated_a.rs"]) {
+    writeFileSync(join(snap, f), "x\n");
+    utimesSync(join(snap, f), old, old);
+  }
+  const fake = loggingDocker(tmp());
+  const s = new Session("img", rustCfg(), snap);
+  withDocker(fake.path, () => {
+    s.run("cargo nextest run", 60);
+    Bun.sleepSync(20); // a run takes longer than a file system clock tick
+    writeFileSync(join(snap, "tests/arnx_generated_a.rs"), "y\n"); // rewritten
+    writeFileSync(join(snap, "tests/arnx_generated_b's.rs"), "z\n"); // new
+    mkdirSync(join(snap, ".arnx-run"), { recursive: true });
+    writeFileSync(join(snap, ".arnx-run", "final-1.xml"), "<x/>"); // a report, no source
+    s.run("cargo nextest run", 60);
+    s.run("cargo nextest run", 60);
+    s.close();
+  });
+  const execs = fake.calls().filter((c) => c[0] === "exec").map((c) => c[4]!);
+  expect(execs).toHaveLength(3);
+  // The first run starts from the image's build, older than the snapshot: nothing to touch.
+  expect(execs[0]).not.toContain("touch");
+  expect(execs[1]).toContain("touch -c -- /src/tests/arnx_generated_a.rs '/src/tests/arnx_generated_b'\"'\"'s.rs';");
+  expect(execs[1]).not.toContain("lib.rs");
+  expect(execs[1]).not.toContain(".arnx-run");
+  expect(execs[2]).not.toContain("touch");
+});
+
+test("a kill that Docker does not answer in time counts as the run's timeout; the container goes", () => {
+  const fake = loggingDocker(tmp(), { exec: 'case "$*" in *slow*) exec sleep 5;; esac; echo ran', kill: "exec sleep 5" });
+  const saved = keptBox.dockerSeconds;
+  keptBox.dockerSeconds = 1;
+  const s = new Session("img", rustCfg(), tmp());
+  let slow, next;
+  try {
+    withDocker(fake.path, () => {
+      slow = s.run("slow", 1);
+      next = s.run("cargo nextest run", 60);
+      s.close();
+    });
+  } finally {
+    keptBox.dockerSeconds = saved;
+  }
+  expect(slow).toMatchObject({ exitCode: null, timedOut: true });
+  expect(next).toMatchObject({ exitCode: 0, output: "ran\n" });
+  const calls = fake.calls();
+  const boxes = calls.filter((c) => c[0] === "run").map((c) => c[c.indexOf("--name") + 1]!);
+  expect(boxes).toHaveLength(2);
+  expect(calls.filter((c) => c[0] === "rm").map((c) => c[2])).toEqual(boxes);
+});
+
+test("a container start Docker does not answer in time is removed by its name, and the run counts as timed out", () => {
+  const fake = loggingDocker(tmp(), { start: "exec sleep 5" });
+  const saved = keptBox.dockerSeconds;
+  keptBox.dockerSeconds = 1;
+  const s = new Session("img", rustCfg(), tmp());
+  let r;
+  try {
+    withDocker(fake.path, () => {
+      r = s.run("cargo nextest run", 60);
+    });
+  } finally {
+    keptBox.dockerSeconds = saved;
+  }
+  expect(r).toMatchObject({ exitCode: null, timedOut: true });
+  const calls = fake.calls();
+  const name = calls[0]![calls[0]!.indexOf("--name") + 1]!;
+  expect(calls.map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["rm", "-f"]]);
+  expect(calls[1]).toEqual(["rm", "-f", name]);
+});
+
+test("a run after the session closed (an interrupt) starts no shared container", () => {
+  const fake = loggingDocker(tmp());
+  const s = new Session("img", rustCfg(), tmp());
+  withDocker(fake.path, () => {
+    s.run("cargo nextest run a", 60);
+    cleanupLiveSessions();
+    s.run("cargo nextest run b", 60);
+  });
+  expect(fake.calls().map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["exec", expect.any(String)], ["rm", "-f"],
+    ["run", "--rm"]]);
 });

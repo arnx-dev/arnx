@@ -91,6 +91,9 @@ export interface Adapter {
   noDownloadCache?: string[];
   /** Commands run after the project's install commands when building the image (part of the image key). */
   postInstall?: string[];
+  /** The runs of one session share one container, so the build a run leaves there is the next run's start (see
+   * `Session`); `emptied`: directories in it a run empties first, as a new container would have them. */
+  keepBuild?: { emptied: string[] };
 }
 
 /** accepted_tests_dir when the config leaves it at its default. A TypeScript project then keeps its accepted tests

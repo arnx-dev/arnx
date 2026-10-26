@@ -230,4 +230,7 @@ export const rust: Adapter = {
   runEnv: ["CARGO_TERM_COLOR=never", "CARGO_TARGET_DIR=/opt/arnx-target"],
   postInstall: ["mkdir -p /opt/arnx-target && chmod -R a+rwX /opt/arnx-target /usr/local/cargo",
     `${WORKSPACE} mkdir -p ${posix.dirname(LOCK)}; [ ! -f "$ws/Cargo.lock" ] || cp "$ws/Cargo.lock" ${LOCK}`],
+  // Otherwise every run compiles the workspace again from the image's target. tmp/ is CARGO_TARGET_TMPDIR, where
+  // integration tests put their own files.
+  keepBuild: { emptied: ["/opt/arnx-target/tmp"] },
 };
