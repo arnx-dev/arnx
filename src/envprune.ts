@@ -109,7 +109,8 @@ export function cacheRecords(): CacheRecord[] {
  * step built on it, and the copy of the code below it when nothing else builds on that copy. */
 export function sourceRecords(records: CacheRecord[], tags: string[]): CacheRecord[] {
   const regular = records.filter((r) => r.type === "regular" || r.type === "");
-  const marks = new Set(tags.map((t) => `RUN : ${t}`));
+  // BuildKit names the step `mount / from exec /bin/sh -c : <tag>` (`RUN : <tag>` in some versions).
+  const marks = new Set(tags.map((t) => ` : ${t}`));
   const set = new Set(regular.filter((r) => [...marks].some((m) => r.description.endsWith(m))).map((r) => r.id));
   if (!set.size) return [];
   const marked = [...set];

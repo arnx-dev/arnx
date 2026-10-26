@@ -176,7 +176,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: code baked into the ima
       const tag = `arnx-env:${bakedKey(envKey(cfg, two), cfg, [{ root: "/opt/app", scope: "app", files: [] }], two)}`;
       if (sandboxOptions.buildkit) {
         const found = sourceRecords(cacheRecords(), [tag]).map((r) => r.description);
-        expect(found.some((d) => d.endsWith(`RUN : ${tag}`))).toBe(true);
+        expect(found.some((d) => d.endsWith(`/bin/sh -c : ${tag}`))).toBe(true);
         expect(found.some((d) => d.includes("cp -r . /opt/app"))).toBe(true);
       }
     } finally {

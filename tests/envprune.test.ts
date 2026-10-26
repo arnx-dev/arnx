@@ -139,17 +139,18 @@ test("prune removes an old source image with the build cache records its build l
       record("base0", [], "pulled from docker.io/library/python:3.12-slim@sha256:00", "50MB"),
       // the environment image's own build
       record("envcopy", ["base0"], "[stage-0 2/4] COPY . /src", "10MB"),
-      record("envrun", ["envcopy"], "[stage-0 4/4] RUN pip install pytest", "1GB"),
+      record("envrun", ["envcopy"], "mount / from exec /bin/sh -c pip install pytest", "1GB"),
       // a's build: its copy of the code, the marked step, the steps after it
       record("copya", ["base0"], "[stage-0 2/5] COPY . /src", "300MB"),
-      record("marka", ["copya"], `[stage-0 3/5] RUN : ${a}`),
+      record("marka", ["copya"], `mount / from exec /bin/sh -c : ${a}`),
       record("worka", ["marka"], "[stage-0 4/5] WORKDIR /src/app"),
-      record("runa", ["worka"], "[stage-0 5/5] RUN cp -r . /opt/app && pip install pytest", "2.35GB"),
-      // b (another install of the same code) was built from the same copy: it stays while b does
+      record("runa", ["worka"], "mount / from exec /bin/sh -c cp -r . /opt/app && pip install pytest", "2.35GB"),
+      // b (another install of the same code) was built from the same copy: it stays while b does (named as some
+      // BuildKit versions name the step)
       record("markb", ["copya"], `[stage-0 3/5] RUN : ${b}`),
       // c is in use, so neither it nor its records go
       record("copyc", ["base0"], "[stage-0 2/5] COPY . /src", "300MB"),
-      record("markc", ["copyc"], `[stage-0 3/5] RUN : ${c}`),
+      record("markc", ["copyc"], `mount / from exec /bin/sh -c : ${c}`),
       record("mount", [], "cached mount /arnx-cache from exec /bin/sh -c pip install pytest", "800MB", "exec.cachemount"),
     ].join("\n");
     const docker = fakeDocker([
@@ -184,8 +185,8 @@ test("arnx env prune names the build cache it removes with the images made from 
     const tag = "arnx-env:k1-src-aaaaaaaaaaaa";
     fakeDocker([`${tag}\tid1\t2.4GB\t${labels(repoId(repo), "main", 30.5, Date.now())}`], [],
       [record("copya", ["base0"], "[stage-0 2/5] COPY . /src", "300MB"),
-        record("marka", ["copya"], `[stage-0 3/5] RUN : ${tag}`),
-        record("runa", ["marka"], "[stage-0 5/5] RUN cp -r . /opt/app && pip install pytest", "2.35GB")].join("\n"));
+        record("marka", ["copya"], `mount / from exec /bin/sh -c : ${tag}`),
+        record("runa", ["marka"], "mount / from exec /bin/sh -c cp -r . /opt/app && pip install pytest", "2.35GB")].join("\n"));
     const cli = new Cli({ cwd: repo });
     expect(await cli.run("env", "prune")).toBe(0);
     expect(cli.stdout).toContain(`Removed 1 image (2.4GB):\n  ${tag} (main, 30 days old, 2.4GB)\n` +
