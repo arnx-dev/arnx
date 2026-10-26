@@ -21,9 +21,10 @@ import { worthALook } from "../src/setupview";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
 import { GOOD, PROJECTS } from "./helpers/yaml";
+import { AWS_KEY } from "./helpers/fakekeys";
 
 const tmp = useTmp();
-const FIXTURE = "AWS = 'AKIAIOSFODNN7EXAMPLE'\n";
+const FIXTURE = `AWS = '${AWS_KEY}'\n`;
 const PIN = { path: "crates/common/src/secrets.rs", matches: secretPins(FIXTURE) };
 
 test("allow_secret_looking parses in both kinds of file, and its pins are what snapshots keep", () => {
@@ -38,7 +39,7 @@ test("allow_secret_looking parses in both kinds of file, and its pins are what s
 test.each([
   ["not a list", "allow_secret_looking: {a: b}\n"],
   ["no matches", "allow_secret_looking:\n  - path: a.rs\n"],
-  ["a match that is not a pin", "allow_secret_looking:\n  - {path: a.rs, matches: [AKIAIOSFODNN7EXAMPLE]}\n"],
+  ["a match that is not a pin", `allow_secret_looking:\n  - {path: a.rs, matches: [${AWS_KEY}]}\n`],
   ["outside the repository", `allow_secret_looking:\n  - {path: ../a.rs, matches: [${PIN.matches[0]}]}\n`],
 ])("allow_secret_looking refuses %s", (_name, extra) => {
   expect(() => parseReviewFile(GOOD + extra)).toThrow(/allow_secret_looking/);
@@ -153,7 +154,7 @@ test("arnx allow-secret pins a file's key-shaped strings into review.yaml and se
   expect(readSecretPins(repo)).toEqual([{ path: "src/detect.py", matches: secretPins(FIXTURE) }]);
   expect(cli.stdout).toContain("src/detect.py: 1 key-like string (AKIA… line 2)");
   expect(cli.stdout).toContain("arnx setup");
-  expect(cli.stdout).not.toContain("AKIAIOSFODNN7EXAMPLE");
+  expect(cli.stdout).not.toContain(AWS_KEY);
   // After setup the file is a full review.yaml: allowing more needs a new proof, which the next review runs.
   writeFileSync(reviewConfigPath(repo), withSecretPins(stampFile(parseReviewFile(YAML), "u", "t"), readSecretPins(repo)));
   writeFileSync(join(repo, "src", "detect.py"), FIXTURE + "T = 'ghp_" + "d".repeat(36) + "'\n");

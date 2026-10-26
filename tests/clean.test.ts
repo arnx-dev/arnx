@@ -4,6 +4,7 @@ import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { secretHits } from "../src/secrets";
 
 const ROOT = join(import.meta.dir, "..");
 const rot13 = (s: string) => s.replace(/[a-z]/g, (c) => String.fromCharCode(((c.charCodeAt(0) - 84) % 26) + 97));
@@ -46,6 +47,12 @@ test("test_no_private_names", () => {
     const text = readFileSync(p, "latin1").toLowerCase();
     for (const w of FORBIDDEN) if (text.includes(w)) hits.push(`${relative(ROOT, p)}: ${w}`);
   }
+  expect(hits).toEqual([]);
+});
+
+test("no file holds a key-shaped string: setup run on arnx withholds none (tests build their fakes at runtime)", () => {
+  const hits = files().flatMap((p) => secretHits(readFileSync(p, "utf8"))
+    .map((h) => `${relative(ROOT, p)}:${h.line} ${h.label}`));
   expect(hits).toEqual([]);
 });
 

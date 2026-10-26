@@ -7,6 +7,7 @@ import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "../src/error
 import { secretPins } from "../src/secrets";
 import { commit, gitRepo, initRepo, runGit } from "./helpers/gitutil";
 import { useTmp } from "./helpers/tmp";
+import { AWS_KEY, AWS_KEY_2, PRIVATE_KEY } from "./helpers/fakekeys";
 
 const tmp = useTmp();
 
@@ -138,7 +139,7 @@ test("test_arnx_dir_is_not_a_change", () => {
 
 test("test_secret_content_in_diff_refused", () => {
   const repo = gitRepo(tmp());
-  writeFileSync(join(repo, "app.py"), "KEY = 'AKIAABCDEFGHIJKLMNOP'\n");
+  writeFileSync(join(repo, "app.py"), `KEY = '${AWS_KEY_2}'\n`);
   expect(() => resolveChange(repo)).toThrow(/secret/);
 });
 
@@ -172,7 +173,7 @@ test("test_repo_root", () => {
 test("test_snapshot_worktree_scrubs", () => {
   const repo = gitRepo(tmp());
   writeFileSync(join(repo, ".env"), "A=1\n");
-  writeFileSync(join(repo, "conf.py"), "K = '-----BEGIN RSA PRIVATE KEY-----'\n");
+  writeFileSync(join(repo, "conf.py"), `K = '${PRIVATE_KEY}'\n`);
   symlinkSync("/etc/hostname", join(repo, "link"));
   writeFileSync(join(repo, "app.py"), "changed = True\n");
   const dest = join(tmp(), "snap");
@@ -183,7 +184,7 @@ test("test_snapshot_worktree_scrubs", () => {
   expect(removedFiles).toEqual([{ path: "conf.py", line: 1, label: "a private key" }]);
 });
 
-const FIXTURE = "AWS = 'AKIAIOSFODNN7EXAMPLE'\n";
+const FIXTURE = `AWS = '${AWS_KEY}'\n`;
 
 test("a source file with a key-shaped string is withheld, unless allowed with every such string pinned", () => {
   const repo = gitRepo(tmp());
@@ -194,7 +195,7 @@ test("a source file with a key-shaped string is withheld, unless allowed with ev
   expect(snapshot(repo, null, join(tmp(), "s1"))).toEqual([{ path: "src/detect.py", line: 2, label: "AKIA…" }]);
   expect(existsSync(join(tmp(), "s1", "src", "detect.py"))).toBe(false);
   expect(snapshot(repo, null, join(tmp(), "s2"), allow)).toEqual([]);
-  expect(readFileSync(join(tmp(), "s2", "src", "detect.py"), "utf8")).toContain("AKIAIOSFODNN7EXAMPLE");
+  expect(readFileSync(join(tmp(), "s2", "src", "detect.py"), "utf8")).toContain(AWS_KEY);
   // The pin is per path: the same text elsewhere is withheld.
   writeFileSync(join(repo, "other.py"), FIXTURE);
   runGit(repo, "add", "other.py");
