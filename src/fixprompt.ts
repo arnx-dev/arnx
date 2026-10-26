@@ -4,7 +4,7 @@
 // rules: change the product code, never the accepted tests, and run `arnx check` until it passes. Its opening, the
 // rules and the answers' heading are the `fix` keys of src/prompts.toml, which .arnx/prompts.toml can override.
 import type { AcceptResult } from "./accept";
-import { DEFAULT_PROMPTS, type Prompts } from "./prompts";
+import { DEFAULT_PROMPTS, isModelKey, type Prompts } from "./prompts";
 import { groupsOf } from "./report";
 import { SHALLOW_NOTE } from "./shallow";
 import type { Settings } from "./settings";
@@ -159,5 +159,8 @@ export function fixPrompt(r: Pick<AcceptResult, "review" | "marks" | "answers" |
     for (const f of leave) out.push(`- ${f.id} (${marks.findings[f.id]}): ${f.explanation.split("\n")[0] || f.testId}`);
     out.push("");
   }
+  // The repository's own text, named, so whoever reads the prompt knows it is not arnx's.
+  const yours = p.overridden.filter((k) => !isModelKey(k));
+  if (yours.length) out.push(`Taken from .arnx/prompts.toml instead of arnx's defaults: ${yours.join(", ")}.`, "");
   return out.join("\n");
 }

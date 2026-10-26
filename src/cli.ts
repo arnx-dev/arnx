@@ -56,7 +56,7 @@ import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, next
 import { isoSeconds } from "./util";
 import { spend } from "./spend";
 import { installSkills, SKILL_DIRS, skillDirsShown, skillStates, userSkillRoot } from "./skill";
-import { DEFAULTS, PLACEHOLDERS, PROMPT_KEYS, type PromptKey, textHash } from "./prompts";
+import { DEFAULTS, isModelKey, PLACEHOLDERS, PROMPT_KEYS, type PromptKey, textHash } from "./prompts";
 import { CLOUD_PROMPTS, copyDefault, hasOverrides, type Override, overrideWarnings, PROMPTS_FILE, promptsPath,
   readOverrides } from "./userprompts";
 import { recheckJson, recheckReview, recheckSummary } from "./recheck";
@@ -630,18 +630,21 @@ class Commands {
         checks.push([false, "Environment", e.message]);
       }
     }
-    // The repository's own prompts: with the user's keys, a file that does not read stops a review (a ✗); arnx cloud
-    // runs its own prompts and only says so.
+    // The repository's own prompts: a file that does not read stops a review on the user's keys, and accept also with
+    // arnx cloud (it builds the fix prompt here), so it is a ✗ either way. arnx cloud runs its own model prompts.
     const cloudOn = !!s && cloudModels(s);
-    let overrides: Override[] = [];
-    if (!cloudOn && existsSync(promptsPath(repo))) {
+    let all: Override[] = [];
+    if (existsSync(promptsPath(repo))) {
       try {
-        overrides = readOverrides(repo);
+        all = readOverrides(repo);
       } catch (e) {
         if (!(e instanceof ArnxError)) throw e;
         checks.push([false, "Prompts", e.message]);
       }
     }
+    const overrides = cloudOn ? all.filter((o) => !isModelKey(o.key)) : all; // the ones in use
+    const promptsLine = [...overrides.length ? [`yours for ${overrides.map((o) => o.key).join(", ")}`] : [],
+      ...cloudOn && all.some((o) => isModelKey(o.key)) ? [CLOUD_PROMPTS] : []].join("; ");
     const promptNotes = overrideWarnings(overrides);
     // The provider tables a role uses, under Models (a table no role names is not shown).
     const used = new Set(s ? modelRefs(s).map((r) => r.provider) : []);
@@ -660,8 +663,7 @@ class Commands {
     if (jev) this.d.out(`JEV (experimental): ${jev}`);
     const telemetry = telemetryLine(telemetryStatus(this.d.env, this.telemetrySetting()), this.telemetryOpen);
     this.d.out(telemetry);
-    if (overrides.length) this.d.out(`Prompts: yours for ${overrides.map((o) => o.key).join(", ")}`);
-    else if (cloudOn && hasOverrides(repo)) this.d.out(`Prompts: ${CLOUD_PROMPTS}`);
+    if (promptsLine) this.d.out(`Prompts: ${promptsLine}`);
     for (const note of promptNotes) this.d.out(`  ${note}`);
     this.d.out("");
     const issues = checks.filter(([ok]) => ok === false).length;
@@ -1243,6 +1245,9 @@ class Commands {
     }
     for (const [qid, ids] of byAnswer) this.d.out(`${ids.join(", ")} set aside: your answer to ${qid} has its own test`);
     for (const p of tests) this.d.out(`  kept: ${relative(repo, p)}`);
+    if (result.fixOverrides.length) {
+      this.d.out(`Fix prompt: yours for ${result.fixOverrides.join(", ")} (${PROMPTS_FILE})`);
+    }
     const answers: { question: string; result: string; tests: string[]; cost_usd: number; rewrite_of: string[] | null }[]
       = [];
     for (const ans of result.answers) {
@@ -1324,7 +1329,8 @@ class Commands {
       : tests.length ? [real.length ? "commit the fix and the accepted tests together" : "commit the accepted tests"] : [];
     this.emit("ok", 0, { review_id: result.review.id, kept: tests.map(rel),
       dest: tests.length ? rel(result.dest) || "." : null, issues, marks, answers, check: checked,
-      fix_prompt: rel(promptPath), next });
+      fix_prompt: rel(promptPath),
+      ...(result.fixOverrides.length ? { fix_prompt_overrides: result.fixOverrides } : {}), next });
     await this.sendTelemetry("accept", () => acceptData(result, tests.length));
     return 0;
   }

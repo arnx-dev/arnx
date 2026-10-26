@@ -126,6 +126,8 @@ export interface Review {
    * overrides, and with arnx cloud, which runs its own prompts). */
   promptOverrides?: string[];
   promptsHash?: string;
+  /** The change itself edits .arnx/prompts.toml, and the review ran its version (absent otherwise). */
+  promptsFileEdited?: true;
   findings: Finding[];
   questions: string[];
   flaky: string[];
@@ -510,6 +512,7 @@ export function render(r: Review): string {
     `- Change: ${r.change}, ${r.filesChanged} files, +${r.added} −${r.removed}`,
     ...untrackedLines(r).map((l) => `- ${l}`),
     modelsLine(r),
+    ...(r.promptsFileEdited ? ["- This change edits .arnx/prompts.toml; the review used its version."] : []),
     `- ${r.usage?.length ? costLine(r) : `Cost: $${r.costUsd.toFixed(2)}`} · ${duration(r.seconds)} · Agent stopped: ${r.stop}`, "",
     "## Status", "", ...statusLines(r), "",
     marksIssues(r)

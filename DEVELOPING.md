@@ -374,7 +374,10 @@ and refused when it names an unknown key or a placeholder its key does not offer
 sent), the header of review.md names them; without overrides both are absent and every file is what it was. arnx
 cloud runs its own prompts: `setup` and `review` print `CLOUD_PROMPTS` once when the file overrides one of them, and
 nothing of it is sent. The `fix` keys are no model's: `accept` reads the file first and builds fix-prompt.md with
-them, with arnx cloud too, and a review does not list them.
+them, with arnx cloud too, and names them (a line, the prompt's last line, `fix_prompt_overrides` in --json); a
+review does not list them, and doctor checks the file under arnx cloud too. The file is read from the working tree:
+a change that edits it (base against head, or the working tree) is reviewed with its own version, which the review
+says at its start, in review.md's header and as `prompts_file_edited` in review.json.
 Approval's stamp covers review.yaml only, so editing the file needs no approve. Telemetry carries nothing about it.
 
 ## Modules

@@ -74,12 +74,13 @@ hunt.task` writes arnx's text of that key into `.arnx/prompts.toml`, where you e
 you changed: every other key follows arnx's defaults, also after an upgrade. A key keeps the `$placeholders` its
 default offers (arnx refuses others, naming the ones it has); `arnx doctor` warns when arnx changed the default you
 copied (`<name>_base` records it) and when you dropped a placeholder the step needs, such as `$diff`. Each review
-names your keys and the hash of the prompts it ran, in review.json and review.md's header. The file is not part of the
-approval: editing it needs no `arnx approve`. With arnx cloud its own prompts run (arnx says so in one line and sends
-nothing of yours). The defaults are in `src/prompts.toml`. Whatever the prompt says, a finding is still a test that
-failed in every run in Docker, so a prompt cannot make arnx report a failure that did not happen. It can make arnx
-write tests that expect the wrong thing: those fail for real and still need your mark, so a worse prompt shows up as
-more findings you mark intended, noise or rewrite.
+names your keys and the hash of the prompts it ran, in review.json and review.md's header; a change that edits
+`.arnx/prompts.toml` is reviewed with its own version, and the review says so. `arnx accept` names the fix prompt's
+keys you changed. The file is not part of the approval: editing it needs no `arnx approve`. With arnx cloud its own
+prompts run (arnx says so in one line and sends nothing of yours). The defaults are in `src/prompts.toml`. Whatever
+the prompt says, a finding is still a test that failed in every run in Docker, so a prompt cannot make arnx report a
+failure that did not happen. It can make arnx write tests that expect the wrong thing: those fail for real and still
+need your mark, so a worse prompt shows up as more findings you mark intended, noise or rewrite.
 
 Found a combination or a prompt that catches more? Open an issue with the review's numbers: we'll try it in our own
 measurements.

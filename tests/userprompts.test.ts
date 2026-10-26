@@ -46,7 +46,11 @@ test("an override replaces its key only: every other prompt is arnx's", () => {
     const built = promptCases(new Prompts({ ...DEFAULTS, [key]: mark }, [key]));
     const changed = Object.keys(built).filter((name) => built[name] !== defaults[name]);
     expect(changed.length).toBeGreaterThan(0);
-    for (const name of changed) expect(`${name}: ${built[name]!.includes(mark)}`).toBe(`${name}: true`);
+    // The fix prompt also names the keys it took from the file, so it changes even where the key's text is not used.
+    const named = `instead of arnx's defaults: ${key}.`;
+    for (const name of changed) {
+      expect(`${name}: ${built[name]!.includes(mark) || built[name]!.includes(named)}`).toBe(`${name}: true`);
+    }
   }
   expect(promptCases(new Prompts({ ...DEFAULTS, "rank.system": "x" }, ["rank.system"])).PROMPT_VERSION)
     .toBe(PROMPT_VERSION);

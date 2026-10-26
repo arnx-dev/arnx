@@ -18,6 +18,7 @@ import { type AgentModel, allPrices } from "./llm";
 import { baseName, funcOf, ownerFile, type TestResult } from "./outcomes";
 import { fixPrompt } from "./fixprompt";
 import { LocalBrain } from "./localbrain";
+import { isModelKey } from "./prompts";
 import { promptsFor } from "./userprompts";
 import { defaultMarks, firstLine, groupsOf, load, type Marks, parseMarks, parseReports, type Review, wrapMarkdown }
   from "./report";
@@ -95,6 +96,8 @@ export interface AcceptResult {
   sources: Record<string, MarkSource>;
   /** Over every review in precision.jsonl, after this one was recorded (see precisionOf). */
   precision: Precision;
+  /** The fix prompt's keys .arnx/prompts.toml overrode (fix-prompt.md names them too). */
+  fixOverrides: string[];
 }
 
 export type MarkSource = "default" | "chosen";
@@ -581,7 +584,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   const red = review.findings.filter((f) => keeps.findings[f.id] === "real")
     .map((f) => ({ id: f.id, testId: f.testId, project: f.project, explanation: f.explanation }));
   const result = { review, marks, kept, answers, rewrites, setAside, dest, red, moved, sources,
-    precision: precisionOf(log) };
+    precision: precisionOf(log), fixOverrides: prompts.overridden.filter((k) => !isModelKey(k)) };
   writeFileSync(join(rdir, "fix-prompt.md"), wrapMarkdown(fixPrompt(result, settings, prompts)));
   return result;
 }

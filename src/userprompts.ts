@@ -7,6 +7,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import { git } from "./change";
 import { ArnxError } from "./errors";
 import { DEFAULT_PROMPTS, DEFAULTS, isModelKey, NEEDED, PLACEHOLDERS, placeholdersIn, PROMPT_KEYS, type PromptKey,
   Prompts, textHash } from "./prompts";
@@ -87,6 +88,18 @@ export function hasOverrides(repo: string): boolean {
   } catch {
     return true;
   }
+}
+
+/** Said at a review's start when its change edits the prompts file: the review reads the working tree's. */
+export const PROMPTS_EDITED = "this change edits .arnx/prompts.toml; the review uses its version";
+
+/** Whether the change adds, edits or removes .arnx/prompts.toml: its text at the change's base against its head (the
+ * working tree when the change has none). An absent file reads as empty. */
+export function changeEditsPrompts(repo: string, change: { base: string; head: string | null }): boolean {
+  const at = (rev: string) => git(repo, ["show", `${rev}:${PROMPTS_FILE}`], [0, 128]);
+  const path = promptsPath(repo);
+  const after = change.head ? at(change.head) : existsSync(path) ? readFileSync(path, "utf8") : "";
+  return at(change.base) !== after;
 }
 
 /** doctor's notes on the overrides: a default arnx changed since it was copied, a placeholder the step needs
