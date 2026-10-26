@@ -312,7 +312,11 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
     ...typeof spec.test_command === "string" && runner !== "node" && quotedTargets(spec.test_command)
       ? ["test_command: {targets} is inside quotes: arnx adds the runner's report options at the end, after the " +
         "closing quote, so no report is written. Leave the runner and {targets} outside the quotes (make build && " +
-        "<runner> {targets})"] : []].map((p) => at + p);
+        "<runner> {targets})"] : [],
+    ...typeof spec.test_command === "string" && runner !== "node" && subshellTargets(spec.test_command)
+      ? ["test_command: {targets} is inside parentheses: the report options arnx adds at the end would follow the " +
+        "`)`, so no report is written. Leave the runner and {targets} outside them (cd app && <runner> {targets})"]
+      : []].map((p) => at + p);
   problems.push(...commandProblems);
   const command = commandProblems.length ? "" : spec.test_command as string;
   let typecheck: string | undefined;
@@ -460,11 +464,11 @@ export function afterTargets(command: string): string | null {
   return m ? rest.slice(m.index).trim() : null;
 }
 
-/** Whether the last {targets} in a test command sits inside quotes (`sh -c "make; pytest {targets}"`): the report
- * options arnx appends would follow the closing quote and go to the shell, not the runner. */
-export function quotedTargets(command: string): boolean {
+/** Where the last {targets} in a test command sits: inside which quote ("" for none), and how many parentheses deep
+ * outside quotes (a subshell or `$(...)`). */
+function atTargets(command: string): { quote: string; depth: number } {
   const end = command.lastIndexOf("{targets}");
-  let quote = "";
+  let quote = "", depth = 0;
   for (let i = 0; i < end; i++) {
     const c = command[i]!;
     if (quote === "'") {
@@ -473,9 +477,22 @@ export function quotedTargets(command: string): boolean {
     else if (quote === "\"") {
       if (c === "\"") quote = "";
     } else if (c === "'" || c === "\"") quote = c;
+    else if (c === "(") depth++;
+    else if (c === ")" && depth > 0) depth--;
   }
-  return quote !== "";
+  return { quote, depth };
 }
+
+/** Whether the last {targets} in a test command sits inside quotes (`sh -c "make; pytest {targets}"`): the report
+ * options arnx appends would follow the closing quote and go to the shell, not the runner. */
+export const quotedTargets = (command: string) => atTargets(command).quote !== "";
+
+/** Whether the last {targets} sits inside parentheses outside quotes (`(cd app && pytest {targets})`): the report
+ * options arnx appends would follow the `)`, as with quotes. */
+export const subshellTargets = (command: string) => {
+  const at = atTargets(command);
+  return at.quote === "" && at.depth > 0;
+};
 
 /** Why a test_command that writes is refused, naming what writes. A setup approved before the rule fails here on any
  * command after an upgrade, so it says how to fix it. */
