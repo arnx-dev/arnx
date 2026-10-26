@@ -110,6 +110,8 @@ export function scanKeys(path: string, text: string, pins: readonly string[]): K
       if (KEY_END.test(text) || hasKeyBody(text)) return withhold;
       continue;
     }
+    // A block with no body in it: a body elsewhere (in code) withholds the file.
+    if (!hasKeyBody(lines.slice(at, end + 1).join("\n")) && hasKeyBody(text)) return withhold;
     // A line of comment marks alone (a closing */) holds nothing to blank.
     for (let i = at + 1; i <= end; i++) if (!/^[\s*/#!]*$/.test(lines[i]!)) blank.add(i);
   }

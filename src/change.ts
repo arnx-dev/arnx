@@ -251,7 +251,7 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
   const blanked = blankDiff(diff, allow, (path) => base === EMPTY_TREE ? null : show(base, path),
     (path) => head === null ? readText(join(repo, path)) : show(head, path));
   diff = blanked.diff;
-  const secret = secretInDiff(diff, allow);
+  const secret = secretInDiff(diff, allow) ?? blanked.secret;
   if (secret) {
     throw new ArnxError(`the change contains text that looks like a secret (a key or token) in ${secret.path} ` +
       `(${secret.label}); arnx will not send it to a model. If it is a test fixture, not a secret, allow the file: ` +
@@ -278,10 +278,13 @@ function readText(p: string): string | null {
 /** `diff` with its lines blanked where each side's file (`before`, `after`: its text by path, null when absent)
  * blanks them (scanKeys): key-shaped text in comments of source files. A file whose key is in code is left as it
  * is, for secretInDiff to refuse. A section of a file with blanked lines loses its hunk headers' function context,
- * which git may take from a key's body. `files`: the lines blanked, numbered in the side each diff line comes from. */
+ * which git may take from a key's body. `files`: the lines blanked, numbered in the side each diff line comes from.
+ * `secret`: a section showing a key body of a file withheld for a key in code, though no header is in the hunk. */
 function blankDiff(diff: string, allow: readonly SecretPin[], before: (path: string) => string | null,
-                   after: (path: string) => string | null): { diff: string; files: Blanked[] } {
+                   after: (path: string) => string | null)
+  : { diff: string; files: Blanked[]; secret?: { path: string; label: string } } {
   const files: Blanked[] = [];
+  let secret: { path: string; label: string } | undefined;
   const pins = (path: string) => allow.find((a) => a.path === path)?.matches ?? [];
   const sections = diff.split(/^(?=diff --git )/m).map((section) => {
     const oldPath = /^--- a\/(.*)$/m.exec(section)?.[1] ?? null;
@@ -299,6 +302,7 @@ function blankDiff(diff: string, allow: readonly SecretPin[], before: (path: str
       return new Map((scan?.blank ?? []).map((n) => [n, lines[n - 1]!]));
     };
     const old = side(oldPath, before), now = side(newPath, after);
+    if ((!old || !now) && hasKeyBody(section)) secret ??= { path, label: "a private key" };
     if (!old || !now || (!old.size && !now.size)) return section;
     const done = new Set<number>();
     let a = 0, b = 0, inHunk = false;
@@ -323,7 +327,7 @@ function blankDiff(diff: string, allow: readonly SecretPin[], before: (path: str
     if (done.size) files.push({ path, lines: [...done].sort((x, y) => x - y) });
     return out.join("\n");
   });
-  return { diff: sections.join(""), files };
+  return { diff: sections.join(""), files, ...(secret ? { secret } : {}) };
 }
 
 /** The three files taking most of a diff, with their sizes ("package-lock.json 173 KB, README.md 25 KB, …"). */

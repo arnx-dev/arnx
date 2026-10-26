@@ -111,6 +111,9 @@ test("a private key in a comment is blanked with its body; a body outside the co
     .toEqual({ line: 1, label: "a private key" });
   expect(withheld("a.ts", `/*\n * ${PEM}\n */\nconst x = 1;\n/*\n * ${BODY}\n * ${PEM_END}\n */\n`))
     .toEqual({ line: 2, label: "a private key" });
+  // A header and END in comments with no body between them, and a body in code: withheld.
+  expect(withheld("a.py", `# ${PEM}\n# ${PEM_END}\nK = """\n${NO_DIGITS}\n"""\n`)).toEqual({ line: 1, label: "a private key" });
+  expect(blanked("a.py", `# ${PEM}\n# ${PEM_END}\nK = 1\n`).lines).toEqual([1, 2]);
   // A header with no END line: a placeholder only while the file holds no key body anywhere.
   const far = Array.from({ length: 60 }, (_, i) => `const a${i} = ${i};`).join("\n");
   expect(withheld("a.ts", `// ${PEM}\n${far}\nconst b = "${BODY}";\n`)).toEqual({ line: 1, label: "a private key" });
@@ -210,6 +213,18 @@ test("a review's diff never carries a key body in a hunk header's function conte
   const far = resolveChange(repo);
   expect([far.diff.includes(body2), far.blanked]).toEqual([false, undefined]);
   expect(far.diff).toMatch(/^@@ -17,4 \+17,4 @@$/m);
+});
+
+test("a review's diff showing a key body of a withheld file refuses, though the header is outside the hunk", () => {
+  const repo = gitRepo(tmp());
+  const RSA = "-----BEGIN RSA " + "PRIVATE KEY-----", RSA_END = "-----END RSA " + "PRIVATE KEY-----";
+  const rows = ["a", "b", "c", "d", "e"].map((c) => "MIIEowIBAAKCAQEA" + c.repeat(48));
+  const file = (tail: string) => `const PEM = \`${RSA}\n${rows.join("\n")}\n${RSA_END}\`;\n${tail}\n`;
+  writeFileSync(join(repo, "k.ts"), file("x();"));
+  commit(repo, "key in code");
+  writeFileSync(join(repo, "k.ts"), file("y();"));
+  expect(() => resolveChange(repo)).toThrow("the change contains text that looks like a secret (a key or token) in " +
+    "k.ts (a private key)");
 });
 
 test("the review names the files whose comment lines were blanked", () => {
