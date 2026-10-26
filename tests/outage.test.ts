@@ -150,9 +150,14 @@ test("a few 503s, then replies: no outage line", async () => {
 
 test("the reviewer's provider down: incomplete, and the reviewer's tests are what is missing", async () => {
   const reviewer = new ResponsesAgent(remote(() => status(503)), "high", { store: false });
-  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: reviewer, challenger: new FakeJson([]),
+  const { review, rdir } = await runReview(repo, { settings: SETTINGS, agentModel: reviewer, challenger: new FakeJson([]),
     sessionFactory: fakeFactory(runs) });
   expect(exitCode(review)).toBe(2);
+  // review.md names the resume once, in the outage line, not a fresh review in the Incomplete line.
+  const md = readFileSync(join(rdir, "review.md"), "utf8");
+  expect(md).toContain("Incomplete: `main` produced no tests: the reviewer's model call failed.\n");
+  expect(md).not.toContain("again to cover it");
+  expect(md.match(/arnx review --resume/g)).toHaveLength(1);
   expect(summary(review, "").split("\n")[1]).toBe("Incomplete: `main` produced no tests: the reviewer's model " +
     "call failed. myprovider (llm.example.com) unavailable: HTTP 503 on every call (1 call, 4 attempts); missing: the reviewer's tests. Run " +
     "`arnx review --resume` when it is back.");
