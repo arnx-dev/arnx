@@ -7,7 +7,7 @@ import type { AdapterId } from "./adapters/types";
 import { type Before, type FixStatus, isPreExisting } from "./before";
 import { ArnxError } from "./errors";
 import { type ModelUse, parseJsonObject } from "./llm";
-import type { ProviderFailure } from "./outage";
+import { type ProviderFailure, resumes } from "./outage";
 import { type Shallow, SHALLOW_NOTE } from "./shallow";
 import { describeDiagnostic, describeTypecheck, type TypeCheck } from "./typecheck";
 import { pyTruthy, splitLines } from "./util";
@@ -343,9 +343,10 @@ const ROLE: Record<string, string> = { "part-hunt": "part hunts", "second-hunt":
  * what to do. Never a key or a response body; arnx cloud's models and their vendor are never named. */
 export function failureLine(f: ProviderFailure): string {
   const every = f.failed === f.calls;
+  const again = resumes(f) ? "Run `arnx review --resume`" : "Run `arnx review` again";
   if (f.provider === "arnx") {
     const rounds = every ? `every project round (${f.calls})` : `${f.failed} of ${f.calls} project rounds`;
-    return `arnx cloud's models unavailable: ${rounds} stopped on a failed model call. Run \`arnx review\` again later.`;
+    return `arnx cloud's models unavailable: ${rounds} stopped on a failed model call. ${again} later.`;
   }
   const a = f.kind === "auth" || f.attempts === undefined ? ""
     : f.failed === 1 ? plural(f.attempts, "attempt")
@@ -356,13 +357,15 @@ export function failureLine(f: ProviderFailure): string {
   const missing = f.missing.length ? `; missing: ${f.missing.map((x) => WORK[x] ?? x).join(", ")}`
     : every ? "; other models answered in its place" : "";
   return f.kind === "auth" ? `${f.name} refused the key: ${f.detail} ${count}${missing}. Check ${f.key ?? "its key"}.`
-    : `${f.name} unavailable: ${f.detail} ${count}${missing}. Run \`arnx review\` again when it is back.`;
+    : `${f.name} unavailable: ${f.detail} ${count}${missing}. ${again} when it is back.`;
 }
 
 function statusLines(r: Review): string[] {
   const { problems, notes } = statusOf(r);
   const names = r.projects.length > 1 ? ` (${ticks(r.projects)})` : "";
-  const out = [problems.length ? `Incomplete: ${problems.join("; ")}. Run \`arnx review\` again to cover it.`
+  // When a resume redoes what an outage cut, the outage line below says so: no fresh review here.
+  const again = (r.providerFailures ?? []).some(resumes) ? "" : " Run `arnx review` again to cover it.";
+  const out = [problems.length ? `Incomplete: ${problems.join("; ")}.${again}`
     : untestedCount(r) ? `Partly covered: no arnx test refers to ${untestedCount(r)} of the ${untestedOf(r)} changed ` +
       "source files below, so finding nothing there says nothing about them. Check them yourself, or review them " +
       "on their own with `arnx review --range`."

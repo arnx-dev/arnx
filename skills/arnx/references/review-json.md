@@ -142,7 +142,7 @@ that timed out is not one either.
 |---|---|---|
 | `provider` | string | The provider part of the model refs (`anthropic`, `openai`, or a `[providers.<name>]` table's name), or `arnx` for arnx cloud, whose models are never named. |
 | `name` | string | How the report names it: `Anthropic`, `OpenAI`, a table by its name and host (`myprovider (llm.example.com)`), `arnx cloud`. |
-| `kind` | string | `unavailable`: down or unreachable; run `arnx review` again when it is back. `auth`: it refused the key; check `key`. |
+| `kind` | string | `unavailable`: down or unreachable; when it is back, `arnx review --resume` if the reviewer or the judging failed, else `arnx review` again. `auth`: it refused the key; check `key`. |
 | `detail` | string | What the failed calls met, such as `HTTP 503` or `no connection (ConnectionRefused)`; never a response body. |
 | `calls` | number | Calls the review made to this provider (for arnx cloud: project rounds). |
 | `failed` | number | Those that failed this way. |

@@ -49,7 +49,8 @@ Each command does one job and writes to a known place. All state lives in the us
 except, under the user's config directory (`$XDG_CONFIG_HOME/arnx/`, else `~/.config/arnx/`): the telemetry install
 id (`telemetry.json`, one per machine, only once telemetry has sent), the arnx cloud login (`credentials.json`) and
 the local pins of accepted tests (`pins/<repo>.json`); and, in Docker, the environment images (`arnx-env:<hash>`).
-Accepted tests are written into the project's own test folders.
+Accepted tests are kept in `.arnx/tests/`, each at the path it runs from; only `arnx check` puts them in place, in a
+throwaway copy.
 
 | Command | Job | Reads | Writes | Models | Docker |
 |---|---|---|---|---|---|
@@ -60,9 +61,9 @@ Accepted tests are written into the project's own test folders.
 | `review` | Write tests for the current change, run them 3 times, turn stable failures into findings, have a second model challenge each one | the change, the code, the approved environment | `.arnx/reviews/<id>/` | reviewer + challenger | yes |
 | `next` | Say where the repository is in the flow and the one command to run now (`next.ts`); with arnx cloud, the login or a top-up first | `.arnx/`, the change | nothing | no | no |
 | `triage` | Step through the findings in the terminal: marks, severity, answers | `.arnx/reviews/<id>/` | `review.md`, `triage.json` | no | no |
-| `accept` | Read the user's marks and answers from `review.md`; keep real findings as tests; turn answers into tests; pin each kept file's sha256 and its accepted tests; run the accepted tests (`--no-check` skips it); write the fix prompt. `--keep-edits`: record edited accepted tests as they are | `.arnx/reviews/<id>/` | `tests/arnx/r<id>/`, `.arnx/precision.jsonl`, `.arnx/accepted-tests.json`, `fix-prompt.md`, the local pins | reviewer (answers only) | yes |
+| `accept` | Read the user's marks and answers from `review.md`; keep real findings as tests; turn answers into tests; pin each kept file's sha256 and its accepted tests; run the accepted tests (`--no-check` skips it); write the fix prompt. `--keep-edits`: record edited accepted tests as they are | `.arnx/reviews/<id>/` | `.arnx/tests/<project root>/tests/arnx/r<id>/`, `.arnx/precision.jsonl`, `.arnx/accepted-tests.json`, `fix-prompt.md`, the local pins | reviewer (answers only) | yes |
 | `prompt` | Print the fix prompt of the review accepted last (or the id given) | `.arnx/reviews/<id>/fix-prompt.md` | nothing | no | no |
-| `check` | Run the accepted tests in the approved sandbox, accepted tests told from the other tests in their files; refuse (exit 4) when a pinned file or its entry changed. `--review [id]`: run a review's confirmed tests on the working tree instead (`recheck.ts`), before anything is accepted | `tests/arnx/`, `.arnx/accepted-tests.json`; with `--review`, `.arnx/reviews/<id>/` | `.arnx/run/` logs | no | yes |
+| `check` | Run the accepted tests in the approved sandbox, accepted tests told from the other tests in their files; refuse (exit 4) when a pinned file or its entry changed. `--review [id]`: run a review's confirmed tests on the working tree instead (`recheck.ts`), before anything is accepted | `.arnx/tests/`, `.arnx/accepted-tests.json`; with `--review`, `.arnx/reviews/<id>/` | `.arnx/run/` logs | no | yes |
 | `consent` | Record the consent to send code (`--cloud`: to arnx cloud) without sending anything | `.arnx/config.toml` | `consent_at` or `cloud_consent_at` | no | no |
 | `allow-secret` | Pin the key-like strings of test-fixture files, so they are sent and copied; never shows the strings | the files named | `.arnx/review.yaml` (proven again before the next review) | no | no |
 | `env prune` | Remove this repository's environment images no approved project uses, older than `--keep-days` (7); `--all-repos`, `--dry-run`. An image made from the code (`<key>-src-<hash>`, baked.ts) also takes the build cache records its build left, each by id, found from the step marked with its tag | Docker's image labels, `docker buildx du` | nothing | no | yes |
@@ -225,7 +226,8 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   attempt; `auth`: 401 or 403). The same outcomes, kept in memory by `outage.ts`, become review.json's
   `provider_failures` and the sentence after the review's status. A review with an `unavailable` failure of the
   reviewer or the judging (`cutByOutage`, not once accepted) resumes like an interrupted one: `--resume` tests again
-  the project rounds a failed call stopped (their verdicts dropped), keeps the others and judges again.
+  the project rounds a failed call stopped (their verdicts dropped), keeps the others and judges again. Its status
+  line and `arnx next` then name `arnx review --resume`.
 - `agent.turn` (`agent.ts`): one agent turn: stop reason, tools called, `paths` (the path argument of each `read_file`,
   `list_dir` and `grep` call, in order; never contents), tool errors, writes, test runs.
 - `hunt.list`, `hunt.suspect`, `hunt.merged`, `hunt.dropped` (`localbrain.ts`): each hunter's list, the ranked
@@ -361,21 +363,21 @@ container (one Docker does not answer in time is removed, and the run counts as 
 entrypoint runs each command in a new container (docker.jsonl: `container` step with `kept: false`). The reasoning is
 at `Session` in `sandbox.ts`.
 
-Kept test files are named after what they protect, inside a folder that keeps the review id (`tests/arnx/r<id>/`,
-i.e. `accepted_tests_dir` under the project's root; while that is the default, TypeScript uses `__tests__/arnx/r<id>/`;
-Rust has no folder, as cargo builds only `tests/*.rs`, so the id is a prefix: `tests/arnx_<id>_<name>.rs`). The name
-comes from the file's first finding marked real (F1, F2, … order): the title of its problem (its group from
-`explain`), else its explanation's first line, else its test function's name, made into lowercase ASCII words joined
-by `_` (`slugify`: at most 50 characters, cut at a word, not ending on "the", "with" and the like, a leading "test"
-dropped). A file holding several problems is named after that first one. An answer's file keeps its generated name
-without the adapter's affixes. The adapter puts the name in its own form (`test_<name>.py`, `<name>.test.ts`,
-`arnx_<id>_<name>.rs`); support files (conftest.py, arnx-helpers) keep theirs. A name that another file in the
-repository already has (the owner's tests, an earlier review's; not `.arnx/`, not this review's own) gets `_2`, `_3`:
-pytest imports test files by name. `accepted.json` maps each generated file to where it went (`moved`), which the fix
-prompt uses; `arnx check` runs whatever is in the accepted folders (and a Rust crate's `tests/arnx_<id>_*.rs`: the
-adapter's `kept`), so tests kept under the older names
-(`test_<id>_<name>.py`, `<name>.r<id>.test.ts`) keep running. Accepting again under other marks can rename a file:
-the copy under its old name is removed.
+Kept test files are named after what they protect, inside a folder that keeps the review id, under `.arnx/tests/` at
+the path each runs from (`.arnx/tests/<project root>/tests/arnx/r<id>/`, i.e. `accepted_tests_dir` under the
+project's root; while that is the default, TypeScript uses `__tests__/arnx/r<id>/`; Rust has no folder, as cargo builds
+only `tests/*.rs`, so the id is a prefix: `tests/arnx_<id>_<name>.rs`). The name comes from the file's first finding
+marked real (F1, F2, … order): the title of its problem (its group from `explain`), else its explanation's first
+line, else its test function's name, made into lowercase ASCII words joined by `_` (`slugify`: at most 50 characters,
+cut at a word, not ending on "the", "with" and the like, a leading "test" dropped). A file holding several problems is
+named after that first one. An answer's file keeps its generated name without the adapter's affixes. The adapter puts
+the name in its own form (`test_<name>.py`, `<name>.test.ts`, `arnx_<id>_<name>.rs`); support files (conftest.py,
+arnx-helpers) keep theirs. A name that another file in the repository already has (the owner's tests, an earlier
+review's in `.arnx/tests/`; not this review's own) gets `_2`, `_3`: pytest imports test files by name. `accepted.json`
+maps each generated file to where it went (`moved`), which the fix prompt uses; `arnx check` runs whatever is in the
+accepted folders under `.arnx/tests/` (and a Rust crate's `tests/arnx_<id>_*.rs`: the adapter's `kept`), so tests
+kept under the older names (`test_<id>_<name>.py`, `<name>.r<id>.test.ts`) keep running. Accepting again under other
+marks can rename a file: the copy under its old name is removed.
 
 ## Prompts
 
@@ -472,8 +474,8 @@ CI, teammates) the committed pins are the trusted ones.
 - Test containers get no network (or an internal one reaching only declared services), no host environment, no
   capabilities, CPU, memory and process limits, and a throwaway copy of the repo.
 - Model keys stay in the arnx process: never passed to Docker, written to a file, or logged.
-- arnx never edits the user's code. `review` writes under `.arnx/`; `accept` writes only to `tests/arnx/` (a Rust crate:
-  `tests/arnx_<id>_*.rs`) and `.arnx/` (and its local pins); `init` writes `.arnxignore` only when there is none; `skill install` writes only the skill
+- arnx never edits the user's code. `review` writes under `.arnx/`; `accept` writes only to `.arnx/` (accepted tests in
+  `.arnx/tests/`) and its local pins; `init` writes `.arnxignore` only when there is none; `skill install` writes only the skill
   folders.
 - A run uses only a proven environment: a review.yaml changed since its proof (or never proven) is proven again
   before `review`, `check` or `accept` uses it, and a failing proof stops the command.
