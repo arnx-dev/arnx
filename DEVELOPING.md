@@ -270,6 +270,9 @@ names to 500, test messages to 500); a test message that looks like a secret is 
 - A resumed review appends a second segment for each project it re-runs; take each project's last segment.
 - `role=jev` calls count every answered call as `unknown_usage` (no token counts): leave them out of aborted-call
   counts.
+- A call to a model with no price (none in `[prices]` or `PRICES`) is `ok: true` with cost 0 and `unknown_usage` 1,
+  its tokens kept: leave those out of aborted-call counts too. Such a model runs (setup, review and accept say once
+  that the budget cap does not cover it, `unpricedNote`); review.json marks its usage entry `unpriced`.
 - `review.failed` is absent when the error came before the log opened (the review has no events at all).
 
 Events are never sent anywhere; they are for reading a run afterwards (debugging, and our own evaluation runs).
@@ -420,7 +423,7 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `outcomes.ts` | Run tests through the adapter; classify results across runs |
 | `before.ts` | The before/after check's comparison: a finding's runs on the code before the change against its failure |
 | `typecheck.ts` | The project's own type check: tsc's output read, errors on the change against those before it, in words |
-| `llm.ts` | Agent clients (Anthropic Messages, or a Responses API: OpenAI, and generic tables that copy either API); JSON calls via either; prices |
+| `llm.ts` | Agent clients (Anthropic Messages, or a Responses API: OpenAI, and generic tables that copy either API); JSON calls via either; prices (a model with none runs, its cost unknown) |
 | `agent.ts` | The tool loop and its confined tools; hard budget |
 | `prompts.ts` | Every prompt: the default text read from `prompts.toml` (imported as text, so every build carries it), the keys and their placeholders, the builders (`Prompts`); `PROMPT_VERSION` changes with any edit of the text |
 | `userprompts.ts` | `.arnx/prompts.toml`: per-key overrides read (unknown keys and placeholders refused), copied, checked by doctor; with arnx cloud, one line and nothing sent |

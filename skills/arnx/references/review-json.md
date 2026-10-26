@@ -96,7 +96,9 @@ Empty strings are left out of `review.md`; they are written here as empty string
 | `input` | number | Input tokens. |
 | `output` | number | Output tokens. |
 
-Also: `unknown_calls` (calls billed with unknown usage, not counted in the cost), `cache_read`, `cache_write`.
+Also: `unknown_calls` (calls billed with unknown usage, not counted in the cost), `cache_read`, `cache_write`, and
+`unpriced` (`true` only when arnx has no price for the model: its cost is unknown, `cost_usd` is 0 and every call is in
+`unknown_calls`; absent otherwise).
 
 ## Each fix proof
 

@@ -30,7 +30,8 @@ import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewF
 import { getAdapter } from "./adapters";
 import { ArnxError, internalError, SetupRequired } from "./errors";
 import { FILE as IGNORE_FILE, initialIgnore } from "./ignore";
-import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter } from "./llm";
+import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter, unpricedModels,
+  unpricedNote } from "./llm";
 import { exitCode, failureLine, findingStatus, groupsOf, load, neededQuestions, nextSteps, parseMarks, type Review,
   summary, summaryRows, summaryStatus, wrapMarkdown, yourCall } from "./report";
 import { acceptData, checkData, reportTelemetry, reviewData, type Sender, setupData,
@@ -45,7 +46,7 @@ import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSetting
   modelsSetting, recordCloudModels, recordConsent, type Settings, settingsPath, untrackedSetting, withModels,
   writeSettings }
   from "./settings";
-import { providerLines, unusedKeysNote } from "./settings";
+import { type ModelRef, providerLines, unusedKeysNote } from "./settings";
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, type ProjectProof, runSetup,
@@ -519,6 +520,14 @@ class Commands {
     }
   }
 
+  /** The one line about models arnx has no price for: they run, their cost unknown and outside the budget cap. */
+  private unpriced(s: Settings, refs: (ModelRef | null | undefined)[]): boolean {
+    const models = unpricedModels(s, refs);
+    const note = unpricedNote(models);
+    if (note) this.d.out(note);
+    return note !== null;
+  }
+
   /** With arnx cloud, the one line about the repository's own prompts (they are not used, nothing of them is sent). */
   private cloudPrompts(repo: string): void {
     if (hasOverrides(repo)) this.d.out(CLOUD_PROMPTS);
@@ -830,6 +839,7 @@ class Commands {
     const started = this.clock();
     const cloud = await this.cloudBrain(repo, s, mode);
     if (cloud) this.cloudPrompts(repo);
+    const unpriced = !cloud && this.unpriced(s, [s.reviewer]);
     const result = await this.withProgress(a, (progress) => runSetup(repo, s,
       cloud ? null : this.d.setupModel ?? makeAgentModel(s, this.d.env), { outDir, project, add, progress, failureModel,
         untracked, localPins: localPinsPath(this.d.env, repo),
@@ -846,7 +856,8 @@ class Commands {
       return code;
     };
     // With arnx cloud the figure is what it billed (its price), not the models' cost.
-    const cost = cloud ? `Billed $${result.costUsd.toFixed(2)} by arnx cloud` : `Cost $${result.costUsd.toFixed(2)}`;
+    const cost = cloud ? `Billed $${result.costUsd.toFixed(2)} by arnx cloud`
+      : unpriced ? "Cost unknown" : `Cost $${result.costUsd.toFixed(2)}`;
     if (!result.ok) {
       const saved = result.yamlText ? this.saveAttempt(repo, result.yamlText) : null;
       const failure = setupFailure(result, s.setupBudgetUsd);
@@ -877,7 +888,8 @@ class Commands {
     this.d.out("");
     this.d.out(approvalScreen(proposed, repo, { proofs: result.projects, untracked }));
     this.d.out("");
-    this.d.out(`Wrote ${REVIEW_FILE} (${minutes(this.clock() - started)}, $${result.costUsd.toFixed(2)})` +
+    this.d.out(`Wrote ${REVIEW_FILE} (${minutes(this.clock() - started)}, ` +
+      `${unpriced ? "cost unknown" : `$${result.costUsd.toFixed(2)}`})` +
       `${notes ? `; notes in ${relative(repo, notes)}` : ""}.`);
     // Nobody is asked: the suites run once more and the file is stamped; what is worth a look comes at the end.
     const r = await this.approveRun(repo, a, project, untracked, { warnings, since: started });
@@ -1193,6 +1205,7 @@ class Commands {
       return this.reviewWith(repo, s, a, cloud, untracked);
     }
     const agentModel = makeAgentModel(s, this.d.env);
+    this.unpriced(s, [s.reviewer, s.challenger, s.challengerFallback, s.hunter, s.secondHunter]);
     // Verdict calls give up on a stalled attempt sooner than hunt calls (see makeChallenger).
     const challenger = makeChallenger(s, this.d.env);
     const progress = new Progress(this.progressLine, { quiet: a.values.quiet as boolean | undefined,
@@ -1259,6 +1272,7 @@ class Commands {
       live: this.d.live ?? null, cost: costSince() });
     let runner = null;
     let billed = false; // arnx cloud turns the answers into tests: their cost is what it billed
+    let unpriced = false; // the answer model has no price: its cost is unknown
     if (!a.values["no-answers"]) {
       s = await this.agreed(repo, s, mode); // answers are turned into tests by a model
       await this.reprove(repo, a, again);
@@ -1269,6 +1283,7 @@ class Commands {
       } else {
         // Answer rounds use answer_model when set (a cheap model writes a test for a stated behaviour well).
         const agent = makeAgentModel(s.answerModel ? { ...s, reviewer: s.answerModel } : s, this.d.env);
+        unpriced = this.unpriced(s, [s.answerModel ?? s.reviewer]);
         agent.notice = progress.say;
         runner = makeAnswerRunner(repo, loadReviewFile(repo), s, agent, dockerSession, progress.say);
       }
@@ -1318,7 +1333,7 @@ class Commands {
       = [];
     for (const ans of result.answers) {
       const keptCount = Object.values(ans.keep).reduce((n, v) => n + v.size, 0);
-      const cost = `$${ans.costUsd.toFixed(2)}${billed ? " billed" : ""}`;
+      const cost = unpriced ? "cost unknown" : `$${ans.costUsd.toFixed(2)}${billed ? " billed" : ""}`;
       const failing = ans.disagree.map((t) => t.split("::").at(-1)!);
       const rewrite = result.rewrites.find((w) => w.id === ans.qid);
       const label = rewrite ? `${ans.qid} (rewrite of ${rewrite.findings.join(", ")})` : ans.qid;

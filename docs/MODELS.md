@@ -41,7 +41,8 @@ suggests for the second opinion. Their models are priced in arnx. Any other prov
     [prices]
     "some-model" = [0.5, 2.0, 0.05, 0.0]              # USD per million tokens: input, output, cache read, cache write
 
-A model arnx has no price for needs one under `[prices]`, from the provider's price page. `store = false` (Responses
+A model arnx has no price for runs with its cost unknown: the budget cap cannot stop what arnx cannot price, and
+arnx says so once when a command starts; give it a price under `[prices]`, from the provider's price page. `store = false` (Responses
 only) sends unstored requests, with reasoning passed back encrypted, for endpoints that refuse stored ones. A table
 named like a built-in provider (`[providers.openai]`, say with another `url`) changes only the fields it gives.
 `arnx doctor` lists each table a role uses, with its host and whether its key's variable is set; telemetry counts it as
@@ -92,4 +93,4 @@ You pay your model providers directly. Each review prints its cost, and review.m
 line per run to `.arnx/usage.jsonl` with tokens and cost per model, dated by UTC day as the providers bill.
 A review costs from a few cents for a small change to a few dollars for a large one (our own reviews on real
 changes: $0.17 to $3.19); it stops writing tests at your cap, `review_usd` under `[budget]` (default $3.00), and the
-report says when it did.
+report says when it did. A model with no price shows `cost unknown` in that split and is not covered by the cap.

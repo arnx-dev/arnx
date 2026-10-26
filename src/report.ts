@@ -259,8 +259,10 @@ function costLine(r: Review): string {
   // arnx cloud's figure is what it charged the account (its price, not the providers' cost); a call it could not
   // price is not charged, so there is no note to add.
   if (usage.every((u) => CLOUD_MODEL.test(u.model))) return `Billed $${r.costUsd.toFixed(2)} by arnx cloud`;
-  const parts = usage.map((u) => `${u.model.replace(/^[^:]*:/, "")} $${u.costUsd.toFixed(2)}`).join(" · ");
-  const unknown = usage.reduce((a, u) => a + u.unknownCalls, 0);
+  const parts = usage.map((u) => `${u.model.replace(/^[^:]*:/, "")} ` +
+    (u.unpriced ? "cost unknown" : `$${u.costUsd.toFixed(2)}`)).join(" · ");
+  // A model with no price says so in its part; every one of its calls is in unknownCalls.
+  const unknown = usage.reduce((a, u) => a + (u.unpriced ? 0 : u.unknownCalls), 0);
   // A call cut off mid-reply is billed, but the provider never said for how much: its cost is not in the total.
   const note = unknown ? `; ${unknown === 1 ? "1 call was" : `${unknown} calls were`} cut off mid-reply, so arnx ` +
     `could not price what the provider billed for ${unknown === 1 ? "it" : "them"}: the cost shown may be a little low`
@@ -953,11 +955,15 @@ function issuesLine(r: Review, rows: SummaryRow[]): string {
   return `${counted} (${plural(findings, "finding")})${settled ? `; ${settled}` : ""}.`;
 }
 
-/** The cost in one word, and a note when calls cut off mid-reply could not be priced. */
+/** The cost in one word, and a note when calls cut off mid-reply could not be priced, or a model has no price. */
 function costShort(r: Review): string {
   if (billedByCloud(r)) return `$${r.costUsd.toFixed(2)} billed`;
-  const unknown = (r.usage ?? []).reduce((a, u) => a + u.unknownCalls, 0);
-  return `$${r.costUsd.toFixed(2)}${unknown ? " (a little more: some calls were cut off mid-reply)" : ""}`;
+  const usage = r.usage ?? [];
+  const unknown = usage.reduce((a, u) => a + (u.unpriced ? 0 : u.unknownCalls), 0);
+  const unpriced = usage.filter((u) => u.unpriced).map((u) => u.model.replace(/^[^:]*:/, ""));
+  const notes = [...unknown ? ["a little more: some calls were cut off mid-reply"] : [],
+    ...unpriced.length ? [`${unpriced.join(", ")}: cost unknown`] : []];
+  return `$${r.costUsd.toFixed(2)}${notes.length ? ` (${notes.join("; ")})` : ""}`;
 }
 
 const snake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
