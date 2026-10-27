@@ -175,6 +175,19 @@ stamps it (the proof; nobody is asked). With `--json` the consent to send code n
 | `ok` | 0 | Set up and proven. |
 | `fail` | 2 | No working environment, tests failing on the current code, or the proof's run failed. `.arnx/review.yaml` is already set up (no `--force`): `error`, exit 2. |
 
+`arnx setup --baseline` runs every project's suite (no model) and records the tests failing now as the baseline,
+taking `known_failing` out of `.arnx/review.yaml`; its object has its own fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `recorded` | boolean | The baseline was recorded and the file stamped. |
+| `projects` | array | One entry per suite: `{ name, ok, summary, failing_today }`; `failing_today`: how many tests it fails now. |
+| `changes` | array of strings | What changed: tests added to or gone from the baseline per project (`baseline shop: 2 tests added, 1 left`), and per project with `known_failing`, how many tests in those files pass and count again. Empty when nothing changed or nothing was recorded. |
+| `record` | string | `.arnx/setup/approval.md` once recorded. |
+| `detail` | string | Why it was not recorded (`fail`): each suite that does not run, or whose failures are mostly the environment's. |
+
+A suite that does not run, or where most tests fail, changes nothing: `fail`, exit 2.
+
 ### approve
 
 `arnx approve` proves `.arnx/review.yaml` again: it runs every project's suite (or one, with `--project`) and stamps
@@ -185,7 +198,7 @@ Each proof is recorded, with those changes and its warnings, in `.arnx/setup/app
 | Field | Type | Meaning |
 |---|---|---|
 | `approved` | boolean | The environment is proven now. |
-| `projects` | array | One entry per suite that ran, in order: `{ name, ok, summary, accepted_failing, unexpected }`; `summary` is the suite's counts (`3 passed`), or why it failed. `accepted_failing`: tests kept by `arnx accept` that still fail (their bugs are not fixed yet; `arnx check` runs them); they do not block the proof while each file matches its pin in `.arnx/accepted-tests.json`, and one changed since accept does. `unexpected`: the ids of the failing tests that block it (outside the baseline and the accepted tests). Empty when nothing ran. |
+| `projects` | array | One entry per suite that ran, in order: `{ name, ok, summary, accepted_failing, unexpected }`; `summary` is the suite's counts (`3 passed`), or why it failed. `accepted_failing`: tests kept by `arnx accept` that still fail (their bugs are not fixed yet; `arnx check` runs them); they do not block the proof while each file matches its pin in `.arnx/accepted-tests.json`, and one changed since accept does. `unexpected`: the ids of the failing tests that block it (outside the baseline and the accepted tests). `baseline_failing`: how many of its failures are in the baseline (`.arnx/baseline.json`). `left_baseline`: the ids of baseline tests that pass now, which this proof took out of it. `flaky`: the ids of tests that failed, then passed when run once more; they do not block it. Empty when nothing ran. |
 | `detail` | string | Only with `fail`: why it was not proven: per failing suite, up to 5 failing tests and the path of its whole output (`.arnx/run/approve-<project>.log`). |
 | `next` | array of strings | The commands to run next: `arnx review` once proven, else `arnx approve` (after fixing the file). |
 

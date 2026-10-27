@@ -926,7 +926,8 @@ class Commands {
       `${unpriced ? "cost unknown" : `$${result.costUsd.toFixed(2)}`})` +
       `${notes ? `; notes in ${relative(repo, notes)}` : ""}.`);
     // Nobody is asked: the suites run once more and the file is stamped; what is worth a look comes at the end.
-    const r = await this.approveRun(repo, a, project, untracked, { warnings, since: started, afterSetup: true });
+    const r = await this.approveRun(repo, a, project, untracked, { warnings, since: started,
+      afterSetup: result.projects.filter((p) => p.failed).map((p) => p.name) });
     if (r.code !== 0) {
       this.d.out(`Not proven:\n${r.detail}`);
       this.d.out(`${cost} · last attempt: ${REVIEW_FILE} (not proven) · logs: .arnx/run/`);
@@ -1073,7 +1074,7 @@ class Commands {
    * is copied to PROVEN_COPY, what the next change is compared with. Says nothing but progress. */
   private async approveRun(repo: string, a: Args, project: string | undefined, untracked: boolean | undefined,
                            o: { warnings: string[]; since?: number; changes?: string[] | "no-copy" | null;
-                             afterSetup?: boolean })
+                             afterSetup?: string[] })
     : Promise<{ code: number; projects: ApprovedProject[]; detail: string; record: string | null }> {
     // Who ran the proof: the git user (a coding agent running arnx is not told apart from its user).
     const by = git(repo, ["config", "user.name"], [0, 1]).trim() || "unknown";
@@ -1084,7 +1085,8 @@ class Commands {
         ...(this.d.approveSessions ? { sessionFactory: this.d.approveSessions } : {}) }),
     o.since !== undefined ? { since: o.since } : {});
     const projects = suites.map((s) => ({ name: s.name, ok: s.ok, summary: s.summary,
-      accepted_failing: s.acceptedFailing, unexpected: s.unexpected }));
+      accepted_failing: s.acceptedFailing, unexpected: s.unexpected, baseline_failing: s.baselineFailing,
+      left_baseline: s.left, flaky: s.flaky }));
     if (!ok) return { code: 2, projects, detail, record: null };
     return { code: 0, projects, detail, record: this.proofRecord(repo, by, at, o.warnings, o.changes) };
   }
@@ -1114,8 +1116,11 @@ class Commands {
     if (!existsSync(reviewConfigPath(repo)) || isSeedFile(repo)) {
       throw new SetupRequired("no .arnx/review.yaml yet; run `arnx setup` first");
     }
-    loadReviewFile(repo, { requireApproved: false }); // validates the file first
+    const before = loadReviewFile(repo, { requireApproved: false }); // validates the file first
     requireDocker();
+    // A review.yaml edited since its proof says what changed first, as any proof does: this one stamps it too.
+    const st = proofState(repo, before);
+    const edits = st.proven ? null : this.sayChanges(st);
     const untracked = untrackedSetting(repo);
     const by = git(repo, ["config", "user.name"], [0, 1]).trim() || "unknown";
     const at = isoSeconds(new Date());
@@ -1131,7 +1136,9 @@ class Commands {
     }
     this.d.out(changes.length ? ["Changed:", ...changes.map((c) => `  ${c}`)].join("\n") : "The baseline is unchanged.");
     const file = loadReviewFile(repo);
-    const record = this.proofRecord(repo, by, at, approvalWarnings(file), changes);
+    const record = this.proofRecord(repo, by, at, approvalWarnings(file),
+      [...Array.isArray(edits) ? edits : edits === "no-copy" ? ["review.yaml: no copy of the proven file to compare"] : [],
+        ...changes]);
     this.provenEnd(repo, file, [], { untracked });
     this.emit("ok", 0, { recorded: true, projects, changes, record, next: ["arnx review"] });
     return 0;
@@ -1819,7 +1826,7 @@ function setupJson(o: { file: ReviewFile | null; result: SetupResult; approved: 
 
 /** One project's suite in `approve --json` (skills/arnx/references/json.md). */
 export interface ApprovedProject { name: string; ok: boolean; summary: string; accepted_failing: number;
-  unexpected: string[] }
+  unexpected: string[]; baseline_failing?: number; left_baseline?: string[]; flaky?: string[] }
 
 /** `arnx review --json`: the result, the exit code and a summary of the review, as the terminal summary shows it
  * (review.json holds the whole review). */

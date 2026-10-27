@@ -73,3 +73,25 @@ test("setup --baseline goes on its own", async () => {
   expect(await cli.run("setup", "--baseline", "--add")).not.toBe(0);
   expect(cli.stderr + cli.stdout).toContain("--baseline records the tests failing today for the whole file");
 });
+
+test("setup --baseline records nothing when most of the suite fails: that is the environment", async () => {
+  const repo = repoWith(OLD);
+  const rows: Row[] = [["tests/test_a.py", "test_a", "passed", ""], ["tests/test_b.py", "test_b", "failed", "refused"],
+    ["tests/test_c.py", "test_c", "failed", "refused"]];
+  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suite(rows) });
+  expect(await cli.run("setup", "--baseline")).toBe(2);
+  expect(cli.stdout).toContain("most of the suite fails (2 failing, 1 passing), which points to the environment");
+  expect(readFileSync(reviewConfigPath(repo), "utf8")).toBe(OLD);
+  expect(existsSync(join(repo, ".arnx", "baseline.json"))).toBe(false);
+});
+
+test("setup --baseline says what changed in review.yaml since its proof, and records it", async () => {
+  const repo = repoWith(OLD);
+  expect(await new Cli({ cwd: repo, env: ENV, approveSessions: suite(ROWS) }).run("setup", "--baseline")).toBe(0);
+  const text = readFileSync(reviewConfigPath(repo), "utf8");
+  writeFileSync(reviewConfigPath(repo), text.replace("python -m pytest -q {targets}", "python -m pytest -q -x {targets}"));
+  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suite(ROWS) });
+  expect(await cli.run("setup", "--baseline")).toBe(0);
+  expect(cli.stdout).toContain("test_command `python -m pytest -q {targets}` → `python -m pytest -q -x {targets}`");
+  expect(readFileSync(join(repo, ".arnx", "setup", "approval.md"), "utf8")).toContain("- test_command `python -m pytest");
+});

@@ -103,7 +103,7 @@ test("approve --json: each project's accepted_failing and unexpected tests", asy
     cli.out.length = 0;
     expect(await cli.run("approve", "--yes", "--json", "--quiet")).toBe(0);
     expect(JSON.parse(cli.stdout).projects).toEqual([{ name: "app", ok: true, summary: "1 passed (1 accepted test still fails)",
-      accepted_failing: 1, unexpected: [] }]);
+      accepted_failing: 1, unexpected: [], baseline_failing: 0, left_baseline: [], flaky: [] }]);
   } finally {
     sandboxOptions.docker = saved;
   }

@@ -53,6 +53,8 @@ test("a baseline that does not read says how to record it again", () => {
 test("memory addresses in test ids do not count, so a parameter id holding one matches run to run", () => {
   expect(testKey("t.py::test_x[<Foo object at 0x7f3a2b1c9d00>]")).toBe(testKey("t.py::test_x[<Foo object at 0x7f99aa001122>]"));
   expect(testKey("t.py::test_x[0x10]")).toBe("t.py::test_x[0x10]");
+  // A hex value as a parameter is the test's own: two of them stay two tests.
+  expect(testKey("t.py::test_parse[0xdeadbeef]")).not.toBe(testKey("t.py::test_parse[0xcafebabe]"));
 });
 
 test("a suite passes while its failures are in the baseline; a baseline test that passes leaves it", () => {
@@ -68,12 +70,13 @@ test("a suite passes while its failures are in the baseline; a baseline test tha
     "tests/test_c.py::test_c"]);
 });
 
-test("a flaky baseline test stays while the suite has it, passing or not, and leaves once the suite does not", () => {
+test("a flaky baseline test leaves once it passes, like any other", () => {
   const cfg = parseReviewConfig(YAML);
   const base = [entry("tests/test_a.py", "test_a", { flaky: true })];
   const pass = [t("tests/test_a.py", "test_a", "passed"), t("tests/test_c.py", "test_c", "passed")];
-  expect(suiteOk(pass, cfg, undefined, undefined, base)[2].left).toEqual([]);
-  expect(suiteOk(pass.slice(1), cfg, undefined, undefined, base)[2].left).toEqual(["tests/test_a.py::test_a"]);
+  expect(suiteOk(pass, cfg, undefined, undefined, base)[2].left).toEqual(["tests/test_a.py::test_a"]);
+  expect(suiteOk([t("tests/test_a.py", "test_a", "failed"), pass[1]!], cfg, undefined, undefined, base)[2].left)
+    .toEqual([]);
 });
 
 test("while setup records, every failure may fail and is returned to be recorded; no test passing still fails", () => {
@@ -86,8 +89,8 @@ test("while setup records, every failure may fail and is returned to be recorded
     .toContain("no test passed");
 });
 
-function repoWith(yaml: string, base?: Baseline): string {
-  const repo = gitRepo(tmp());
+function repoWith(yaml: string, base?: Baseline, name = "repo"): string {
+  const repo = gitRepo(join(tmp(), name));
   mkdirSync(dirname(reviewConfigPath(repo)), { recursive: true });
   writeFileSync(reviewConfigPath(repo), yaml);
   if (base) writeBaseline(repo, base);
@@ -132,14 +135,29 @@ test("a proof reruns a test failing outside the baseline: passing then, it does 
   expect(detail).toContain("failing outside the baseline:\n  tests/test_b.py::test_b");
 });
 
-test("right after setup recorded the baseline, a test failing outside it joins it as flaky", async () => {
+test("right after setup recorded a project, a test failing outside its baseline joins it as flaky", async () => {
   const repo = repoWith(YAML);
   const whole: Row[] = [["tests/test_a.py", "test_a", "passed", ""], ["tests/test_b.py", "test_b", "failed", "timing"]];
-  const [ok] = await approveFile(repo, { by: "Dev", at: "2026-10-27", afterSetup: true,
+  const [ok] = await approveFile(repo, { by: "Dev", at: "2026-10-27", afterSetup: ["main"],
     sessionFactory: fakeFactory(runs(whole, whole)) });
   expect(ok).toBe(true);
   expect(readBaseline(repo).get("main")).toEqual([{ id: "tests/test_b.py::test_b", file: "tests/test_b.py",
     first: "timing", flaky: true }]);
+  // A project setup did not run this time (setup --add) gets no such pass: a test failing twice fails the proof.
+  const other = repoWith(YAML, undefined, "other");
+  const [kept] = await approveFile(other, { by: "Dev", at: "2026-10-27", afterSetup: ["web"],
+    sessionFactory: fakeFactory(runs(whole, whole)) });
+  expect(kept).toBe(false);
+});
+
+test("right after setup, most of the suite failing is the environment: the proof fails, nothing joins", async () => {
+  const repo = repoWith(YAML);
+  const whole: Row[] = [["tests/test_a.py", "test_a", "passed", ""], ["tests/test_b.py", "test_b", "failed", "refused"],
+    ["tests/test_c.py", "test_c", "failed", "refused"]];
+  const [ok] = await approveFile(repo, { by: "Dev", at: "2026-10-27", afterSetup: ["main"],
+    sessionFactory: fakeFactory(runs(whole, whole)) });
+  expect(ok).toBe(false);
+  expect(existsSync(join(repo, ".arnx", "baseline.json"))).toBe(false);
 });
 
 const SVC = YAML.replace("test_command:", "services:\n  db: {image: postgres:16}\ntest_command:");
@@ -172,12 +190,41 @@ test("failures that look like the environment go back to the agent once; tried a
   ]);
 });
 
+test("approve --project refuses a baseline changed since its proof: other projects' entries would go unproven",
+  async () => {
+    const yaml = "version: 1\nprojects:\n  api:\n    root: .\n    language: python\n    image: python:3.12\n" +
+      "    test_command: pytest {targets}\n  web:\n    root: web\n    language: python\n    image: python:3.12\n" +
+      "    test_command: pytest {targets}\n";
+    const repo = repoWith(yaml);
+    const pass = fakeFactory(runs([["tests/test_a.py", "test_a", "passed", ""]]));
+    expect((await approveFile(repo, { by: "Dev", at: "x", sessionFactory: pass }))[0]).toBe(true);
+    writeBaseline(repo, new Map([["web", [entry("web/tests/test_w.py", "test_w")]]]));
+    const [ok, why] = await approveFile(repo, { by: "Dev", at: "x", project: "api", sessionFactory: pass });
+    expect([ok, why]).toEqual([false, ".arnx/baseline.json changed since its proof; run `arnx approve` without " +
+      "--project"]);
+  });
+
+test("setup --project keeps a kept project's known_failing as it is: it must stay as approved", async () => {
+  const yaml = "version: 1\nprojects:\n  api:\n    root: .\n    language: python\n    image: python:3.12\n" +
+    "    test_command: pytest {targets}\n    owns: [app.py, tests/]\n    known_failing: [tests/test_net.py]\n" +
+    "  web:\n    root: web\n    language: python\n    image: python:3.12\n    test_command: pytest {targets}\n" +
+    "uncovered:\n  - {path: '**', reason: rest}\n";
+  const repo = repoWith(yaml);
+  const model = new ScriptedAgent([[tool("try_project", { yaml, project: "web" })], [tool("propose", { yaml })],
+    [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"), project: "web",
+    sessionFactory: fakeFactory(runs([["web/tests/test_w.py", "test_w", "passed", ""]])) });
+  expect(r.ok).toBe(true);
+  expect(r.yamlText).toContain("known_failing: [tests/test_net.py]");
+});
+
 test("known_failing comes out of a proposal with the rest of the file as it was written", () => {
   const yaml = "version: 1\nprojects:\n  api:\n    root: .\n    install: [pip install pytest]  # keep\n" +
     "    known_failing: [tests/test_net.py]\n    test_command: pytest {targets}\n";
   expect(withoutKnownFailing(yaml)).toEqual(["version: 1\nprojects:\n  api:\n    root: .\n" +
     "    install: [pip install pytest] # keep\n    test_command: pytest {targets}\n", true]);
   expect(withoutKnownFailing(YAML)).toEqual([YAML, false]);
+  expect(withoutKnownFailing(yaml, new Set(["api"]))).toEqual([yaml, false]);
 });
 
 test("worth a look: per project, how many tests fail today, with their causes and flaky ones", () => {

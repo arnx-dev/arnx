@@ -5,10 +5,10 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirS
   writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
-import { parseDocument } from "yaml";
+import { isMap as isYamlMap, isScalar, parseDocument } from "yaml";
 import { StopRound, Workspace } from "./agent";
-import { type Baseline, type BaselineTest, baselineDigest, describeBaselineChanges, entryOf, keysOf, readBaseline,
-  testKey, writeBaseline } from "./baseline";
+import { type Baseline, BASELINE_FILE, type BaselineTest, baselineDigest, describeBaselineChanges, entryOf, keysOf,
+  readBaseline, testKey, writeBaseline } from "./baseline";
 import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
 import { getAdapter, LANGUAGES } from "./adapters";
@@ -17,7 +17,7 @@ import { type Blanked, describeBlanked, filesAt, hasCommits, snapshot, takeSnaps
   from "./change";
 import {
   loadReviewFile, parseReviewFile, projectDigest, readSecretPins, type ReviewConfig, reviewConfigPath, type ReviewFile,
-  secretPinsOf, secretPinsYaml, stamp, stampFile,
+  secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampFile,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
 import { classify, describeHints, diagnose, firstErrors, firstLine, type Hint, missingLeftOut, npxDownload, npxText,
@@ -101,10 +101,8 @@ export function suiteOk(results: TestResult[] | null, cfg: ReviewConfig, accepte
     if (record || known.has(testKey(t.testId))) baselineFailing++;
     else unexpected.push(t.testId);
   }
-  // A baseline test leaves once it no longer fails; a flaky one only once the suite no longer has it.
-  const seen = new Set(results.map((t) => testKey(t.testId)));
-  const left = record ? [] : baseline.filter((b) => !failing.has(testKey(b.id)) && (!b.flaky || !seen.has(testKey(b.id))))
-    .map((b) => b.id);
+  // A baseline test leaves once it no longer fails, a flaky one too: should it fail again, the rerun tells.
+  const left = record ? [] : baseline.filter((b) => !failing.has(testKey(b.id))).map((b) => b.id);
   const summary = [...counts.keys()].sort().filter((o) => counts.get(o)).map((o) => `${counts.get(o)} ${o}`).join(", ") +
     (acceptedFailing ? ` (${acceptedFailing} accepted test${acceptedFailing === 1 ? "" : "s"} still fail` +
       `${acceptedFailing === 1 ? "s" : ""})` : "") +
@@ -211,7 +209,8 @@ const APART_MAX = 20;
  * fail today (suiteOk; "record" while setup records them: failures then never stop the suite, and the hints about them
  * come back all the same). `rerun`: tests failing outside the baseline run once more, and those that pass then count
  * as flaky, not as failures. `passedBefore`: the whole suite ran moments ago with every test outside the baseline
- * passing (setup's own run), so a test failing outside it now is flaky too. `outputLog`: where the whole output goes. */
+ * passing (setup's own run), so a test failing again on the rerun is flaky too, unless most of the suite fails.
+ * `outputLog`: where the whole output goes. */
 export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string,
                                { sessionFactory = dockerSession, targets = [], failureModel, key, acceptedTestsDir,
                                  accepted, outputLog, leftOut, baseline = [], rerun = false, passedBefore = false }: {
@@ -262,15 +261,16 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     }
     let [ok, verdict, counts] = suiteOk(all, cfg, accepted, acceptedTestsDir, baseline);
     // Tests failing outside the baseline run once more, by file: one that passes then is flaky, not a new failure.
+    // Right after setup (`passedBefore`) the suite passed them moments ago, so one failing again is flaky too; not
+    // when most of the suite fails, which is the environment.
     const again = rerun && !ok && baseline !== "record" && counts.unexpected.length
       ? [...new Set((all ?? []).filter((t) => counts.unexpected.includes(t.testId)).map((t) => t.fileAttr))] : [];
-    if (again.length && (passedBefore || (!again.includes("") && again.length <= APART_MAX))) {
+    if (again.length && !again.includes("") && again.length <= APART_MAX) {
       const passed = new Set<string>();
-      if (!passedBefore) {
-        const [, second] = runTests(session, snap, cfg, again, "again.xml", SUITE_TIMEOUT);
-        for (const t of second ?? []) if (t.outcome === "passed") passed.add(testKey(t.testId));
-      }
-      const flaky = counts.unexpected.filter((id) => passedBefore || passed.has(testKey(id)));
+      const [, second] = runTests(session, snap, cfg, again, "again.xml", SUITE_TIMEOUT);
+      for (const t of second ?? []) if (t.outcome === "passed") passed.add(testKey(t.testId));
+      const most = counts.unexpected.length > counts.passed;
+      const flaky = counts.unexpected.filter((id) => passed.has(testKey(id)) || (passedBefore && !most));
       if (flaky.length) {
         const extra = (all ?? []).filter((t) => flaky.includes(t.testId)).map((t) => ({ ...entryOf(t), flaky: true as const }));
         [ok, verdict, counts] = suiteOk(all, cfg, accepted, acceptedTestsDir, [...baseline as BaselineTest[], ...extra]);
@@ -480,7 +480,7 @@ const few = (xs: string[], max = 3) => xs.slice(0, max).join(", ") + (xs.length 
 
 /** What a person is told when propose refuses, in a few words (the agent gets the whole reason). */
 export function rejectedReason(p: { changed: string[]; overlaps: string[]; unexplained: string[]; ownTests: string[];
-  silent: string[]; failed: string[] }): string {
+  failed: string[] }): string {
   const out: string[] = [];
   if (p.unexplained.length) {
     out.push(`${plural(p.unexplained.length, "file")} unaccounted for (${few(p.unexplained)})`);
@@ -488,8 +488,6 @@ export function rejectedReason(p: { changed: string[]; overlaps: string[]; unexp
   if (p.overlaps.length) out.push(`${plural(p.overlaps.length, "file")} owned by two projects (${few(p.overlaps)})`);
   if (p.changed.length) out.push(`approved projects changed (${few(p.changed)})`);
   if (p.ownTests.length) out.push(`own tests in tests_dir (${few(p.ownTests)})`);
-  if (p.silent.length) out.push(`${plural(p.silent.length, "known_failing entry", "known_failing entries")} with no ` +
-    `reason in notes (${few(p.silent)})`);
   if (p.failed.length) out.push(`${plural(p.failed.length, "project")} do${p.failed.length === 1 ? "es" : ""} not run ` +
     `(${few(p.failed)})`);
   return out.join("; ");
@@ -581,7 +579,7 @@ export function coverageMap(repo: string, file: ReviewFile, untracked = false): 
  * rerun just the files that failed. */
 export function envDigest(cfg: ReviewConfig): string {
   return JSON.stringify([cfg.image, cfg.workdir, cfg.install, cfg.testCommand, cfg.services, cfg.env, cfg.testsDir,
-    cfg.installRoot]);
+    cfg.installRoot, cfg.runner, cfg.typecheck ?? null]);
 }
 
 /** known_failing entries that no note explains (by path or file name): each hides a whole test file. */
@@ -619,22 +617,23 @@ export function environmentFaults(counts: SuiteCounts, cfg: ReviewConfig)
     text: lines.join("\n"), count };
 }
 
-/** `text` without known_failing (the file's, or any project's), and whether it had one. Setup records failing tests
- * one by one, so a proposal's known_failing is taken out rather than refused (an older prompt may still ask for it). */
-export function withoutKnownFailing(text: string): [string, boolean] {
+/** `text` without known_failing (the file's, or any project's but those in `keep`, which must stay as they are), and
+ * whether it had one. Setup records failing tests one by one, so a proposal's known_failing is taken out rather than
+ * refused (an older prompt may still ask for it). */
+export function withoutKnownFailing(text: string, keep: ReadonlySet<string> = new Set()): [string, boolean] {
   const doc = parseDocument(text);
   if (doc.errors.length) return [text, false];
   let dropped = false;
-  if (doc.has("known_failing")) {
+  if (doc.has("known_failing") && !keep.has("main")) {
     doc.delete("known_failing");
     dropped = true;
   }
   const projects = doc.get("projects");
-  if (projects && typeof projects === "object" && "items" in projects) {
-    for (const item of (projects as { items: { key: unknown }[] }).items) {
-      const name = String((item.key as { value?: unknown })?.value ?? item.key);
-      if (doc.hasIn(["projects", name, "known_failing"])) {
-        doc.deleteIn(["projects", name, "known_failing"]);
+  if (isYamlMap(projects)) {
+    for (const item of projects.items) {
+      const name = String(isScalar(item.key) ? item.key.value : item.key);
+      if (!keep.has(name) && isYamlMap(item.value) && item.value.has("known_failing")) {
+        item.value.delete("known_failing");
         dropped = true;
       }
     }
@@ -813,7 +812,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     // The agent's file, with the user's allow-list added: the agent may not write one.
     const parse = (args: Record<string, unknown>): { f: ReviewFile; text: string } | string => {
       if (typeof args.yaml !== "string") return "invalid: yaml must be a string";
-      const [yaml, dropped] = withoutKnownFailing(args.yaml);
+      const [yaml, dropped] = withoutKnownFailing(args.yaml, new Set(keep.keys()));
       if (dropped) {
         args = { ...args, yaml };
         state.notice = "(known_failing is not used: arnx records each failing test itself, so it was taken out of the " +
@@ -1020,10 +1019,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           ownTests.push(p.name);
         }
       }
-      const silent: string[] = [];
       if (problems.length) {
         if (unproven.length) problems.push(`not proven yet: ${unproven.join(", ")} (propose runs them once the rest is right)`);
-        state.problem = rejectedReason({ changed, overlaps: map.overlaps, unexplained: map.unexplained, ownTests, silent,
+        state.problem = rejectedReason({ changed, overlaps: map.overlaps, unexplained: map.unexplained, ownTests,
           failed: [] });
         say(`Proposal rejected: ${state.problem}. Retrying...`);
         return `refused:\n${problems.join("\n")}`;
@@ -1054,8 +1052,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         }
       }
       if (failed.length) {
-        const why = rejectedReason({ changed: [], overlaps: [], unexplained: [], ownTests: [], silent: [],
-          failed: failedNames });
+        const why = rejectedReason({ changed: [], overlaps: [], unexplained: [], ownTests: [], failed: failedNames });
         // The suite's own failure (state.problem, state.failing) stays what a failed setup reports.
         say(`Proposal rejected: ${why}. Retrying...`);
         return `refused: propose ran the projects changed since they were proven, and these do not run:\n` +
@@ -1165,12 +1162,12 @@ function failedSuite(s: ApprovedSuite, legacy: boolean, repo: string): string {
  * project is unchanged since the last approval. The suites run on what reviews will see: tracked files, and untracked
  * ones only with `untracked` (default: `[review] untracked`). Tests kept by `arnx accept` may fail while they match
  * their pins (`localPins`: this machine's record, localPinsPath). Tests in the baseline may fail; those that no longer
- * do leave it. A test failing outside it runs once more, and passing then it does not count (flaky). `afterSetup`:
- * setup recorded the baseline moments ago, so a test failing outside it is flaky and joins it as such; otherwise the
- * baseline never grows here. [approved, text, each suite that ran] */
+ * do leave it. A test failing outside it runs once more, and passing then it does not count (flaky). `afterSetup`: the
+ * projects setup recorded moments ago, where a test failing outside the baseline is flaky and joins it as such;
+ * otherwise the baseline never grows here. [approved, text, each suite that ran] */
 export async function approveFile(repo: string, o: { by: string; at: string; project?: string;
   sessionFactory?: SessionFactory; progress?: Say; untracked?: boolean; localPins?: string | null;
-  afterSetup?: boolean })
+  afterSetup?: string[] })
   : Promise<[boolean, string, ApprovedSuite[]]> {
   const say = o.progress ?? (() => {});
   const f = loadReviewFile(repo, { requireApproved: false });
@@ -1192,6 +1189,9 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
       return [false, `${changed.map((p) => p.name).join(", ")} changed since its proof; run \`arnx approve\` ` +
         "without --project", []];
     }
+    if (stampedBaseline(f) !== baselineDigest(repo)) {
+      return [false, `${BASELINE_FILE} changed since its proof; run \`arnx approve\` without --project`, []];
+    }
     run = f.projects.filter((p) => p.name === o.project);
   }
   const summaries: string[] = [];
@@ -1209,15 +1209,20 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
       const log = join(repo, ".arnx", "run", f.legacy ? "approve-build.log" : `approve-build-${cfg.name}.log`);
       const output = posix.join(".arnx", "run", f.legacy ? "approve.log" : `approve-${cfg.name}.log`);
       const mine = base.get(cfg.name) ?? [];
+      const fresh = !!o.afterSetup?.includes(cfg.name);
       const [ok, summary, , skips, , , counts] = await runSuite(cfg, snap, log, { sessionFactory: o.sessionFactory,
         key: envKey(cfg, join(tmp, "manifests")), acceptedTestsDir: accepted, accepted: trusted,
-        outputLog: join(repo, output), baseline: mine, rerun: true, passedBefore: o.afterSetup });
-      say(`${cfg.name}: ${ok ? "✓" : "✗"} ${gist(summary)}${skips.length ? ` · skipped because ${skips.join("; ")}` : ""}`);
+        outputLog: join(repo, output), baseline: mine, rerun: true, passedBefore: fresh });
+      const moved = [counts.left.length ? `${counts.left.length} left the baseline (they pass now)` : "",
+        counts.flaky.length ? `${plural(counts.flaky.length, "test")} failed, then passed when run again (flaky): ` +
+          few(counts.flaky) : ""].filter(Boolean).map((x) => ` · ${x}`).join("");
+      say(`${cfg.name}: ${ok ? "✓" : "✗"} ${gist(summary)}${ok ? moved : ""}` +
+        `${skips.length ? ` · skipped because ${skips.join("; ")}` : ""}`);
       suites.push({ name: cfg.name, ok, summary, acceptedFailing: counts.acceptedFailing, unexpected: counts.unexpected,
         log: output, baselineFailing: counts.baselineFailing, left: counts.left, flaky: counts.flaky });
       if (ok) summaries.push(f.legacy ? summary : `${cfg.name}: ${summary}`);
       const left = new Set(counts.left);
-      const joined = o.afterSetup ? counts.failed.filter((t) => counts.flaky.includes(t.testId))
+      const joined = fresh ? counts.failed.filter((t) => counts.flaky.includes(t.testId))
         .map((t) => ({ ...entryOf(t), flaky: true as const })) : [];
       next.set(cfg.name, [...mine.filter((b) => !left.has(b.id)), ...joined]);
     }
@@ -1269,9 +1274,16 @@ export async function rerecordBaseline(repo: string, o: { by: string; at: string
       const log = join(repo, ".arnx", "run", f.legacy ? "baseline-build.log" : `baseline-build-${cfg.name}.log`);
       const output = posix.join(".arnx", "run", f.legacy ? "baseline.log" : `baseline-${cfg.name}.log`);
       const all = { ...cfg, knownFailing: [] };
-      const [ok, summary, , , , , counts] = await runSuite(all, snap, log, { sessionFactory: o.sessionFactory,
+      let [ok, summary, , , , , counts] = await runSuite(all, snap, log, { sessionFactory: o.sessionFactory,
         key: envKey(cfg, join(tmp, "manifests")), acceptedTestsDir: accepted, accepted: trusted,
         outputLog: join(repo, output), baseline: "record" });
+      // Most of the suite failing is the environment, not today's code: nothing is recorded from it.
+      const most = ok && counts.failed.length > counts.passed;
+      if (most) {
+        ok = false;
+        summary = `${summary}; most of the suite fails (${counts.failed.length} failing, ${counts.passed} passing), ` +
+          "which points to the environment, not the code: fix it, then record again";
+      }
       const tests = counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined));
       const failingIds = new Set(tests.map((t) => t.id));
       const guarded = cfg.knownFailing.length ? counts.all.filter((t) => t.outcome === "passed" && !failingIds.has(t.testId) &&

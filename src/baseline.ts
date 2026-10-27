@@ -12,7 +12,7 @@ export const BASELINE_FILE = ".arnx/baseline.json";
 
 /** One test the suite fails today. `first`: the first line of its failure. `cause`: what the failure points to when it
  * looks like the environment, not the code (the setup agent saw it and could not fix it in the sandbox). `flaky`: it
- * failed in one run and passed in another, so it may do either. */
+ * failed in one run and passed in another; like any entry, it leaves once it passes. */
 export interface BaselineTest { id: string; file: string; first: string; cause?: string; flaky?: true }
 
 /** Each project's tests, by project name. */
@@ -22,7 +22,7 @@ export const baselinePath = (repo: string) => join(repo, BASELINE_FILE);
 
 /** A test's id as the baseline compares it: memory addresses in parameter ids (`<Foo object at 0x7f3a…>`) differ from
  * run to run, so they are left out. */
-export const testKey = (id: string) => id.replace(/0x[0-9a-f]{6,}/gi, "0x");
+export const testKey = (id: string) => id.replace(/ at 0x[0-9a-f]+/gi, " at 0x");
 
 /** The keys (testKey) of `tests`. */
 export const keysOf = (tests: BaselineTest[]) => new Set(tests.map((t) => testKey(t.id)));
