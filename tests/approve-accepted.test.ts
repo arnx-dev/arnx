@@ -35,7 +35,7 @@ test("a pinned accepted test that fails does not block the suite; it is counted"
   // Not pinned (accept never recorded it), it is a failure like any other.
   const [bad, why, c2] = suiteOk([t("tests/test_a.py", "passed"), t(KEPT, "failed")], CFG, { pinned: [], changed: [] });
   expect(bad).toBe(false);
-  expect(why).toContain("failing outside known_failing");
+  expect(why).toContain("failing outside the baseline");
   expect(c2.unexpected).toEqual([`${KEPT}::t`]);
   // Accepted tests alone do not make a suite that runs.
   expect(suiteOk([t(KEPT, "failed")], CFG, { pinned: [KEPT], changed: [] })[1]).toContain("no test passed");
@@ -124,7 +124,7 @@ test("a failing approval names 5 tests, how many more, and where the whole outpu
   expect(ok).toBe(false);
   const ids = cases.map(([f, n]) => `${f}::${n}`);
   expect(detail.split("\n\n")[0]).toBe([
-    "✗ pay: 7 failed; failing outside known_failing:",
+    "✗ pay: 7 failed; failing outside the baseline:",
     ...ids.slice(0, 5).map((id) => `  ${id}`),
     "  and 2 more",
     "  Full output: .arnx/run/approve-pay.log",

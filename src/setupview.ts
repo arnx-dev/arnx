@@ -3,7 +3,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, filesAt, git, leftOutUntracked, resolveChange, someNames, untrackedLine } from "./change";
-import { fileDigest, isFileApproved, parseReviewFile, readSecretPins, type ReviewFile, secretPinsOf } from "./config";
+import { type Baseline, BASELINE_FILE, describeBaselineChanges, parseBaseline, readBaseline } from "./baseline";
+import { fileDigest, isProven, parseReviewFile, readSecretPins, type ReviewFile, secretPinsOf } from "./config";
 import { detect } from "./detect";
 import { ArnxError } from "./errors";
 import { refString, type Settings, untrackedSetting } from "./settings";
@@ -16,6 +17,8 @@ const USD_PER_PROJECT = [0.03, 0.1];
 export const REVIEW_FILE = ".arnx/review.yaml";
 /** A copy of review.yaml as its last proof stamped it (a local file): what a changed file is compared with. */
 export const PROVEN_COPY = ".arnx/setup/proven-review.yaml";
+/** The baseline the last proof on this machine held, kept next to PROVEN_COPY. */
+export const PROVEN_BASELINE = ".arnx/setup/proven-baseline.json";
 
 /** Shown before setup starts: the steps, what is sent, and a rough estimate from the layout found without a model.
  * `untracked`: the agent reads untracked files too (--untracked; default `[review] untracked`). */
@@ -128,7 +131,7 @@ export function approvalScreen(file: ReviewFile, repo: string, o: { proofs?: Pro
  * there is reported as not tested) and source files no project mentions. */
 export function worthALook(file: ReviewFile, repo: string, o: { proofs?: ProjectProof[]; untracked?: boolean })
   : string[] {
-  const lines = approvalWarnings(file, o.proofs);
+  const lines = [...baselineLines(file, currentBaseline(repo) ?? new Map()), ...approvalWarnings(file, o.proofs)];
   if (!file.legacy) {
     const map = coverageMap(repo, file, !!o.untracked);
     lines.push(...map.uncovered.map((u) => `not tested: ${u.path} (${u.files} file${u.files === 1 ? "" : "s"}` +
@@ -136,6 +139,26 @@ export function worthALook(file: ReviewFile, repo: string, o: { proofs?: Project
     if (map.unexplained.length) lines.push(`${map.unexplained.length} source files no project mentions`);
   }
   return lines;
+}
+
+/** One line per project with tests in the baseline: how many fail today, and the causes and flaky tests among them
+ * (the rest fail on the code as it is). */
+export function baselineLines(file: ReviewFile, base: Baseline): string[] {
+  const out: string[] = [];
+  for (const p of file.projects) {
+    const tests = base.get(p.name) ?? [];
+    if (!tests.length) continue;
+    const groups = new Map<string, number>();
+    for (const t of tests) {
+      const k = t.flaky ? "flaky" : t.cause;
+      if (k) groups.set(k, (groups.get(k) ?? 0) + 1);
+    }
+    const why = [...groups].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`);
+    if (groups.size > 3) why.push("…");
+    out.push(`${p.name}: ${tests.length} test${tests.length === 1 ? " fails" : "s fail"} today, recorded in ` +
+      `${BASELINE_FILE}${why.length ? ` (${why.join("; ")})` : ""}`);
+  }
+  return out;
 }
 
 /** After the proof: the next command, and what it would review in this repository right now (what would be sent:
@@ -167,16 +190,44 @@ function provenCopy(repo: string): ReviewFile | null {
   }
 }
 
-/** Where review.yaml stands against its last proof on this machine. `proven`: its stamp holds and it holds what the
- * proof's copy holds (or there is no copy: a proof by an older arnx, a fresh clone). Otherwise `changes`: what changed
- * since the copy, stamp or not (null without a copy). `stamped`: it carries a stamp, current or not. */
+/** The baseline the last proof on this machine held: empty when that proof held none (a copy of review.yaml and no
+ * baseline copy), null when there is no copy at all or it does not read. */
+function provenBaseline(repo: string): Baseline | null {
+  const path = join(repo, PROVEN_BASELINE);
+  if (!existsSync(path)) return existsSync(join(repo, PROVEN_COPY)) ? new Map() : null;
+  try {
+    return parseBaseline(readFileSync(path, "utf8"));
+  } catch (e) {
+    if (e instanceof ArnxError) return null;
+    throw e;
+  }
+}
+
+/** The baseline as it is now; null when it does not read (then nothing is proven). */
+function currentBaseline(repo: string): Baseline | null {
+  try {
+    return readBaseline(repo);
+  } catch (e) {
+    if (e instanceof ArnxError) return null;
+    throw e;
+  }
+}
+
+/** Where review.yaml stands against its last proof on this machine. `proven`: its stamp holds (over review.yaml and
+ * the baseline) and they hold what the proof's copies hold (or there is no copy: a proof by an older arnx, a fresh
+ * clone). Otherwise `changes`: what changed since the copies, stamp or not (null without a copy). `stamped`: it
+ * carries a stamp, current or not. */
 export function proofState(repo: string, file: ReviewFile): { proven: boolean; stamped: boolean;
   changes: string[] | null } {
   const copy = provenCopy(repo);
+  const oldBase = provenBaseline(repo);
+  const base = currentBaseline(repo);
+  const baseChanges = oldBase && base ? describeBaselineChanges(oldBase, base) : [];
   // A stamp that holds over content this machine did not prove (recomputed by hand) is no proof.
-  const proven = isFileApproved(file) && (!copy || fileDigest(copy) === fileDigest(file));
+  const proven = base !== null && isProven(repo, file) && (!copy || fileDigest(copy) === fileDigest(file)) &&
+    !baseChanges.length;
   const stamped = typeof file.raw.approved === "object" && file.raw.approved !== null;
-  return { proven, stamped, changes: !proven && copy ? describeChanges(copy, file) : null };
+  return { proven, stamped, changes: !proven && copy ? [...describeChanges(copy, file), ...baseChanges] : null };
 }
 
 type Raw = Record<string, unknown>;

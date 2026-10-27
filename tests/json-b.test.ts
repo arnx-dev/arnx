@@ -81,7 +81,7 @@ test("approve --yes --json: each project's suite, proven or not", async () => {
     expect(o).toMatchObject({ result: "fail", exit_code: 2, approved: false, next: ["arnx approve"] });
     expect((o.projects as { name: string; ok: boolean; unexpected: string[] }[]).map((p) => [p.name, p.ok,
       p.unexpected])).toEqual([["pay", false, ["tests/test_a.py::test_a"]], ["feed", false, ["tests/test_a.py::test_a"]]]);
-    expect(o.detail).toContain("pay: 1 failed; failing outside known_failing");
+    expect(o.detail).toContain("pay: 1 failed; failing outside the baseline");
   } finally {
     sandboxOptions.docker = saved;
   }

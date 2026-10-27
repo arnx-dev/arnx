@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { Document, parseDocument, visit } from "yaml";
 import type { ScalarTag, Tags } from "yaml";
 import { getAdapter } from "./adapters";
+import { baselineDigest } from "./baseline";
 import { python } from "./adapters/python";
 import type { Adapter, AdapterId } from "./adapters/types";
 import { ArnxError, SetupRequired } from "./errors";
@@ -195,7 +196,7 @@ export function approvalStamp(repo: string): { by: string; at: string; current: 
   if (!isMap(raw) || !isMap(raw.approved)) return null;
   let current = false;
   try {
-    current = isFileApproved(parseReviewFile(text));
+    current = isProven(repo, parseReviewFile(text));
   } catch (e) {
     if (!(e instanceof ArnxError)) throw e;
   }
@@ -426,6 +427,15 @@ export function parseReviewConfig(text: string): ReviewConfig {
 export const fileDigest = (f: ReviewFile) => digest(f.projects[0]!);
 export const isFileApproved = (f: ReviewFile) => isApproved(f.projects[0]!);
 
+/** The baseline hash review.yaml's stamp holds (`approved.baseline`); null when it holds none. */
+export function stampedBaseline(f: ReviewFile): string | null {
+  const a = f.raw.approved;
+  return isMap(a) && typeof a.baseline === "string" ? a.baseline : null;
+}
+
+/** The file is proven, and so is `.arnx/baseline.json` as it is now (none, when the stamp holds no hash). */
+export const isProven = (repo: string, f: ReviewFile) => isFileApproved(f) && stampedBaseline(f) === baselineDigest(repo);
+
 function hash(value: unknown): string {
   return createHash("sha256").update(pyJson(value, { sortKeys: true, floatNumbers: true })).digest("hex");
 }
@@ -518,7 +528,7 @@ export function loadReviewFile(repo: string, { requireApproved = true } = {}): R
   const path = reviewConfigPath(repo);
   if (!existsSync(path)) throw new SetupRequired("no .arnx/review.yaml; run `arnx setup`");
   const f = parseReviewFile(readFileSync(path, "utf8"));
-  if (requireApproved && !isFileApproved(f)) {
+  if (requireApproved && !isProven(repo, f)) {
     throw new SetupRequired(".arnx/review.yaml is not proven, or changed since its proof; run `arnx approve` to prove " +
       "it");
   }
@@ -542,13 +552,16 @@ function toYaml(raw: Raw): string {
 }
 
 /** The file with an approval stamp. Floats keep a fraction so they read back as floats and the hash holds. A file
- * with projects also records each project's digest. */
-export function stampFile(f: ReviewFile, by: string, at: string): string {
+ * with projects also records each project's digest. `baseline`: the hash of `.arnx/baseline.json` (baselineDigest),
+ * null when there is none. */
+export function stampFile(f: ReviewFile, by: string, at: string, baseline: string | null = null): string {
   const approved: Raw = { by, at, sha256: fileDigest(f) };
   if (!f.legacy) approved.projects = Object.fromEntries(f.projects.map((p) => [p.name, projectDigest(f, p.name)]));
+  if (baseline) approved.baseline = baseline;
   return toYaml({ ...without(f.raw, "approved"), approved });
 }
 
-export function stamp(cfg: ReviewConfig, by: string, at: string): string {
-  return toYaml({ ...without(cfg.raw, "approved"), approved: { by, at, sha256: digest(cfg) } });
+export function stamp(cfg: ReviewConfig, by: string, at: string, baseline: string | null = null): string {
+  return toYaml({ ...without(cfg.raw, "approved"),
+    approved: { by, at, sha256: digest(cfg), ...(baseline ? { baseline } : {}) } });
 }

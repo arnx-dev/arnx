@@ -97,7 +97,7 @@ test("a proven setup ends with how many old images arnx env prune would remove",
     "Images: 1 unused environment image (1.2GB); arnx env prune removes it\nNext: arnx review");
 });
 
-test("setup ends with a worth-a-look block: set aside, not tested, allowed secrets, downloads", async () => {
+test("setup ends with a worth-a-look block: failing today, not tested, allowed secrets, downloads", async () => {
   const repo = await shop();
   mkdirSync(join(repo, "docs"));
   writeFileSync(join(repo, "docs", "guide.py"), "X = 1\n");
@@ -107,19 +107,20 @@ test("setup ends with a worth-a-look block: set aside, not tested, allowed secre
   expect(await new Cli({ cwd: repo, env: ENV }).run("allow-secret", "tests/fixture.py")).toBe(0);
   const yaml = GOOD.replace("[pip install pytest]",
     "[pip install pytest, \"curl -fsSL https://get.example.com/tool.sh | sh\", \"pip install --upgrade pip\"]")
-    .replace("    test_command:", "    known_failing: [tests/test_old.py]\n    notes: [tests/test_old.py needs a database]\n" +
-      "    test_command:") + "uncovered:\n  - path: docs/\n    reason: examples only\n";
+    .replace("    test_command:", "    notes: [tests/test_old.py needs a database]\n    test_command:") +
+    "uncovered:\n  - path: docs/\n    reason: examples only\n";
+  const OLD: [string, string, string, string] = ["tests/test_old.py", "test_db", "failed", "assert False"];
   const model = new ScriptedAgent([[tool("try_project", { yaml })], [tool("propose", { yaml })],
     [text("tests/test_old.py: needs a database we do not have.")]]);
-  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: suites([PASS]),
-    approveSessions: suites([PASS]) });
+  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: suites([PASS, OLD]),
+    approveSessions: suites([PASS, OLD]) });
   expect(await cli.run("setup", "--yes")).toBe(0);
   const tail = cli.stdout.slice(cli.stdout.indexOf("✓ Environment proven"));
   expect(tail.split("\n").slice(0, -1)).toEqual([
     "✓ Environment proven",
     "",
     "Worth a look:",
-    "  ! shop: 1 test file(s) set aside as known failing: tests/test_old.py",
+    "  ! shop: 1 test fails today, recorded in .arnx/baseline.json",
     "  ! shop: install downloads from get.example.com (not a package registry)",
     "  ! tests/fixture.py: allowed although secret-looking; sent to the model and the sandbox",
     "  ! not tested: docs/ (1 file): examples only",

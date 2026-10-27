@@ -30,6 +30,7 @@ import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewF
   reviewConfigPath, withoutSecretPins, withSecretPins } from "./config";
 import { getAdapter } from "./adapters";
 import { ArnxError, internalError, SetupRequired } from "./errors";
+import { type Baseline, baselinePath, readBaseline, writeBaseline } from "./baseline";
 import { FILE as IGNORE_FILE, initialIgnore } from "./ignore";
 import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter, unpricedModels,
   unpricedNote } from "./llm";
@@ -52,7 +53,7 @@ import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile,
   type ProjectProof, runSetup, type SetupResult, stillRed } from "./setup";
-import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, PROVEN_COPY,
+import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, PROVEN_BASELINE, PROVEN_COPY,
   proofState, REVIEW_FILE, setupPreview, worthALook }
   from "./setupview";
 import { isoSeconds } from "./util";
@@ -895,6 +896,7 @@ class Commands {
       return finish(2, false);
     }
     this.replaceFile(repo, result.yamlText!);
+    this.recordBaseline(repo, parseReviewFile(result.yamlText!), result.projects);
     const notes = result.notes?.trim() ? join(outDir, "notes.md") : null;
     if (notes) writeFileSync(notes, result.notes!.trim() + "\n");
     const proposed = parseReviewFile(result.yamlText!);
@@ -911,7 +913,7 @@ class Commands {
       `${unpriced ? "cost unknown" : `$${result.costUsd.toFixed(2)}`})` +
       `${notes ? `; notes in ${relative(repo, notes)}` : ""}.`);
     // Nobody is asked: the suites run once more and the file is stamped; what is worth a look comes at the end.
-    const r = await this.approveRun(repo, a, project, untracked, { warnings, since: started });
+    const r = await this.approveRun(repo, a, project, untracked, { warnings, since: started, afterSetup: true });
     if (r.code !== 0) {
       this.d.out(`Not proven:\n${r.detail}`);
       this.d.out(`${cost} · last attempt: ${REVIEW_FILE} (not proven) · logs: .arnx/run/`);
@@ -924,6 +926,23 @@ class Commands {
     this.provenEnd(repo, proposed, r.projects, { proofs: result.projects, untracked });
     this.emit("ok", 0, json({ approved: true, record: r.record, approval: r.projects, next: ["arnx review"] }));
     return finish(0, true);
+  }
+
+  /** The tests each project fails today, as setup's runs found them: a project setup proved gets its own, one it kept
+   * (proved earlier) keeps what the baseline held. */
+  private recordBaseline(repo: string, file: ReviewFile, proofs: ProjectProof[]): void {
+    let old: Baseline = new Map();
+    try {
+      old = readBaseline(repo);
+    } catch (e) {
+      if (!(e instanceof ArnxError)) throw e; // a baseline that does not read is recorded anew
+    }
+    const next: Baseline = new Map();
+    for (const p of file.projects) {
+      const proof = proofs.find((x) => x.name === p.name);
+      next.set(p.name, proof?.failed ?? old.get(p.name) ?? []);
+    }
+    writeBaseline(repo, next);
   }
 
   /** The end of setup and approve: the proof, what is worth a look (only what applies), the next step. */
@@ -1040,13 +1059,14 @@ class Commands {
    * .arnx/setup/approval.md (a local file; review.yaml stays as it is) with `changes` (sayChanges). The stamped file
    * is copied to PROVEN_COPY, what the next change is compared with. Says nothing but progress. */
   private async approveRun(repo: string, a: Args, project: string | undefined, untracked: boolean | undefined,
-                           o: { warnings: string[]; since?: number; changes?: string[] | "no-copy" | null })
+                           o: { warnings: string[]; since?: number; changes?: string[] | "no-copy" | null;
+                             afterSetup?: boolean })
     : Promise<{ code: number; projects: ApprovedProject[]; detail: string; record: string | null }> {
     // Who ran the proof: the git user (a coding agent running arnx is not told apart from its user).
     const by = git(repo, ["config", "user.name"], [0, 1]).trim() || "unknown";
     const at = isoSeconds(new Date());
     const [ok, detail, suites] = await this.withProgress(a, (progress) =>
-      approveFile(repo, { by, at, project, untracked, progress,
+      approveFile(repo, { by, at, project, untracked, progress, afterSetup: o.afterSetup,
         localPins: localPinsPath(this.d.env, repo),
         ...(this.d.approveSessions ? { sessionFactory: this.d.approveSessions } : {}) }),
     o.since !== undefined ? { since: o.since } : {});
@@ -1057,6 +1077,8 @@ class Commands {
     const sha = createHash("sha256").update(readFileSync(reviewConfigPath(repo))).digest("hex").slice(0, 12);
     mkdirSync(dirname(join(repo, record)), { recursive: true });
     copyFileSync(reviewConfigPath(repo), join(repo, PROVEN_COPY));
+    if (existsSync(baselinePath(repo))) copyFileSync(baselinePath(repo), join(repo, PROVEN_BASELINE));
+    else rmSync(join(repo, PROVEN_BASELINE), { force: true });
     const changed = o.changes === "no-copy" ? ["Changed since the last proof: no copy of the proven file to compare", ""]
       : o.changes?.length ? ["Changed since the last proof:", ...o.changes.map((c) => `- ${c}`), ""] : [];
     writeFileSync(join(repo, record), ["# Environment proven", "", `${at} · by ${by} · ${REVIEW_FILE} sha256 ${sha}`, "",
