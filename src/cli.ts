@@ -52,7 +52,7 @@ import { type ModelRef, providerLines, unusedKeysNote } from "./settings";
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile,
-  type ProjectProof, runSetup, type SetupResult, stillRed } from "./setup";
+  type ProjectProof, rerecordBaseline, runSetup, type SetupResult, stillRed } from "./setup";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, PROVEN_BASELINE, PROVEN_COPY,
   proofState, REVIEW_FILE, setupPreview, worthALook }
   from "./setupview";
@@ -102,6 +102,7 @@ Prepare, once per repository
   init [--cloud] [--force]              write .arnx/config.toml and .arnxignore
   setup [--untracked] [--yes] [--force] find how your tests run in Docker and prove it
         [--project NAME | --add]        prove one project again, or cover what no project covers
+        [--baseline]                    record the tests failing today again (no model)
   approve [--project NAME]              run the suites in .arnx/review.yaml again and stamp it
   doctor                                check config, keys, Docker and the environment
   cloud on|off [--yes]                  arnx cloud's models instead of your keys, or back
@@ -186,7 +187,7 @@ const COMMANDS: Record<string, { options: Options; positionals: number }> = Obje
   credits: { options: {}, positionals: 0 },
   doctor: { options: { ...MODELS }, positionals: 0 },
   setup: { options: { yes: { type: "boolean" }, force: { type: "boolean" }, project: { type: "string" },
-    add: { type: "boolean" }, quiet: { type: "boolean" }, untracked: { type: "boolean" },
+    add: { type: "boolean" }, baseline: { type: "boolean" }, quiet: { type: "boolean" }, untracked: { type: "boolean" },
     "no-untracked": { type: "boolean" }, ...MODELS }, positionals: 0 },
   approve: { options: { yes: { type: "boolean" }, project: { type: "string" }, quiet: { type: "boolean" } },
     positionals: 0 },
@@ -645,6 +646,8 @@ class Commands {
         `${cloud ? " (arnx cloud)" : ""}`]);
     }
     let file: ReviewFile | null = null;
+    // A review.yaml from before 0.1.5 sets aside whole files: said once, under the Environment line.
+    let knownNote = "";
     if (!existsSync(reviewConfigPath(repo)) || isSeedFile(repo)) {
       checks.push([null, "Environment", "not configured"]);
     } else {
@@ -658,6 +661,11 @@ class Commands {
           : st.stamped || st.changes ? `changed since its proof${which}: the next review proves it again`
           : `not proven yet${which}: the next review proves it`;
         checks.push([true, "Environment", state]);
+        const known = file.projects.reduce((n, p) => n + p.knownFailing.length, 0);
+        if (known) {
+          knownNote = `known_failing sets aside ${known} whole test file${known === 1 ? "" : "s"}; \`arnx setup ` +
+            "--baseline` records the failing tests one by one instead, so the passing tests next to them count";
+        }
       } catch (e) {
         if (!(e instanceof ArnxError)) throw e;
         checks.push([false, "Environment", e.message]);
@@ -687,6 +695,7 @@ class Commands {
       this.d.out(`${good ? "✓" : good === null ? "·" : "✗"} ${name}: ${text}`);
       if (name === "Models") for (const line of providers) this.d.out(`  ${line}`);
       if (name === "Keys" && unused) this.d.out(`  ${unused}`);
+      if (name === "Environment" && knownNote) this.d.out(`  ${knownNote}`);
     }
     this.d.out("");
     const coverage = file && !file.legacy ? coverageMap(repo, file, untrackedSetting(repo)) : null;
@@ -820,7 +829,11 @@ class Commands {
     const project = a.values.project as string | undefined;
     const add = Boolean(a.values.add);
     if (project && add) throw new ArnxError("--add and --project cannot be used together");
+    if (a.values.baseline && (project || add || a.values.force)) {
+      throw new ArnxError("--baseline records the tests failing today for the whole file; use it on its own");
+    }
     const repo = this.repo();
+    if (a.values.baseline) return this.setupBaseline(repo, a);
     const path = reviewConfigPath(repo);
     if (project || add) {
       if (!existsSync(path)) throw new SetupRequired("no .arnx/review.yaml yet; run `arnx setup` first");
@@ -1073,19 +1086,55 @@ class Commands {
     const projects = suites.map((s) => ({ name: s.name, ok: s.ok, summary: s.summary,
       accepted_failing: s.acceptedFailing, unexpected: s.unexpected }));
     if (!ok) return { code: 2, projects, detail, record: null };
+    return { code: 0, projects, detail, record: this.proofRecord(repo, by, at, o.warnings, o.changes) };
+  }
+
+  /** After a proof stamped the file: copies of review.yaml and the baseline as proven (what the next change is
+   * compared with), and the approval record with who ran it, what changed and what is worth a look. */
+  private proofRecord(repo: string, by: string, at: string, warnings: string[], changes?: string[] | "no-copy" | null)
+    : string {
     const record = APPROVAL_RECORD;
     const sha = createHash("sha256").update(readFileSync(reviewConfigPath(repo))).digest("hex").slice(0, 12);
     mkdirSync(dirname(join(repo, record)), { recursive: true });
     copyFileSync(reviewConfigPath(repo), join(repo, PROVEN_COPY));
     if (existsSync(baselinePath(repo))) copyFileSync(baselinePath(repo), join(repo, PROVEN_BASELINE));
     else rmSync(join(repo, PROVEN_BASELINE), { force: true });
-    const changed = o.changes === "no-copy" ? ["Changed since the last proof: no copy of the proven file to compare", ""]
-      : o.changes?.length ? ["Changed since the last proof:", ...o.changes.map((c) => `- ${c}`), ""] : [];
+    const changed = changes === "no-copy" ? ["Changed since the last proof: no copy of the proven file to compare", ""]
+      : changes?.length ? ["Changed since the last proof:", ...changes.map((c) => `- ${c}`), ""] : [];
     writeFileSync(join(repo, record), ["# Environment proven", "", `${at} · by ${by} · ${REVIEW_FILE} sha256 ${sha}`, "",
       ...changed,
-      ...(o.warnings.length ? ["Worth a look:", ...o.warnings.map((w) => `- ${w}`)] : ["Worth a look: nothing"]), ""]
+      ...(warnings.length ? ["Worth a look:", ...warnings.map((w) => `- ${w}`)] : ["Worth a look: nothing"]), ""]
       .join("\n"));
-    return { code: 0, projects, detail, record };
+    return record;
+  }
+
+  /** `arnx setup --baseline`: the suites run as setup runs them and the tests failing now become the baseline
+   * (known_failing goes); no model. Then what changed, the proof's end, and the next step. */
+  private async setupBaseline(repo: string, a: Args): Promise<number> {
+    if (!existsSync(reviewConfigPath(repo)) || isSeedFile(repo)) {
+      throw new SetupRequired("no .arnx/review.yaml yet; run `arnx setup` first");
+    }
+    loadReviewFile(repo, { requireApproved: false }); // validates the file first
+    requireDocker();
+    const untracked = untrackedSetting(repo);
+    const by = git(repo, ["config", "user.name"], [0, 1]).trim() || "unknown";
+    const at = isoSeconds(new Date());
+    this.d.out("Recording the tests each suite fails today (no model, Docker only).");
+    const [ok, detail, suites, changes] = await this.withProgress(a, (progress) => rerecordBaseline(repo, { by, at,
+      progress, untracked, localPins: localPinsPath(this.d.env, repo),
+      ...(this.d.approveSessions ? { sessionFactory: this.d.approveSessions } : {}) }));
+    const projects = suites.map((x) => ({ name: x.name, ok: x.ok, summary: x.summary, failing_today: x.failing }));
+    if (!ok) {
+      this.d.out(`Not recorded (nothing changed):\n${detail}`);
+      this.emit("fail", 2, { recorded: false, projects, detail, changes: [], next: ["arnx setup --baseline"] });
+      return 2;
+    }
+    this.d.out(changes.length ? ["Changed:", ...changes.map((c) => `  ${c}`)].join("\n") : "The baseline is unchanged.");
+    const file = loadReviewFile(repo);
+    const record = this.proofRecord(repo, by, at, approvalWarnings(file), changes);
+    this.provenEnd(repo, file, [], { untracked });
+    this.emit("ok", 0, { recorded: true, projects, changes, record, next: ["arnx review"] });
+    return 0;
   }
 
   /** Pin the key-shaped strings of each file in review.yaml, so snapshots keep it while it holds no others. */

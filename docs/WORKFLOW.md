@@ -29,7 +29,7 @@ runs`). Reviews then run only the tests arnx writes. A `test_command` that delet
 Before it starts, setup says what it will do and gives a rough time and cost estimate. While it runs, it shows on
 stderr each model reply, each file it reads and each suite it runs (`--quiet` turns this off). It then shows one
 line per project, runs every suite once more and stamps `.arnx/review.yaml` with a hash (the proof); nothing is asked.
-It ends with what is worth a look, only what applies: test files set aside as known failing, tests skipped for want
+It ends with what is worth a look, only what applies: how many tests fail today (the baseline), tests skipped for want
 of a service or variable, commands that ignore their own errors (`|| true`), install lines that download from outside
 the package registries (`curl`, `wget`, `git clone`), files allowed although they look like secrets, and what no
 project tests. The same list, with who ran the proof (the git user), is in `.arnx/setup/approval.md`. Open
@@ -38,13 +38,27 @@ project tests. The same list, with who ran the proof (the git user), is in `.arn
 A `.arnx/review.yaml` changed since its proof (edited by hand, in a pull request, or by `arnx allow-secret`) is
 noticed and proven again before the next `review`, `check` or `accept` uses it. First it says what changed since the
 last proof, per project: `test_command` (old → new), `install`, files added to or removed from `known_failing`, `env`,
-`services`, `owns`, `uses`, any other key by name, and projects added or removed. It compares with the copy the last
+`services`, `owns`, `uses`, any other key by name, projects added or removed, and tests added to or gone from the
+baseline. It compares with the copy the last
 proof kept in `.arnx/setup/proven-review.yaml` (a local file; without it, as after a proof by an older arnx or in a
 fresh clone, it says there is no copy to compare), stamp or not; a file whose stamp holds but whose content is not
 that copy's (a stamp recomputed by hand) counts as changed too. With `--json`, the command's object says so in
 `reproved`. Then the suites run and the file is stamped again, followed by what
 is worth a look; the changes go into `.arnx/setup/approval.md` too. When a suite fails there, the command stops and
 names the failing tests (exit 3). `arnx approve` runs the same proof on its own, saying the same.
+
+### The baseline
+
+Setup records each test your suite fails today in `.arnx/baseline.json`, one entry per test with the first line of
+its failure; commit it with `.arnx/review.yaml`. A proof passes while every failing test is in it, so the passing
+tests next to a failing one keep counting. A baseline test that passes again leaves it at the next proof. A test
+failing outside it runs once more, and one that passes then does not fail the proof. A proof never adds to the
+baseline: `arnx setup --baseline` records it again from the suites as they run now (no model, Docker only) and says
+what changed. Failures that look like the environment (a module or service missing, a variable not set, a host that
+does not resolve, or most of the suite failing) go back to the setup agent once; what it cannot fix in the sandbox is
+recorded with its cause. Its hash is part of the stamp, so a hand edit is proven again like one of `review.yaml`. A
+`review.yaml` from before 0.1.5 with `known_failing` keeps working; `arnx setup --baseline` replaces it with the
+failing tests in those files.
 
 ### Rust crates
 

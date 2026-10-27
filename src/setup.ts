@@ -7,8 +7,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { parseDocument } from "yaml";
 import { StopRound, Workspace } from "./agent";
-import { type Baseline, type BaselineTest, baselineDigest, entryOf, keysOf, readBaseline, testKey, writeBaseline }
-  from "./baseline";
+import { type Baseline, type BaselineTest, baselineDigest, describeBaselineChanges, entryOf, keysOf, readBaseline,
+  testKey, writeBaseline } from "./baseline";
 import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
 import { getAdapter, LANGUAGES } from "./adapters";
@@ -54,11 +54,13 @@ export const OUTPUT_TAIL = 6000;
  * again (`flaky`, ids), and every failure (accepted ones aside), for setup to record. */
 export interface SuiteCounts { acceptedFailing: number; unexpected: string[]; baselineFailing: number; left: string[];
   flaky: string[]; failed: TestResult[]; passed: number;
+  /** Every test the run reported. */
+  all: TestResult[];
   /** What the failures point to (diagnose, the run apart, JEV), when the suite's failures were looked at. */
   hints?: Hint[] }
 
 const noCounts = (): SuiteCounts => ({ acceptedFailing: 0, unexpected: [], baselineFailing: 0, left: [], flaky: [],
-  failed: [], passed: 0 });
+  failed: [], passed: 0, all: [] });
 
 /** The accepted files of this project (`accepted`, acceptedPins) that match their pin, and those changed since. */
 function acceptedOf(cfg: ReviewConfig, accepted: AcceptedPins, dir?: string): AcceptedPins {
@@ -108,7 +110,7 @@ export function suiteOk(results: TestResult[] | null, cfg: ReviewConfig, accepte
       `${acceptedFailing === 1 ? "s" : ""})` : "") +
     (baselineFailing && !record ? ` (${baselineFailing} in the baseline)` : "");
   const c: SuiteCounts = { acceptedFailing, unexpected, baselineFailing, left, flaky: [], failed,
-    passed: counts.get("passed") ?? 0 };
+    passed: counts.get("passed") ?? 0, all: results };
   if (mine.changed.length) {
     return [false, `${summary}; accepted test changed since \`arnx accept\`: ${mine.changed.map((x) =>
       `${x.change} ${x.path}`).join(", ")} (see \`arnx check\`)`, c];
@@ -1232,3 +1234,72 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
 }
 
 export const approveConfig = approveFile;
+
+/** One project in `arnx setup --baseline`: its suite, how many tests it fails today, and, when it had known_failing,
+ * how many tests in those files pass and count again. */
+export interface RecordedSuite { name: string; ok: boolean; summary: string; failing: number; guarded: number;
+  log: string }
+
+/** `arnx setup --baseline`: every project's suite runs as setup runs it, known_failing left out, and the tests failing
+ * now become the baseline; known_failing goes from review.yaml and the file is stamped. No model is asked. A project
+ * whose suite does not run leaves everything as it was. [recorded, text, each suite, what changed] */
+export async function rerecordBaseline(repo: string, o: { by: string; at: string; sessionFactory?: SessionFactory;
+  progress?: Say; untracked?: boolean; localPins?: string | null })
+  : Promise<[boolean, string, RecordedSuite[], string[]]> {
+  const say = o.progress ?? (() => {});
+  const path = reviewConfigPath(repo);
+  const f = loadReviewFile(repo, { requireApproved: false });
+  let old: Baseline = new Map();
+  try {
+    old = readBaseline(repo);
+  } catch (e) {
+    if (!(e instanceof ArnxError)) throw e; // recorded anew
+  }
+  const settings = settingsOf(repo);
+  const accepted = settings?.acceptedTestsDir;
+  const trusted = acceptedPins(repo, o.localPins ?? null);
+  const next: Baseline = new Map();
+  const suites: RecordedSuite[] = [];
+  const tmp = tempDir("arnx-baseline-");
+  try {
+    const snap = join(tmp, "repo");
+    snapshot(repo, null, snap, secretPinsOf(f.raw), { untracked: o.untracked ?? settings?.untracked ?? false });
+    copyManifests(snap, join(tmp, "manifests"));
+    for (const cfg of f.projects) {
+      const log = join(repo, ".arnx", "run", f.legacy ? "baseline-build.log" : `baseline-build-${cfg.name}.log`);
+      const output = posix.join(".arnx", "run", f.legacy ? "baseline.log" : `baseline-${cfg.name}.log`);
+      const all = { ...cfg, knownFailing: [] };
+      const [ok, summary, , , , , counts] = await runSuite(all, snap, log, { sessionFactory: o.sessionFactory,
+        key: envKey(cfg, join(tmp, "manifests")), acceptedTestsDir: accepted, accepted: trusted,
+        outputLog: join(repo, output), baseline: "record" });
+      const tests = counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined));
+      const failingIds = new Set(tests.map((t) => t.id));
+      const guarded = cfg.knownFailing.length ? counts.all.filter((t) => t.outcome === "passed" && !failingIds.has(t.testId) &&
+        cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))).length : 0;
+      say(`${cfg.name}: ${ok ? "✓" : "✗"} ${gist(summary)}${ok && tests.length ? ` · ${tests.length} failing today` : ""}`);
+      suites.push({ name: cfg.name, ok, summary, failing: tests.length, guarded, log: output });
+      next.set(cfg.name, tests);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  const failed = suites.filter((x) => !x.ok);
+  if (failed.length) {
+    return [false, failed.map((x) => `✗ ${f.legacy ? "" : `${x.name}: `}${x.summary}` +
+      (existsSync(join(repo, x.log)) ? `\n  Full output: ${x.log}` : "")).join("\n\n"), suites, []];
+  }
+  const changes = describeBaselineChanges(old, next);
+  const known = f.projects.filter((p) => p.knownFailing.length);
+  for (const p of known) {
+    const g = suites.find((x) => x.name === p.name)!.guarded;
+    changes.push(`${f.legacy ? "" : `${p.name}: `}known_failing removed (${plural(p.knownFailing.length, "file")}): ` +
+      `${g} of ${p.knownFailing.length === 1 ? "its" : "their"} tests ${g === 1 ? "passes and counts" : "pass and count"} ` +
+      "again");
+  }
+  writeBaseline(repo, next);
+  const text = withoutKnownFailing(readFileSync(path, "utf8"))[0];
+  const g = parseReviewFile(text);
+  const hash = baselineDigest(repo);
+  writeFileSync(path, g.legacy ? stamp(g.projects[0]!, o.by, o.at, hash) : stampFile(g, o.by, o.at, hash));
+  return [true, suites.map((x) => f.legacy ? x.summary : `${x.name}: ${x.summary}`).join("; "), suites, changes];
+}

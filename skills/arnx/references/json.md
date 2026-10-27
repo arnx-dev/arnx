@@ -13,10 +13,11 @@ Every arnx command takes `--json`. Then:
 `review`, `check` and `accept` prove `.arnx/review.yaml` again first when it changed since its last proof on this
 machine (see [approve](#approve)). When they did, their object (an `error` one too) has `reproved`:
 `{ changes, no_copy }`. `changes`: what changed since that proof, one line each (`shop: test_command \`a\` → \`b\``,
-`shop: known_failing added tests/test_x.py`, `project feed added`, `shop: image changed`); `null` when there was no
+`shop: known_failing added tests/test_x.py`, `project feed added`, `shop: image changed`, `baseline shop: 2 tests
+added`); `null` when there was no
 copy of the proven file to compare (`no_copy` true: proven by an older arnx, or a fresh clone). Absent when no proof
-ran. A change that weakens the tests (a `test_command` that runs less, files added to `known_failing`) is the user's
-to judge: pass `changes` on to them.
+ran. A change that weakens the tests (a `test_command` that runs less, files added to `known_failing`, tests added
+to the baseline) is the user's to judge: pass `changes` on to them.
 
 ## Shared fields
 
@@ -161,12 +162,12 @@ stamps it (the proof; nobody is asked). With `--json` the consent to send code n
 | `auto_approved` | boolean | Kept for older readers: equal to `approved` (setup asks nobody). |
 | `projects` | array | One entry per project of the file setup wrote (or of its last attempt): `{ name, runs_in, image, runner, suite, ok, accepted_failing, unexpected }`. `runs_in`: the project's folder; `suite`: its suite's counts (`3 passed`), or why it failed, `null` when it never ran; `ok`: it passed (in the proof, when one ran); `accepted_failing` and `unexpected` as in `approve`. |
 | `files` | object or null | What the files line counts: `projects` (each `{ name, owned, used }`), `not_tested` (the `uncovered` paths) and `untracked_left_out` (untracked files not read: without `--untracked`). Which files a project owns says nothing about how well its tests cover them. `null` when setup failed. |
-| `warnings` | array of strings | The `!` lines of "Worth a look" but what no project tests (that is `files.not_tested`): tests skipped, files set aside as known failing, commands that ignore their errors (`|| true`), install lines downloading from outside the package registries (`curl`, `wget`, `git clone`), secret-looking files allowed. |
+| `warnings` | array of strings | The `!` lines of "Worth a look" but what no project tests (that is `files.not_tested`): how many tests each project fails today (the baseline, `.arnx/baseline.json`), tests skipped, files set aside as known failing (a `review.yaml` from before 0.1.5), commands that ignore their errors (`|| true`), install lines downloading from outside the package registries (`curl`, `wget`, `git clone`), secret-looking files allowed. |
 | `review_yaml` | string or null | Where the file is: `.arnx/review.yaml`; after a failure the last attempt, not proven (`.arnx/setup/review.yaml` when `.arnx/review.yaml` is proven and kept); `null` when there was no attempt. |
 | `approval_record` | string or null | `.arnx/setup/approval.md` once proven (who ran the proof: the git user; when, the file's sha256 and the warnings); else `null`. |
 | `cost_usd` | number | What setup's model calls cost. |
 | `seconds` | number | How long setup took, the proof included. |
-| `failure` | object or null | Why setup failed: `{ kind, reason, failing }`. `kind` is `environment` (it never got a suite running: a build that fails, a runner that does not start, the budget or the turns used up, no proposal, or a run that needs a file arnx left out, after which setup stops) or `tests` (the suite runs and the current code fails tests outside `known_failing`; `failing` holds their ids). `null` unless `fail`. |
+| `failure` | object or null | Why setup failed: `{ kind, reason, failing }`. `kind` is `environment` (it never got a suite running: a build that fails, a runner that does not start, the budget or the turns used up, no proposal, or a run that needs a file arnx left out, after which setup stops) or `tests` (the suite runs and the current code fails tests outside the baseline; `failing` holds their ids). `null` unless `fail`. |
 | `next` | array of strings | The commands to run next: `arnx review` once proven; `arnx approve` (after fixing `review_yaml`: it proves it again); `arnx setup --force` when there was no attempt. When setup stopped for a file it left out: `arnx allow-secret PATH` (secret-looking) or `add !PATH to .arnxignore`, then `arnx setup`. |
 
 | `result` | Exit | When |
@@ -184,7 +185,7 @@ Each proof is recorded, with those changes and its warnings, in `.arnx/setup/app
 | Field | Type | Meaning |
 |---|---|---|
 | `approved` | boolean | The environment is proven now. |
-| `projects` | array | One entry per suite that ran, in order: `{ name, ok, summary, accepted_failing, unexpected }`; `summary` is the suite's counts (`3 passed`), or why it failed. `accepted_failing`: tests kept by `arnx accept` that still fail (their bugs are not fixed yet; `arnx check` runs them); they do not block the proof while each file matches its pin in `.arnx/accepted-tests.json`, and one changed since accept does. `unexpected`: the ids of the failing tests that block it (outside `known_failing` and the accepted tests). Empty when nothing ran. |
+| `projects` | array | One entry per suite that ran, in order: `{ name, ok, summary, accepted_failing, unexpected }`; `summary` is the suite's counts (`3 passed`), or why it failed. `accepted_failing`: tests kept by `arnx accept` that still fail (their bugs are not fixed yet; `arnx check` runs them); they do not block the proof while each file matches its pin in `.arnx/accepted-tests.json`, and one changed since accept does. `unexpected`: the ids of the failing tests that block it (outside the baseline and the accepted tests). Empty when nothing ran. |
 | `detail` | string | Only with `fail`: why it was not proven: per failing suite, up to 5 failing tests and the path of its whole output (`.arnx/run/approve-<project>.log`). |
 | `next` | array of strings | The commands to run next: `arnx review` once proven, else `arnx approve` (after fixing the file). |
 

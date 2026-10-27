@@ -183,8 +183,9 @@ broke and how long setup took.
 - Changes up to 200 KB per review; review a long branch in parts with `--range A..B`.
 - Python, JavaScript/TypeScript and Rust only (`arnx init` and `arnx doctor` say so for a repository in another
   language, before anything is sent). No Windows build: use WSL 2.
-- Setup marks test files it cannot run as `known_failing`, with a reason that is a model's judgement: setup lists
-  them under "Worth a look"; read those entries in `.arnx/review.yaml`.
+- Setup records the tests your suite fails today, one by one, in `.arnx/baseline.json`, and later proofs do not
+  count them. A failure that looks like the environment (a missing service, package or variable) goes back to the
+  setup agent first; what it cannot fix in the sandbox is recorded with its cause, listed under "Worth a look".
 - Model replies vary: two reviews of the same change can report different findings.
 
 ## Try it, and tell us
