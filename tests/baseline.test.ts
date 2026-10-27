@@ -5,12 +5,12 @@ import { dirname, join } from "node:path";
 import type { TestResult } from "../src/adapters/types";
 import { type Baseline, baselineText, describeBaselineChanges, parseBaseline, readBaseline, testKey, writeBaseline }
   from "../src/baseline";
-import { isProven, loadReviewFile, parseReviewConfig, reviewConfigPath } from "../src/config";
+import { isProven, loadReviewFile, parseReviewConfig, parseReviewFile, reviewConfigPath } from "../src/config";
 import { defaultSettings } from "../src/settings";
-import { approveFile, runSetup, suiteOk, withoutKnownFailing } from "../src/setup";
-import { baselineLines } from "../src/setupview";
+import { approveFile, coverageGap, runSetup, suiteOk, withoutKnownFailing } from "../src/setup";
+import { approvalChecks, baselineLines } from "../src/setupview";
 import { fakeFactory, type FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
-import { gitRepo } from "./helpers/gitutil";
+import { gitRepo, runGit } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
 
@@ -241,4 +241,59 @@ test("the baseline's changes are named per project", () => {
   const now: Baseline = new Map([["api", [entry("a.py", "x"), entry("b.py", "z"), entry("b.py", "w")]],
     ["web", [entry("c.py", "v")]]]);
   expect(describeBaselineChanges(old, now)).toEqual(["baseline api: 2 tests added, 1 left", "baseline web: 1 test added"]);
+});
+
+/** A snapshot with `n` test files in each folder, for the coverage check. */
+function testTree(dirs: Record<string, number>): string {
+  const snap = join(tmp(), "snap");
+  for (const [dir, n] of Object.entries(dirs)) {
+    mkdirSync(join(snap, dir), { recursive: true });
+    for (let i = 0; i < n; i++) writeFileSync(join(snap, dir, `test_${i}.py`), "def test_x():\n    pass\n");
+  }
+  return snap;
+}
+
+test("tests that test_command leaves out are named: files no run reported, and fewer tests than an earlier try", () => {
+  const cfg = parseReviewConfig(YAML);
+  const snap = testTree({ "tests/boundary": 30, "src/domain": 5 });
+  const ran = Array.from({ length: 5 }, (_, i) => t(`src/domain/test_${i}.py`, "test_x", "passed"));
+  expect(coverageGap(cfg, snap, ran, undefined)).toEqual({ line: "30 of 35 files that look like tests never ran " +
+    "(tests/boundary 30)" });
+  // A runner reporting paths from its own root further down still counts as having run them.
+  expect(coverageGap(cfg, snap, ran.map((r) => ({ ...r, fileAttr: r.fileAttr.replace("src/", "") })), undefined))
+    .toEqual({ line: "30 of 35 files that look like tests never ran (tests/boundary 30)" });
+  expect(coverageGap(cfg, snap, ran, { tests: 100, command: "pytest -k fast {targets}" })!.line).toBe(
+    "30 of 35 files that look like tests never ran (tests/boundary 30); it runs 5 tests where an earlier try ran 100 " +
+    "(`pytest -k fast {targets}`)");
+  // Another project's folder and paths listed under uncovered are not this project's to run.
+  expect(coverageGap(cfg, snap, ran, undefined, undefined, (p) => p.startsWith("tests/boundary"))).toBeNull();
+  // A few files, or a small share, are left alone.
+  expect(coverageGap(cfg, testTree({ "tests/boundary": 30, "src/domain": 200 }),
+    Array.from({ length: 200 }, (_, i) => t(`src/domain/test_${i}.py`, "test_x", "passed")), undefined)).toBeNull();
+});
+
+test("setup sends tests left out of test_command back to the agent once; kept, they are worth a look", async () => {
+  const repo = gitRepo(join(tmp(), "gap"));
+  mkdirSync(join(repo, "tests", "slow"), { recursive: true });
+  for (let i = 0; i < 25; i++) writeFileSync(join(repo, "tests", "slow", `test_s${i}.py`), "def test_s():\n    pass\n");
+  writeFileSync(join(repo, "tests", "test_fast.py"), "def test_f():\n    pass\n");
+  runGit(repo, "add", "-A");
+  runGit(repo, "commit", "-qm", "tests");
+  const narrow = YAML.replace("{targets}", "tests/test_fast.py {targets}");
+  const commands: string[] = [];
+  const script = (command: string): [string | null, string, boolean] => {
+    commands.push(command);
+    return [junitXml([["tests/test_fast.py", "test_f", "passed", ""]]), "", false];
+  };
+  const model = new ScriptedAgent([[tool("try_project", { yaml: narrow })], [tool("try_project", { yaml: narrow })],
+    [tool("propose", { yaml: narrow })], [text("the slow tests need hardware")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"), sessionFactory: fakeFactory(script) });
+  const first = String((model.calls[1]!.messages.at(-1)!.content as Record<string, unknown>[])[0]!.content);
+  expect(first).toContain("but 25 of 26 files that look like tests never ran (tests/slow 25)");
+  expect(first).toContain("try the project again unchanged");
+  expect(r.ok).toBe(true);
+  expect(commands.filter((c) => c.includes("suite.xml"))).toHaveLength(1); // the kept run is not run again
+  expect(r.projects[0]!.gap).toBe("25 of 26 files that look like tests never ran (tests/slow 25)");
+  expect(approvalChecks(parseReviewFile(narrow), r.projects)).toContain("main: 25 of 26 files that look like tests " +
+    "never ran (tests/slow 25); test_command leaves them out");
 });

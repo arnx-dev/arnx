@@ -70,6 +70,7 @@ export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = []): s
   for (const p of file.projects) {
     const proof = proofs.find((x) => x.name === p.name);
     if (proof?.skips.length) out.push(`${p.name}: tests skipped because ${proof.skips.join("; ")}`);
+    if (proof?.gap) out.push(`${p.name}: ${proof.gap}; test_command leaves them out`);
     if (p.knownFailing.length) {
       const silent = unexplainedFailing(p);
       out.push(`${p.name}: ${p.knownFailing.length} test file(s) set aside as known failing` +

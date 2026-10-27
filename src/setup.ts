@@ -422,7 +422,9 @@ export function ignoredTargets(results: TestResult[] | null, targets: string[], 
 
 /** One project's proof: its suite counts, why tests were skipped, and the tests it fails today (recorded as its
  * baseline; absent for a project proved earlier). */
-export interface ProjectProof { name: string; summary: string; skips: string[]; failed?: BaselineTest[] }
+export interface ProjectProof { name: string; summary: string; skips: string[]; failed?: BaselineTest[];
+  /** Tests its test_command leaves out, kept by the agent (coverageGap). */
+  gap?: string }
 
 export interface SetupResult {
   ok: boolean;
@@ -641,6 +643,65 @@ export function withoutKnownFailing(text: string, keep: ReadonlySet<string> = ne
   return dropped ? [doc.toString({ flowCollectionPadding: false, lineWidth: 0 }), true] : [text, false];
 }
 
+/** Folders of test data: what sits in them under tests/ is not a test. */
+const TEST_DATA = new Set(["fixtures", "__fixtures__", "testdata", "test-data", "__snapshots__", "__mocks__"]);
+
+/** The files under a project that look like tests (isTestPath), relative to the repository: its own tests, not the
+ * ones arnx writes or keeps, and none `skip` names (another project's, or listed under uncovered). */
+export function testFilesUnder(cfg: ReviewConfig, snap: string, acceptedTestsDir?: string,
+                               skip: (path: string) => boolean = () => false): string[] {
+  const out: string[] = [];
+  const generated = writeDirOf(cfg);
+  const visit = (rel: string) => {
+    const abs = join(snap, rel);
+    for (const name of readdirSync(abs)) {
+      const r = rel === "." ? name : `${rel}/${name}`;
+      const st = lstatSync(join(abs, name));
+      if (r === generated || name === ".arnx" || isKeptPath(cfg, r, acceptedTestsDir) || skip(r)) continue;
+      if (st.isDirectory()) {
+        if (!NOT_OWN.has(name) && !TEST_DATA.has(name)) visit(r);
+      } else if (st.isFile() && isTestPath(r)) out.push(r);
+    }
+  };
+  if (existsSync(join(snap, cfg.workdir))) visit(cfg.workdir);
+  return out;
+}
+
+/** Most of a project's tests left out by its test_command: files under it that look like tests and that no run
+ * reported, and a run reporting fewer tests than an earlier try did (`most`). Null when neither is large: 20 or more
+ * files and a fifth of them, or 20 or more tests and a tenth of them. */
+export function coverageGap(cfg: ReviewConfig, snap: string, results: TestResult[],
+                            most: { tests: number; command: string } | undefined, acceptedTestsDir?: string,
+                            skip?: (path: string) => boolean): { line: string } | null {
+  const reported = new Set(results.map((t) => t.fileAttr).filter(Boolean));
+  // A runner may report a file relative to the project's root, or to its own root further down.
+  const ran = (f: string) => {
+    for (let s: string = f; ; ) {
+      if (reported.has(s)) return true;
+      const k = s.indexOf("/");
+      if (k < 0) return false;
+      s = s.slice(k + 1);
+    }
+  };
+  const files = results.length ? testFilesUnder(cfg, snap, acceptedTestsDir, skip) : [];
+  const unrun = files.filter((f) => !ran(f));
+  const parts: string[] = [];
+  if (unrun.length >= 20 && unrun.length * 5 >= files.length) {
+    const dirs = new Map<string, number>();
+    for (const f of unrun) {
+      const d = posix.dirname(f).split("/").slice(0, 2).join("/");
+      dirs.set(d, (dirs.get(d) ?? 0) + 1);
+    }
+    const top = [...dirs].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([d, n]) => `${d} ${n}`);
+    parts.push(`${unrun.length} of ${files.length} files that look like tests never ran (${top.join(", ")}` +
+      `${dirs.size > 3 ? ", …" : ""})`);
+  }
+  if (most && most.tests - results.length >= 20 && (most.tests - results.length) * 10 >= most.tests) {
+    parts.push(`it runs ${results.length} tests where an earlier try ran ${most.tests} (\`${clip(most.command, 120)}\`)`);
+  }
+  return parts.length ? { line: parts.join("; ") } : null;
+}
+
 /** What a tool call does, in a few words, for progress lines. Setup's own tools report themselves. */
 export function describeTool(name: string, input: Record<string, unknown>): string | null {
   const arg = (k: string) => (typeof input[k] === "string" ? input[k] as string : "").slice(0, 100);
@@ -752,9 +813,12 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     failing: [] as string[], failingProject: null as string | null, problem: "", needed: null as NeededFile[] | null,
     usesChecked: false, pathsChecked: false, pathHints: [] as UsesHint[],
     lastFile: null as string | null,
-    // Failures that went back to the agent as the environment's, per project, with the run they came from: the same
-    // environment tried again records them without running the suite again.
-    faults: new Map<string, { env: string; key: string; run: { summary: string; skips: string[]; counts: SuiteCounts } }>(),
+    // What went back to the agent once (failures that look like the environment, tests left out), per project, with the
+    // run it came from: the same environment tried again goes on from that run without running the suite again.
+    held: new Map<string, { env: string; shown: Set<string>; run: { summary: string; skips: string[];
+      counts: SuiteCounts } }>(),
+    // The most tests a whole-suite run of each project reported, and the test_command that ran them.
+    mostRan: new Map<string, { tests: number; command: string }>(),
     notice: "" };
   const tmp = tempDir("arnx-setup-");
   // Docker steps of this setup, with their durations.
@@ -893,12 +957,13 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const last = state.lastFailing.get(name);
       const subset = last && last.env === env
         ? last.files.filter((file) => !cfg.knownFailing.some((k) => file.startsWith(k))) : [];
-      // Failures that went back to the agent, tried again in the same environment: the run they came from stands.
-      const held = state.faults.get(name);
+      // A run that went back to the agent, tried again in the same environment: that run stands.
+      const held = state.held.get(name);
+      let onlySubset = false;
       try {
         if (held && held.env === env) {
           announce = null;
-          say(`${name}: same environment as the last try; recording its failing tests as failing today`);
+          say(`${name}: same environment as the last try; its run stands`);
           [ok, summary, tail, skips, failing, hints, counts] = [true, held.run.summary, "", held.run.skips, [], "",
             held.run.counts];
         } else if (subset.length) {
@@ -912,6 +977,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
             failureModel: o.failureModel, key: keyOf(cfg), acceptedTestsDir: accepted,
             accepted: trusted, leftOut, baseline: "record" });
           } else {
+            onlySubset = true;
             summary = `rerun of the ${subset.length} file(s) that failed last time: ${summary}`;
           }
         } else {
@@ -943,16 +1009,38 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       }
       announce = null;
       state.summary = f.legacy ? summary : `${name}: ${summary}`;
+      if (!onlySubset && counts.all.length > (state.mostRan.get(name)?.tests ?? 0)) {
+        state.mostRan.set(name, { tests: counts.all.length, command: cfg.testCommand });
+      }
+      // Each kind of doubt goes back to the agent once; what it keeps, tried again unchanged, goes on from the same run.
+      const shown = held && held.env === env ? held.shown : new Set<string>();
+      const hold = (key: string) => state.held.set(name, { env, shown: new Set([...shown, key]),
+        run: { summary, skips, counts } });
       // Failures that look like the environment go back to the agent once before they are recorded.
       const faults = ok && counts.failed.length ? environmentFaults(counts, cfg) : null;
-      if (faults && !(held && held.env === env && held.key === faults.key)) {
-        state.faults.set(name, { env, key: faults.key, run: { summary, skips, counts } });
+      if (faults && !shown.has(faults.key)) {
+        hold(faults.key);
         state.problem = `${name}: ${plural(counts.failed.length, "failing test")} that look like the environment`;
         attempt({ ok: false, reused: false, summary: clip(summary, 500), failing: failing.length, skips: skips.length,
           hints: clip(faults.text, 1000) });
         say(`${name}: runs, but ${faults.count ? `${plural(faults.count, "failing test")} look like the environment`
           : "most of its tests fail"}; asking the agent`);
         return `the suite of ${name} runs (${summary}), but its failures are not recorded yet:\n${faults.text}`;
+      }
+      // Tests test_command leaves out never run, and nothing else would say so: they go back to the agent once.
+      const nested = f.projects.map((p) => p.workdir).filter((w) => w && w !== "." && w !== cfg.workdir);
+      const uncovered = matcher(f.uncovered.map((u) => u.path).join("\n"));
+      const gap = ok ? coverageGap(cfg, snap, counts.all, state.mostRan.get(name), accepted,
+        (r) => nested.some((w) => r === w || r.startsWith(`${w}/`)) || uncovered(r)) : null;
+      if (gap && !shown.has("gap")) {
+        hold("gap");
+        state.problem = `${name}: ${gap.line}`;
+        attempt({ ok: false, reused: false, summary: clip(summary, 500), failing: failing.length, skips: skips.length,
+          hints: clip(gap.line, 1000) });
+        say(`${name}: runs, but ${gap.line}; asking the agent`);
+        return `the suite of ${name} runs (${summary}), but ${gap.line}. Tests that test_command leaves out never run, ` +
+          "and nothing else would say so. Run them too (a longer suite is fine: reviews run only the tests arnx writes), " +
+          "or, if they cannot run in the sandbox, try the project again unchanged: the gap is then shown to the user.";
       }
       // The suite runs (some tests pass) and the current code fails others: a different failure from one that never ran.
       const ran = !ok && counts.unexpected.length > 0 && /\b[1-9]\d* passed\b/.test(summary);
@@ -975,7 +1063,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       if (red) say(stillRed(counts.acceptedFailing));
       state.proven.set(name, projectDigest(f, name));
       state.proofs.set(name, { name, summary, skips,
-        failed: counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined)) });
+        failed: counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined)),
+        ...(gap ? { gap: gap.line } : {}) });
       // A TypeScript project that can be type checked and has no typecheck yet: say so while the agent is here.
       const read = (rel: string) => {
         try {
