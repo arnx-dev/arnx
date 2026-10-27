@@ -146,7 +146,7 @@ test("cleanupLiveSessions removes registered sessions", async () => {
     cleanupLiveSessions();
     cleanupLiveSessions();
     const lines = readFileSync(log, "utf8").trim().split("\n");
-    expect(lines.filter((l) => l === `rm -f arnx-${s.id}-db`)).toHaveLength(1);
+    expect(lines.filter((l) => l === `rm -fv arnx-${s.id}-db`)).toHaveLength(1);
     expect(lines.filter((l) => l === `network rm ${s.network}`)).toHaveLength(1);
   } finally {
     sandboxOptions.docker = saved;
@@ -220,6 +220,10 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     const cfg = parseReviewConfig(SVC);
     const image = await ensureEnv(cfg, snap(), join(tmp(), "build.log"));
     const s = await new Session(image, cfg, snap()).start();
+    // postgres declares a data volume; closing the session removes it with the container
+    const volumes = spawnSync("docker", ["inspect", "-f", "{{range .Mounts}}{{.Name}} {{end}}", `arnx-${s.id}-db`],
+      { encoding: "utf8" }).stdout.trim().split(/\s+/).filter(Boolean);
+    expect(volumes.length).toBeGreaterThan(0);
     try {
       const ok = s.run("python -c \"import socket; socket.create_connection(('db', 5432), 5)\"", 60);
       expect(ok.exitCode).toBe(0);
@@ -230,6 +234,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     }
     const networks = spawnSync("docker", ["network", "ls", "--format", "{{.Name}}"], { encoding: "utf8" }).stdout;
     expect(networks.split("\n")).not.toContain(s.network);
+    for (const v of volumes) expect(spawnSync("docker", ["volume", "inspect", v]).status).not.toBe(0);
   }, 600_000);
 });
 
@@ -346,7 +351,7 @@ test("a Rust session's runs share one container, so the build a run leaves is th
   for (const part of ["--network none", "--cap-drop ALL", "--security-opt no-new-privileges", "--pids-limit 512",
     "--memory 4g", "--memory-swap 4g", "--tmpfs /tmp:rw,exec,size=1g", `-v ${tmp()}:/src`,
     "-e CARGO_TARGET_DIR=/opt/arnx-target"]) expect(joined).toContain(part);
-  expect(removed).toEqual(["rm", "-f", box]);
+  expect(removed).toEqual(["rm", "-fv", box]);
   // Each run is the command in that container: what it left is cleared first (temporary files, the target's tmp/
   // that tests write to), and its leftover processes are killed after.
   for (const [call, cmd] of [[first, "cargo nextest run a"], [second, "cargo nextest run b"]] as const) {
@@ -389,7 +394,7 @@ test("the head and the base session never share a container: each removes only i
   expect(calls.filter((c) => c[0] === "run").map((c) => c[c.indexOf("-v") + 1]))
     .toEqual([`${join(tmp(), "head")}:/src`, `${join(tmp(), "base")}:/src`]);
   expect(calls.filter((c) => c[0] === "exec").map((c) => c[1])).toEqual(boxes);
-  expect(calls.filter((c) => c[0] === "rm")).toEqual([["rm", "-f", boxes[0]!], ["rm", "-f", boxes[1]!]]);
+  expect(calls.filter((c) => c[0] === "rm")).toEqual([["rm", "-fv", boxes[0]!], ["rm", "-fv", boxes[1]!]]);
 });
 
 test("a run that times out in the shared container has its processes killed; the container and its build stay", () => {
@@ -406,7 +411,7 @@ test("a run that times out in the shared container has its processes killed; the
   const calls = fake.calls();
   const box = calls[0]![calls[0]!.indexOf("--name") + 1]!;
   expect(calls.map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["exec", box], ["exec", box], ["exec", box],
-    ["rm", "-f"]]);
+    ["rm", "-fv"]]);
   expect(calls[2]).toEqual(["exec", box, "sh", "-c", "kill -9 -1 2>/dev/null; exit 0"]);
 });
 
@@ -528,8 +533,8 @@ test("a container start Docker does not answer in time is removed by its name, a
   expect(r).toMatchObject({ exitCode: null, timedOut: true });
   const calls = fake.calls();
   const name = calls[0]![calls[0]!.indexOf("--name") + 1]!;
-  expect(calls.map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["rm", "-f"]]);
-  expect(calls[1]).toEqual(["rm", "-f", name]);
+  expect(calls.map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["rm", "-fv"]]);
+  expect(calls[1]).toEqual(["rm", "-fv", name]);
 });
 
 test("a run after the session closed (an interrupt) starts no shared container", () => {
@@ -540,6 +545,6 @@ test("a run after the session closed (an interrupt) starts no shared container",
     cleanupLiveSessions();
     s.run("cargo nextest run b", 60);
   });
-  expect(fake.calls().map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["exec", expect.any(String)], ["rm", "-f"],
+  expect(fake.calls().map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["exec", expect.any(String)], ["rm", "-fv"],
     ["run", "--rm"]]);
 });
