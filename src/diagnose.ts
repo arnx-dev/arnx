@@ -1,7 +1,7 @@
 // Hints for the setup agent about why a suite's tests fail, read from the failures themselves: a module that is not
 // installed or not importable, a system library or a program missing from the image, an environment variable read
-// without a default, a host that does not resolve, a connection refused, a test file that does not load, and tests
-// that pass once the rest of the suite is left out. Each hint quotes the line it comes
+// without a default, a variable env sets that the error names, a host that does not resolve, a connection refused, a
+// test file that does not load, and tests that pass once the rest of the suite is left out. Each hint quotes the line it comes
 // from and is only a hint: the agent still reads the output and decides, and arnx changes nothing in the file.
 // A failure that matches no signature gets no hint, so the agent sees it as it did before; a wrong hint is worse than
 // none, which is why every signature here is narrow.
@@ -11,13 +11,16 @@ import type { TestResult } from "./adapters/types";
 import type { ReviewConfig } from "./config";
 
 export type HintKind = "missing-package" | "import-path" | "missing-library" | "missing-program" |
-  "missing-variable" | "unresolved-host" | "connection-refused" | "does-not-load" | "order-dependent" |
+  "missing-variable" | "env-value" | "unresolved-host" | "connection-refused" | "does-not-load" | "order-dependent" |
   "genuine-failure";
 
 /** source: who judged it when it is not a signature (the experimental JEV, with its confidence). */
 export interface Hint { kind: HintKind; detail: string; files: string[]; evidence: string; source?: string }
 
 const LOCAL = /^(?:localhost|127\.\d+\.\d+\.\d+|::1|\[::1\]|0\.0\.0\.0)$/;
+
+// A name that reads as an environment variable, so a short or lowercase key in env is never looked for in errors.
+const ENV_NAME = /^[A-Z][A-Z0-9_]{3,}$/;
 
 const failed = (t: TestResult) => t.outcome === "failed" || t.outcome === "error";
 
@@ -98,6 +101,13 @@ export function classify(message: string, cfg: ReviewConfig, snap: string): Omit
   if ((m = /ECONNREFUSED ([\w.:[\]-]+)|connection to server at "([^"]+)"[^\n]*(?:\n[^\n]*)?refused|Connection refused|\[Errno 111\]/.exec(message))) {
     return { kind: "connection-refused", detail: m[1] ?? m[2] ?? "", evidence: lineOf(message, m.index) };
   }
+  // A variable env sets, named by the line that says what went wrong (not the source lines a traceback prints): the
+  // value env gives is wrong, or it overrides a default the tests set themselves. A KeyError names a key of some
+  // mapping; os.environ cannot raise one for a variable env sets.
+  const line = errorLine(message);
+  const name = !/^KeyError\b/.test(line) && Object.keys(cfg.env).find((k) => ENV_NAME.test(k) &&
+    new RegExp(`(?<![\\w$])${escaped(k)}(?![\\w$])`).test(line));
+  if (name) return { kind: "env-value", detail: name, evidence: line };
   return null;
 }
 
@@ -228,6 +238,10 @@ function sentence(h: Hint, cfg: ReviewConfig): string {
     case "missing-variable":
       return `variable \`${h.detail}\` is read without a default and is not set: give it a test value in env, ` +
         "unless the code needs a real one from outside";
+    case "env-value":
+      return `the tests fail on variable \`${h.detail}\`, which env sets: env's value is not one the code accepts ` +
+        "(its format or length), or it overrides a default the tests set themselves (conftest, a setup file). Give " +
+        "it a valid test value, or take it out of env";
     case "unresolved-host":
       return `a host name does not resolve${h.detail ? ` (${h.detail})` : ""}. Declared services resolve in the ` +
         "sandbox, so this host is not one: the test needs the internet (then try the project again unchanged and it " +

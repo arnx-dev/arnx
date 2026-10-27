@@ -38,6 +38,25 @@ test("a variable is missing only when the environment raised, not any KeyError",
   expect(kind("pytest:test_dict_keyerror")).toBeNull();
 });
 
+test("a variable env sets is the cause only when the error line names it", () => {
+  const cfg = parseReviewConfig(CFG.replace("env: {MODE: test}",
+    "env: {MODE: test, PAY_LINK_SECRET: x}\nallow_env_names: [PAY_LINK_SECRET]"));
+  const raised = "RuntimeError: PAY_LINK_SECRET must be set to at least 32 characters\n" +
+    "tests/test_credits.py:12: in test_grant\n    secret = os.environ['PAY_LINK_SECRET']";
+  expect(classify(raised, cfg, tmp())).toMatchObject({ kind: "env-value", detail: "PAY_LINK_SECRET",
+    evidence: "RuntimeError: PAY_LINK_SECRET must be set to at least 32 characters" });
+  // Named only in the source lines the traceback prints, by a longer name, or a name env does not set: no hint.
+  expect(classify("assert 500 == 200\n    secret = os.environ['PAY_LINK_SECRET']", cfg, tmp())).toBeNull();
+  expect(classify("RuntimeError: PAY_LINK_SECRET_V2 must be set", cfg, tmp())).toBeNull();
+  expect(classify("RuntimeError: PAY_LINK_SECRET must be set", PY, tmp())).toBeNull();
+  // A short key is never looked for: it would match ordinary words in errors.
+  const short = parseReviewConfig(CFG.replace("env: {MODE: test}", "env: {DB: x}"));
+  expect(classify("ValueError: DB x", short, tmp())).toBeNull();
+  expect(describeHints(diagnose([{ testId: "tests/test_credits.py::test_grant", name: "test_grant",
+    fileAttr: "tests/test_credits.py", outcome: "failed", message: raised } as TestResult], cfg, tmp()), cfg))
+    .toContain("variable `PAY_LINK_SECRET`, which env sets");
+});
+
 test("hosts that do not resolve, and connections refused", () => {
   expect(kind("pytest:test_dns_external")).toMatchObject({ kind: "unresolved-host", detail: "" });
   expect(kind("pytest:test_dns_bare")).toMatchObject({ kind: "unresolved-host", detail: "" });
