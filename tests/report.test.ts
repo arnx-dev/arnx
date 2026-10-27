@@ -128,6 +128,24 @@ test("the cost line splits the total per model and says a cut-off call it could 
   expect(summary(sampleReview(), "review.md")).toContain(" · $0.34 · "); // reviews written before the split
 });
 
+test("a model with no price: its cost unknown in the split and the summary, its calls not called cut off", () => {
+  const usage = [
+    { model: "anthropic:claude-sonnet-5-5", calls: 9, unknownCalls: 0, input: 1, output: 1, cacheRead: 0, cacheWrite: 0,
+      costUsd: 0.4012 },
+    { model: "compat:mystery-model", calls: 3, unknownCalls: 3, input: 1, output: 1, cacheRead: 0, cacheWrite: 0,
+      costUsd: 0, unpriced: true },
+  ];
+  const r = sampleReview({ costUsd: 0.4012, usage });
+  expect(render(r)).toContain("- Cost $0.40 (claude-sonnet-5-5 $0.40 · mystery-model cost unknown) · ");
+  expect(summary(r, "review.md")).toContain(" · $0.40 (mystery-model: cost unknown) · ");
+  const dir = join(tmp(), "unpriced");
+  save(r, dir, "diff");
+  expect(load(dir).usage[1]!.unpriced).toBe(true);
+  usage[0]!.unknownCalls = 1;
+  expect(summary(sampleReview({ costUsd: 0.4012, usage }), "review.md")).toContain(" · $0.40 (a little more: some " +
+    "calls were cut off mid-reply; mystery-model: cost unknown) · ");
+});
+
 test("review.md on disk is wrapped for plain editors; marks and answers still read back", () => {
   const long = "word ".repeat(60).trim();
   const r = sampleReview({ questions: [`Should ${long}?`] });

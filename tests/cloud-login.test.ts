@@ -78,6 +78,9 @@ test("login: pending, slow_down, then the token, kept 0600 in the config directo
   expect(statSync(path).mode & 0o777).toBe(0o600);
   expect(c.seen.filter((x) => x.path === "/v1/auth/token").map((x) => x.body)).toEqual(
     Array(4).fill({ device_code: "dev-code" }));
+  // The device is named by arnx's version and the OS, never the machine's name.
+  expect(c.seen.find((x) => x.path === "/v1/auth/device")!.body).toEqual({ cli_version: VERSION,
+    device_name: `arnx ${VERSION} on ${process.platform}` });
 });
 
 test("login: XDG_CONFIG_HOME wins; an older file is made 0600 again", () => {

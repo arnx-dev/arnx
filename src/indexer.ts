@@ -74,7 +74,7 @@ export async function projectIndex(cfg: ReviewConfig, snap: string, outDir: stri
     try {
       r = await dockerAsync(args, { timeout: INDEX_TIMEOUT });
     } catch (e) {
-      docker(["rm", "-f", name]);
+      docker(["rm", "-fv", name]);
       throw e;
     }
     if (r.status !== 0) throw new Error(`the indexer exited with ${r.status}: ${(r.stderr || r.stdout).trim().slice(-300)}`);

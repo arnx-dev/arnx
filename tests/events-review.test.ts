@@ -355,8 +355,8 @@ test("a final run without a report is recorded as missing", async () => {
 test("a final run that timed out is recorded as missing with timed_out and no exit code", async () => {
   const { es } = await twoFiles((n) => n === 2 ? null : junitXml([
     ["tests/arnx_generated/test_bad.py", "test_bad", "failed", "x"]]), 2);
-  expect(ofType(es, "test.run_missing").map((e) => [e.data.repeat, e.data.timed_out, e.data.exit_code]))
-    .toEqual([[2, true, null]]);
+  expect(ofType(es, "test.run_missing").map((e) => [e.data.repeat, e.data.timed_out, e.data.exit_code, e.data.skipped]))
+    .toEqual([[2, true, null, undefined], [3, false, null, true]]); // the run after it is skipped
 });
 
 test("a test message that looks like a secret is withheld from test.run and test.classified", async () => {

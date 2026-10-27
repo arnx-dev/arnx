@@ -1,7 +1,7 @@
 import { beforeEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { runAgent, ToolError, Workspace } from "../src/agent";
+import { backtracks, grepLimits, runAgent, ToolError, Workspace } from "../src/agent";
 import { ModelError } from "../src/errors";
 import { type Attempt, billedError, PRICES, type Reply } from "../src/llm";
 import { ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -94,6 +94,15 @@ test("test_budget_stops_the_loop", async () => {
   expect(model.calls).toHaveLength(2);
 });
 
+test("a model with no price runs past the budget: its cost unknown, each reply counted with unknown usage", async () => {
+  const model = new ScriptedAgent([[tool("list_dir", { path: "." })], [tool("list_dir", { path: "." })], [text("done")]],
+    { input: 100_000, output: 10_000, cacheRead: 0, cacheWrite: 0 });
+  model.model = "mystery-model";
+  const result = await runAgent(model, new Workspace(root), { system: "s", user: "u", budgetUsd: 0.01, prices: PRICES });
+  expect([result.stop, result.costUsd, result.calls, result.unknownCalls]).toEqual(["end_turn", 0, 3, 3]);
+  expect(result.usage.input).toBe(300_000);
+});
+
 test("test_api_error_stops", async () => {
   class Failing extends ScriptedAgent {
     override async create(): Promise<Reply> {
@@ -151,6 +160,79 @@ test("a model error is written to the transcript with its timeout flag and attem
 
 test("grep refuses a long pattern", async () => {
   await expect(new Workspace(root).call("grep", { pattern: "a".repeat(501) })).rejects.toThrow(ToolError);
+});
+
+test("grep refuses the usual backtracking shapes before matching anything", async () => {
+  for (const p of ["(a+)+", "(a*)*", "(\\w+\\s?)*", "x(?:ab?)+y", "((a+)b)*", "(a+){2,}", "(a*a*)+", "a*a*a*",
+    ".*.*.*", "a*\\w*a*", "\\w+\\d*", ".*\\w*", "[A-Z0-9_]+[A-Z_]*"]) {
+    expect(backtracks(p)).toBe(true);
+  }
+  // Two in a row where the second takes all the first does are linear in practice.
+  for (const p of ["needle", "def \\w+\\(", "(foo|bar)+", "\\s*\\w+", "[a-z]+[0-9]+", "(\\w+)\\s*=", "a*b*",
+    "import .*", "x{2}(ab){3}", "a*ba*", "(a{2})+", "a\\*a*", "[(a+)]+", "\\(a+\\)+", "\\w+.*", "[A-Z_]+[A-Z0-9_]*",
+    "a*a*", ".*.*", "a+\\w+", "\\d+\\w*\\s+\\w+"]) {
+    expect(backtracks(p)).toBe(false);
+  }
+  writeFileSync(join(root, "slow.txt"), "a".repeat(600) + "\n");
+  const started = Date.now();
+  await expect(new Workspace(root).call("grep", { pattern: "a*a*a*b" })).rejects.toThrow("pattern too slow");
+  expect(Date.now() - started).toBeLessThan(500);
+});
+
+test("grep stops a pattern that backtracks without end", async () => {
+  // a shape the check above lets through: about 7 s unbounded under Bun, longer under Node
+  writeFileSync(join(root, "slow.txt"), "a".repeat(400) + "\n");
+  const started = Date.now();
+  expect(backtracks("a*.?a*.?a*b")).toBe(false);
+  await expect(new Workspace(root).call("grep", { pattern: "a*.?a*.?a*b" })).rejects.toThrow("pattern too slow");
+  expect(Date.now() - started).toBeLessThan(4000);
+  expect(await new Workspace(root).call("grep", { pattern: "needle" })).toContain("latin.txt:1:");
+});
+
+test("grep's time limit counts matching only: a literal grep over 6,000 files finds its matches", async () => {
+  for (let d = 0; d < 60; d++) {
+    mkdirSync(join(root, "many", `d${d}`), { recursive: true });
+    for (let f = 0; f < 100; f++) {
+      writeFileSync(join(root, "many", `d${d}`, `f${f}.py`), `x = ${f}\n` + (d === 59 && f === 99 ? "marker\n" : "") +
+        "def handler(request):\n    return request\n".repeat(20));
+    }
+  }
+  const ws = new Workspace(root);
+  expect(await ws.call("grep", { pattern: "marker", path: "many" })).toBe("many/d59/f99.py:2: marker");
+  // Walking and reading 6,000 files takes longer than this; matching a literal in them does not.
+  grepLimits.ms = 300;
+  try {
+    expect(await ws.call("grep", { pattern: "marker", path: "many" })).toBe("many/d59/f99.py:2: marker");
+  } finally {
+    grepLimits.ms = 2000;
+  }
+}, 30_000);
+
+test("a regex grep skips lines over 10,000 characters and says so; a literal one still searches them", async () => {
+  mkdirSync(join(root, "web"), { recursive: true });
+  writeFileSync(join(root, "web", "app.min.js"), "var a=1;".repeat(112_500) + "\nneedle zzz\n");
+  writeFileSync(join(root, "web", "b.js"), "x".repeat(20_000) + "needle\n" + "abc zzz\n");
+  const ws = new Workspace(root);
+  const started = Date.now();
+  expect(await ws.call("grep", { pattern: "\\w+.*zzz", path: "web" })).toBe("web/app.min.js:2: needle zzz\n" +
+    "web/b.js:2: abc zzz\n2 lines over 10,000 characters skipped (minified or generated)");
+  expect(Date.now() - started).toBeLessThan(1500);
+  expect(await ws.call("grep", { pattern: "needle", path: "web" })).toBe("web/app.min.js:2: needle zzz\n" +
+    `web/b.js:1: ${"x".repeat(200)}`);
+});
+
+test("a grep stopped by its time limit returns the matches it found, then why it stopped", async () => {
+  mkdirSync(join(root, "part"), { recursive: true });
+  // the first batch (over 1 MB) holds the match; the second holds a line the pattern backtracks on
+  writeFileSync(join(root, "part", "a0.txt"), "b\n" + `${"x".repeat(100)}\n`.repeat(11_000));
+  writeFileSync(join(root, "part", "a1.txt"), "a".repeat(400) + "\n");
+  grepLimits.ms = 300;
+  try {
+    expect(await new Workspace(root).call("grep", { pattern: "a*.?a*.?a*b", path: "part" })).toBe("part/a0.txt:1: b\n" +
+      "... stopped: pattern too slow (over 0.3 s): simplify it, e.g. no nested or stacked quantifiers like (a+)+ or a*a*a*");
+  } finally {
+    grepLimits.ms = 2000;
+  }
 });
 
 test("grep skips files over the size limit", async () => {

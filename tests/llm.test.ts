@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { ModelError, SetupRequired } from "../src/errors";
+import { ModelError } from "../src/errors";
 import {
   AnthropicAgent, AnthropicJson, CANCEL_SECONDS, cancelInFlight, costUsd, FallbackJson, makeAgentModel, makeJsonModel,
   makeChallenger, makeSecondHunter, parseJsonObject, PRICES, ResponsesAgent,
-  responsesInput, ResponsesJson,
+  responsesInput, ResponsesJson, unpricedModels, unpricedNote,
 } from "../src/llm";
 import { exitCodeAfter, finalExitCode, onInterrupt, startInterrupt } from "../src/interrupt";
 import { type ProviderTable } from "../src/providers";
@@ -21,8 +21,8 @@ const fakeFetch = (h: Handler) => (async (url: string | URL | Request, init?: Re
 test("test_cost", () => {
   expect(costUsd("claude-sonnet-5-5", { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 }, PRICES))
     .toBeCloseTo(3.0, 10);
-  expect(() => costUsd("mystery", { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, PRICES)).toThrow(SetupRequired);
-  expect(() => costUsd("mystery", { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, PRICES)).toThrow(/price/);
+  // No price: the cost is unknown, not an error.
+  expect(costUsd("mystery", { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, PRICES)).toBeNull();
 });
 
 test("test_parse_json_object", () => {
@@ -169,8 +169,33 @@ test("test_factories", () => {
   expect(() => makeAgentModel(s, { OPENAI_API_KEY: "o" })).toThrow(/ANTHROPIC_API_KEY/);
   expect(makeAgentModel(s, { ANTHROPIC_API_KEY: "a" }).model).toBe("claude-sonnet-5-5");
   expect(makeJsonModel(s.challenger, s, { OPENAI_API_KEY: "o" }).ref).toBe("openai:gpt-6.1-sol");
-  // A model arnx has no price for needs one under [prices].
-  expect(() => makeJsonModel(parseModelRef("compat:unpriced", TABLES), s, COMPAT_ENV)).toThrow(/price/);
+  // A model arnx has no price for runs, its cost unknown; the command says so once.
+  const unpriced = parseModelRef("compat:unpriced", TABLES);
+  expect(makeJsonModel(unpriced, s, COMPAT_ENV).ref).toBe("compat:unpriced");
+  expect(makeAgentModel({ ...s, reviewer: unpriced }, COMPAT_ENV).model).toBe("unpriced");
+  expect(unpricedModels(s, [s.reviewer, unpriced, null, unpriced])).toEqual([{ ref: "compat:unpriced", name: "unpriced" }]);
+  expect(unpricedModels({ ...s, prices: PRICED }, [parseModelRef("compat:some-model", TABLES)])).toEqual([]);
+  // Priced by the name [prices] uses: with the OpenAI tier when one applies.
+  expect(unpricedModels({ ...s, openaiTier: "flex" }, [s.challenger]))
+    .toEqual([{ ref: "openai:gpt-6.1-sol", name: "gpt-6.1-sol@flex" }]);
+  expect(unpricedNote([])).toBeNull();
+  expect(unpricedNote([{ name: "unpriced" }])).toBe("No price for unpriced: cost unknown, and the budget cap does not " +
+    "cover it ([prices] in .arnx/config.toml)");
+  expect(unpricedNote([{ name: "a" }, { name: "b" }])).toBe("No price for a, b: cost unknown, and the budget cap does " +
+    "not cover them ([prices] in .arnx/config.toml)");
+});
+
+test("a JSON call to a model with no price costs 0 and counts as billed with unknown usage", async () => {
+  const messages = new FakeMessages(['{"verdict": "confirmed"}']);
+  const agent = new AnthropicAgent("claude-mystery", "medium", "k", { messages });
+  const reply = await new AnthropicJson(parseModelRef("anthropic:claude-mystery"), agent, PRICES)
+    .completeJson("sys", "user", SCHEMA);
+  expect([reply[0], reply[1], reply[3]]).toEqual([{ verdict: "confirmed" }, 0, 1]);
+  const m = new ResponsesJson(parseModelRef("openai:gpt-mystery"), "https://api.example/v1", "k", "medium", PRICES,
+    { sleep: noSleep, fetch: fakeFetch(() => new Response(sse(responsesBody('{"verdict": "disputed"}')),
+      { status: 200, headers: { "content-type": "text/event-stream" } })) });
+  const r = await m.completeJson("s", "u", SCHEMA);
+  expect([r[0], r[1], r[3]]).toEqual([{ verdict: "disputed" }, 0, 1]);
 });
 
 test("anthropic: a stream that goes silent is retried", async () => {
@@ -427,13 +452,13 @@ test("responses agent: a cut-off reply is max_tokens, and without storage reason
   expect("tools" in sent[0]!).toBe(false);
 });
 
-test("the reviewer may be any provider arnx knows a price for", () => {
+test("the reviewer may be any provider, priced or not", () => {
   const as = (ref: string) => ({ ...defaultSettings(), providers: TABLES, prices: PRICED,
     reviewer: parseModelRef(ref, TABLES) });
   expect(makeAgentModel(as("openai:gpt-5.5-2026-04-23"), { OPENAI_API_KEY: "o" })).toBeInstanceOf(ResponsesAgent);
   expect(makeAgentModel(as("compat:some-model"), COMPAT_ENV).model).toBe("some-model");
   expect(() => makeAgentModel(as("openai:gpt-5.5-2026-04-23"), {})).toThrow(/OPENAI_API_KEY/);
-  expect(() => makeAgentModel(as("compatenv:unpriced"), COMPAT_ENV)).toThrow(/price/);
+  expect(makeAgentModel(as("compatenv:unpriced"), COMPAT_ENV).model).toBe("unpriced");
 });
 
 // Provider backoff headers: the wait is never shorter than the local backoff (DELAYS[0] = 2s for the first retry).

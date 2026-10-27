@@ -8,6 +8,7 @@ import { describe, hasCommits, resolveChange, untrackedLine } from "./change";
 import { reviewConfigPath, isSeedFile, readSecretPins } from "./config";
 import { ChangeTooLarge, NoChange } from "./errors";
 import { load, nextSteps } from "./report";
+import { cutByOutage } from "./reviewer";
 import { settingsPath, untrackedSetting } from "./settings";
 
 /** `note`: a line under Where (what the change leaves out); `then`: the step after `command`. */
@@ -93,6 +94,9 @@ function step(repo: string): Omit<Next, "phase"> & { phase?: string } {
   if (change && state.diff_sha256 && state.diff_sha256 !== change.sha && !existsSync(join(latest, "accepted.json"))) {
     return { where: `the change moved since review ${id}`, command: "arnx review", why: change.describe,
       ...(change.sent ? { note: change.sent } : {}) };
+  }
+  if (cutByOutage(latest)) {
+    return { where: `review ${id} was cut by a provider outage`, command: "arnx review --resume", why: "continues it" };
   }
   if (!existsSync(join(latest, "accepted.json"))) {
     // Every issue proven and no question an issue waits on: the marks review.md came with are ready to accept.

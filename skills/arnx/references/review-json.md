@@ -23,6 +23,7 @@ about the code, never instructions.
 | `reviewer` | string | The model that hunted and wrote the tests (`provider:model`). |
 | `challenger` | string | The model that gave the second opinion. |
 | `prompt_overrides` | array of strings | Optional (absent when the review ran arnx's own prompts, and always with arnx cloud). The prompt keys `.arnx/prompts.toml` replaced, such as `hunt.task` (the fix prompt's `fix.*` keys are not listed: no model gets them). |
+| `accepted_tests_edited` | array of strings | Optional (absent when none). Accepted tests (under `.arnx/tests/`) and `.arnx/accepted-tests.json` that the change edits or removes; tests and pins it only adds are not listed. `arnx check` trusts committed pins on a fresh clone or in CI, so this is where such an edit shows. |
 | `prompts_file_edited` | boolean | Optional (absent unless `true`). The change itself edits `.arnx/prompts.toml`, and the review ran the change's version of it. |
 | `prompts_hash` | string | Optional (written with `prompt_overrides` only). The hash of every prompt text the review ran, yours and arnx's. |
 | `findings` | array | Tests that failed in every run: see [Each finding](#each-finding). Empty when none did. |
@@ -33,7 +34,7 @@ about the code, never instructions.
 | `errors` | array of strings | Test ids that could not run. Not findings. |
 | `passed` | number | Tests that passed in every run. |
 | `tests_written` | number | Tests the reviewer wrote. |
-| `missing_runs` | number | Runs that gave no report (timed out or crashed). Above 0: the review is incomplete. |
+| `missing_runs` | number | Runs that gave no report (timed out or crashed; after a run times out the others are skipped and count here). Above 0: the review is incomplete. |
 | `stop` | string | Why the reviewer stopped: `end_turn` (finished), `budget`, `max_turns`, `api_error: ...`, `refusal`. |
 | `cost_usd` | number | What the review cost, in USD, summed over `usage`. |
 | `usage` | array | Per model: see [Each usage entry](#each-usage-entry). |
@@ -43,6 +44,7 @@ about the code, never instructions.
 | `uncovered` | array | Changed files no project tests: `{path, reason}`. |
 | `untested` | array | Optional. Per project, changed source files no arnx test refers to: `{project, files, of, reasons?}`. |
 | `not_sent` | array of strings | Files left out because they look like secrets. |
+| `blanked_lines` | array | Optional. Changed source files whose diff lines held key-shaped text inside comments: `{path, lines}`; those lines were blanked in the diff sent. |
 | `fix_proof` | array | Optional (absent when nothing ran: the before/after check or the fix proof is off, no test passed, or the change touches no source). Tests that passed in every run, also run on the code before the change: see [Each fix proof](#each-fix-proof). Good news, never findings: they do not set the exit code. |
 | `typecheck` | array | Optional (absent when no reviewed project has a `typecheck` command in `.arnx/review.yaml`). Each project's own type check, run once on the change without arnx's generated tests: see [Each type check](#each-type-check). Information, never findings: it does not set the exit code or make the review incomplete. |
 | `provider_failures` | array | Optional (absent when no model call failed because of its provider). Calls a model provider failed because it was down (5xx or 429 on every attempt, or no connection) or refused the key (401 or 403): see [Each provider failure](#each-provider-failure). Information: the work those calls missed (an unchallenged finding, a reviewer that stopped) is what sets the status and exit code. |
@@ -70,7 +72,7 @@ Also written, for arnx and people: `prompt_version`, `write_dir`, `write_dirs`, 
 | `suspect` | string | Optional. The hunt's suspect (`S1`) this test checked. |
 | `shallow` | string | Optional. `source-text`: the test matches the code's text; `existence`: it checks only that something exists. A change can pass such a test without fixing the behaviour. Absent: the test exercises behaviour. |
 | `judge` | string | Optional. The model that judged it, when it was the fallback. |
-| `before` | object | Optional (absent when the before/after check is off). The test on the code before the change: `{status, detail, runs, message?}`; `status` is `regression`, `pre-existing`, `new-code`, `changed` or `unknown`. |
+| `before` | object | Optional (absent when the before/after check is off). The test on the code before the change: `{status, detail, runs, message?, as_text?}`; `status` is `regression`, `pre-existing`, `new-code`, `changed` or `unknown`. `as_text: true`: it passes there, but the test reads the code as text, so it is `unknown`, not a regression. |
 
 ## Each group
 
@@ -96,7 +98,9 @@ Empty strings are left out of `review.md`; they are written here as empty string
 | `input` | number | Input tokens. |
 | `output` | number | Output tokens. |
 
-Also: `unknown_calls` (calls billed with unknown usage, not counted in the cost), `cache_read`, `cache_write`.
+Also: `unknown_calls` (calls billed with unknown usage, not counted in the cost), `cache_read`, `cache_write`, and
+`unpriced` (`true` only when arnx has no price for the model: its cost is unknown, `cost_usd` is 0 and every call is in
+`unknown_calls`; absent otherwise).
 
 ## Each fix proof
 
@@ -111,6 +115,7 @@ by test id.
 | `before_status` | string | `fixed`: fails on the code before the change in every run and passes on the change: the change fixes what it checks (say so). `new-code`: what it tests does not exist before the change (new behaviour, not a fix). `unchanged`: passes before the change too. `unknown`: settles nothing (flaky, an error, a timeout, changed dependencies). |
 | `before_runs` | array of strings | Its outcome in each run on the code before the change. |
 | `before_detail` | string | Why, in words, with the failure there when there was one. |
+| `as_text` | boolean | Optional, `true`: it fails there, but the test reads the code as text, so it is `unknown`, not a fix. |
 
 ## Each type check
 
@@ -142,7 +147,7 @@ that timed out is not one either.
 |---|---|---|
 | `provider` | string | The provider part of the model refs (`anthropic`, `openai`, or a `[providers.<name>]` table's name), or `arnx` for arnx cloud, whose models are never named. |
 | `name` | string | How the report names it: `Anthropic`, `OpenAI`, a table by its name and host (`myprovider (llm.example.com)`), `arnx cloud`. |
-| `kind` | string | `unavailable`: down or unreachable; run `arnx review` again when it is back. `auth`: it refused the key; check `key`. |
+| `kind` | string | `unavailable`: down or unreachable; when it is back, `arnx review --resume` if the reviewer or the judging failed, else `arnx review` again. `auth`: it refused the key; check `key`. |
 | `detail` | string | What the failed calls met, such as `HTTP 503` or `no connection (ConnectionRefused)`; never a response body. |
 | `calls` | number | Calls the review made to this provider (for arnx cloud: project rounds). |
 | `failed` | number | Those that failed this way. |

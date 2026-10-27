@@ -7,9 +7,10 @@ export class Cli {
   constructor(public deps: Partial<CliDeps>) {}
 
   run(...argv: string[]): Promise<number> {
-    // Telemetry stays closed unless a test opens it, so no test ever posts to the real endpoint.
-    return main(argv, { env: {}, dockerOk: () => [true, "running"], ask: async () => null, check: false,
-      telemetryOpen: false, ...this.deps,
+    // Telemetry stays closed unless a test opens it, so no test ever posts to the real endpoint; no test asks the real
+    // Docker for its images.
+    return main(argv, { env: {}, dockerOk: () => [true, "running"], oldImages: () => [], ask: async () => null,
+      check: false, telemetryOpen: false, ...this.deps,
       out: (l) => this.out.push(l), err: (l) => this.err.push(l) });
   }
 

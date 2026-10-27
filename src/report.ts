@@ -5,9 +5,10 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AdapterId } from "./adapters/types";
 import { type Before, type FixStatus, isPreExisting } from "./before";
+import { type Blanked, describeBlanked, someNames } from "./change";
 import { ArnxError } from "./errors";
 import { type ModelUse, parseJsonObject } from "./llm";
-import type { ProviderFailure } from "./outage";
+import { type ProviderFailure, resumes } from "./outage";
 import { type Shallow, SHALLOW_NOTE } from "./shallow";
 import { describeDiagnostic, describeTypecheck, type TypeCheck } from "./typecheck";
 import { pyTruthy, splitLines } from "./util";
@@ -109,9 +110,10 @@ export const rankGroups = (groups: Group[]) => [...groups].sort(bySeverity);
 export interface Checked { project: string; test: string; expects: string }
 
 /** A passing test run on the code before the change (the fix proof). `beforeStatus` "fixed": it fails there in every
- * run, so the change fixes what it checks; `beforeRuns`: its outcome in each run there. */
+ * run, so the change fixes what it checks; `beforeRuns`: its outcome in each run there; `asText`: it would be fixed,
+ * but it reads the code as text, so it is unknown and not counted. */
 export interface FixProof { testId: string; project: string; file: string | null; beforeStatus: FixStatus;
-  beforeRuns: string[]; beforeDetail: string }
+  beforeRuns: string[]; beforeDetail: string; asText?: true }
 
 export interface Review {
   id: string;
@@ -128,6 +130,8 @@ export interface Review {
   promptsHash?: string;
   /** The change itself edits .arnx/prompts.toml, and the review ran its version (absent otherwise). */
   promptsFileEdited?: true;
+  /** Accepted tests (or their pins in .arnx/accepted-tests.json) the change edits or removes (absent when none). */
+  acceptedTestsEdited?: string[];
   findings: Finding[];
   questions: string[];
   flaky: string[];
@@ -140,6 +144,8 @@ export interface Review {
   ignoredChanged?: string[];
   /** Changed lockfiles: in the sandbox, their text not sent. */
   lockfilesChanged?: string[];
+  /** Changed source files whose diff lines held key-shaped text in comments: those lines were blanked. */
+  blankedLines?: Blanked[];
   /** Untracked files the review sent because the owner opted in (--untracked); absent when none. */
   untrackedIncluded?: string[];
   /** How many untracked files the review left out (not sent, not in the sandbox); absent when none. */
@@ -259,8 +265,10 @@ function costLine(r: Review): string {
   // arnx cloud's figure is what it charged the account (its price, not the providers' cost); a call it could not
   // price is not charged, so there is no note to add.
   if (usage.every((u) => CLOUD_MODEL.test(u.model))) return `Billed $${r.costUsd.toFixed(2)} by arnx cloud`;
-  const parts = usage.map((u) => `${u.model.replace(/^[^:]*:/, "")} $${u.costUsd.toFixed(2)}`).join(" · ");
-  const unknown = usage.reduce((a, u) => a + u.unknownCalls, 0);
+  const parts = usage.map((u) => `${u.model.replace(/^[^:]*:/, "")} ` +
+    (u.unpriced ? "cost unknown" : `$${u.costUsd.toFixed(2)}`)).join(" · ");
+  // A model with no price says so in its part; every one of its calls is in unknownCalls.
+  const unknown = usage.reduce((a, u) => a + (u.unpriced ? 0 : u.unknownCalls), 0);
   // A call cut off mid-reply is billed, but the provider never said for how much: its cost is not in the total.
   const note = unknown ? `; ${unknown === 1 ? "1 call was" : `${unknown} calls were`} cut off mid-reply, so arnx ` +
     `could not price what the provider billed for ${unknown === 1 ? "it" : "them"}: the cost shown may be a little low`
@@ -343,9 +351,10 @@ const ROLE: Record<string, string> = { "part-hunt": "part hunts", "second-hunt":
  * what to do. Never a key or a response body; arnx cloud's models and their vendor are never named. */
 export function failureLine(f: ProviderFailure): string {
   const every = f.failed === f.calls;
+  const again = resumes(f) ? "Run `arnx review --resume`" : "Run `arnx review` again";
   if (f.provider === "arnx") {
     const rounds = every ? `every project round (${f.calls})` : `${f.failed} of ${f.calls} project rounds`;
-    return `arnx cloud's models unavailable: ${rounds} stopped on a failed model call. Run \`arnx review\` again later.`;
+    return `arnx cloud's models unavailable: ${rounds} stopped on a failed model call. ${again} later.`;
   }
   const a = f.kind === "auth" || f.attempts === undefined ? ""
     : f.failed === 1 ? plural(f.attempts, "attempt")
@@ -356,13 +365,15 @@ export function failureLine(f: ProviderFailure): string {
   const missing = f.missing.length ? `; missing: ${f.missing.map((x) => WORK[x] ?? x).join(", ")}`
     : every ? "; other models answered in its place" : "";
   return f.kind === "auth" ? `${f.name} refused the key: ${f.detail} ${count}${missing}. Check ${f.key ?? "its key"}.`
-    : `${f.name} unavailable: ${f.detail} ${count}${missing}. Run \`arnx review\` again when it is back.`;
+    : `${f.name} unavailable: ${f.detail} ${count}${missing}. ${again} when it is back.`;
 }
 
 function statusLines(r: Review): string[] {
   const { problems, notes } = statusOf(r);
   const names = r.projects.length > 1 ? ` (${ticks(r.projects)})` : "";
-  const out = [problems.length ? `Incomplete: ${problems.join("; ")}. Run \`arnx review\` again to cover it.`
+  // When a resume redoes what an outage cut, the outage line below says so: no fresh review here.
+  const again = (r.providerFailures ?? []).some(resumes) ? "" : " Run `arnx review` again to cover it.";
+  const out = [problems.length ? `Incomplete: ${problems.join("; ")}.${again}`
     : untestedCount(r) ? `Partly covered: no arnx test refers to ${untestedCount(r)} of the ${untestedOf(r)} changed ` +
       "source files below, so finding nothing there says nothing about them. Check them yourself, or review them " +
       "on their own with `arnx review --range`."
@@ -513,6 +524,7 @@ export function render(r: Review): string {
     ...untrackedLines(r).map((l) => `- ${l}`),
     modelsLine(r),
     ...(r.promptsFileEdited ? ["- This change edits .arnx/prompts.toml; the review used its version."] : []),
+    ...(r.acceptedTestsEdited ? [`- This change edits accepted tests: ${someNames(r.acceptedTestsEdited, 5)}.`] : []),
     `- ${r.usage?.length ? costLine(r) : `Cost: $${r.costUsd.toFixed(2)}`} · ${duration(r.seconds)} · Agent stopped: ${r.stop}`, "",
     "## Status", "", ...statusLines(r), "",
     marksIssues(r)
@@ -534,6 +546,11 @@ export function render(r: Review): string {
       out.push(`- \`${x.testId}\`${what ? `: ${firstLine(what)}` : ""}${multi(r) ? ` (${x.project})` : ""}`);
     }
     out.push("");
+  }
+  const asText = (r.fixProof ?? []).filter((x) => x.asText);
+  if (asText.length) {
+    out.push(`Not counted as fixes (${asText.length === 1 ? "it reads" : "they read"} the code as text): ` +
+      `${ticks(asText.map((x) => x.testId))}.`, "");
   }
   out.push("## Findings", "");
   const caused = active(r), already = r.findings.filter(isPreExisting);
@@ -642,6 +659,9 @@ export function render(r: Review): string {
     `- Runs without a report (timed out or crashed): ${r.missingRuns}`);
   if (r.ignoredChanged?.length) out.push(`- Changed files left out by .arnxignore (not reviewed): ${ticks(r.ignoredChanged)}`);
   if (r.lockfilesChanged?.length) out.push(`- Changed lockfiles (in the sandbox, not reviewed): ${ticks(r.lockfilesChanged)}`);
+  if (r.blankedLines?.length) {
+    out.push(`- Comment lines blanked as secret-looking (not sent): ${describeBlanked(r.blankedLines)}`);
+  }
   if (r.notSent.length) {
     out.push(`- Files left out because they looked like secrets: ${ticks(r.notSent)}. If one is a test fixture, not a ` +
       "secret: `arnx allow-secret PATH`, then `arnx review` again");
@@ -953,11 +973,15 @@ function issuesLine(r: Review, rows: SummaryRow[]): string {
   return `${counted} (${plural(findings, "finding")})${settled ? `; ${settled}` : ""}.`;
 }
 
-/** The cost in one word, and a note when calls cut off mid-reply could not be priced. */
+/** The cost in one word, and a note when calls cut off mid-reply could not be priced, or a model has no price. */
 function costShort(r: Review): string {
   if (billedByCloud(r)) return `$${r.costUsd.toFixed(2)} billed`;
-  const unknown = (r.usage ?? []).reduce((a, u) => a + u.unknownCalls, 0);
-  return `$${r.costUsd.toFixed(2)}${unknown ? " (a little more: some calls were cut off mid-reply)" : ""}`;
+  const usage = r.usage ?? [];
+  const unknown = usage.reduce((a, u) => a + (u.unpriced ? 0 : u.unknownCalls), 0);
+  const unpriced = usage.filter((u) => u.unpriced).map((u) => u.model.replace(/^[^:]*:/, ""));
+  const notes = [...unknown ? ["a little more: some calls were cut off mid-reply"] : [],
+    ...unpriced.length ? [`${unpriced.join(", ")}: cost unknown`] : []];
+  return `$${r.costUsd.toFixed(2)}${notes.length ? ` (${notes.join("; ")})` : ""}`;
 }
 
 const snake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
@@ -979,7 +1003,8 @@ export function save(r: Review, rdir: string, diff: string): void {
   mkdirSync(rdir, { recursive: true });
   // schema_version, each finding's status and exit_code are derived for readers; load() drops them.
   const json = { schema_version: REVIEW_SCHEMA_VERSION, ...rekey(r, snake),
-    findings: r.findings.map((f) => ({ ...rekey(f, snake), status: findingStatus(f) })),
+    findings: r.findings.map((f) => ({ ...rekey(f, snake), ...(f.before ? { before: rekey(f.before, snake) } : {}),
+      status: findingStatus(f) })),
     project_stats: (r.projectStats ?? []).map((p) => rekey(p, snake)),
     usage: (r.usage ?? []).map((u) => rekey(u, snake)), ...(r.timings ? { timings: rekey(r.timings, snake) } : {}),
     ...(r.fixProof ? { fix_proof: r.fixProof.map((x) => rekey(x, snake)) } : {}),
@@ -1000,8 +1025,10 @@ export function load(rdir: string): Review {
     throw new ArnxError(`cannot read ${path}: ${(e as Error).message}`);
   }
   const findings = (data.findings as object[]).map((f) => {
-    const { status: _status, ...rest } = f as Record<string, unknown>;
-    return { project: "main", ...rekey(rest, camel) } as unknown as Finding;
+    const { status: _status, before, ...rest } = f as Record<string, unknown>;
+    const finding = { project: "main", ...rekey(rest, camel) } as unknown as Finding;
+    if (before) finding.before = rekey(before as object, camel) as unknown as Before;
+    return finding;
   });
   const { schema_version: _version, exit_code: _code, ...fields } = data;
   const r = { language: "python", projects: ["main"], notReviewed: [], uncovered: [], ...rekey(fields, camel),

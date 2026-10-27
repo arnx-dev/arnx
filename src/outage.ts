@@ -67,6 +67,14 @@ export function providerFailures(outcomes: CallRecord[], s?: Pick<Settings, "pro
   return out;
 }
 
+/** The roles whose work a resume does again: the project rounds a failed call stopped, and the judging. */
+const REDONE = new Set(["reviewer", "challenge", "explain", "merge-questions"]);
+
+/** Whether `arnx review --resume` does again the work this failure cut: an outage of a role a resume redoes. */
+export function resumes(f: ProviderFailure): boolean {
+  return f.kind === "unavailable" && f.roles.some((x) => REDONE.has(x));
+}
+
 /** arnx cloud's side: project rounds that ended on a failed model call there (stop `api_error`). Its models and
  * their vendor stay unnamed. */
 export function cloudFailure(stops: string[]): ProviderFailure | null {

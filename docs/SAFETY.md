@@ -9,20 +9,30 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
 - Each test environment is a Docker image (`arnx-env:<hash>`), built again when the install steps or the dependency
   files change; Rust images can take several GB. With `context = "precise"` (`.arnx/config.toml`), each one also
   gets a code indexer layer (`arnx-env:<hash>-scip1`, about 0.7 GB for Python and TypeScript; the indexer runs with
-  no network). When the install copies your code into the image (`cp -r . /opt/app`), arnx builds one more image per
+  no network). When the install copies your code into the image (`cp -r . /opt/app`, or `pip install .` when your
+  tests import the installed package rather than the code in /src), arnx builds one more image per
   version of the code it tests (`arnx-env:<hash>-src-<hash>`), reused for that code. `arnx env prune` removes this
   repository's images that no proven project uses now and are a week old (`--keep-days N`, `--dry-run` to list them
   first, `--all-repos` for other repositories' old images too), and with each image made from your code the build
-  cache records its build left, each by its id; the rest of Docker's build cache is not touched.
+  cache records its build left, each by its id; the rest of Docker's build cache is not touched. Such images built
+  by arnx before 0.1.3 do not say which records are theirs: prune removes the image, leaves the cache, and says so
+  (`docker builder prune` removes all of Docker's unused build cache, if you want that).
 - `arnx remove` lists everything arnx put in the repository (`.arnx/`, `.arnxignore`, the skill folders), this
-  repository's test images and the pins arnx keeps for it outside the repository; `arnx remove --yes` deletes them.
+  repository's test images and the pins arnx keeps for it outside the repository; `arnx remove --yes` deletes them,
+  with the build cache of the images made from your code (as `arnx env prune` removes it).
   Files you committed are left for the `git rm` it prints, so the removal shows in a commit. Accepted tests are your
   tests by then: kept unless `--tests`. Your arnx cloud login and the arnx program itself are not touched.
 - Your model keys stay in the arnx process. Files that usually hold secrets, and text that looks like a key, are
-  never sent to a model. A file left out this way is named at setup and in each review. When its key-shaped text
+  never sent to a model. A file left out this way is named at setup and in each review. When every key-shaped
+  string in a JavaScript, TypeScript, Python or Rust file is inside a comment that has its lines to itself (a doc
+  example), the file is sent with those comment lines blanked instead (a private key's whole block too, when it lies
+  in the comment), and setup names the file and its lines; one in code, or on a line that also holds code, still
+  leaves the whole file out. A review's diff blanks such lines the same way and names them; a key in code
+  in the diff still stops the review. When its key-shaped text
   is test fixtures (a secret detector's own tests), `arnx allow-secret PATH` pins each such string in
   `.arnx/review.yaml`, which is then proven again before the next review; a new key-shaped string in that file
-  withholds it again. Setup lists allowed files under "Worth a look".
+  withholds it again, and `arnx allow-secret --remove PATH` takes a file off the list (proven again too). Setup lists
+  allowed files under "Worth a look".
   When a setup run fails on a file left out this way (or by `.arnxignore`), setup stops and names it: only you can
   let it in.
 - arnx never edits your code or your tests. `accept` writes only into `.arnx/` (accepted tests in `.arnx/tests/`,

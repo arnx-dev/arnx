@@ -202,3 +202,35 @@ projects:
   const [, results] = runTests(runner, snap, cfg, [], "suite.xml", 60);
   expect(results!.find((t) => t.outcome === "failed")!.fileAttr).toBe("src/lib.rs");
 });
+
+test("a run whose build fails gives no report, never the previous run's junit.xml", () => {
+  const snap = tmp();
+  writeFileSync(join(snap, "Cargo.toml"), '[package]\nname = "calc"\nversion = "0.1.0"\n');
+  const bin = join(snap, "fakebin");
+  mkdirSync(bin);
+  // cargo: the build fails, so nextest writes no report.
+  writeFileSync(join(bin, "cargo"), [
+    "#!/bin/sh",
+    `if [ "$1" = locate-project ]; then echo ${join(snap, "Cargo.toml")}; exit 0; fi`,
+    "echo 'error: could not compile'; exit 101"].join("\n"), { mode: 0o755 });
+  const old = join(snap, ".arnx-run", "nextest", "arnx");
+  mkdirSync(old, { recursive: true });
+  writeFileSync(join(old, "junit.xml"), INLINE);
+  const runner = { run: (command: string) => {
+    const r = spawnSync("sh", ["-c", command.replaceAll("/src/", `${snap}/`)], { cwd: snap, encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+    return { exitCode: r.status, output: r.stdout, timedOut: false, seconds: 1 };
+  } };
+  const cfg = parseReviewFile(`version: 1
+projects:
+  calc:
+    root: .
+    language: rust
+    image: rust:1-bookworm
+    test_command: cargo nextest run {targets}
+`).projects[0]!;
+  const [result, results] = runTests(runner, snap, cfg, [], "suite.xml", 60);
+  expect(result.exitCode).toBe(101);
+  expect(results).toBeNull();
+  expect(existsSync(join(old, "junit.xml"))).toBe(false);
+});

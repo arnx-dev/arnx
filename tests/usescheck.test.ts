@@ -135,3 +135,75 @@ test("with context = precise, setup sends what the code does not bear out back t
   expect(indexed).toEqual([]);
   expect(names.replies[0]).toContain("accepted:");
 });
+
+test("without a code index, the map's paths: an unanchored uses entry that matches in several places, and one that " +
+  "takes in other projects whole", async () => {
+  const { mapHints } = await import("../src/usescheck");
+  const run = "    image: node:22\n    language: typescript\n    runner: vitest\n    test_command: vitest run {targets}\n";
+  const file = parseReviewFile(`version: 1
+projects:
+  api:
+    root: api
+${run}  web:
+    root: services/web
+${run}  jobs:
+    root: services/jobs
+${run}  shared:
+    root: packages/shared
+${run}    uses: [api/, /packages/api/, util.ts]
+  scripts:
+    root: scripts
+${run}    uses: [services/, packages/shared/]
+`);
+  const files = ["api/src/a.ts", "packages/api/src/b.ts", "packages/shared/src/c.ts", "services/web/util.ts",
+    "services/web/src/d.ts", "services/jobs/src/e.ts", "services/README.md", "scripts/run.ts", "scripts/util.ts"];
+  expect(mapHints(file, files).map((h) => [h.project, h.kind, h.text])).toEqual([
+    ["shared", "unanchored", "shared: uses api/ matches in 2 places (api/, packages/api/); anchor it to the one meant " +
+      "(/api/, /packages/api/)"],
+    ["scripts", "catch-all", "scripts: uses services/ takes in 2 other projects whole (web, jobs), so every change " +
+      "in them is reviewed by scripts too (duplicate findings, double cost); narrow it to what scripts depends on"]]);
+  // A file name or a glob matching several files is meant to: no hint.
+  expect(mapHints(parseReviewFile(`version: 1
+projects:
+  api:
+    root: api
+${run}    uses: ["*.proto", tsconfig*.json, package.json, "lib*/"]
+`), ["api/a.ts", "proto/x.proto", "proto/y.proto", "tsconfig.base.json", "web/tsconfig.json", "package.json",
+    "web/package.json", "lib1/a.ts", "web/lib2/b.ts"])).toEqual([]);
+  // One project used whole (a shared library), an anchored entry and an unanchored one with one place: no hint.
+  expect(mapHints(parseReviewFile(`version: 1
+projects:
+  app:
+    root: app
+${run}    uses: [/packages/shared/, lib/]
+  shared:
+    root: packages/shared
+${run}`), ["app/a.ts", "packages/shared/b.ts", "packages/lib/c.ts"])).toEqual([]);
+});
+
+test("setup sends the map's path hints back to the agent once, without a code index", async () => {
+  const repo = gitRepo(tmp());
+  for (const [f, body] of [["app/main.py", "import lib\n"], ["app/tests/test_a.py", "def test_a(): pass\n"],
+    ["lib/util.py", "def f(): pass\n"], ["tools/lib/x.py", "def g(): pass\n"]]) {
+    mkdirSync(join(repo, f!, ".."), { recursive: true });
+    writeFileSync(join(repo, f!), body!);
+  }
+  commit(repo, "layout");
+  const yaml = YAML.replace("uses: [lib/, extra/]", "uses: [lib/]").replace("uncovered:\n",
+    "uncovered:\n  - path: /tools/\n    reason: scripts run by hand\n");
+  const passing = (): [string | null, string, boolean] => [junitXml([["app/tests/test_a.py", "test_a", "passed", ""]]),
+    "1 passed", false];
+  const model = new ScriptedAgent([[tool("try_project", { yaml })], [tool("propose", { yaml })],
+    [tool("propose", { yaml })], [text("done")]]);
+  const progress: string[] = [];
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "setup"),
+    sessionFactory: fakeFactory(passing), progress: (m) => progress.push(m) });
+  const replies = model.calls.slice(2).map((c) => JSON.stringify(c.messages.at(-1)!.content));
+  expect(r.ok).toBe(true);
+  expect(replies[0]).toContain("refused once: these uses entries reach further than meant:");
+  expect(replies[0]).toContain("app: uses lib/ matches in 2 places (lib/, tools/lib/); anchor it to the one meant " +
+    "(/lib/, /tools/lib/)");
+  expect(replies[0]).toContain("propose the same file again to keep it as it is");
+  expect(replies[1]).toContain("accepted:");
+  expect(progress).toContain("1 uses entry too wide; asking the agent");
+});

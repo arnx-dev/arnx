@@ -3,7 +3,9 @@
 // that no approved project uses now, older than the days kept, are removed; an image without arnx's labels (built
 // before they existed) is counted, never removed. An image made from the code under test also takes the build cache
 // records its build left (the layers stay on disk with them): each by its id, found from the step marked with the
-// image's tag (sandbox.ts dockerfile), never a prune of the whole cache.
+// image's tag (sandbox.ts dockerfile), never a prune of the whole cache. An arnx before 0.1.3 built them without that
+// step, and nothing Docker prints ties such an image to its records (they list no layer digest, and every build of a
+// project's image names its steps alike), so their cache is left and prune says so.
 import { loadReviewFile } from "./config";
 import { LAYER_VERSION } from "./indexer";
 import { docker, envKey, repoId } from "./sandbox";
@@ -11,9 +13,10 @@ import { docker, envKey, repoId } from "./sandbox";
 export { repoId };
 
 export interface EnvImage { tag: string; size: string; repo: string | null; project: string; created: string }
-/** `cache`: the build cache records removed (with dryRun, to remove) with the images made from the code. */
+/** `cache`: the build cache records removed (with dryRun, to remove) with the images made from the code;
+ * `cacheNotFound`: how many of those images an older arnx built without the marked step, so their records stay. */
 export interface Pruned {
-  removed: EnvImage[]; failed: [EnvImage, string][]; unlabelled: number; cache: CacheRecord[];
+  removed: EnvImage[]; failed: [EnvImage, string][]; unlabelled: number; cache: CacheRecord[]; cacheNotFound: number;
 }
 
 /** A BuildKit build cache record, as `docker buildx du --verbose` prints it. */
@@ -49,10 +52,13 @@ export const repoImages = (repo: string): EnvImage[] => envImages().labelled.fil
 
 export const ageDays = (img: EnvImage, now: number) => (now - Date.parse(img.created)) / DAY_MS;
 
-/** Removes (or with dryRun lists) this repository's images that are not an approved project's current environment
- * and are at least `keepDays` old; `allRepos` also takes other repositories' images that old. */
-export function pruneEnv(repo: string, o: { keepDays: number; now?: number; dryRun?: boolean; allRepos?: boolean })
-  : Pruned {
+/** The images `arnx env prune` keeps unless told otherwise: those under this many days old. */
+export const KEEP_DAYS = 7;
+
+/** This repository's images that are not an approved project's current environment and are at least `keepDays` old;
+ * `allRepos` also takes other repositories' images that old. What prune removes. */
+export function staleImages(repo: string, o: { keepDays: number; now?: number; allRepos?: boolean })
+  : { images: EnvImage[]; unlabelled: number } {
   const now = o.now ?? Date.now();
   let current: string[] = [];
   try {
@@ -64,10 +70,24 @@ export function pruneEnv(repo: string, o: { keepDays: number; now?: number; dryR
   }
   const me = repoId(repo);
   const { labelled, unlabelled } = envImages();
-  const removed: EnvImage[] = [], failed: [EnvImage, string][] = [];
-  for (const img of labelled) {
+  const images = labelled.filter((img) => {
     const mine = img.repo === me;
-    if (!(mine || o.allRepos) || (mine && current.includes(img.tag)) || ageDays(img, now) < o.keepDays) continue;
+    return (mine || o.allRepos) && !(mine && current.includes(img.tag)) && ageDays(img, now) >= o.keepDays;
+  });
+  return { images, unlabelled };
+}
+
+/** This repository's images prune would remove with its defaults, for doctor and the end of setup. */
+export const oldImages = (repo: string): EnvImage[] => staleImages(repo, { keepDays: KEEP_DAYS }).images;
+
+/** Removes (or with dryRun lists) staleImages, with the build cache of those made from the code. */
+export function pruneEnv(repo: string, o: { keepDays: number; now?: number; dryRun?: boolean; allRepos?: boolean })
+  : Pruned {
+  const { images, unlabelled } = staleImages(repo, o);
+  // Asked before the images go: their history is gone with them.
+  const unmarked = new Set(images.map((i) => i.tag).filter((t) => t.includes("-src-") && !markedBuild(t)));
+  const removed: EnvImage[] = [], failed: [EnvImage, string][] = [];
+  for (const img of images) {
     if (o.dryRun) {
       removed.push(img);
       continue;
@@ -76,13 +96,24 @@ export function pruneEnv(repo: string, o: { keepDays: number; now?: number; dryR
     if (r.status === 0) removed.push(img);
     else failed.push([img, (r.stderr || r.stdout).trim().split("\n")[0] ?? ""]);
   }
-  const sources = removed.map((i) => i.tag).filter((t) => t.includes("-src-"));
-  let cache = sources.length ? sourceRecords(cacheRecords(), sources) : [];
-  if (!o.dryRun) {
-    cache = cache.filter((c) =>
-      docker(["buildx", "prune", "-f", "--filter", `id=${c.id}`], { timeout: 300 }).status === 0);
-  }
-  return { removed, failed, unlabelled, cache };
+  return { removed, failed, unlabelled, cache: sourceCache(removed.map((i) => i.tag), o.dryRun),
+    cacheNotFound: removed.filter((i) => unmarked.has(i.tag)).length };
+}
+
+/** Whether an image made from the code was built with the step marked with its tag; true when Docker cannot say. */
+export function markedBuild(tag: string): boolean {
+  const r = docker(["image", "history", "--no-trunc", "--format", "{{.CreatedBy}}", tag]);
+  return r.status !== 0 || !r.stdout.trim() || r.stdout.includes(` : ${tag}`);
+}
+
+/** Removes (or with dryRun lists) the build cache records the builds of the images made from the code among `tags`
+ * left (sourceRecords), each by its id; the ones removed. */
+export function sourceCache(tags: string[], dryRun = false): CacheRecord[] {
+  const sources = tags.filter((t) => t.includes("-src-"));
+  const cache = sources.length ? sourceRecords(cacheRecords(), sources) : [];
+  if (dryRun) return cache;
+  return cache.filter((c) =>
+    docker(["buildx", "prune", "-f", "--filter", `id=${c.id}`], { timeout: 300 }).status === 0);
 }
 
 /** Every build cache record; none when Docker has no BuildKit (an image delete then frees its layers). */

@@ -17,7 +17,7 @@ missing (keys, Docker, configuration); setup and review run the same checks firs
 service, a crate), each with its own environment, and checks each by running its existing suite. It shows a coverage
 map: what each project owns, what it only uses (such as a shared library), and what no project tests, with the
 reason. A review tests every project the change touches and lists what it could not test. `arnx setup --add` covers
-more later; `arnx setup --project NAME` redoes one project. Projects that install the same way (a Cargo workspace,
+more later: it tries every uncovered entry again, so fix what its reason names first; `arnx setup --project NAME` redoes one project. Projects that install the same way (a Cargo workspace,
 one lockfile at the root) share one environment image when they have the same `image`, `install` and
 `install_root` (the directory the install runs in); otherwise each project builds its own.
 
@@ -76,7 +76,10 @@ image (scip-python, scip-typescript or rust-analyzer; no network) and follows th
 module's function or constant with the same name stays out. Indexing adds about 10 to 50 seconds per project to a
 review and builds one extra layer per test image; when the index cannot be built, the review goes on by name. Setup
 then also checks the map once: a `uses` entry the project's code never refers to, or code it refers to outside its
-`owns` and `uses`, goes back to the setup agent as a hint.
+`owns` and `uses`, goes back to the setup agent as a hint. Without an index, setup still checks the map's paths
+once: a `uses` folder with no leading `/` that matches in several places (`api/` also matching `packages/api/`), or
+one that takes in two or more other projects whole (a catch-all `services/`), would have those changes reviewed
+twice, so it goes back to the setup agent as a hint too.
 
 What a review sends, and what it leaves out (untracked files, `.arnxignore`, secrets):
 [SAFETY.md](SAFETY.md#what-a-review-sends).
@@ -115,7 +118,9 @@ What each outcome means: **regression** (passes before, fails after: the change 
 test is right); **pre-existing** (fails the same way before: not caused by the change); **new-code** (what it tests
 does not exist before, so there is nothing to compare); **changed** (fails before too, differently: kept as a
 finding); **unknown** (not checked, or nothing settled: flaky, an error, no base, or the change altered the image's
-dependencies so a same failure would prove nothing). Only regression is evidence about the change itself.
+dependencies so a same failure would prove nothing). Only regression is evidence about the change itself. A test
+that reads one of the project's source files as text and matches it is never a regression or a fix: it shows the
+text changed, not the behaviour, so its outcome there is unknown and review.md says why.
 
 ## Type check
 
@@ -152,8 +157,9 @@ its own, under "Type check": it never fails a test, turns a run into no report, 
    clipboard) to your coding agent: the failing tests, what each bug is, your answers, and the rules (yours with
    `arnx prompts copy fix.rules`). `arnx check` runs the accepted tests in the proven sandbox, services included,
    on your working tree, and lists what still fails.
-4. When `arnx check` passes, commit the fixes together with `.arnx/tests/` and `.arnx/accepted-tests.json`: they now
-   guard against the bugs coming back, each time `arnx check` runs. Read them first: they are code a model wrote.
+4. When `arnx check` passes, commit the fixes together with `.arnx/tests/`, `.arnx/accepted-tests.json` and
+   `.arnx/answer-watch.json` (when there is one): they now guard against the bugs coming back, each time `arnx check`
+   runs. Read them first: they are code a model wrote.
 
 Accepted tests are pinned. `accept` records the sha256 of each file it writes in `.arnx/accepted-tests.json`, with
 the file's accepted tests (so `arnx check` tells them from the other tests the review wrote into it), and
@@ -161,9 +167,15 @@ the file's accepted tests (so `arnx check` tells them from the other tests the r
 nothing, and a coding agent told to make `arnx check` pass cannot do it that way. Editing the record along with the
 test does not help either: a sha256 there counts only when it is the committed one or one `arnx accept` wrote on this
 machine (it keeps a copy in `~/.config/arnx/pins/`, outside the repository); a changed or removed entry exits 4 too.
+A fresh clone or CI has no such copy and trusts the committed record, so a commit that edits both shows only in its
+diff: `arnx review` of that change names the accepted tests and pins it edits or removes.
 Changed by mistake: `arnx accept --again <id>` copies the review's tests back (your edits are lost); `arnx check`
 also names `git checkout -- <file>` when the committed copy is the accepted one. Changed on purpose:
-`arnx accept --keep-edits` records the accepted tests as they are now. `arnx check --json` prints the result as JSON
+`arnx accept --keep-edits` records the accepted tests as they are now. An answer's test can ask for the opposite of an
+accepted test: `accept` records, for each answer test that fails, the accepted tests that pass beside it
+(`.arnx/answer-watch.json`, committed with the tests), and when a later `arnx check` finds the answer's test passing
+and one of those failing it says `Q1's test now passes and F3's fails: they may contradict` (the exit code is
+unchanged); decide which one holds. `arnx check --json` prints the result as JSON
 (each project's passed and failed tests, the overall result, the changed files) for programs and coding agents.
 
 Tests an older arnx kept inside your projects (`tests/arnx/`, with expected-fail markers) are in your own test run:

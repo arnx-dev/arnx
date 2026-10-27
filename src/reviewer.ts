@@ -10,19 +10,20 @@ import type { Billed, Brain, Totals } from "./brain";
 import { inPool } from "./challenge";
 import { shallowKind } from "./shallow";
 import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, withRole } from "./events";
-import { added, type Change, describe, EMPTY_TREE, filesAt, git, removed, resolveChange, sliceDiff, someNames,
-  untrackedLine } from "./change";
+import { added, type Change, describe, describeBlanked, EMPTY_TREE, filesAt, removed, resolveChange, sliceDiff,
+  someNames, untrackedLine } from "./change";
 import { loadReviewFile, type ReviewConfig, reviewConfigPath, secretPinsOf } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
 import { huntParts } from "./hunt";
 import { projectIndex } from "./indexer";
 import { closers } from "./interrupt";
 import { addUsage, type AgentModel, allPrices, FallbackJson, type JsonModel, type ModelUse, newUse,
-  type Trace } from "./llm";
+  type Trace, unpricedModels } from "./llm";
 import { LocalBrain } from "./localbrain";
 import { changeEditsPrompts, PROMPTS_EDITED, promptsFor } from "./userprompts";
+import { changeEditsAccepted } from "./check";
 import { baseName, funcOf, ownerFile } from "./outcomes";
-import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, withCalls } from "./outage";
+import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, resumes, withCalls } from "./outage";
 import { CONTEXT_LIMIT, contextPack } from "./context";
 import type { Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
@@ -33,9 +34,9 @@ import type { TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
 import { route } from "./route";
 import { isSecretPath } from "./secrets";
-import { cloudModels, refString, type Settings } from "./settings";
-import { dockerSession, ownTestsInWriteDir, ownTestsProblem, type Round, testRound, typecheckRound, writeDirOf }
-  from "./testround";
+import { cloudModels, modelRefs, refString, type Settings } from "./settings";
+import { collect, dockerSession, ownTestsInWriteDir, ownTestsProblem, type Round, testRound, typecheckRound,
+  writeDirOf } from "./testround";
 import { logUsage } from "./usage";
 import { randomHex } from "./util";
 import { buildInfo, VERSION } from "./version";
@@ -48,16 +49,13 @@ export const PROJECT_CONCURRENCY = 2;
 interface SavedVerdict { verdict: string; reason: string; dependsOn: string | null; judge: string | null;
   model: string; cost: number }
 
-/** The roles whose work a resume does again: the project rounds a failed call stopped, and the judging. */
-const REDONE = new Set(["reviewer", "challenge", "explain", "merge-questions"]);
-
 /** Whether a review's report says a provider outage cut work that a resume does again. A report without one finished:
  * there is nothing to resume. Not once its findings were accepted. */
 export function cutByOutage(rdir: string): boolean {
   if (existsSync(join(rdir, "accepted.json"))) return false;
   try {
     const r = JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")) as { provider_failures?: ProviderFailure[] };
-    return (r.provider_failures ?? []).some((f) => f.kind === "unavailable" && f.roles.some((x) => REDONE.has(x)));
+    return (r.provider_failures ?? []).some(resumes);
   } catch {
     return false;
   }
@@ -169,18 +167,19 @@ export function buildFindings(rnd: Round, report: AgentReport): Finding[] {
 }
 
 /** The project's own test files that mention one of its environment variables, so the reviewer can copy their
- * setup (a database connection, the schema). Read from the working tree; at most `max`. */
-export function envTests(repo: string, cfg: ReviewConfig, max = 6): string[] {
+ * setup (a database connection, the schema). Read from the round's snapshot (`snap`): the files the reviewer can
+ * read, staged and untracked ones included when the review sends them; at most `max`. */
+export function envTests(snap: string, cfg: ReviewConfig, max = 6): string[] {
   const names = Object.keys(cfg.env);
-  if (!names.length) return [];
+  if (!names.length || !existsSync(join(snap, cfg.workdir))) return [];
   const adapter = adapterFor(cfg);
-  const files = git(repo, ["ls-files", "-z", "--", cfg.workdir === "." ? "." : cfg.workdir]).split("\0")
-    .filter((p) => p && adapter.isTestFile(posix.basename(p)) && !isSecretPath(p));
+  const files = collect(snap, cfg.workdir === "." ? "" : cfg.workdir, /./)
+    .filter((p) => adapter.isTestFile(posix.basename(p)) && !isSecretPath(p));
   const out: string[] = [];
   for (const p of files) {
     let body: string;
     try {
-      body = readFileSync(join(repo, p), "utf8");
+      body = readFileSync(join(snap, p), "utf8");
     } catch {
       continue;
     }
@@ -236,9 +235,13 @@ export async function runReview(repo: string, o: { settings: Settings;
   if (change.leftOut) {
     o.progress?.(`left out ${change.leftOut.length} accepted test file(s) not committed yet`);
   }
+  if (change.blanked) o.progress?.(`comment lines blanked as secret-looking: ${describeBlanked(change.blanked)}`);
   // The local brain reads .arnx/prompts.toml from the working tree: a change that edits it is reviewed with its own.
   const promptsEdited = !o.brain && changeEditsPrompts(repo, change);
   if (promptsEdited) o.progress?.(PROMPTS_EDITED);
+  // Elsewhere (a fresh clone, CI) check trusts the committed pins: an edit of accepted tests shows only here.
+  const acceptedEdited = changeEditsAccepted(repo, change);
+  if (acceptedEdited.length) o.progress?.(`this change edits accepted tests: ${someNames(acceptedEdited, 5)}`);
   const routing = route(file, change.files, s.maxProjects);
   if (!routing.routed.length) {
     const paths = routing.uncovered.map((u) => `${u.path} (${u.reason})`).join(", ");
@@ -372,7 +375,6 @@ export async function runReview(repo: string, o: { settings: Settings;
       const outDir = file.legacy ? rdir : join(rdir, "projects", cfg.name);
       const scope = file.legacy ? { owned: change.files, used: [] } : { owned, used };
       const projectBudget = s.reviewBudgetUsd * AGENT_SHARE / n;
-      const env = envTests(repo, cfg);
       const opts = { brain, budgetUsd: projectBudget, writeDir, runs: s.runs, outDir,
         sessionFactory: o.sessionFactory ?? dockerSession, progress: o.progress, coverage: scope.owned,
         untracked: !!change.withUntracked,
@@ -396,8 +398,8 @@ export async function runReview(repo: string, o: { settings: Settings;
             if (!r.index) o.progress?.(`${cfg.name} (${i + 1}/${n}): no code index (${clip(r.reason ?? "", 80)}); context by names`);
             index = r.index;
           }
-          return { kind: "review" as const, input: { cfg, diff, scope, scoped: !file.legacy, envTests: env,
-            maxQuestions: s.maxQuestions, dbNames: databaseEnv(cfg.env, cfg.services),
+          return { kind: "review" as const, input: { cfg, diff, scope, scoped: !file.legacy,
+            envTests: envTests(snap, cfg), maxQuestions: s.maxQuestions, dbNames: databaseEnv(cfg.env, cfg.services),
             // Part hunters build their context packs from the snapshot; with an index they get them built here.
             ...(o.hunt ? { hunt: { context: contextPack(snap, diff, scope.owned, searchDirs, CONTEXT_LIMIT, index),
               root: snap, searchDirs, ...(index ? { parts: huntParts(snap, cfg, diff, scope.owned, searchDirs, index) }
@@ -510,7 +512,8 @@ export async function runReview(repo: string, o: { settings: Settings;
       for (const [testId, fx] of Object.entries(rnd.fixProof?.tests ?? {})) {
         const t = passedById.get(testId);
         fixProof.push({ testId, project: cfg.name, file: t ? ownerFile(t.fileAttr, Object.keys(rnd.files)) : null,
-          beforeStatus: fx.status, beforeRuns: fx.runs, beforeDetail: fx.detail });
+          beforeStatus: fx.status, beforeRuns: fx.runs, beforeDetail: fx.detail,
+          ...(fx.asText ? { asText: true as const } : {}) });
       }
       if (rnd.typecheck) typecheck.push(rnd.typecheck);
       if (kept) keptRound.add(cfg.name);
@@ -608,6 +611,11 @@ export async function runReview(repo: string, o: { settings: Settings;
       if (i >= 0) usage[i] = mergeUse(usage[i]!, u);
       else usage.push(u);
     }
+    // A model arnx has no price for ran with its cost unknown: its entry says so.
+    if (!label) {
+      const unpriced = new Set(unpricedModels(s, modelRefs(s)).map((m) => m.ref));
+      for (const u of usage) if (unpriced.has(u.model)) u.unpriced = true;
+    }
     const first = routing.routed[0]!.project;
     // arnx cloud's models fail on its side: only a round's stop says so, and its vendor is never named.
     const failures = label ? [cloudFailure(projectStats.map((p) => p.stop ?? "end_turn"))].filter((f) => f !== null)
@@ -620,10 +628,12 @@ export async function runReview(repo: string, o: { settings: Settings;
       promptVersion: brain.version,
       ...(brain.overrides ? { promptOverrides: brain.overrides.keys, promptsHash: brain.overrides.hash } : {}),
       ...(promptsEdited ? { promptsFileEdited: true as const } : {}),
+      ...(acceptedEdited.length ? { acceptedTestsEdited: acceptedEdited } : {}),
       findings, questions: questions.slice(0, s.maxQuestions),
       flaky, errors, passed, testsWritten: written, missingRuns, notSent: [...notSent].sort(),
       ...(change.ignored ? { ignoredChanged: change.ignored } : {}),
       ...(change.lockfiles ? { lockfilesChanged: change.lockfiles } : {}),
+      ...(change.blanked ? { blankedLines: change.blanked } : {}),
       ...(change.untrackedIncluded ? { untrackedIncluded: change.untrackedIncluded } : {}),
       ...(change.untrackedLeftOut ? { untrackedLeftOut: change.untrackedLeftOut.length } : {}),
       costUsd: Math.round(usage.reduce((a, u) => a + u.costUsd, 0) * 10_000) / 10_000, usage,

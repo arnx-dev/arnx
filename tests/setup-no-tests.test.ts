@@ -169,3 +169,39 @@ test("a test_command with {targets} inside quotes is refused: the report options
     "    test_command: sh -c \"cargo nextest run {targets}\"\n";
   expect(said("", rust)).toContain("{targets} is inside quotes");
 });
+
+test("a test_command with {targets} inside parentheses is refused: the report options would land after the `)`", () => {
+  const said = (c: string, yaml = YAML) => {
+    try {
+      parseReviewFile(yaml.replace("python -m pytest -q {targets}", c));
+      return "";
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  for (const c of ["(cd app && python -m pytest {targets})", "make && (cd app && python -m pytest {targets} -x)",
+    "echo $(python -m pytest {targets})", "(cd app && python -m pytest -k \"a)\" {targets})"]) {
+    expect([c, said(c)]).toEqual([c, expect.stringContaining("{targets} is inside parentheses")]);
+  }
+  expect(said("(cd app && python -m pytest {targets})")).toBe("review.yaml: projects.app.test_command: {targets} is " +
+    "inside parentheses: the report options arnx adds at the end would follow the `)`, so no report is written. " +
+    "Leave the runner and {targets} outside them (cd app && <runner> {targets})");
+  for (const c of ["(make build) && python -m pytest {targets}", "python -m pytest -k \"f(x)\" {targets}",
+    "python -m pytest -k 'a (b' {targets}", "python -m pytest -k a\\(b {targets}",
+    "python -m pytest $(cat args.txt) {targets}"]) {
+    expect([c, said(c)]).toEqual([c, ""]);
+  }
+  // Quotes say it once: the message about quotes.
+  expect(said("sh -c \"(python -m pytest {targets})\"")).not.toContain("parentheses");
+  // Same runners as quotes: node's options go in at --test, inside the parentheses with it.
+  const ts = (runner: string, c: string) => "version: 1\nprojects:\n  app:\n    root: .\n    language: typescript\n" +
+    `    runner: ${runner}\n    image: node:22\n    test_command: "${c}"\n`;
+  for (const [runner, c] of [["jest", "npx jest {targets}"], ["vitest", "npx vitest run {targets}"],
+    ["bun", "bun test {targets}"]]) {
+    expect(said("", ts(runner!, `(cd web && ${c})`))).toContain("{targets} is inside parentheses");
+  }
+  expect(said("", ts("node", "(cd web && node --test {targets})"))).toBe("");
+  const rust = "version: 1\nprojects:\n  app:\n    root: .\n    language: rust\n    image: rust:1\n" +
+    "    test_command: (cd core && cargo nextest run {targets})\n";
+  expect(said("", rust)).toContain("{targets} is inside parentheses");
+});

@@ -5,12 +5,14 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirS
   writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
+import { parseDocument } from "yaml";
 import { StopRound, Workspace } from "./agent";
 import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { AdapterId, TestResult } from "./adapters/types";
-import { filesAt, hasCommits, snapshot, type Withheld, workingTreeFiles } from "./change";
+import { type Blanked, describeBlanked, filesAt, hasCommits, snapshot, takeSnapshot, type Withheld, workingTreeFiles }
+  from "./change";
 import {
   loadReviewFile, parseReviewFile, projectDigest, readSecretPins, type ReviewConfig, reviewConfigPath, type ReviewFile,
   secretPinsOf, secretPinsYaml, stamp, stampFile,
@@ -34,7 +36,7 @@ import { loadSettings, refString, type Settings, settingsPath } from "./settings
 import { runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
 import { SOURCE } from "./untested";
 import { otherLanguageOf } from "./languages";
-import { fileReferences, usesHints } from "./usescheck";
+import { fileReferences, mapHints, type UsesHint, usesHints } from "./usescheck";
 import { agentUse, logUsage } from "./usage";
 import { randomHex } from "./util";
 import { VERSION } from "./version";
@@ -380,6 +382,8 @@ export interface SetupResult {
   projects: ProjectProof[];
   /** Files left out of the snapshot because they hold key-shaped text the user has not allowed. */
   withheld: Withheld[];
+  /** Source files kept with comment lines blanked: their only such text was in comments. */
+  blanked: Blanked[];
   /** The failing tests (outside known_failing) of the last suite that ran with some tests passing: setup got the
    * suite running, the current code fails them. Empty when the last run never got that far. */
   failing: string[];
@@ -417,6 +421,7 @@ export function neededText(files: NeededFile[]): string {
 /** Withheld files for a person or an agent: path, what looks like a key, and its line. */
 export const describeWithheld = (w: Withheld[]) => w.map((x) => `${x.path} (${x.label}, line ${x.line})`).join(", ");
 
+
 /** Up to `max` names, then "…". */
 const few = (xs: string[], max = 3) => xs.slice(0, max).join(", ") + (xs.length > max ? ", …" : "");
 
@@ -443,9 +448,11 @@ const yamlSchema = (extra: Record<string, unknown> = {}, required: string[] = ["
 export const TRY_PROJECT: Tool = {
   name: "try_project",
   description: "Validate a review.yaml proposal, build one project's environment and run that project's existing test " +
-    "suite. Pass the whole file and the project's name (optional when the file has one project). Returns whether the " +
-    "suite runs, the counts and the end of the output.",
-  input_schema: yamlSchema({ project: { type: "string" } }),
+    "suite. Pass the whole file as yaml and the project's name (optional when the file has one project); or, after " +
+    "a whole file, the project's name and project_yaml: only that project's settings (what goes under " +
+    "projects.<name>), which replace them in the last whole file. Returns whether the suite runs, the counts and the " +
+    "end of the output.",
+  input_schema: yamlSchema({ project: { type: "string" }, project_yaml: { type: "string" } }, []),
 };
 
 export const PROPOSE: Tool = {
@@ -639,7 +646,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     proven: new Map<string, string>(), attempts: 0, proofs: new Map<string, ProjectProof>(),
     final: null as ReviewFile | null, lastFailing: new Map<string, { env: string; files: string[] }>(),
     failing: [] as string[], failingProject: null as string | null, problem: "", needed: null as NeededFile[] | null,
-    usesChecked: false };
+    usesChecked: false, pathsChecked: false, pathHints: [] as UsesHint[],
+    lastFile: null as string | null };
   const tmp = tempDir("arnx-setup-");
   // Docker steps of this setup, with their durations.
   dockerSteps.log = (line) => {
@@ -669,7 +677,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     // Files the user allowed although they look like secrets: the approved file's, or a seed's before the first setup.
     const pins = existing ? secretPinsOf(existing.raw) : seedPins(repo);
     const untracked = !!o.untracked;
-    const withheld = snapshot(repo, null, snap, pins, { untracked });
+    const { withheld, blanked } = takeSnapshot(repo, null, snap, pins, { untracked });
     // Image keys come from the manifests as they were before any run wrote into the snapshot.
     copyManifests(snap, join(tmp, "manifests"));
     const keyOf = (cfg: ReviewConfig) => envKey(cfg, join(tmp, "manifests"));
@@ -687,8 +695,12 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     if (withheld.length) {
       say(`left out as secret-looking: ${describeWithheld(withheld)}; if one is a test fixture, not a secret, allow ` +
         "it with `arnx allow-secret PATH` and run setup again");
-      emit("setup.withheld", { files: withheld.map((w) => w.path) });
     }
+    if (blanked.length) say(`comment lines blanked as secret-looking: ${describeBlanked(blanked)}`);
+    if (withheld.length || blanked.length) {
+      emit("setup.withheld", { files: withheld.map((w) => w.path), blanked: blanked.map((b) => b.path) });
+    }
+    const current = existing ? readFileSync(reviewConfigPath(repo), "utf8") : "";
     // The agent's file, with the user's allow-list added: the agent may not write one.
     const parse = (args: Record<string, unknown>): { f: ReviewFile; text: string } | string => {
       if (typeof args.yaml !== "string") return "invalid: yaml must be a string";
@@ -703,15 +715,38 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         }
         const text = pins.length ? `${args.yaml.trimEnd()}\n${secretPinsYaml(pins)}` : args.yaml;
         state.lastTried = text;
+        state.lastFile = args.yaml;
         return { f: pins.length ? parseReviewFile(text) : own, text };
       } catch (e) {
         if (!(e instanceof ArnxError)) throw e;
         return `invalid: ${e.message}`;
       }
     };
-    const tryProject = async (args: Record<string, unknown>): Promise<string> => {
+    // One project's settings in place of the whole file: they replace that project's in the last whole file the
+    // agent sent (or the current review.yaml, or an empty one).
+    const wholeFile = (args: Record<string, unknown>): Record<string, unknown> | string => {
+      if (typeof args.project_yaml !== "string") {
+        return typeof args.yaml === "string" ? args : "invalid: pass the whole file as yaml, or the project's " +
+          "settings as project_yaml with its name";
+      }
+      if (typeof args.project !== "string" || !args.project) return "invalid: name the project its settings are for";
+      const doc = parseDocument(state.lastFile ?? (current || "version: 1\nprojects: {}\n"));
+      const block = parseDocument(args.project_yaml);
+      if (doc.errors.length || block.errors.length) {
+        return `invalid: project_yaml is not valid YAML: ${(block.errors[0] ?? doc.errors[0])!.message}`;
+      }
+      if (!doc.has("projects")) return "invalid: the last whole file has no projects; pass the whole file as yaml";
+      // The current review.yaml's stamp and allow-list are arnx's, never the agent's.
+      doc.delete("approved");
+      doc.delete("allow_secret_looking");
+      doc.setIn(["projects", args.project], block.contents);
+      return { yaml: String(doc), project: args.project };
+    };
+    const tryProject = async (input: Record<string, unknown>): Promise<string> => {
       if (state.needed) throw stopped();
       const n = ++state.attempts;
+      const args = wholeFile(input);
+      if (typeof args === "string") return args;
       const parsed = parse(args);
       if (typeof parsed === "string") return parsed;
       const { f } = parsed;
@@ -861,6 +896,21 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         say(`Proposal rejected: ${state.problem}. Retrying...`);
         return `refused:\n${problems.join("\n")}`;
       }
+      // The map's paths are checked once, before any project runs: uses entries wider than meant go back as hints,
+      // and the same file proposed again is accepted. Approved projects must stay as they are, so none is named.
+      if (!state.pathsChecked) {
+        state.pathsChecked = true;
+        state.pathHints = mapHints(f, files.filter((p) => !ignoredFile(p) && !isSecretPath(p)))
+          .filter((h) => !keep.has(h.project));
+        const hints = state.pathHints;
+        emit("setup.paths_check", { projects: f.projects.length,
+          hints: hints.map((h) => ({ project: h.project, kind: h.kind })) });
+        if (hints.length) {
+          say(`${hints.length} uses entr${hints.length === 1 ? "y" : "ies"} too wide; asking the agent`);
+          return "refused once: these uses entries reach further than meant:\n" + hints.map((h) => `- ${h.text}`)
+            .join("\n") + "\nFix them, or propose the same file again to keep it as it is.";
+        }
+      }
       // The rest is right: propose runs each project changed since it was proven, instead of a round trip per project.
       const failed: string[] = [];
       const failedNames: string[] = [];
@@ -889,7 +939,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           const r = await (o.indexer ?? projectIndex)(p, snap, join(o.outDir, "index", p.name));
           if (r.index) indexes.push(r.index);
         }
-        const hints = indexes.length ? usesHints(f, fileReferences(indexes)) : [];
+        // An entry the path check already named is not named again.
+        const hints = (indexes.length ? usesHints(f, fileReferences(indexes)) : [])
+          .filter((h) => !state.pathHints.some((x) => x.project === h.project && x.entry === h.entry));
         emit("setup.uses_check", { indexed: indexes.length, projects: f.projects.length,
           hints: hints.map((h) => ({ project: h.project, kind: h.kind })) });
         if (hints.length) {
@@ -903,7 +955,6 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       return `accepted:\n${describeCoverage(map)}\nStop here and summarise.`;
     };
     const ws = new Workspace(snap, { extra: { try_project: [TRY_PROJECT, tryProject], propose: [PROPOSE, propose] } });
-    const current = existing ? readFileSync(reviewConfigPath(repo), "utf8") : "";
     const detection = detectReadable(repo, untracked);
     const brain: Brain = o.brain ?? new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings),
       prompts: promptsFor(repo) });
@@ -932,7 +983,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     emit("setup.completed", { ok: state.accepted !== null, stop: result.stop, cost_usd: result.costUsd,
       attempts: state.attempts, projects: projects.map((p) => p.name), summary: clip(state.summary, 500) });
     return { ok: state.accepted !== null, yamlText: state.accepted ?? state.lastTried, summary: state.summary,
-      costUsd: result.costUsd, stop: state.needed ? "stopped" : result.stop, notes: result.finalText, projects, withheld,
+      costUsd: result.costUsd, stop: state.needed ? "stopped" : result.stop, notes: result.finalText, projects, withheld, blanked,
       failing: state.accepted !== null ? [] : state.failing, failingProject: state.accepted !== null ? null
         : state.failingProject, problem: state.problem, ...(state.needed ? { needed: state.needed } : {}) };
   } finally {

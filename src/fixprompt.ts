@@ -39,7 +39,7 @@ function causesOf(fs: AcceptResult["review"]["findings"]): { id: string; text: s
 }
 
 /** The accepted tests of a problem: each file once, its test names with their finding ids, then how they fail (one
- * line when they all fail the same way). */
+ * line when they all fail the same way; none without failure text). */
 function testsOf(fs: AcceptResult["review"]["findings"], moved: Record<string, string>): string[] {
   const tests = fs.map((f) => {
     const where = placed(moved, f.file, f.testId);
@@ -48,13 +48,15 @@ function testsOf(fs: AcceptResult["review"]["findings"], moved: Record<string, s
       message: f.message.split("\n")[0]!.slice(0, 160) };
   });
   const same = new Set(tests.map((t) => t.message)).size === 1;
-  const item = (t: (typeof tests)[number]) => `\`${t.name}\` (${t.id})` + (same ? "" : ` fails with \`${t.message}\``);
+  // A test the runner gave no failure text for is listed without one.
+  const item = (t: (typeof tests)[number]) => `\`${t.name}\` (${t.id})` +
+    (same || !t.message.trim() ? "" : ` fails with \`${t.message}\``);
   const files = [...new Set(tests.map((t) => t.file))];
   const label = tests.length === 1 ? "Accepted test" : "Accepted tests";
   const out = files.length === 1 ? [`- ${label}, in \`${files[0]}\`:`, ...tests.map((t) => `  - ${item(t)}`)]
     : [`- ${label}:`, ...files.flatMap((file) => [`  - in \`${file}\`:`,
       ...tests.filter((t) => t.file === file).map((t) => `    - ${item(t)}`)])];
-  if (same) {
+  if (same && tests[0]!.message.trim()) {
     const who = tests.length === 1 ? "It fails" : tests.length === 2 ? "Both fail" : `All ${tests.length} fail`;
     out.push(`  ${who} with \`${tests[0]!.message}\`.`);
   }

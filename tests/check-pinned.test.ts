@@ -118,7 +118,7 @@ test("check --json gives each project's passed and failed tests and the overall 
   cli.out.length = 0;
   expect(await cli.run("check", "--json", "--quiet")).toBe(1);
   const j = JSON.parse(cli.stdout);
-  expect(j).toEqual({ schema_version: 1, command: "check", result: "fail", exit_code: 1, changed: [], projects: [{ project: "app",
+  expect(j).toEqual({ schema_version: 1, command: "check", result: "fail", exit_code: 1, changed: [], may_contradict: [], projects: [{ project: "app",
     files: [KEPT], no_report: false, no_report_reason: null, log: null, passed: [], skipped: 0,
     accepted: [`${RUN}::test_a`],
     failed: [{ test_id: `${RUN}::test_a`, outcome: "failed", message: "assert False\ntrace", accepted: true }] }] });

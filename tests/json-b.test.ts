@@ -16,6 +16,7 @@ import { junitXml } from "./helpers/junit";
 import { finding, sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
 import { PROJECTS } from "./helpers/yaml";
+import { AWS_KEY } from "./helpers/fakekeys";
 
 const tmp = useTmp();
 const RID = "20261011-a1b2c3";
@@ -158,7 +159,7 @@ test("triage --json draws nothing and changes nothing: the marks and answers as 
 
 test("allow-secret --json: each file's key-like strings by kind and line, never the text", async () => {
   const repo = gitRepo(tmp());
-  const key = "AKIAIOSFODNN7EXAMPLE";
+  const key = AWS_KEY;
   writeFileSync(join(repo, "detect.py"), `A = 1\nAWS = '${key}'\n`);
   const cli = new Cli({ cwd: repo });
   expect(await cli.run("allow-secret", "detect.py", "--json")).toBe(0);
@@ -197,7 +198,7 @@ exit 0
     expect(json(dry)).toEqual({ schema_version: 1, command: "env", result: "ok", exit_code: 0, dry_run: true,
       keep_days: 7, removed: [{ tag: "arnx-env:old1", project: "main", age_days: 30, size: "5GB" },
         { tag: "arnx-env:busy", project: "main", age_days: 30, size: "2GB" }], failed: [], unlabelled: 1,
-      cache_records: 0, cache_size: "0MB" });
+      cache_records: 0, cache_size: "0MB", cache_not_found: 0 });
     const real = new Cli({ cwd: repo });
     expect(await real.run("env", "prune", "--keep-days", "3", "--json")).toBe(2);
     expect(json(real)).toMatchObject({ result: "fail", exit_code: 2, dry_run: false, keep_days: 3,

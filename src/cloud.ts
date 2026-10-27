@@ -5,7 +5,6 @@
 // set, how to use them instead. A network failure does not prove arnx cloud is closed: only its explicit `not_open`
 // answer says so (exit 2).
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { hostname } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { ArnxError, SetupRequired } from "./errors";
 import { CLOUD_URL, type Env, missingKeys, type ModelsMode, type Settings } from "./settings";
@@ -373,8 +372,9 @@ export async function deviceLogin(url: string, env: Env, d: LoginDeps): Promise<
   const now = d.now ?? Date.now;
   const sleep = d.sleep ?? wait;
   const client = new CloudClient(url, { ...(d.fetch ? { fetch: d.fetch } : {}), sleep });
+  // The device is named by arnx's version and the OS only: the machine's own name is never sent.
   const start = await client.call<DeviceLogin>("POST", "/v1/auth/device",
-    { cli_version: VERSION, device_name: hostname().slice(0, 128) });
+    { cli_version: VERSION, device_name: `arnx ${VERSION} on ${process.platform}` });
   d.say("Sign in to arnx cloud");
   d.say(`  1. Open: ${start.verification_uri}`);
   d.say(`  2. Enter code: ${start.user_code}`);

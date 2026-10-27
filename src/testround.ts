@@ -11,7 +11,7 @@ import { adapterFor } from "./adapters";
 import { bakedError, bakedIn, bakedKey, type BakedCopy, copyOnly, type CopyOnly, copyStopText, rebuildText }
   from "./baked";
 import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
-  fixText, judgeBefore, judgeFix, notChecked, SKIP_REASONS } from "./before";
+  fixText, judgeBefore, judgeFix, notChecked, SKIP_REASONS, textBefore, textFix } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
 import { snapshot } from "./change";
 import { type ReviewConfig, secretPinsOf } from "./config";
@@ -24,6 +24,7 @@ import type { Say } from "./progress";
 import { describeTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
   typeCheckOf } from "./typecheck";
 import { databaseEnv, dbUntested, untestedFiles } from "./untested";
+import { projectSource, shallowKind } from "./shallow";
 
 export const TOOL_TIMEOUT = 300;
 export const RUN_TIMEOUT = 600;
@@ -382,13 +383,24 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
             if (got) ran(i + 1, got, false, secs);
             else emit("test.run_missing", { project: cfg.name, repeat: i + 1, timed_out: run.timedOut,
               exit_code: run.exitCode, seconds: secs });
-            continue;
+          } else {
+            const rerun = new Set(got.map((t) => ownerFile(t.fileAttr, Object.keys(f))));
+            const kept = first.filter((t) => !rerun.has(ownerFile(t.fileAttr, Object.keys(f))));
+            r.push([...kept, ...got]);
+            ran(i + 1, kept, true);
+            ran(i + 1, got, false, secs);
           }
-          const rerun = new Set(got.map((t) => ownerFile(t.fileAttr, Object.keys(f))));
-          const kept = first.filter((t) => !rerun.has(ownerFile(t.fileAttr, Object.keys(f))));
-          r.push([...kept, ...got]);
-          ran(i + 1, kept, true);
-          ran(i + 1, got, false, secs);
+          // A test that hangs would hang again: the other runs are skipped, each a run without a report, as if it
+          // had timed out there too.
+          if (run.timedOut && i + 1 < o.runs) {
+            say(`final run ${i + 1}/${o.runs} timed out; the other runs skipped`);
+            for (let j = i + 2; j <= o.runs; j++) {
+              r.push(null);
+              emit("test.run_missing", { project: cfg.name, repeat: j, timed_out: false, exit_code: null, seconds: 0,
+                skipped: true });
+            }
+            break;
+          }
         }
         if (o.typecheck && cfg.typecheck) checked = typecheckHere(session, snap, cfg, o.writeDir, say);
         return [a, f, r] as const;
@@ -617,6 +629,17 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
       envChanged = envKey(cfg, snap) !== o.headKey;
       snapshotMs = ms(t0);
       const out: BeforeRun[] = [];
+      // As in the final runs, a test that hangs would hang again: after a run times out the others are skipped, each
+      // a run without a report.
+      const skipRest = (runs: BeforeRun[], i: number, type: "before.run" | "fix_proof.run", files: number) => {
+        o.say(`before the change: run ${i}/${o.runs}${type === "fix_proof.run" ? " of the passing tests" : ""} ` +
+          "timed out; the other runs skipped");
+        for (let j = i + 1; j <= o.runs; j++) {
+          runs.push({ results: null, output: "skipped: an earlier run timed out", timedOut: false });
+          emit(type, { project: cfg.name, run: j, files, duration_ms: 0, reported: false, timed_out: false,
+            skipped: true });
+        }
+      };
       for (let i = 1; ids.length && i <= o.runs; i++) {
         if (o.deadline !== undefined && performance.now() >= o.deadline) {
           late = true;
@@ -631,6 +654,10 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
         out.push({ results: ours.length ? ours : null, output: run.output, timedOut: run.timedOut });
         emit("before.run", { project: cfg.name, run: i, files: targets.length, duration_ms: took,
           reported: ours.length > 0, timed_out: run.timedOut });
+        if (run.timedOut && i < o.runs) {
+          skipRest(out, i, "before.run", targets.length);
+          break;
+        }
       }
       for (let i = 1; !late && proofTargets.length && i <= o.runs; i++) {
         if (o.deadline !== undefined && performance.now() >= o.deadline) {
@@ -645,15 +672,26 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
         proofRuns.push({ results: ours.length ? ours : null, output: run.output, timedOut: run.timedOut });
         emit("fix_proof.run", { project: cfg.name, run: i, files: proofTargets.length, duration_ms: took,
           reported: ours.length > 0, timed_out: run.timedOut });
+        if (run.timedOut && i < o.runs) {
+          skipRest(proofRuns, i, "fix_proof.run", proofTargets.length);
+          break;
+        }
       }
       return out;
     }, o.headSnap, o.headKey);
     if (late) return skip("time");
-    return result(() => done(Object.fromEntries(o.findings.map((t) =>
-      [t.testId, judgeBefore(t, ownerFile(t.fileAttr, own), runs, envChanged)]))),
+    // A test that reads one of the project's source files as text and matches it proves no regression and no fix.
+    const source = projectSource(o.headSnap, cfg.workdir, (name) => adapterFor(cfg).isTestFile(name));
+    const asText = (t: TestResult, file: string | null) => file !== null &&
+      shallowKind(o.files[file], funcOf(t), (p) => source(file, p)) === "source-text";
+    return result(() => done(Object.fromEntries(o.findings.map((t) => {
+      const file = ownerFile(t.fileAttr, own), b = judgeBefore(t, file, runs, envChanged);
+      return [t.testId, asText(t, file) ? textBefore(b) : b];
+    }))),
     () => proofLate ? proved({}, "time") : proved(Object.fromEntries(o.proofs.map((t) => {
       const file = ownerFile(t.fileAttr, own);
-      return [t.testId, judgeFix(t, file, file !== null && owners.includes(file) ? runs : proofRuns, envChanged)];
+      const f = judgeFix(t, file, file !== null && owners.includes(file) ? runs : proofRuns, envChanged);
+      return [t.testId, asText(t, file) ? textFix(f) : f];
     }))));
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

@@ -111,7 +111,7 @@ test("with every key, the defaults are the harness, role by role (arnx cloud bui
     answerModel: refString(s.answerModel!) }).toEqual({ ...HARNESS });
   // As arnx cloud's loader checks them: each ref parses with no tables, and has a price in the built-in table.
   for (const ref of Object.values(HARNESS)) {
-    expect(() => costUsd(parseModelRef(ref).model, NO_USAGE, PRICES)).not.toThrow();
+    expect(costUsd(parseModelRef(ref).model, NO_USAGE, PRICES)).not.toBeNull();
   }
 });
 

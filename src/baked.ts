@@ -4,15 +4,19 @@
 // copy is never refreshed. arnx finds such copies by path and content, keeps those the tests reach (a path the commands
 // name, or a symlink under one); when they differ from the code under test it builds the image again from that code,
 // or, when that code is not there yet (the before/after check), refuses. A copy made only to install from
-// (`cp -r packages /opt/deps && bun install`, its links pointing back to /src) is left alone.
+// (`cp -r packages /opt/deps && bun install`, its links pointing back to /src) is left alone. A Python project's own
+// package installed into the image (`pip install .` into site-packages, or an editable install of a copy outside
+// /src) is a copy too when the project's Python imports it from there, as a probe run in the session asks.
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
+import { parse as parseToml } from "smol-toml";
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
-import { docker, dockerSteps, REPORT_DIR } from "./sandbox";
+import { DEFAULT_LIMITS, docker, dockerSteps, REPORT_DIR, runArgv } from "./sandbox";
 import { globRegex } from "./secrets";
+import { randomHex, shQuote } from "./util";
 
 /** A copy of a snapshot folder (`scope`, relative to the repository; "" for the repository) at `root` in the image:
  * `files` are the paths, relative to scope, found under both. */
@@ -200,19 +204,134 @@ function imageHashes(image: string, paths: string[]): Map<string, string> | null
   return out.size ? out : null;
 }
 
+/** The import name of the project's package: pyproject.toml's [project] name, else setup.cfg's [metadata] name, in
+ * the project's folder, then the repository's; `-` becomes `_`. Null when neither names one. */
+export function packageName(cfg: ReviewConfig, snap: string): string | null {
+  for (const dir of [...new Set([projectOf(cfg), ""])]) {
+    let name: unknown;
+    try {
+      name = (parseToml(readFileSync(join(snap, dir, "pyproject.toml"), "utf8")).project as { name?: unknown })?.name;
+    } catch {
+      name = undefined; // no pyproject.toml, or one that does not read
+    }
+    if (typeof name !== "string") {
+      try {
+        const cfgText = readFileSync(join(snap, dir, "setup.cfg"), "utf8");
+        const metadata = /^\[metadata\][ \t]*$([\s\S]*?)(?=^\[|(?![\s\S]))/m.exec(cfgText)?.[1] ?? "";
+        name = /^name[ \t]*[=:][ \t]*(\S+)[ \t]*$/m.exec(metadata)?.[1];
+      } catch {
+        name = undefined;
+      }
+    }
+    if (typeof name === "string" && /^[A-Za-z0-9][\w.-]*$/.test(name)) return name.replaceAll("-", "_");
+  }
+  return null;
+}
+
+/** The package `name` in the snapshot, under the project's folder (shallowest first): a folder of that name holding
+ * Python files, or a module `<name>.py`. Repository paths; null when there is none. */
+function packageInSnapshot(cfg: ReviewConfig, snap: string, name: string): { dir: string } | { module: string } | null {
+  const tests = posix.normalize(posix.join(projectOf(cfg), cfg.testsDir));
+  let level = [projectOf(cfg)];
+  for (let depth = 0; depth < 4 && level.length; depth++) {
+    const next: string[] = [];
+    for (const dir of level) {
+      let names: string[];
+      try {
+        names = readdirSync(join(snap, dir)).sort();
+      } catch {
+        continue;
+      }
+      for (const n of names) {
+        const rel = dir ? `${dir}/${n}` : n;
+        const st = lstatSync(join(snap, rel));
+        if (n === `${name}.py` && st.isFile()) return { module: rel };
+        if (!st.isDirectory() || n.startsWith(".") || PRUNED_NAMES.includes(n) || rel === tests) continue;
+        if (n === name && readdirSync(join(snap, rel)).some((f) => f.endsWith(".py"))) return { dir: rel };
+        next.push(rel);
+      }
+    }
+    level = next;
+  }
+  return null;
+}
+
+// Prints where the package named by argv[1] imports from (its folder for a namespace package), without importing it.
+const PROBE = `import importlib.util, sys
+try:
+    s = importlib.util.find_spec(sys.argv[1])
+except Exception:
+    s = None
+o = s and (s.origin if s.origin not in (None, "namespace") else next(iter(s.submodule_search_locations or []), None))
+print("arnx-package:", o or "")`;
+
+/** Where the project's Python imports `name` from, asked as a test run would (the code under test at /src, the
+ * project's folder, its env, no network); null when the probe fails or finds no package. */
+function packageOrigin(cfg: ReviewConfig, image: string, snap: string, name: string): string | null {
+  const command = `p=$(command -v python3 || command -v python) || exit 1; "$p" -c ${shQuote(PROBE)} ${shQuote(name)}`;
+  const argv = runArgv({ image, name: `arnx-probe-${randomHex(3)}`, network: "none", snapshot: snap,
+    workdir: cfg.workdir, env: cfg.env, command, limits: DEFAULT_LIMITS,
+    user: `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`, runEnv: getAdapter(cfg.language).runEnv });
+  try {
+    const r = docker(argv.slice(1), { timeout: 120 });
+    const origin = /^arnx-package: (\/.*)$/m.exec(r.stdout)?.[1]?.trim();
+    return r.status === 0 && origin ? origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The project's package as the image holds it outside /src, when its Python imports it from there: a copy of the
+ * package's folder in the snapshot (or of its module alone), with the files the image has and their hashes. Says in
+ * docker.jsonl what the probe found. */
+function packageCopy(cfg: ReviewConfig, image: string, snap: string)
+  : { copy: BakedCopy; hashes: Map<string, string> } | null {
+  const name = cfg.language === "python" ? packageName(cfg, snap) : null;
+  const local = name && packageInSnapshot(cfg, snap, name);
+  if (!name || !local) return null;
+  const origin = packageOrigin(cfg, image, snap, name);
+  const log = (copy: string | null, more: Record<string, unknown> = {}) => dockerSteps.log?.({
+    at: new Date().toISOString(), step: "package", project: cfg.name, package: name, origin, copy, ...more });
+  const outside = origin && origin !== "/src" && !origin.startsWith("/src/");
+  const root = !outside ? null : "dir" in local
+    ? (posix.basename(origin) === "__init__.py" ? posix.dirname(origin) : posix.extname(origin) ? null : origin)
+    : posix.basename(origin) === `${name}.py` ? posix.dirname(origin) : null;
+  if (!root) {
+    log(null);
+    return null;
+  }
+  const scope = "dir" in local ? local.dir : posix.dirname(local.module);
+  const wanted = "dir" in local ? scopeFiles(snap, scope, notCode(cfg, snap, scope)) : [`${name}.py`];
+  const hashes = imageHashes(image, wanted.map((f) => inRoot(root, f))) ?? new Map<string, string>();
+  const files = wanted.filter((f) => hashes.has(inRoot(root, f)));
+  if (!files.length) {
+    log(null, { unknown: true });
+    return null;
+  }
+  const copy = { root, scope, files };
+  log(root, { differ: differing([copy], hashes, snap).length });
+  return { copy, hashes };
+}
+
 /** What `image` holds of the snapshot's code that runs reach; null when it holds no such copy, or cannot tell. */
 export function bakedIn(cfg: ReviewConfig, image: string, snap: string): Baked | null {
   const paths = commandPaths(cfg);
   let links: [string, string][] | undefined;
   const copies = findCopies(imageFiles(image), scopesOf(cfg, snap)).filter((c) =>
     reached(c.root, paths, []) || reached(c.root, paths, links ??= imageLinks(image, paths)));
-  if (!copies.length) return null;
-  const hashes = imageHashes(image, copies.flatMap((c) => c.files.map((f) => inRoot(c.root, f))));
-  if (!hashes) {
-    dockerSteps.log?.({ at: new Date().toISOString(), step: "baked", project: cfg.name,
-      roots: copies.map((c) => c.root), unknown: true });
-    return null;
+  const pkg = packageCopy(cfg, image, snap);
+  if (!copies.length && !pkg) return null;
+  const hashes = new Map(pkg?.hashes);
+  if (copies.length) {
+    const found = imageHashes(image, copies.flatMap((c) => c.files.map((f) => inRoot(c.root, f))));
+    if (!found) {
+      dockerSteps.log?.({ at: new Date().toISOString(), step: "baked", project: cfg.name,
+        roots: copies.map((c) => c.root), unknown: true });
+      return null;
+    }
+    for (const [p, h] of found) hashes.set(p, h);
   }
+  if (pkg && !copies.some((c) => c.root === pkg.copy.root)) copies.push(pkg.copy);
   return { copies, differ: differing(copies, hashes, snap) };
 }
 
@@ -222,7 +341,11 @@ export function bakedIn(cfg: ReviewConfig, image: string, snap: string): Baked |
 export function bakedKey(key: string, cfg: ReviewConfig, copies: BakedCopy[], snap: string): string {
   const h = createHash("sha256");
   const wanted = new Set(copies.map((c) => c.scope));
-  for (const { scope, files } of scopesOf(cfg, snap).filter((s) => wanted.has(s.scope))) {
+  const known = scopesOf(cfg, snap);
+  // A package's folder (packageCopy) is a scope of its own, after the project's and the repository's.
+  const own = [...wanted].filter((w) => !known.some((s) => s.scope === w)).sort()
+    .map((scope) => ({ scope, files: scopeFiles(snap, scope, notCode(cfg, snap, scope)) }));
+  for (const { scope, files } of [...known.filter((s) => wanted.has(s.scope)), ...own]) {
     for (const f of files) {
       const rel = inScope(scope, f);
       h.update(`${rel}\0`).update(readFileSync(join(snap, rel))).update("\0");

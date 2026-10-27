@@ -390,9 +390,9 @@ export class Session implements Runner {
     this.closed = true;
     if (!live.delete(this)) return;
     this.dropBox();
-    for (const name of this.boxes) docker(["rm", "-f", name]);
+    for (const name of this.boxes) docker(["rm", "-fv", name]);
     this.boxes.clear();
-    for (const name of this.started) docker(["rm", "-f", name]);
+    for (const name of this.started) docker(["rm", "-fv", name]);
     if (this.networkCreated) docker(["network", "rm", this.network]);
   }
 
@@ -493,7 +493,7 @@ export class Session implements Runner {
     this.box = null;
     if (!box) return;
     try {
-      if (docker(["rm", "-f", box], { timeout: keptBox.dockerSeconds }).status === 0) this.boxes.delete(box);
+      if (docker(["rm", "-fv", box], { timeout: keptBox.dockerSeconds }).status === 0) this.boxes.delete(box);
     } catch {
       // close tries again
     }

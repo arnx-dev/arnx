@@ -176,7 +176,10 @@ export class LocalBrain implements Brain {
         `project exactly as it is.\n<review.yaml>\n${x.current}</review.yaml>`;
     } else if (x.add) {
       user += "\n\nThe current review.yaml is below. Cover what is listed under uncovered where a project can test it; " +
-        `keep every existing project exactly as it is.\n<review.yaml>\n${x.current}</review.yaml>`;
+        "keep every existing project exactly as it is. Try every entry under uncovered again, whatever its reason " +
+        "says: the user may have fixed the cause since setup wrote it, so the reason may be stale. Remove an entry " +
+        "once a project owns or uses its files, and update the reason of one that still cannot be tested." +
+        `\n<review.yaml>\n${x.current}</review.yaml>`;
     }
     let last = 0, unasked: { text: string; turn: number } | null = null;
     const agent = await runAgent(this.m.agentModel, t, { system: this.p.setupSystem(), user, budgetUsd: x.budgetUsd,

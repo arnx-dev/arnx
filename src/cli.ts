@@ -6,12 +6,13 @@ import { unsupportedText } from "./languages";
 import BANNER_ANSI from "../assets/banner.ans" with { type: "text" };
 import BANNER_TEXT from "../assets/banner.txt" with { type: "text" };
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { accept, findAccepted, findReview, makeAnswerRunner, recordChosen } from "./accept";
-import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, failingList, keepEdits,
+import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, contradictionLines,
+  failingList, keepEdits, mayContradict, recordAnswerWatch,
   legacyAccepted, moveOut,
   localPinsPath, TESTS_CHANGED } from "./check";
 import { colorFor, colorLines, paint } from "./color";
@@ -24,13 +25,14 @@ import { type Account, byokHint, CloudClient, credentialsPath, deleteCredentials
   type Fetch, tokenFor, usd } from "./cloud";
 import { dockerSession, suffixReviewCopies } from "./testround";
 import type { SessionFactory } from "./sandbox";
-import { git, repoRoot } from "./change";
-import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, type ReviewFile, reviewConfigPath, withSecretPins }
-  from "./config";
+import { describeBlanked, git, repoRoot } from "./change";
+import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, readSecretPins, type ReviewFile,
+  reviewConfigPath, withoutSecretPins, withSecretPins } from "./config";
 import { getAdapter } from "./adapters";
 import { ArnxError, internalError, SetupRequired } from "./errors";
 import { FILE as IGNORE_FILE, initialIgnore } from "./ignore";
-import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter } from "./llm";
+import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter, unpricedModels,
+  unpricedNote } from "./llm";
 import { exitCode, failureLine, findingStatus, groupsOf, load, neededQuestions, nextSteps, parseMarks, type Review,
   summary, summaryRows, summaryStatus, wrapMarkdown, yourCall } from "./report";
 import { acceptData, checkData, reportTelemetry, reviewData, type Sender, setupData,
@@ -39,18 +41,17 @@ import { acceptData, checkData, reportTelemetry, reviewData, type Sender, setupD
 import { Progress, type Live } from "./progress";
 import { runReview } from "./reviewer";
 import { envOwner, requireDocker } from "./sandbox";
-import { ageDays, type EnvImage, pruneEnv, totalSize } from "./envprune";
+import { ageDays, type CacheRecord, type EnvImage, KEEP_DAYS, oldImages, pruneEnv, totalSize } from "./envprune";
 import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSettings, missingKeys, modelRefs, type ModelsMode,
   modelsMode,
   modelsSetting, recordCloudModels, recordConsent, type Settings, settingsPath, untrackedSetting, withModels,
   writeSettings }
   from "./settings";
-import { providerLines, unusedKeysNote } from "./settings";
+import { type ModelRef, providerLines, unusedKeysNote } from "./settings";
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
-import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, type ProjectProof, runSetup,
-  type SetupResult, stillRed }
-  from "./setup";
+import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile,
+  type ProjectProof, runSetup, type SetupResult, stillRed } from "./setup";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, PROVEN_COPY,
   proofState, REVIEW_FILE, setupPreview, worthALook }
   from "./setupview";
@@ -105,7 +106,7 @@ Prepare, once per repository
   cloud on|off [--yes]                  arnx cloud's models instead of your keys, or back
   login | logout | credits              arnx cloud: sign this machine in or out; the balance
   consent [--cloud] [--yes]             agree now to send code (otherwise asked on the first send)
-  allow-secret PATH...                  send files whose key-like text is a test fixture
+  allow-secret [--remove] PATH...       send files whose key-like text is a test fixture; --remove undoes it
   skill install [--user] [--force]      the arnx skill for coding agents
   prompts [copy KEY]                    the prompts; copy one to .arnx/prompts.toml to edit it
   env prune [--keep-days N] [--all-repos] [--dry-run]
@@ -153,6 +154,8 @@ export interface CliDeps {
   color?: boolean;
   colorErr?: boolean;
   dockerOk(): [boolean, string];
+  /** This repository's images `arnx env prune` would remove (default: envprune's oldImages; tests replace it). */
+  oldImages?: (repo: string) => EnvImage[];
   /** stdout is a terminal a person reads (not a pipe, a log or --json): init's first run shows the banner there. */
   banner?: boolean;
   /** A person at a terminal can answer (stdin and stdout are terminals). */
@@ -197,7 +200,7 @@ const COMMANDS: Record<string, { options: Options; positionals: number }> = Obje
   prompt: { options: {}, positionals: 1 },
   triage: { options: {}, positionals: 1 },
   next: { options: { ...MODELS }, positionals: 0 },
-  "allow-secret": { options: {}, positionals: 1000 },
+  "allow-secret": { options: { remove: { type: "boolean" } }, positionals: 1000 },
   skill: { options: { user: { type: "boolean" }, force: { type: "boolean" } }, positionals: 1 },
   prompts: { options: {}, positionals: 2 },
   env: { options: { "keep-days": { type: "string" }, "all-repos": { type: "boolean" }, "dry-run": { type: "boolean" } },
@@ -230,6 +233,17 @@ async function ask(prompt: string): Promise<string | null> {
     rl.close();
   }
 }
+
+/** env prune's and remove's line on images an older arnx made from the code, whose build cache cannot be found. */
+const olderCacheLine = (k: number) => `${k} image${k === 1 ? "" : "s"} built by an older arnx left build cache arnx ` +
+  "cannot find; `docker builder prune` removes all unused build cache (your choice).";
+
+/** doctor's and setup's line on the images `arnx env prune` would remove. */
+const oldImagesLine = (images: EnvImage[]) => {
+  const one = images.length === 1;
+  return `Images: ${images.length} unused environment image${one ? "" : "s"} (${totalSize(images)}); ` +
+    `arnx env prune removes ${one ? "it" : "them"}`;
+};
 
 export function dockerOk(): [boolean, string] {
   try {
@@ -519,6 +533,14 @@ class Commands {
     }
   }
 
+  /** The one line about models arnx has no price for: they run, their cost unknown and outside the budget cap. */
+  private unpriced(s: Settings, refs: (ModelRef | null | undefined)[]): boolean {
+    const models = unpricedModels(s, refs);
+    const note = unpricedNote(models);
+    if (note) this.d.out(note);
+    return note !== null;
+  }
+
   /** With arnx cloud, the one line about the repository's own prompts (they are not used, nothing of them is sent). */
   private cloudPrompts(repo: string): void {
     if (hasOverrides(repo)) this.d.out(CLOUD_PROMPTS);
@@ -675,6 +697,8 @@ class Commands {
     this.d.out(telemetry);
     if (promptsLine) this.d.out(`Prompts: ${promptsLine}`);
     for (const note of promptNotes) this.d.out(`  ${note}`);
+    const old = checks.some(([ok, name]) => name === "Docker" && ok) ? this.oldImages(repo) : [];
+    if (old.length) this.d.out(oldImagesLine(old));
     this.d.out("");
     const issues = checks.filter(([ok]) => ok === false).length;
     const ready = checks.every(([ok]) => ok);
@@ -697,6 +721,7 @@ class Commands {
         unexplained: coverage.unexplained } } : {}),
       ...(jev && s ? { jev: { on: !!s.jev, key_set: !!this.d.env.JEV_API_KEY, detail: jev } } : {}),
       ...(overrides.length ? { prompts: { overridden: overrides.map((o) => o.key), notes: promptNotes } } : {}),
+      ...(old.length ? { old_images: { count: old.length, size: totalSize(old) } } : {}),
       telemetry: { enabled: telemetry.startsWith("Telemetry: on"),
         reason: telemetry.startsWith("Telemetry: on") ? null
           : telemetry.replace(/^Telemetry: (?:disabled|off) ?/, "").replace(/^\((.*)\)$/, "$1") } });
@@ -830,6 +855,7 @@ class Commands {
     const started = this.clock();
     const cloud = await this.cloudBrain(repo, s, mode);
     if (cloud) this.cloudPrompts(repo);
+    const unpriced = !cloud && this.unpriced(s, [s.reviewer]);
     const result = await this.withProgress(a, (progress) => runSetup(repo, s,
       cloud ? null : this.d.setupModel ?? makeAgentModel(s, this.d.env), { outDir, project, add, progress, failureModel,
         untracked, localPins: localPinsPath(this.d.env, repo),
@@ -839,6 +865,9 @@ class Commands {
       this.d.out(`Left out as secret-looking (not sent, not in the sandbox): ${describeWithheld(result.withheld)}. ` +
         "If one is a test fixture, not a secret: `arnx allow-secret PATH`, then run setup again.");
     }
+    if (result.blanked.length) {
+      this.d.out(`Comment lines blanked as secret-looking (not sent): ${describeBlanked(result.blanked)}.`);
+    }
     const seconds = () => Math.round((this.clock() - started) / 1000);
     const finish = async (code: number, approved: boolean): Promise<number> => {
       await this.sendTelemetry("setup", () => setupData({ languages: projectLanguages(result.yamlText), approved,
@@ -846,7 +875,8 @@ class Commands {
       return code;
     };
     // With arnx cloud the figure is what it billed (its price), not the models' cost.
-    const cost = cloud ? `Billed $${result.costUsd.toFixed(2)} by arnx cloud` : `Cost $${result.costUsd.toFixed(2)}`;
+    const cost = cloud ? `Billed $${result.costUsd.toFixed(2)} by arnx cloud`
+      : unpriced ? "Cost unknown" : `Cost $${result.costUsd.toFixed(2)}`;
     if (!result.ok) {
       const saved = result.yamlText ? this.saveAttempt(repo, result.yamlText) : null;
       const failure = setupFailure(result, s.setupBudgetUsd);
@@ -877,7 +907,8 @@ class Commands {
     this.d.out("");
     this.d.out(approvalScreen(proposed, repo, { proofs: result.projects, untracked }));
     this.d.out("");
-    this.d.out(`Wrote ${REVIEW_FILE} (${minutes(this.clock() - started)}, $${result.costUsd.toFixed(2)})` +
+    this.d.out(`Wrote ${REVIEW_FILE} (${minutes(this.clock() - started)}, ` +
+      `${unpriced ? "cost unknown" : `$${result.costUsd.toFixed(2)}`})` +
       `${notes ? `; notes in ${relative(repo, notes)}` : ""}.`);
     // Nobody is asked: the suites run once more and the file is stamped; what is worth a look comes at the end.
     const r = await this.approveRun(repo, a, project, untracked, { warnings, since: started });
@@ -902,7 +933,18 @@ class Commands {
     const red = projects.reduce((k, p) => k + p.accepted_failing, 0);
     if (red) this.d.out(stillRed(red));
     this.sayWorthALook(repo, file, o);
+    const old = this.oldImages(repo);
+    if (old.length) this.d.out(oldImagesLine(old));
     this.d.out(nextStep(repo));
+  }
+
+  /** This repository's images `arnx env prune` would remove; none when Docker does not answer. */
+  private oldImages(repo: string): EnvImage[] {
+    try {
+      return this.d.oldImages?.(repo) ?? [];
+    } catch {
+      return [];
+    }
   }
 
   /** "Worth a look" after a passing proof: only what applies, nothing when nothing does. */
@@ -1027,6 +1069,7 @@ class Commands {
   /** Pin the key-shaped strings of each file in review.yaml, so snapshots keep it while it holds no others. */
   async allowSecret(a: Args): Promise<number> {
     const repo = this.repo();
+    if (a.values.remove) return this.disallowSecret(repo, a.positionals);
     if (!a.positionals.length) throw new ArnxError("name the files to allow: arnx allow-secret PATH...");
     const pins = a.positionals.map((p) => {
       if (!existsSync(resolve(this.d.cwd, p))) throw new ArnxError(`${p}: no such file`);
@@ -1058,6 +1101,30 @@ class Commands {
     return 0;
   }
 
+  /** allow-secret --remove: the paths' pins out of review.yaml, so their files are withheld again. The files need not
+   * exist any more. A seed left with nothing allowed is removed. */
+  private disallowSecret(repo: string, paths: string[]): number {
+    if (!paths.length) throw new ArnxError("name the files to stop allowing: arnx allow-secret --remove PATH...");
+    const rels = paths.map((p) => {
+      const at = resolve(this.d.cwd, p);
+      const full = existsSync(at) ? realpathSync(at)
+        : existsSync(dirname(at)) ? join(realpathSync(dirname(at)), basename(at)) : at;
+      if (!full.startsWith(repo + sep)) throw new ArnxError(`${p} is outside the repository`);
+      return relative(repo, full).split(sep).join("/");
+    });
+    const path = reviewConfigPath(repo);
+    if (!existsSync(path)) throw new ArnxError(`${rels[0]} is not allowed in ${REVIEW_FILE}; nothing to remove`);
+    const seed = isSeedFile(repo);
+    const text = withoutSecretPins(readFileSync(path, "utf8"), rels);
+    if (seed && readSecretPins(repo).every((p) => rels.includes(p.path))) rmSync(path);
+    else writeFileSync(path, text);
+    this.d.out(`✓ No longer allowed: ${rels.join(", ")} (withheld again from model calls and the sandbox).`);
+    const next = seed ? "arnx setup" : "arnx review";
+    this.d.out(`Next: ${next}`);
+    this.emit("ok", 0, { removed: rels, review_yaml: REVIEW_FILE, next: [next] });
+    return 0;
+  }
+
   /** remove: lists what arnx put in this repository; --yes deletes it. Tracked files are left for `git rm`, accepted
    * tests are kept unless --tests, and nothing outside the repository but its images and pins is touched. */
   async remove(a: Args): Promise<number> {
@@ -1075,11 +1142,12 @@ class Commands {
       return under.length && under.length === t.files ? [t.path.replace(/\/$/, "")] : under.sort();
     });
     const gitLine = gitRm.length ? `git rm -r --quiet ${gitRm.map(shellWord).join(" ")}` : null;
-    const json = (failed: [string, string][]) => ({ dry_run: !yes,
+    const json = (failed: [string, string][], cache: CacheRecord[] = []) => ({ dry_run: !yes,
       deleted: plan.untracked.filter((p) => !failed.some(([f]) => f === p)), tracked: plan.tracked, git_rm: gitLine,
       images: images.map((i) => ({ tag: i.tag, size: i.size })), docker_checked: plan.images !== null,
       pins: plan.pins ? this.shown(plan.pins) : null, kept_tests: plan.keptTests,
-      failed: failed.map(([path, error]) => ({ path, error })) });
+      failed: failed.map(([path, error]) => ({ path, error })),
+      ...(yes ? { cache_records: cache.length, cache_size: totalSize(cache) } : {}) });
     if (!plan.targets.length && !images.length && !plan.pins) {
       this.d.out("Nothing of arnx's in this repository.");
       this.emit("ok", 0, { ...json([]), state: "nothing" });
@@ -1108,20 +1176,21 @@ class Commands {
       this.emit("ok", 0, { ...json([]), state: "listed", next: ["arnx remove --yes"] });
       return 0;
     }
-    const failed = applyRemove(repo, plan);
+    const { failed, cache, cacheNotFound } = applyRemove(repo, plan);
     const done = plan.untracked.length + images.length + (plan.pins ? 1 : 0) - failed.length;
     this.d.out(failed.length ? `Removed ${n(done, "item")}; ${failed.length} could not be removed:`
       : `✓ Removed arnx from this repository${tracked.size ? ", except committed files" : ""}.`);
     for (const [what, why] of failed) this.d.out(`  ${what}: ${why}`);
+    if (cacheNotFound) this.d.out(olderCacheLine(cacheNotFound));
     if (gitLine) say("Remove the committed files in a commit:", `  ${gitLine}`);
     this.d.out(`Kept: ${kept.join("; ")}.`);
-    this.emit(failed.length ? "fail" : "ok", failed.length ? 2 : 0, { ...json(failed), state: "removed" });
+    this.emit(failed.length ? "fail" : "ok", failed.length ? 2 : 0, { ...json(failed, cache), state: "removed" });
     return failed.length ? 2 : 0;
   }
 
   async env(a: Args): Promise<number> {
     if (a.positionals[0] !== "prune") throw new ArnxError("usage: arnx env prune [--keep-days N] [--all-repos] [--dry-run]");
-    const days = (a.values["keep-days"] as string | undefined) ?? "7";
+    const days = (a.values["keep-days"] as string | undefined) ?? String(KEEP_DAYS);
     if (!/^\d+$/.test(days)) throw new ArnxError("--keep-days takes a whole number of days");
     const repo = this.repo();
     const now = Date.now();
@@ -1138,6 +1207,7 @@ class Commands {
         this.d.out(`${dryRun ? "Would remove" : "Removed"} their build cache: ${n(r.cache.length, "record")} ` +
           `(${totalSize(r.cache)}).`);
       }
+      if (r.cacheNotFound) this.d.out(olderCacheLine(r.cacheNotFound));
     } else {
       this.d.out("No environment image to remove.");
     }
@@ -1153,7 +1223,8 @@ class Commands {
       size: i.size });
     this.emit(r.failed.length ? "fail" : "ok", r.failed.length ? 2 : 0, { dry_run: dryRun, keep_days: Number(days),
       removed: r.removed.map(image), failed: r.failed.map(([i, why]) => ({ ...image(i), error: why })),
-      unlabelled: r.unlabelled, cache_records: r.cache.length, cache_size: totalSize(r.cache) });
+      unlabelled: r.unlabelled, cache_records: r.cache.length, cache_size: totalSize(r.cache),
+      cache_not_found: r.cacheNotFound });
     return r.failed.length ? 2 : 0;
   }
 
@@ -1193,6 +1264,7 @@ class Commands {
       return this.reviewWith(repo, s, a, cloud, untracked);
     }
     const agentModel = makeAgentModel(s, this.d.env);
+    this.unpriced(s, [s.reviewer, s.challenger, s.challengerFallback, s.hunter, s.secondHunter]);
     // Verdict calls give up on a stalled attempt sooner than hunt calls (see makeChallenger).
     const challenger = makeChallenger(s, this.d.env);
     const progress = new Progress(this.progressLine, { quiet: a.values.quiet as boolean | undefined,
@@ -1259,6 +1331,7 @@ class Commands {
       live: this.d.live ?? null, cost: costSince() });
     let runner = null;
     let billed = false; // arnx cloud turns the answers into tests: their cost is what it billed
+    let unpriced = false; // the answer model has no price: its cost is unknown
     if (!a.values["no-answers"]) {
       s = await this.agreed(repo, s, mode); // answers are turned into tests by a model
       await this.reprove(repo, a, again);
@@ -1269,6 +1342,7 @@ class Commands {
       } else {
         // Answer rounds use answer_model when set (a cheap model writes a test for a stated behaviour well).
         const agent = makeAgentModel(s.answerModel ? { ...s, reviewer: s.answerModel } : s, this.d.env);
+        unpriced = this.unpriced(s, [s.answerModel ?? s.reviewer]);
         agent.notice = progress.say;
         runner = makeAnswerRunner(repo, loadReviewFile(repo), s, agent, dockerSession, progress.say);
       }
@@ -1318,7 +1392,7 @@ class Commands {
       = [];
     for (const ans of result.answers) {
       const keptCount = Object.values(ans.keep).reduce((n, v) => n + v.size, 0);
-      const cost = `$${ans.costUsd.toFixed(2)}${billed ? " billed" : ""}`;
+      const cost = unpriced ? "cost unknown" : `$${ans.costUsd.toFixed(2)}${billed ? " billed" : ""}`;
       const failing = ans.disagree.map((t) => t.split("::").at(-1)!);
       const rewrite = result.rewrites.find((w) => w.id === ans.qid);
       const label = rewrite ? `${ans.qid} (rewrite of ${rewrite.findings.join(", ")})` : ans.qid;
@@ -1353,6 +1427,9 @@ class Commands {
       } finally {
         cp.stop();
       }
+      // What passes beside each answer test that fails now: a later check names a pair that swapped.
+      recordAnswerWatch(repo, result.review.id, Object.fromEntries(result.answers.map((x) => [x.qid, x.disagree])),
+        result.moved, results);
       const failing = results.flatMap((r) => r.failed.map((t) => ({ project: r.project, t })));
       const passing = results.reduce((n, r) => n + r.passed.length, 0);
       checked = { failing: failing.map(({ project, t }) => ({ project, test_id: t.testId, message: t.message })),
@@ -1589,8 +1666,13 @@ class Commands {
       progress.stop();
     }
     const [text, code] = checkSummary(results);
-    if (json) this.emitRaw(checkJson(results, code));
-    else this.d.out(colorLines(text, paint(!!this.d.color)));
+    const pairs = mayContradict(repo, results);
+    // Said before the summary's Next line, if it has one.
+    const lines = text.split("\n");
+    const at = lines.at(-1)!.startsWith("Next:") ? lines.length - 1 : lines.length;
+    lines.splice(at, 0, ...contradictionLines(pairs));
+    if (json) this.emitRaw(checkJson(results, code, [], pairs));
+    else this.d.out(colorLines(lines.join("\n"), paint(!!this.d.color)));
     await this.sendTelemetry("check", () => checkData(results, code, (performance.now() - started) / 1000));
     return code;
   }
@@ -1788,7 +1870,7 @@ function parse(argv: string[]): Parsed {
 }
 
 export async function main(argv: string[], deps: Partial<CliDeps> = {}): Promise<number> {
-  const d: CliDeps = { cwd: process.cwd(), env: process.env, ask, dockerOk,
+  const d: CliDeps = { cwd: process.cwd(), env: process.env, ask, dockerOk, oldImages,
     interactive: !!(process.stdin.isTTY && process.stdout.isTTY),
     banner: !!process.stdout.isTTY,
     out: (line) => process.stdout.write(line + "\n"), err: (line) => process.stderr.write(line + "\n"),

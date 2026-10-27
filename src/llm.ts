@@ -154,8 +154,10 @@ export interface JsonModel {
   completeJson(system: string, user: string, schema: Record<string, unknown>): Promise<JsonReply>;
 }
 
-/** What one model was used for in a run: calls with known usage, calls billed with unknown usage, tokens and cost. */
-export interface ModelUse extends Usage { model: string; calls: number; unknownCalls: number; costUsd: number }
+/** What one model was used for in a run: calls with known usage, calls billed with unknown usage, tokens and cost.
+ * `unpriced`: arnx has no price for the model, so its cost is unknown (each of its calls is in unknownCalls). */
+export interface ModelUse extends Usage { model: string; calls: number; unknownCalls: number; costUsd: number;
+  unpriced?: boolean }
 
 /** The `model.call` event of one JSON call (tokens and cost as the call was billed; `error` when it failed). */
 function emitJsonCall(ref: string, model: string, t0: number, c: { cost: number; usage: Usage | null; unknown: number;
@@ -191,12 +193,11 @@ export function billedError(message: string, costUsd: number, usage: Usage | nul
   return e;
 }
 
-export function costUsd(model: string, usage: Usage, prices: Prices): number {
+/** What a reply cost; null when arnx has no price for the model: the call then counts as billed with unknown usage,
+ * and no budget cap covers it. */
+export function costUsd(model: string, usage: Usage, prices: Prices): number | null {
   const price = prices[model];
-  if (!price) {
-    throw new SetupRequired(`no price for model ${model}; add it under [prices] in .arnx/config.toml ` +
-      "(arnx needs prices to enforce budgets)");
-  }
+  if (!price) return null;
   const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
   const [pIn, pOut, pRead, pWrite] = (price.length === 9 && prompt > price[4] ? price.slice(5) : price) as number[] as
     [number, number, number, number];
@@ -456,8 +457,8 @@ export class AnthropicJson implements JsonModel {
         throw e;
       }
       tries += reply.attempts?.length ?? 0;
-      unknown += reply.unknownCalls ?? 0;
-      const replyCost = costUsd(this.agent.model, reply.usage, this.prices);
+      const priced = costUsd(this.agent.model, reply.usage, this.prices), replyCost = priced ?? 0;
+      unknown += (reply.unknownCalls ?? 0) + (priced === null ? 1 : 0);
       total += replyCost;
       spend.add(replyCost);
       usage = addUsage(usage, reply.usage);
@@ -549,7 +550,8 @@ export class ResponsesJson implements JsonModel {
       throw e;
     }
     const usage = responsesUsage(data);
-    const cost = costUsd(priced, usage, this.prices);
+    const known = costUsd(priced, usage, this.prices), cost = known ?? 0;
+    if (known === null) unknown += 1;
     spend.add(cost);
     let parsed: Record<string, unknown>, text = "";
     try {
@@ -1040,6 +1042,27 @@ function responsesOpts(p: Provider, s: Settings): { tier: string | null; backgro
   return { tier: p.tier ? s.openaiTier ?? null : null, background: !!p.background && s.openaiTransport !== "stream" };
 }
 
+/** The models of `refs` arnx has no price for: `ref` as usage names it, `name` as [prices] would (with the OpenAI tier
+ * when one applies). They run with their cost unknown, their calls counted as billed with unknown usage. */
+export function unpricedModels(s: Settings, refs: (ModelRef | null | undefined)[]): { ref: string; name: string }[] {
+  const prices = allPrices(s), out = new Map<string, string>();
+  for (const r of refs) {
+    if (!r) continue;
+    const p = providerOfRef(s, r);
+    const tier = p && p.api !== "messages" ? responsesOpts(p, s).tier : null;
+    const name = tier ? `${r.model}@${tier}` : r.model;
+    if (!prices[name]) out.set(refString(r), name);
+  }
+  return [...out].map(([ref, name]) => ({ ref, name }));
+}
+
+/** Said once when a command runs models arnx has no price for. */
+export function unpricedNote(models: { name: string }[]): string | null {
+  if (!models.length) return null;
+  const names = models.map((m) => m.name).join(", "), it = models.length === 1 ? "it" : "them";
+  return `No price for ${names}: cost unknown, and the budget cap does not cover ${it} ([prices] in .arnx/config.toml)`;
+}
+
 /** A second opinion from `first`, and from `second` for any call `first` fails (an error or no reply in time). Its
  * per-model use is kept in `uses`; `lastModel` names the model that gave the latest reply. */
 export class FallbackJson implements JsonModel {
@@ -1090,11 +1113,9 @@ export function makeAgentModel(s: Settings, env: Env): AgentModel {
   const { key, url } = keys(env, p);
   const effort = vendorEffort(p, s.effort);
   if (p.api === "messages") {
-    costUsd(ref.model, NO_USAGE, prices); // fail now, not mid-review, when no price is known
     return new AnthropicAgent(ref.model, effort, key, undefined, messagesOpts(p, url));
   }
   const { tier, background } = responsesOpts(p, s);
-  costUsd(tier ? `${ref.model}@${tier}` : ref.model, NO_USAGE, prices);
   return new ResponsesAgent(new ResponsesJson(ref, url, key, effort, prices,
     { tier, background, ...(p.store !== undefined ? { store: p.store } : {}), ...timing }), effort,
     p.store !== undefined ? { store: p.store } : {});
@@ -1106,7 +1127,6 @@ export function makeJsonModel(ref: ModelRef, s: Settings, env: Env,
                               opts: { attemptSeconds?: number; timeoutAttempts?: number; effort?: string } = {}): JsonModel {
   const prices = allPrices(s);
   const { effort: own, ...timing } = opts;
-  costUsd(ref.model, NO_USAGE, prices);
   const p = providerFor(ref, s);
   const { key, url } = keys(env, p);
   const effort = own ?? vendorEffort(p, s.effort);
@@ -1116,7 +1136,6 @@ export function makeJsonModel(ref: ModelRef, s: Settings, env: Env,
       prices);
   }
   const { tier, background } = responsesOpts(p, s);
-  if (tier) costUsd(`${ref.model}@${tier}`, NO_USAGE, prices);
   return new ResponsesJson(ref, url, key, effort, prices,
     { tier, background, ...(p.store !== undefined ? { store: p.store } : {}), ...timing });
 }

@@ -48,6 +48,20 @@ function approved(): string {
   return repo;
 }
 
+test("a review a provider outage cut: next resumes it", () => {
+  const repo = approved();
+  const rdir = join(repo, ".arnx/reviews/20261014-abcdef");
+  mkdirSync(rdir, { recursive: true });
+  writeFileSync(join(rdir, "state.json"), "{}\n");
+  save({ ...sampleReview(), id: "20261014-abcdef", providerFailures: [{ provider: "myprovider", name: "myprovider",
+    kind: "unavailable", detail: "HTTP 503", calls: 2, failed: 2, roles: ["challenge"], missing: ["challenge"] }] },
+  rdir, "d");
+  expect(whatNext(repo)).toMatchObject({ command: "arnx review --resume", phase: "2. Review",
+    where: "review 20261014-abcdef was cut by a provider outage" });
+  writeFileSync(join(rdir, "accepted.json"), "{}\n");
+  expect(whatNext(repo).command).toBe("fix the bugs");
+});
+
 test("a change over the size limit is next's answer, not 'nothing to review'", () => {
   const repo = approved();
   writeFileSync(join(repo, "svc/big.py"), "X = 1\n".repeat(50_000));
