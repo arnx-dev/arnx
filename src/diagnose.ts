@@ -189,8 +189,8 @@ function sentence(h: Hint, cfg: ReviewConfig): string {
         "unless the code needs a real one from outside";
     case "unresolved-host":
       return `a host name does not resolve${h.detail ? ` (${h.detail})` : ""}. Declared services resolve in the ` +
-        "sandbox, so this host is not one: the test needs the internet (then known_failing, with that reason in " +
-        "notes) or a service the file does not declare";
+        "sandbox, so this host is not one: the test needs the internet (then try the project again unchanged and it " +
+        "is recorded as failing today) or a service the file does not declare";
     case "connection-refused":
       if (service) return `service \`${service.name}\` refuses connections: not ready yet (give it a ready check) or another port`;
       if (LOCAL.test(h.detail.replace(/:\d+$/, "").replace(/^\[|\]$/g, ""))) {

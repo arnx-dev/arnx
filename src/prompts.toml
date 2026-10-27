@@ -309,7 +309,6 @@ projects:
     owns: [<paths whose changes this project tests; default: its root>]
     uses: [<paths it depends on but does not own, such as a shared library directory>]
     notes: [<short facts a test writer needs: how to point the code at the database, what must be stubbed>]
-    known_failing: [<test files that fail for reasons the environment cannot fix, such as needing the internet>]
     tests_dir: <optional: where arnx writes its tests, relative to root; set it only when try_project says the \
 default is not picked up>
 uncovered: [{path: <path pattern>, reason: <why no project tests it: no tests, unsupported language, \
@@ -323,8 +322,9 @@ Rules:
 refused unless listed in allow_env_names, which is only for throwaway values.
 - Propose one project per unit that is tested on its own; put shared code under uses of every project that imports \
 it.
-- List a test file in known_failing only when it fails for a reason the environment cannot fix, and say why in \
-notes.
+- Tests that fail on the current code are recorded one by one as failing today, so leave them in the suite: do not \
+exclude tests in test_command. Fix only what the environment causes; failures that look like the environment come \
+back to you once, and trying the project again unchanged records them with their cause.
 - try_project also places a one-line test in the project's tests_dir and checks the runner runs it. When it does \
 not (jest roots, vitest include or a testMatch that leaves the folder out), set tests_dir to a new, empty subfolder \
 inside a folder the configuration includes (for example __tests__/unit/arnx_generated), never to a folder that \

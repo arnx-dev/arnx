@@ -223,8 +223,8 @@ export const rust: Adapter = {
       "workspace root with --workspace, filtered to the project's crate. Set runner: nextest and " +
       "test_command: cargo nextest run {targets}.",
     "- Tests inside src/ (#[cfg(test)] modules) are reported by the source file that holds them (src/net/http.rs, " +
-      "src/lib.rs for the crate root): when one fails for a reason outside the code, list that file under " +
-      "known_failing with the reason in notes; do not exclude tests with -E in test_command.",
+      "src/lib.rs for the crate root). Do not exclude tests with -E in test_command: failing tests are recorded one " +
+      "by one.",
   ].join("\n"),
   manifests: ["Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml"],
   nestedManifests: true,

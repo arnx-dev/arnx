@@ -1722,7 +1722,7 @@ export function setupFailure(r: SetupResult, budgetUsd: number)
     const more = n - SHOWN_FAILING;
     const ids = r.failing.slice(0, SHOWN_FAILING).join(", ") + (more > 0 ? ` (+${more} more)` : "");
     return { text: `Setup got your suite running, but ${n} test${n === 1 ? " fails" : "s fail"} on the current code: ` +
-      `${ids}.`, json: { kind: "tests", reason: `${r.failingProject}: ${n} failing outside known_failing`,
+      `${ids}.`, json: { kind: "tests", reason: `${r.failingProject}: ${n} failing outside the baseline`,
       failing: r.failing } };
   }
   if (r.needed?.length) {

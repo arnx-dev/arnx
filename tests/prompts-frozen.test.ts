@@ -1,5 +1,6 @@
 // The default prompts live in src/prompts.toml; every prompt built from them is byte for byte what arnx 0.1.2 built
-// from the templates in code (tests/fixtures/prompts-0.1.2.json), and PROMPT_VERSION keeps 0.1.2's value.
+// from the templates in code (tests/fixtures/prompts-0.1.2.json), except the setup task, which 0.1.5 changed (setup
+// records failing tests one by one; tests/fixtures/prompts-0.1.5.json), and so PROMPT_VERSION.
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -8,18 +9,20 @@ import { DEFAULTS, NEEDED, PLACEHOLDERS, placeholdersIn, PROMPT_KEYS, PROMPT_VER
 import { parseOverrides, tomlText } from "../src/userprompts";
 import { promptCases } from "./helpers/promptcases";
 
-const FROZEN = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompts-0.1.2.json"), "utf8")) as
-  Record<string, { sha256: string; text?: string }>;
+type Frozen = Record<string, { sha256: string; text?: string }>;
+const FROZEN = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompts-0.1.2.json"), "utf8")) as Frozen;
+const CHANGED = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompts-0.1.5.json"), "utf8")) as Frozen;
 
-test("PROMPT_VERSION keeps 0.1.2's value", () => {
-  expect(PROMPT_VERSION).toBe("9e0a877404fd");
+test("PROMPT_VERSION has 0.1.5's value: the setup task changed, no review prompt did", () => {
+  expect(PROMPT_VERSION).toBe("a2996516d532");
+  expect(Object.keys(CHANGED)).toEqual(["setupTask", "PROMPT_VERSION"]);
 });
 
-test("every built prompt is byte-equal to 0.1.2's", () => {
+test("every built prompt is byte-equal to 0.1.2's, the setup task to 0.1.5's", () => {
   const cases = promptCases();
   expect(Object.keys(cases)).toEqual(Object.keys(FROZEN));
   for (const [name, text] of Object.entries(cases)) {
-    const want = FROZEN[name]!;
+    const want = CHANGED[name] ?? FROZEN[name]!;
     if (want.text !== undefined) expect(`${name}: ${text}`).toBe(`${name}: ${want.text}`);
     expect(`${name}: ${createHash("sha256").update(text).digest("hex")}`).toBe(`${name}: ${want.sha256}`);
   }
