@@ -21,7 +21,7 @@ import {
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
 import { classify, describeHints, diagnose, firstErrors, firstLine, type Hint, missingLeftOut, npxDownload, npxText,
-  passingApart, unexplainedFiles } from "./diagnose";
+  loadFailure, passingApart, unexplainedFiles } from "./diagnose";
 import type { FailureModel } from "./jev";
 import { ArnxError } from "./errors";
 import { loadIgnore, matcher } from "./ignore";
@@ -594,7 +594,8 @@ export function unexplainedFailing(cfg: ReviewConfig): string[] {
  * its file is named in (`hints`: the run apart, JEV); null when nothing points away from the code. */
 export function causeOf(t: TestResult, cfg: ReviewConfig, snap: string, hints: Hint[] = []): string | null {
   const h = classify(t.message, cfg, snap) ?? hints.find((x) => x.kind !== "genuine-failure" && x.files.includes(t.fileAttr));
-  return h ? `${h.kind}${h.detail ? `: ${h.detail}` : ""}` : null;
+  // A file that does not load is named by its error, which the entry keeps as its first line.
+  return h ? `${h.kind}${h.detail && h.kind !== "does-not-load" ? `: ${h.detail}` : ""}` : null;
 }
 
 /** Why a suite's failures go back to the setup agent before they are recorded: some look like the environment, or
@@ -606,9 +607,13 @@ export function environmentFaults(counts: SuiteCounts, cfg: ReviewConfig)
   if (!hints.length && !most) return null;
   const files = new Set(hints.flatMap((h) => h.files));
   const count = counts.failed.filter((t) => files.has(t.fileAttr)).length;
+  const unloaded = new Set(counts.failed.filter(loadFailure).map((t) => t.fileAttr)).size;
   const lines = [
     ...hints.length ? [`${plural(count, "failing test")} fail${count === 1 ? "s" : ""} on the environment, not the code.`,
       describeHints(hints, cfg)] : [],
+    ...unloaded ? [`${plural(unloaded, "test file")} do${unloaded === 1 ? "es" : ""} not load, so none of ` +
+      `${unloaded === 1 ? "its" : "their"} tests run: recorded, a file that does not load counts as one failure and ` +
+      "hides every test in it."] : [],
     ...most ? [`Most of the suite fails (${counts.failed.length} failing, ${counts.passed} passing): an environment that ` +
       "runs the code passes most of its tests."] : [],
     "Fix what the environment lacks (install, services, env). Failing tests are recorded as failing today, so do not " +

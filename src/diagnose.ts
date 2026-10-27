@@ -1,6 +1,7 @@
 // Hints for the setup agent about why a suite's tests fail, read from the failures themselves: a module that is not
-// installed or not importable, an environment variable read without a default, a host that does not resolve, a
-// connection refused, and tests that pass once the rest of the suite is left out. Each hint quotes the line it comes
+// installed or not importable, a system library or a program missing from the image, an environment variable read
+// without a default, a host that does not resolve, a connection refused, a test file that does not load, and tests
+// that pass once the rest of the suite is left out. Each hint quotes the line it comes
 // from and is only a hint: the agent still reads the output and decides, and arnx changes nothing in the file.
 // A failure that matches no signature gets no hint, so the agent sees it as it did before; a wrong hint is worse than
 // none, which is why every signature here is narrow.
@@ -9,8 +10,9 @@ import { join, posix } from "node:path";
 import type { TestResult } from "./adapters/types";
 import type { ReviewConfig } from "./config";
 
-export type HintKind = "missing-package" | "import-path" | "missing-variable" | "unresolved-host" |
-  "connection-refused" | "order-dependent" | "genuine-failure";
+export type HintKind = "missing-package" | "import-path" | "missing-library" | "missing-program" |
+  "missing-variable" | "unresolved-host" | "connection-refused" | "does-not-load" | "order-dependent" |
+  "genuine-failure";
 
 /** source: who judged it when it is not a signature (the experimental JEV, with its confidence). */
 export interface Hint { kind: HintKind; detail: string; files: string[]; evidence: string; source?: string }
@@ -27,6 +29,26 @@ function lineOf(text: string, index: number): string {
   const start = text.lastIndexOf("\n", index) + 1;
   const end = text.indexOf("\n", index);
   return text.slice(start, end === -1 ? undefined : end).replace(MARKS, "").trim().slice(0, 200);
+}
+
+/** Whether a failing result stands for a whole test file that did not load, so none of its tests ran: pytest's
+ * collection error, or a vitest or node file that failed before its tests (one result named after the file). */
+export function loadFailure(t: TestResult): boolean {
+  if (!failed(t) || !t.fileAttr) return false;
+  if (/^collection failure\b/.test(t.message)) return true;
+  return t.name === t.fileAttr || t.name.endsWith(`/${t.fileAttr}`) || t.fileAttr.endsWith(`/${t.name}`);
+}
+
+/** The line of a failure that says what went wrong: its first line that says something, except under pytest's
+ * "collection failure" header, where it is the traceback's last "E" line (the exception the import raised). */
+export function errorLine(message: string): string {
+  const lines = message.split("\n");
+  if (/^collection failure\b/.test(lines[0] ?? "")) {
+    const rest = lines.slice(1);
+    const line = rest.filter((l) => /^E\s/.test(l)).at(-1) ?? rest.find((l) => l.trim());
+    if (line) return line.replace(MARKS, "").trim().slice(0, 200);
+  }
+  return firstLine(message);
 }
 
 /** Whether a Python top-level module name is a file or folder of the repository, at its root or on the way to the
@@ -53,6 +75,12 @@ export function classify(message: string, cfg: ReviewConfig, snap: string): Omit
     const name = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!;
     if (name.startsWith("node:")) return null;
     return { kind: "missing-package", detail: name, evidence: lineOf(message, m.index) };
+  }
+  if ((m = /(lib[\w+.-]*?\.so(?:\.[\w.]+)?): cannot open shared object file/.exec(message))) {
+    return { kind: "missing-library", detail: m[1]!, evidence: lineOf(message, m.index) };
+  }
+  if ((m = /spawn (\S+) ENOENT|\bsh: \d+: (\S+): not found|(?:^|\s)(?:ba)?sh: ([\w./-]+): command not found/.exec(message))) {
+    return { kind: "missing-program", detail: (m[1] ?? m[2] ?? m[3])!, evidence: lineOf(message, m.index) };
   }
   // os.environ["X"] raises from os.py; a KeyError on any other mapping is not about the environment.
   if ((m = /KeyError: '([A-Za-z_][A-Za-z0-9_]*)'/.exec(message)) && /raise KeyError\(key\) from None/.test(message)) {
@@ -126,7 +154,7 @@ export function firstErrors(results: TestResult[] | null, cfg: ReviewConfig): st
     if (!failed(t) || !t.fileAttr || first.has(t.fileAttr) || cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))) {
       continue;
     }
-    const line = firstLine(t.message);
+    const line = errorLine(t.message);
     if (line) first.set(t.fileAttr, line);
   }
   const files = [...first.keys()].sort();
@@ -136,12 +164,14 @@ export function firstErrors(results: TestResult[] | null, cfg: ReviewConfig): st
     files.slice(0, FIRST_ERRORS_MAX).map((f) => `- ${f}: ${first.get(f)}`).join("\n");
 }
 
-/** Hints for the failures outside known_failing, one per kind and detail, with the files they come from. */
+/** Hints for the failures outside known_failing, one per kind and detail, with the files they come from. A file that
+ * does not load and matches no signature gets a hint of its own, named by its error: it hides every test in it. */
 export function diagnose(results: TestResult[] | null, cfg: ReviewConfig, snap: string): Hint[] {
   const hints = new Map<string, Hint>();
   for (const t of results ?? []) {
     if (!failed(t) || cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))) continue;
-    const h = classify(t.message, cfg, snap);
+    const h = classify(t.message, cfg, snap) ??
+      (loadFailure(t) ? { kind: "does-not-load" as const, detail: errorLine(t.message), evidence: "" } : null);
     if (!h) continue;
     const key = `${h.kind}\0${h.detail}`;
     const seen = hints.get(key) ?? { ...h, files: [] };
@@ -184,6 +214,17 @@ function sentence(h: Hint, cfg: ReviewConfig): string {
         ? `\`${h.detail}\` is in the repository but cannot be imported: an import path problem (working directory, ` +
           "rootdir or PYTHONPATH), not a missing package"
         : `the tests import \`${h.detail}\`, which is not there: a file a build step generates, or a wrong path`;
+    case "missing-library":
+      return `system library \`${h.detail}\` is not in the image: install the system package that provides it ` +
+        "(apt-get on Debian images, apk on Alpine) in install, or use an image that has it";
+    case "missing-program":
+      return `program \`${h.detail}\` is not installed where the tests run: install it in install. A server the ` +
+        "test starts itself (redis-server, postgres) must be in the image too: a declared service runs in its own " +
+        "container";
+    case "does-not-load":
+      return `test files do not load (\`${h.detail}\`), so none of their tests run; recorded, each would hide every ` +
+        "test in it. Make them load: install what they import (a package, a system library, a program), set what " +
+        "they read when imported, or fix the import path";
     case "missing-variable":
       return `variable \`${h.detail}\` is read without a default and is not set: give it a test value in env, ` +
         "unless the code needs a real one from outside";

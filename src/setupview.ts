@@ -3,7 +3,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, filesAt, git, leftOutUntracked, resolveChange, someNames, untrackedLine } from "./change";
-import { type Baseline, BASELINE_FILE, describeBaselineChanges, parseBaseline, readBaseline } from "./baseline";
+import { type Baseline, BASELINE_FILE, type BaselineTest, describeBaselineChanges, parseBaseline, readBaseline } from "./baseline";
 import { fileDigest, isProven, parseReviewFile, readSecretPins, type ReviewFile, secretPinsOf } from "./config";
 import { detect } from "./detect";
 import { ArnxError } from "./errors";
@@ -142,22 +142,39 @@ export function worthALook(file: ReviewFile, repo: string, o: { proofs?: Project
   return lines;
 }
 
+/** The causes and flaky tests among `tests`, most first: "2 connection-refused: db; 1 flaky". */
+function causes(tests: BaselineTest[]): string[] {
+  const groups = new Map<string, number>();
+  for (const t of tests) {
+    const k = t.flaky ? "flaky" : t.cause === "does-not-load" ? undefined : t.cause;
+    if (k) groups.set(k, (groups.get(k) ?? 0) + 1);
+  }
+  const why = [...groups].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`);
+  if (groups.size > 3) why.push("…");
+  return why;
+}
+
 /** One line per project with tests in the baseline: how many fail today, and the causes and flaky tests among them
- * (the rest fail on the code as it is). */
+ * (the rest fail on the code as it is); and one for the test files that do not load, which hide all their tests. */
 export function baselineLines(file: ReviewFile, base: Baseline): string[] {
   const out: string[] = [];
   for (const p of file.projects) {
-    const tests = base.get(p.name) ?? [];
-    if (!tests.length) continue;
-    const groups = new Map<string, number>();
-    for (const t of tests) {
-      const k = t.flaky ? "flaky" : t.cause;
-      if (k) groups.set(k, (groups.get(k) ?? 0) + 1);
+    const all = base.get(p.name) ?? [];
+    const tests = all.filter((t) => !t.load);
+    const loads = all.filter((t) => t.load);
+    if (tests.length) {
+      const why = causes(tests);
+      out.push(`${p.name}: ${tests.length} test${tests.length === 1 ? " fails" : "s fail"} today, recorded in ` +
+        `${BASELINE_FILE}${why.length ? ` (${why.join("; ")})` : ""}`);
     }
-    const why = [...groups].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`);
-    if (groups.size > 3) why.push("…");
-    out.push(`${p.name}: ${tests.length} test${tests.length === 1 ? " fails" : "s fail"} today, recorded in ` +
-      `${BASELINE_FILE}${why.length ? ` (${why.join("; ")})` : ""}`);
+    if (loads.length) {
+      const files = [...new Set(loads.map((t) => t.file))].sort();
+      const why = causes(loads);
+      const some = files.slice(0, 3).join(", ") + (files.length > 3 ? `, and ${files.length - 3} more` : "");
+      out.push(`${p.name}: ${files.length} test file${files.length === 1 ? " does" : "s do"} not load, so none of ` +
+        `${files.length === 1 ? "its" : "their"} tests run: ${some}${why.length ? ` (${why.join("; ")})` : ""}; ` +
+        `recorded in ${BASELINE_FILE}`);
+    }
   }
   return out;
 }

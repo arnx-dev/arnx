@@ -100,7 +100,10 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: baseline", () => {
     const recorded = readBaseline(repo).get("main")!;
     expect(recorded.map((t) => t.file).sort()).toEqual(["tests/test_broken.py", "tests/test_calc.py"]);
     expect(recorded.find((t) => t.file === "tests/test_calc.py")!.id).toBe("tests/test_calc.py::test_sub");
-    expect(recorded.find((t) => t.file === "tests/test_broken.py")!.cause).toBe("missing-package: nonexistent_mod");
+    // A file that does not load is recorded as one, named by the import's error, not pytest's collection header.
+    expect(recorded.find((t) => t.file === "tests/test_broken.py")).toMatchObject({
+      cause: "missing-package: nonexistent_mod", load: true, first: "ModuleNotFoundError: No module named 'nonexistent_mod'" });
+    expect(recorded.find((t) => t.file === "tests/test_calc.py")!.load).toBeUndefined();
     expect(suites[0]!.guarded).toBe(3); // test_add and both test_param cases count again
     expect(changes).toContain("known_failing removed (1 file): 3 of its tests pass and count again");
     expect(loadReviewFile(repo).projects[0]!.knownFailing).toEqual([]);
@@ -137,6 +140,16 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: baseline", () => {
     const [brokenOk, why] = await approveFile(repo, by);
     expect(brokenOk).toBe(false);
     expect(why).toContain("failing outside the baseline");
+  }, 600_000);
+
+  test("node --test: a file that does not load is recorded as one, by its error", async () => {
+    const repo = repoOf("node-load", { ...NODE_FILES, "__tests__/calc.test.js": NODE_FILES["__tests__/calc.test.js"]
+      .replace("sub(5, 3), 2", "sub(5, 0), 5"), "__tests__/broken.test.js": 'require("./not-there-arnx");\n' +
+      'require("node:test")("never", () => {});\n' }, NODE_YAML);
+    const [ok, detail] = await rerecordBaseline(repo, by);
+    expect([ok, detail]).toEqual([true, expect.stringContaining("2 passed")]);
+    expect(readBaseline(repo).get("calc")).toEqual([expect.objectContaining({ file: "__tests__/broken.test.js",
+      load: true, first: expect.stringContaining("Cannot find module './not-there-arnx'") })]);
   }, 600_000);
 
   test("nextest: one failing unit test in src/lib.rs is recorded alone; the crate root's other tests count", async () => {

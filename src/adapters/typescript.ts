@@ -23,8 +23,19 @@ const NODE_REPORTER_PATH = "/src/.arnx-run/arnx-node-reporter.mjs";
 const NODE_REPORTER = `// Written by arnx into a throwaway copy of the repository.
 export default async function* reporter(source) {
   const stacks = new Map();
+  const stderr = new Map();
+  // stderr events name the file relative to the working directory, test events by its absolute path.
+  const stderrOf = (file) => {
+    for (const [k, v] of stderr) if (file === k || file.endsWith("/" + k)) return v;
+    return "";
+  };
   for await (const event of source) {
     const d = event.data ?? {};
+    // What a file wrote to stderr: where node puts the error of a file that fails while loading.
+    if (event.type === "test:stderr") {
+      stderr.set(d.file, (stderr.get(d.file) ?? "") + String(d.message ?? ""));
+      continue;
+    }
     if (event.type === "test:start") {
       const stack = stacks.get(d.file) ?? [];
       stack.length = d.nesting;
@@ -44,7 +55,13 @@ export default async function* reporter(source) {
     const loadFailure = event.type === "test:fail" && d.nesting === 0 && error?.failureType === "testCodeFailure"
       && String(d.file ?? "").endsWith(d.name);
     const outcome = loadFailure ? "error" : event.type === "test:fail" ? "failed" : d.skip || d.todo ? "skipped" : "passed";
-    const message = error ? String(error.cause?.message ?? error.message ?? error) : "";
+    let message = error ? String(error.cause?.message ?? error.message ?? error) : "";
+    // node says only "test failed" for such a file: its error line, then what it wrote to stderr.
+    const err = loadFailure ? stderrOf(String(d.file ?? "")).trim() : "";
+    if (err) {
+      const line = err.split("\\n").map((l) => l.trim()).find((l) => /^[\\w.]*(?:Error|Exception)\\b/.test(l));
+      message = (line ? line + "\\n" : "") + err.slice(-2000);
+    }
     yield JSON.stringify({ name, file: d.file ?? null, outcome, message }) + "\\n";
   }
 }

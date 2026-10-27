@@ -6,14 +6,16 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TestResult } from "./adapters/types";
+import { errorLine, loadFailure } from "./diagnose";
 import { ArnxError } from "./errors";
 
 export const BASELINE_FILE = ".arnx/baseline.json";
 
 /** One test the suite fails today. `first`: the first line of its failure. `cause`: what the failure points to when it
  * looks like the environment, not the code (the setup agent saw it and could not fix it in the sandbox). `flaky`: it
- * failed in one run and passed in another; like any entry, it leaves once it passes. */
-export interface BaselineTest { id: string; file: string; first: string; cause?: string; flaky?: true }
+ * failed in one run and passed in another; like any entry, it leaves once it passes. `load`: the entry is a whole test
+ * file that does not load, so none of its tests run. */
+export interface BaselineTest { id: string; file: string; first: string; cause?: string; flaky?: true; load?: true }
 
 /** Each project's tests, by project name. */
 export type Baseline = Map<string, BaselineTest[]>;
@@ -29,15 +31,16 @@ export const keysOf = (tests: BaselineTest[]) => new Set(tests.map((t) => testKe
 
 const FIRST_MAX = 160;
 
-/** The first line of a failure that says something, clipped. */
+/** The line of a failure that says what went wrong (errorLine), clipped. */
 export function firstOf(message: string): string {
-  const line = message.split("\n").map((l) => l.replace(/^(?:\s|E(?=\s)|>)+/, "").trim()).find(Boolean) ?? "";
+  const line = errorLine(message);
   return line.length > FIRST_MAX ? `${line.slice(0, FIRST_MAX - 1)}…` : line;
 }
 
 /** A failing result as a baseline entry. */
 export const entryOf = (t: TestResult, cause?: string): BaselineTest =>
-  ({ id: t.testId, file: t.fileAttr, first: firstOf(t.message), ...(cause ? { cause } : {}) });
+  ({ id: t.testId, file: t.fileAttr, first: firstOf(t.message), ...(cause ? { cause } : {}),
+    ...(loadFailure(t) ? { load: true as const } : {}) });
 
 const isMap = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -63,11 +66,12 @@ export function parseBaseline(text: string): Baseline {
     if (!Array.isArray(tests)) throw bad(`projects.${name} must be a list of tests`);
     out.set(name, tests.map((t, i) => {
       if (!isMap(t) || typeof t.id !== "string" || !t.id || typeof t.file !== "string" || typeof t.first !== "string" ||
-          (t.cause !== undefined && typeof t.cause !== "string") || (t.flaky !== undefined && t.flaky !== true)) {
-        throw bad(`projects.${name}[${i}] must have id, file and first (and may have cause and flaky: true)`);
+          (t.cause !== undefined && typeof t.cause !== "string") || (t.flaky !== undefined && t.flaky !== true) ||
+          (t.load !== undefined && t.load !== true)) {
+        throw bad(`projects.${name}[${i}] must have id, file and first (and may have cause, flaky: true and load: true)`);
       }
       return { id: t.id, file: t.file, first: t.first, ...(t.cause ? { cause: t.cause } : {}),
-        ...(t.flaky ? { flaky: true as const } : {}) };
+        ...(t.flaky ? { flaky: true as const } : {}), ...(t.load ? { load: true as const } : {}) };
     }));
   }
   return out;

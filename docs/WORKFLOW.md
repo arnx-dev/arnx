@@ -54,9 +54,10 @@ its failure; commit it with `.arnx/review.yaml`. A proof passes while every fail
 tests next to a failing one keep counting. A baseline test that passes again leaves it at the next proof. A test
 failing outside it runs once more, and one that passes then does not fail the proof. A proof never adds to the
 baseline: `arnx setup --baseline` records it again from the suites as they run now (no model, Docker only) and says
-what changed. Failures that look like the environment (a module or service missing, a variable not set, a host that
-does not resolve, or most of the suite failing) go back to the setup agent once; what it cannot fix in the sandbox is
-recorded with its cause. Its hash is part of the stamp, so a hand edit is proven again like one of `review.yaml`. A
+what changed. Failures that look like the environment (a module, system library, program or service missing, a
+variable not set, a host that does not resolve, a test file that does not load, or most of the suite failing) go back
+to the setup agent once; what it cannot fix in the sandbox is recorded with its cause. A test file that does not load
+hides every test in it, so it is recorded as one (`"load": true`) and listed apart under Worth a look. Its hash is part of the stamp, so a hand edit is proven again like one of `review.yaml`. A
 `review.yaml` from before 0.1.5 with `known_failing` keeps working; `arnx setup --baseline` replaces it with the
 failing tests in those files.
 
