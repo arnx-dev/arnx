@@ -134,7 +134,7 @@ test("the snapshot keeps a file whose key is in a comment, with the line blanked
   writeFileSync(join(repo, "src/keys.ts"), `export const K = "${SK}";\n`);
   commit(repo, "keys");
   const snap = join(tmp(), "snap");
-  const { withheld: gone, blanked: lines } = takeSnapshot(repo, null, snap);
+  const { withheld: gone, blanked: lines } = takeSnapshot(repo, null, snap, [], { standIns: false });
   expect(gone.map((w) => w.path)).toEqual(["src/keys.ts"]);
   expect(lines).toEqual([{ path: "src/auth.ts", lines: [2] }]);
   expect(readFileSync(join(snap, "src/auth.ts"), "utf8")).toBe("/**\n\n */\nexport const A = 1;\n");

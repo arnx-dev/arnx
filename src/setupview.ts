@@ -4,7 +4,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, filesAt, git, leftOutUntracked, resolveChange, someNames, untrackedLine } from "./change";
 import { type Baseline, BASELINE_FILE, type BaselineTest, describeBaselineChanges, parseBaseline, readBaseline } from "./baseline";
-import { fileDigest, isProven, parseReviewFile, readSecretPins, type ReviewFile, secretPinsOf } from "./config";
+import { fileDigest, isProven, parseReviewFile, readSecretPins, type ReviewFile, sandboxOnlyOf, secretPinsOf }
+  from "./config";
 import { detect } from "./detect";
 import { ArnxError } from "./errors";
 import { refString, type Settings, untrackedSetting } from "./settings";
@@ -96,6 +97,12 @@ export function approvalWarnings(file: ReviewFile, proofs: ProjectProof[] = []):
   if (allowed.length) {
     checks.push(`${allowed.map((p) => p.path).join(", ")}: allowed although secret-looking; sent to the model and the ` +
       "sandbox");
+  }
+  const sandbox = sandboxOnlyOf(file.raw);
+  if (sandbox.length) {
+    checks.push(`${sandbox.join(", ")}: left out by .arnxignore, but the tests need ` +
+      `${sandbox.length === 1 ? "it" : "them"}; copied into the sandbox, never sent to the model (sandbox_only in ` +
+      "review.yaml)");
   }
   return checks;
 }
@@ -322,7 +329,7 @@ export function describeChanges(old: ReviewFile, now: ReviewFile): string[] {
   }
   if (!now.legacy) {
     // Services are told per project, where they are used.
-    const keys = ["version", "allow_env_names", "uncovered", "allow_secret_looking"]
+    const keys = ["version", "allow_env_names", "uncovered", "allow_secret_looking", "sandbox_only"]
       .filter((k) => !same(old.raw[k], now.raw[k]));
     if (keys.length) out.push(`${keys.join(", ")} changed`);
   }

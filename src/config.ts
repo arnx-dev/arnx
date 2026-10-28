@@ -11,12 +11,12 @@ import { baselineDigest } from "./baseline";
 import { python } from "./adapters/python";
 import type { Adapter, AdapterId } from "./adapters/types";
 import { ArnxError, SetupRequired } from "./errors";
-import { isSecretEnvName, type SecretPin } from "./secrets";
+import { GENERATED, isSecretEnvName, type SecretPin } from "./secrets";
 import { purePosix, pyJson, pyStr, pyTruthy } from "./util";
 
 export const KEYS = new Set(["version", "image", "workdir", "install", "test_command", "services", "env", "notes",
   "known_failing", "tests_dir", "allow_env_names", "approved", "language", "allow_secret_looking", "typecheck",
-  "deps_dir"]);
+  "deps_dir", "sandbox_only"]);
 export const SERVICE_KEYS = new Set(["image", "env", "ready"]);
 export const SERVICE_NAME = /^[a-z][a-z0-9-]{0,30}$/;
 
@@ -111,9 +111,9 @@ function strMap(value: unknown, name: string, problems: string[]): Record<string
 }
 
 function secretNames(env: Record<string, string>, where: string, allow: Set<string>): string[] {
-  return Object.keys(env).filter((k) => isSecretEnvName(k) && !allow.has(k)).map((k) =>
-    `${where}.${k}: looks like a secret; arnx passes no secrets to tests (list it under allow_env_names if it is a ` +
-    "throwaway value)");
+  return Object.keys(env).filter((k) => isSecretEnvName(k) && !allow.has(k) && !GENERATED.test(env[k]!)).map((k) =>
+    `${where}.${k}: looks like a secret; arnx passes no secrets to tests (write arnx:generated for a throwaway value ` +
+    "arnx makes, or list the name under allow_env_names if it holds one)");
 }
 
 /** Python's `== 1`: 1, 1.0 and True. */
@@ -150,7 +150,17 @@ function parseYaml(text: string): unknown {
 }
 
 export const FILE_KEYS = new Set(["version", "services", "allow_env_names", "projects", "uncovered", "approved",
-  "allow_secret_looking"]);
+  "allow_secret_looking", "sandbox_only"]);
+/** Files .arnxignore leaves out that the tests need: setup writes them, each run gets them in its sandbox, and no
+ * model is sent them. */
+export const SANDBOX_KEY = "sandbox_only";
+
+function parseSandbox(value: unknown, problems: string[]): string[] {
+  return strList(value, SANDBOX_KEY, problems).map((p) => rel(p, SANDBOX_KEY, problems));
+}
+
+/** The sandbox-only files of a parsed review.yaml (a project's `raw` is the whole file). */
+export const sandboxOnlyOf = (raw: Raw): string[] => parseSandbox(raw[SANDBOX_KEY], []);
 /** Files the user allowed although they hold key-shaped text; written by `arnx allow-secret`. */
 const SECRET_KEY = "allow_secret_looking";
 const PIN = /^[0-9a-f]{16}$/;
@@ -247,6 +257,8 @@ export function withoutSecretPins(text: string, paths: string[]): string {
 /** The allow-list as YAML to append to a file that has none (setup adds the user's to the agent's file). */
 export const secretPinsYaml = (pins: SecretPin[]) =>
   toYaml({ [SECRET_KEY]: pins.map((p) => ({ path: p.path, matches: [...p.matches] })) });
+/** The sandbox-only files as YAML to append to a file that has none (setup adds them to the agent's file). */
+export const sandboxYaml = (paths: string[]) => toYaml({ [SANDBOX_KEY]: [...paths].sort() });
 export const PROJECT_KEYS = new Set(["root", "language", "runner", "image", "install", "test_command", "services", "env",
   "owns", "uses", "notes", "known_failing", "tests_dir", "install_root", "typecheck", "deps_dir"]);
 
@@ -374,6 +386,7 @@ export function parseReviewFile(text: string): ReviewFile {
   }
   const allow = new Set(strList(raw.allow_env_names, "allow_env_names", problems));
   parsePins(raw[SECRET_KEY], problems);
+  parseSandbox(raw[SANDBOX_KEY], problems);
   if (!("projects" in raw)) {
     const unknown = Object.keys(raw).filter((k) => !KEYS.has(k)).sort();
     if (unknown.length) problems.push(`unknown keys: ${unknown.join(", ")}`);

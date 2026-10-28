@@ -97,6 +97,9 @@ export interface Settings {
   /** Reviews (and setup) send untracked files too (`[review] untracked`, default off: tracked changes only; the
    * --untracked and --no-untracked flags win). */
   untracked: boolean;
+  /** A file holding key-shaped text in code goes to the model and the sandbox with a stand-in for each such string,
+   * the real values kept here (`[review] stand_ins`, default on); off, the file is left out. */
+  standIns: boolean;
   /** With the before/after check on, at most this many tests that passed in every run (per project, by test id) run
    * on the code before the change too, to show the change fixes what they check (`[review] fix_proof_max`, default
    * 20; 0 turns it off). */
@@ -126,7 +129,7 @@ export function settingsPath(repo: string): string {
 function withDefaults(consentAt: string | null, reviewer: ModelRef, challenger: ModelRef): Settings {
   return { consentAt, telemetry: false, reviewer, challenger, effort: "medium", reviewBudgetUsd: 3.0,
     setupBudgetUsd: 3.0, answerBudgetUsd: 0.5, runs: 3, maxQuestions: 5, maxProjects: 4, beforeCheck: true, untracked: false,
-    fixProofMax: 20, acceptedTestsDir: "tests/arnx", context: "names", jev: false, prices: {} };
+    standIns: true, fixProofMax: 20, acceptedTestsDir: "tests/arnx", context: "names", jev: false, prices: {} };
 }
 
 export const HAIKU = "anthropic:claude-haiku-5-5";
@@ -250,6 +253,9 @@ export function loadSettings(repo: string): Settings {
   if (review.untracked !== undefined && typeof review.untracked !== "boolean") {
     throw new ArnxError(".arnx/config.toml: review.untracked: write true or false");
   }
+  if (review.stand_ins !== undefined && typeof review.stand_ins !== "boolean") {
+    throw new ArnxError(".arnx/config.toml: review.stand_ins: write true or false");
+  }
   if (review.context !== undefined && review.context !== "names" && review.context !== "precise") {
     throw new ArnxError(".arnx/config.toml: review.context: write \"names\" or \"precise\"");
   }
@@ -282,6 +288,7 @@ export function loadSettings(repo: string): Settings {
     beforeCheck: review.before_check !== false,
     fixProofMax: fixProofMax === undefined ? 20 : Number(fixProofMax),
     untracked: review.untracked === true,
+    standIns: review.stand_ins !== false,
     acceptedTestsDir: str(review.accepted_tests_dir, "tests/arnx"),
     context: review.context === "precise" ? "precise" : "names",
     jev: setup.jev === true,
@@ -356,6 +363,16 @@ export function untrackedSetting(repo: string): boolean {
   }
 }
 
+/** `[review] stand_ins` from .arnx/config.toml; on when there is no config yet or it cannot be read. */
+export function standInsSetting(repo: string): boolean {
+  try {
+    return !existsSync(settingsPath(repo)) || loadSettings(repo).standIns;
+  } catch (e) {
+    if (e instanceof ArnxError) return true;
+    throw e;
+  }
+}
+
 /** Writes .arnx/config.toml. With `known` (init), the harness's lines for roles that are not on it, and the providers
  * arnx knows after the user's own. */
 export function writeSettings(repo: string, s: Settings, opts: { known?: boolean } = {}): void {
@@ -401,6 +418,7 @@ export function writeSettings(repo: string, s: Settings, opts: { known?: boolean
     ...(s.fixProofMax !== 20 ? [setting(`fix_proof_max = ${s.fixProofMax}`,
       "passing tests per project rerun there to prove a fix (0: off)")] : []),
     ...(s.untracked ? [setting("untracked = true", "send untracked files too")] : []),
+    ...(!s.standIns ? [setting("stand_ins = false", "leave out files with key-shaped text, no stand-ins")] : []),
     setting(`accepted_tests_dir = ${q(s.acceptedTestsDir)}`, "path accepted tests run from; kept in .arnx/tests/"),
     ...(s.context !== "names" ? [setting(`context = ${q(s.context)}`, "follow symbols with a code index")] : []),
     ...(s.jev ? ["", "[setup]", commented("jev = true", "experimental: ask JEV (needs JEV_API_KEY)")] : []),

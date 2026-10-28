@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
 import { git, hasCommits, snapshot } from "./change";
-import { loadReviewFile, type ReviewConfig, secretPinsOf } from "./config";
+import { loadReviewFile, type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
 import { placed } from "./fixprompt";
 import { baseName, runTests, type TestResult } from "./outcomes";
@@ -190,7 +190,7 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       const snap = join(tmp, "repo");
       // The working tree as it is now, fixes included, untracked files too (accepted tests are untracked until
       // committed): no model sees what a check runs.
-      snapshot(repo, null, snap, secretPinsOf(file.raw), { untracked: true });
+      snapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw), untracked: true });
       // The accepted tests and their support files, in place in this copy only.
       cpSync(join(repo, DOME), snap, { recursive: true });
       // Each review's files run apart (reviewGroup); the build log is kept where a failed build's error can point to

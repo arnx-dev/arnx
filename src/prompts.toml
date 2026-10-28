@@ -320,7 +320,10 @@ repository root, * stays in one directory and ** crosses directories.
 
 Rules:
 - Never put real secrets in env. A variable whose name contains KEY, TOKEN, SECRET, PASSWORD or CREDENTIAL is \
-refused unless listed in allow_env_names, which is only for throwaway values.
+refused unless its value is arnx:generated or its name is listed in allow_env_names, which is only for throwaway \
+values. For a value the tests need but no real one, write arnx:generated: arnx sets 64 hex digits \
+(arnx:generated:base64: 32 bytes in URL-safe base64, such as a Fernet key), the same in every variable and service \
+that uses it.
 - Propose one project per unit that is tested on its own; put shared code under uses of every project that imports \
 it.
 - Tests that fail on the current code are recorded one by one as failing today, so leave them in the suite: do not \

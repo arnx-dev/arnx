@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
 import { snapshot } from "./change";
-import { loadReviewFile, secretPinsOf } from "./config";
+import { loadReviewFile, sandboxOnlyOf, secretPinsOf } from "./config";
 import { SetupRequired } from "./errors";
 import { asError, ownerFile, runTests, type TestResult } from "./outcomes";
 import type { Say } from "./progress";
@@ -74,7 +74,7 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
         const snap = join(tmp, "repo");
         // The working tree as it is now, fixes included, untracked files too (accepted tests are untracked until
         // committed): no model sees what a check runs.
-        snapshot(repo, null, snap, secretPinsOf(file.raw), { untracked: true });
+        snapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw), untracked: true });
         // The review's generated files go in as they ran, in place of anything in its tests directory.
         mkdirSync(join(snap, writeDir), { recursive: true });
         for (const rel of collect(snap, writeDir, adapter.writable)) rmSync(join(snap, rel), { force: true });
