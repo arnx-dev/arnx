@@ -53,9 +53,8 @@ import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile,
   type ProjectProof, rerecordBaseline, runSetup, type SetupResult, type SetupRun, stillRed } from "./setup";
-import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, PROVEN_BASELINE, PROVEN_COPY,
-  proofState, REVIEW_FILE, setupPreview, worthALook }
-  from "./setupview";
+import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, notTestedRecord, PROVEN_BASELINE,
+  PROVEN_COPY, proofState, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
 import { isoSeconds } from "./util";
 import { spend } from "./spend";
 import { installSkills, SKILL_DIRS, skillDirsShown, skillStates, userSkillRoot } from "./skill";
@@ -1098,24 +1097,28 @@ class Commands {
       accepted_failing: s.acceptedFailing, unexpected: s.unexpected, baseline_failing: s.baselineFailing,
       left_baseline: s.left, flaky: s.flaky }));
     if (!ok) return { code: 2, projects, detail, record: null };
-    return { code: 0, projects, detail, record: this.proofRecord(repo, by, at, o.warnings, o.changes) };
+    return { code: 0, projects, detail, record: this.proofRecord(repo, by, at, o.warnings, o.changes,
+      untracked ?? untrackedSetting(repo)) };
   }
 
   /** After a proof stamped the file: copies of review.yaml and the baseline as proven (what the next change is
    * compared with), and the approval record with who ran it, what changed and what is worth a look. */
-  private proofRecord(repo: string, by: string, at: string, warnings: string[], changes?: string[] | "no-copy" | null)
-    : string {
+  private proofRecord(repo: string, by: string, at: string, warnings: string[], changes?: string[] | "no-copy" | null,
+                      untracked = untrackedSetting(repo)): string {
     const record = APPROVAL_RECORD;
     const sha = createHash("sha256").update(readFileSync(reviewConfigPath(repo))).digest("hex").slice(0, 12);
     mkdirSync(dirname(join(repo, record)), { recursive: true });
     copyFileSync(reviewConfigPath(repo), join(repo, PROVEN_COPY));
     if (existsSync(baselinePath(repo))) copyFileSync(baselinePath(repo), join(repo, PROVEN_BASELINE));
     else rmSync(join(repo, PROVEN_BASELINE), { force: true });
+    // The whole list of what no project tests: the end screen groups it by reason.
+    const notTested = notTestedRecord(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")), repo, untracked);
     const changed = changes === "no-copy" ? ["Changed since the last proof: no copy of the proven file to compare", ""]
       : changes?.length ? ["Changed since the last proof:", ...changes.map((c) => `- ${c}`), ""] : [];
     writeFileSync(join(repo, record), ["# Environment proven", "", `${at} · by ${by} · ${REVIEW_FILE} sha256 ${sha}`, "",
       ...changed,
-      ...(warnings.length ? ["Worth a look:", ...warnings.map((w) => `- ${w}`)] : ["Worth a look: nothing"]), ""]
+      ...(warnings.length ? ["Worth a look:", ...warnings.map((w) => `- ${w}`)] : ["Worth a look: nothing"]),
+      ...notTested.length ? ["", "Not tested:", ...notTested.map((u) => `- ${u}`)] : [], ""]
       .join("\n"));
     return record;
   }
@@ -1148,7 +1151,7 @@ class Commands {
     const file = loadReviewFile(repo);
     const record = this.proofRecord(repo, by, at, approvalWarnings(file),
       [...Array.isArray(edits) ? edits : edits === "no-copy" ? ["review.yaml: no copy of the proven file to compare"] : [],
-        ...changes]);
+        ...changes], untracked);
     this.provenEnd(repo, file, [], { untracked });
     this.emit("ok", 0, { recorded: true, projects, changes, record, next: ["arnx review"] });
     return 0;

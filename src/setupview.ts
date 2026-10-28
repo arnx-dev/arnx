@@ -8,7 +8,11 @@ import { fileDigest, isProven, parseReviewFile, readSecretPins, type ReviewFile,
 import { detect } from "./detect";
 import { ArnxError } from "./errors";
 import { refString, type Settings, untrackedSetting } from "./settings";
-import { coverageMap, type ProjectProof, unexplainedFailing } from "./setup";
+import { BROWSER_TESTS, WEB_UI } from "./browser";
+import { matcher } from "./ignore";
+import { type Coverage, coverageFiles, coverageMap, NO_TESTS, type ProjectProof, SCRIPTS, unexplainedFailing }
+  from "./setup";
+import { SOURCE } from "./untested";
 
 // Rough minutes and USD per project, for the estimate shown before setup starts.
 const MIN_PER_PROJECT = [1, 3];
@@ -112,8 +116,9 @@ export function filesSummary(file: ReviewFile, repo: string, untracked = false):
  * files a project owns says nothing about whether its tests cover them. */
 export function filesLine(f: FilesSummary): string {
   const left = f.untrackedLeftOut;
+  const n = f.notTested.length;
   return `  Files: ${f.projects.map((p) => `${p.name} owns ${p.owned}, uses ${p.used}`).join("; ")} · not tested: ` +
-    `${f.notTested.length ? f.notTested.join(", ") : "none"}` +
+    `${!n ? "none" : n > 3 ? `${n} paths` : f.notTested.join(", ")}` +
     (left.length ? ` · ${left.length} untracked left out (${left.slice(0, 3).join(", ")}${left.length > 3 ? ", …" : ""})`
       : "");
 }
@@ -129,17 +134,46 @@ export function approvalScreen(file: ReviewFile, repo: string, o: { proofs?: Pro
 }
 
 /** The lines of "Worth a look" after a proof, only what applies: the warnings, then what no project tests (a change
- * there is reported as not tested) and source files no project mentions. */
+ * there is reported as not tested), one line per kind (the whole list is in the approval record), and source files
+ * no project mentions. */
 export function worthALook(file: ReviewFile, repo: string, o: { proofs?: ProjectProof[]; untracked?: boolean })
   : string[] {
   const lines = [...baselineLines(file, currentBaseline(repo) ?? new Map()), ...approvalWarnings(file, o.proofs)];
   if (!file.legacy) {
     const map = coverageMap(repo, file, !!o.untracked);
-    lines.push(...map.uncovered.map((u) => `not tested: ${u.path} (${u.files} file${u.files === 1 ? "" : "s"}` +
-      `${u.untracked ? `, ${u.untracked} untracked` : ""}): ${u.reason}`));
+    lines.push(...notTestedLines(map, repo, !!o.untracked));
     if (map.unexplained.length) lines.push(`${map.unexplained.length} source files no project mentions`);
   }
   return lines;
+}
+
+/** The kinds of reason the end screen groups uncovered entries by: an entry whose reason starts with one of them. */
+const KINDS = [BROWSER_TESTS, WEB_UI, SCRIPTS, NO_TESTS, "unsupported language", "infrastructure"];
+
+/** What no project tests, one line per kind of reason: "not tested (web UI): web/ (12 files)". Entries holding no
+ * source file are docs and data; languages arnx does not review are one kind. */
+export function notTestedLines(map: Coverage, repo: string, untracked: boolean): string[] {
+  const sources = coverageFiles(repo, untracked).files.filter((p) => SOURCE.test(p));
+  const kinds = new Map<string, { paths: string[]; files: number }>();
+  for (const u of map.uncovered) {
+    const reason = u.reason.trim().toLowerCase();
+    const kind = /arnx does not review it yet$/.test(u.reason) ? "unsupported language"
+      : !sources.some(matcher(u.path)) ? "docs and data"
+      : KINDS.find((k) => reason.startsWith(k.toLowerCase())) ?? u.reason;
+    const k = kinds.get(kind) ?? { paths: [], files: 0 };
+    k.paths.push(u.path);
+    k.files += u.files;
+    kinds.set(kind, k);
+  }
+  return [...kinds].map(([kind, k]) => `not tested (${kind}): ${k.paths.length > 2 ? `${k.paths.length} paths`
+    : k.paths.join(", ")} (${k.files} file${k.files === 1 ? "" : "s"})`);
+}
+
+/** Every uncovered entry, for the approval record: "path (n files): reason". */
+export function notTestedRecord(file: ReviewFile, repo: string, untracked: boolean): string[] {
+  if (file.legacy) return [];
+  return coverageMap(repo, file, untracked).uncovered.map((u) => `${u.path} (${u.files} file${u.files === 1 ? "" : "s"}` +
+    `${u.untracked ? `, ${u.untracked} untracked` : ""}): ${u.reason}`);
 }
 
 /** The causes and flaky tests among `tests`, most first: "2 connection-refused: db; 1 flaky". */

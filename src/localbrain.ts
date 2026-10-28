@@ -178,7 +178,8 @@ export class LocalBrain implements Brain {
       user += "\n\nThe current review.yaml is below. Cover what is listed under uncovered where a project can test it; " +
         "keep every existing project exactly as it is. Try every entry under uncovered again, whatever its reason " +
         "says: the user may have fixed the cause since setup wrote it, so the reason may be stale. Remove an entry " +
-        "once a project owns or uses its files, and update the reason of one that still cannot be tested." +
+        "once a project owns or uses its files, and update the reason of one that still cannot be tested. Browser tests " +
+        "are the exception: arnx never sets them up." +
         `\n<review.yaml>\n${x.current}</review.yaml>`;
     }
     let last = 0, unasked: { text: string; turn: number } | null = null;

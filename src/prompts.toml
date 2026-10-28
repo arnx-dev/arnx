@@ -285,9 +285,10 @@ Read the repository's manifests, CI configuration, compose files, test configura
 whose tests run on their own (a package, a service, a crate) and describe each as a project in a review.yaml. Prove \
 each project with try_project: it builds the project's Docker image (network allowed while installing), starts the \
 services it lists, and runs its existing suite with no internet apart from those services. Revise until every \
-project's suite runs, then submit the whole file with propose. propose checks that no file is owned by two projects \
-and that every file is owned, used, or listed under uncovered, and runs any project changed since it was proven: \
-there is no need to try every project again after editing another one.
+project's suite runs, then submit the whole file with propose. propose checks that no file is owned by two projects, \
+and runs any project changed since it was proven: there is no need to try every project again after editing another \
+one. Source files outside every project come back to you once, by folder: put those a project tests under its owns \
+or uses; arnx lists the rest under uncovered itself.
 
 $hints
 
@@ -306,13 +307,13 @@ projects:
     test_command: <a command that runs the runner directly, with the placeholder {targets}>
     services: [<names from services above that this project's tests need>]
     env: {<NAME>: <value>}   # the only variables tests see; services are reachable with their name as host
-    owns: [<paths whose changes this project tests; default: its root>]
+    owns: [<paths whose changes this project tests; default: its root, usually right>]
     uses: [<paths it depends on but does not own, such as a shared library directory>]
     notes: [<short facts a test writer needs: how to point the code at the database, what must be stubbed>]
     tests_dir: <optional: where arnx writes its tests, relative to root; arnx sets it from the runner's \
 configuration, so set it only when try_project says its folder is not picked up>
-uncovered: [{path: <path pattern>, reason: <why no project tests it: no tests, unsupported language, \
-infrastructure>}]
+uncovered: [{path: <path pattern>, reason: <why no project tests it: no tests, scripts, unsupported language, \
+infrastructure>}]   # source files only: leave docs, data and configuration out
 
 Paths in owns, uses and uncovered work like .gitignore: a trailing / names a directory, a leading / anchors to the \
 repository root, * stays in one directory and ** crosses directories.
@@ -330,7 +331,11 @@ without tests_dir gets one from its configuration (vitest include, jest roots an
 the default folder lies outside it. When the test does not run, set tests_dir to a new, empty subfolder inside a \
 folder the configuration includes (for example __tests__/unit/arnx_generated), never to a folder that holds the \
 project's own tests; do not change the project's own configuration.
-- Record untested or unsupported paths under uncovered with a reason instead of leaving them out.
+- Do not set up tests that run in a browser (Playwright, Cypress, Storybook, vitest browser mode): arnx lists them \
+under uncovered as browser tests itself.
+- A web UI app (react-dom, next, vue, svelte, @angular/core, solid-js, preact, nuxt, @sveltejs/kit, astro or \
+electron among its dependencies) gets one try at its node or jsdom unit tests. If that try fails, arnx lists it \
+under uncovered as web UI: do not try it again, go on with the rest.
 - Stop when propose accepts the file. Then reply with a short summary of what you chose and why."""
 
 # The fix prompt: what `arnx accept` writes to fix-prompt.md for your coding agent. arnx sends it to no model, so it
