@@ -268,7 +268,8 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
 - `suspect.outcome`, `report.done` (`reviewer.ts`): what became of each suspect; the report's totals.
 - `setup.started`, `setup.attempt`, `setup.completed` (`setup.ts`): the setup agent's attempts and result;
   `setup.withheld`: files left out of its snapshot as secret-looking, and `blanked`, files kept with comment lines
-  blanked (only when there are some); `setup.paths_check`:
+  blanked (only when there are some); `setup.exec`: each exec command (`n`, project, `secs`, `exit`, `timed_out`,
+  `bytes` of output; `ran: false` and `refused` when exec refused it); `setup.paths_check`:
   the map's paths (uses entries wider than meant), with each hint's project and kind; `setup.uses_check`
   (`context = "precise"` only): the map against the code, with the projects indexed and each hint's project and kind.
 - `context.index` (`indexer.ts`, `context = "precise"` only): one project's code index: `ok`, `secs`, `files`, and
@@ -355,6 +356,12 @@ uncovered (`propose`, `coverageMap`). Both count the files a working-tree snapsh
 and untracked unless git ignores them), and the counts name the untracked ones; an untracked file never refuses a
 proposal (not unexplained, not an overlap), so a scratch file cannot block setup. With no commits yet no file counts
 as untracked: every file is the repository's, and the change a review looks at.
+Setup's `exec` tool (`setupexec.ts`; never offered to reviews) runs one command in the image a project's last
+try_project used, as its tests run (the test user, no internet, its services, the same limits), in one container kept
+between commands (`Session.exec`, the kept box) and removed at the end of setup or on an interrupt; /src is a copy of
+the snapshot reset before each command (`Mirror`). It builds no image and nothing it does is kept: 120 s per command
+by default (at most 900), 80 commands or 60 minutes per setup, output cut to its first 2,000 and last 10,000
+characters (all of it in `exec-<n>.log`).
 A round clears every file with the adapter's writable names from tests_dir, so a tests_dir holding the project's own
 such files (Python's test_*.py, conftest.py, __init__.py; not those under the folders `accept` keeps tests in) is
 refused by `try_project`, `propose`, `approve` and `review` (`ownTestsInWriteDir`). Rust's writable names are arnx's own

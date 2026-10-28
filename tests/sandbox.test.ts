@@ -548,3 +548,48 @@ test("a run after the session closed (an interrupt) starts no shared container",
   expect(fake.calls().map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["exec", expect.any(String)], ["rm", "-fv"],
     ["run", "--rm"]]);
 });
+
+// ---- Setup's exec tool: its commands share one container, whatever the language. ----
+
+test("exec commands share one container with every limit a run has; an interrupt removes it by its name", () => {
+  const fake = loggingDocker(tmp());
+  const lines: Record<string, unknown>[] = [];
+  dockerSteps.log = (l) => lines.push(l);
+  const s = new Session("img", parseReviewConfig(CFG), tmp());
+  try {
+    withDocker(fake.path, () => {
+      expect(s.exec("python --version", 60)).toMatchObject({ exitCode: 0, output: "ran\n", timedOut: false });
+      s.exec("ls", 60);
+      cleanupLiveSessions();
+    });
+  } finally {
+    dockerSteps.log = null;
+  }
+  const calls = fake.calls();
+  expect(calls.map((c) => c[0])).toEqual(["run", "exec", "exec", "rm"]);
+  const [start, first, , removed] = calls as [string[], string[], string[], string[]];
+  const box = start[start.indexOf("--name") + 1]!;
+  expect(box).toMatch(new RegExp(`^arnx-${s.id}-exec-[0-9a-f]{6}$`));
+  const joined = start.join(" ");
+  const user = `${process.getuid!()}:${process.getgid!()}`;
+  for (const part of ["--network none", "--cap-drop ALL", "--security-opt no-new-privileges", "--pids-limit 512",
+    "--memory 4g", "--memory-swap 4g", `--user ${user}`, `-v ${tmp()}:/src`]) expect(joined).toContain(part);
+  expect(first.slice(0, 4)).toEqual(["exec", box, "sh", "-c"]);
+  expect(first[4]).toContain("sh -c 'python --version'; s=$?; kill -9 -1 2>/dev/null; exit $s");
+  expect(removed).toEqual(["rm", "-fv", box]);
+  // Logged apart from test runs.
+  expect(lines.filter((l) => l.step === "exec")).toHaveLength(2);
+  expect(lines.filter((l) => l.step === "run")).toHaveLength(0);
+});
+
+test("a project's runs still each get a new container while exec keeps its own", () => {
+  const fake = loggingDocker(tmp());
+  const s = new Session("img", parseReviewConfig(CFG), tmp());
+  withDocker(fake.path, () => {
+    s.exec("ls", 60);
+    s.run("pytest -q a", 60);
+    s.close();
+  });
+  expect(fake.calls().map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["exec", expect.any(String)],
+    ["run", "--rm"], ["rm", "-fv"]]);
+});

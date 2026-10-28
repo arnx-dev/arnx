@@ -17,7 +17,7 @@ export type EventType = "review.started" | "review.completed" | "review.failed" 
   "test.run_missing" | "test.classified" | "before.started" | "before.run" | "before.finding" | "before.done" |
   "fix_proof.started" | "fix_proof.run" | "fix_proof.done" | "typecheck.run" | "typecheck.done" | "challenge.verdict" |
   "suspect.outcome" | "report.done" | "setup.started" | "setup.attempt" | "setup.completed" | "setup.withheld" |
-  "setup.uses_check" | "setup.paths_check";
+  "setup.uses_check" | "setup.paths_check" | "setup.exec";
 
 export interface TraceEvent { schema_version: number; trace_id: string; seq: number; at: string; type: EventType;
   data: Record<string, unknown> }
