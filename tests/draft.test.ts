@@ -69,7 +69,7 @@ test("a pnpm workspace: CI's Node version, one install at the workspace root, CI
   // The member's own lockfile is stale: the workspace's decides.
   expect(api.install[0]).toBe("corepack enable && mkdir -p /opt/ws && cp -a . /opt/ws/ && cd /opt/ws && " +
     "pnpm install --frozen-lockfile");
-  expect(api.test_command).toBe("link-deps && npx vitest run {targets}");
+  expect([api.deps_dir, api.test_command]).toEqual(["/opt/ws", "npx vitest run {targets}"]);
   const doc = draftReview(d)!.doc as Record<string, any>;
   expect(doc.services.postgres).toEqual({ image: "postgres:16", env: { POSTGRES_PASSWORD: "ci", POSTGRES_DB: "shop" },
     ready: "pg_isready -U postgres" });
@@ -146,8 +146,8 @@ test("the runner the test files import wins over the one package.json lists; moc
   }));
   expect(d.candidates.map((c) => [c.root, c.runner])).toEqual([["old", "mocha"], ["svc", "node"]]);
   const p = projects(d);
-  expect(p.svc.test_command).toBe("ln -sfn /opt/deps/node_modules node_modules && node --test --require " +
-    "ts-node/register/transpile-only {targets}");
+  expect([p.svc.deps_dir, p.svc.test_command]).toEqual(["/opt/deps",
+    "node --test --require ts-node/register/transpile-only {targets}"]);
   expect([p.old.runner, p.old.image, p.old.install]).toEqual(["node", "node:22",
     ["mkdir -p /opt/deps && cp package.json /opt/deps/ && cd /opt/deps && npm install"]]);
   expect(unsure(d)).toEqual(["projects.old.runner: the tests are mocha's; node --test runs them once describe and it " +

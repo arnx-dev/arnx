@@ -170,26 +170,24 @@ function jsProject(c: Candidate, f: ProjectFacts, d: Detection, mark: MarkFn): R
   const corepack = !bun && (manager === "pnpm" || manager === "yarn-berry") ? "corepack enable && " : "";
   if (!f.lockfile) mark("install", "no lockfile found");
   const workspace = f.installRoot !== c.root || d.workspaces.includes(c.root);
-  let link: string;
+  // Dependencies install outside /src, which the code hides at run time; deps_dir links their node_modules back
+  // before each run (depsLink in sandbox.ts). A workspace installs whole, so each package's node_modules is there.
   if (workspace) {
-    // The whole workspace installs outside /src; each node_modules folder is linked back before the tests run.
-    const back = f.installRoot === "." ? "/src" : `/src/${f.installRoot}`;
     if (f.installRoot !== c.root) p.install_root = f.installRoot;
-    p.install = [`${corepack}mkdir -p /opt/ws && cp -a . /opt/ws/ && cd /opt/ws && ${ci}`,
-      `printf '#!/bin/sh\\ncd /opt/ws && find . -name node_modules -type d -prune | while read -r d; do ln -sfn "/opt/ws/$d" "${back}/$d"; done\\n' > /usr/local/bin/link-deps && chmod +x /usr/local/bin/link-deps`];
-    link = "link-deps && ";
+    p.install = [`${corepack}mkdir -p /opt/ws && cp -a . /opt/ws/ && cd /opt/ws && ${ci}`];
+    p.deps_dir = "/opt/ws";
     mark(["install", 0], "one install for the workspace; check that its packages resolve");
   } else {
     const files = f.needsTree ? "-a ." : ["package.json", ...f.lockfile ? [f.lockfile] : [], ...f.copy].join(" ");
     p.install = [`${corepack}mkdir -p /opt/deps && cp ${f.copy.includes(".yarn") && !f.needsTree ? "-r " : ""}${files} /opt/deps/ && cd /opt/deps && ${ci}`];
-    link = "ln -sfn /opt/deps/node_modules node_modules && ";
+    p.deps_dir = "/opt/deps";
   }
   const loader = f.deps.includes("tsx") ? " --import tsx" : f.deps.includes("ts-node")
     ? " --require ts-node/register/transpile-only" : "";
   const run = { vitest: "npx vitest run", jest: "npx jest", node: `node --test${loader}`, bun: "bun test" }[runner]!;
-  p.test_command = `${link}${run} {targets}`;
+  p.test_command = `${run} {targets}`;
   if (c.evidence.some((e) => e.startsWith("tsconfig.json and typescript"))) {
-    p.typecheck = `${link}npx tsc --noEmit -p tsconfig.json`;
+    p.typecheck = "npx tsc --noEmit -p tsconfig.json";
   }
   return p;
 }
