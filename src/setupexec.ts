@@ -12,7 +12,7 @@ import { ArnxError } from "./errors";
 import { emit } from "./events";
 import type { Tool } from "./llm";
 import type { Say } from "./progress";
-import { type ExecFactory, type ExecRunner, REPORT_DIR, type RunResult } from "./sandbox";
+import { type ExecFactory, type ExecRunner, OutOfTime, REPORT_DIR, type RunResult } from "./sandbox";
 import { randomHex, shQuote } from "./util";
 
 /** Seconds a command gets unless it asks for more, and the most it may ask for. */
@@ -161,7 +161,7 @@ export class SetupExec {
         runner = await this.o.factory(tried.image, tried.cfg, src);
       } catch (e) {
         rmSync(src, { recursive: true, force: true });
-        if (!(e instanceof ArnxError)) throw e;
+        if (!(e instanceof ArnxError) || e instanceof OutOfTime) throw e;
         return refuse("start", `failed: the container did not start: ${e.message}`);
       }
       if (!runner) {

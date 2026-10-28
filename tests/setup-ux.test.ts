@@ -125,7 +125,7 @@ test("the preview says what setup does and gives an estimate before anything is 
   writeFileSync(join(repo, "services/pay/requirements.txt"), "pytest\n");
   commit(repo, "manifest");
   expect(setupPreview(repo, defaultSettings())).toMatch(
-    /^Setup: finding how to run your tests in Docker \(about \d+–\d+ min, stops at \$3\.00\)\.$/);
+    /^Setup: finding how to run your tests in Docker \(about \d+–\d+ min, stops at 40 min or \$3\.00\)\.$/);
 });
 
 test("the next step says which change a review would test now", () => {

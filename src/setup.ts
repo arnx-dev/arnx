@@ -34,8 +34,8 @@ import { precheck as lookFirst } from "./precheck";
 import { LocalBrain } from "./localbrain";
 import { promptsFor } from "./userprompts";
 import type { Say } from "./progress";
-import { copyManifests, dockerExec, dockerSteps, envKey, envTag, type ExecFactory, type Runner, type RunResult,
-  type SessionFactory } from "./sandbox";
+import { copyManifests, dockerExec, dockerSteps, envKey, envTag, type ExecFactory, OutOfTime, requireTime,
+  type Runner, type RunResult, type SessionFactory, type TimeLimit, timeIsUp, withTimeLimit } from "./sandbox";
 import type { ScipIndex } from "./scip";
 import { EXEC, SetupExec, type TriedEnv } from "./setupexec";
 import { loadSettings, refString, type Settings, settingsPath, setupRef } from "./settings";
@@ -501,6 +501,8 @@ export interface SetupResult {
   problem: string;
   /** Files the snapshot left out that the tests need: setup stopped at the run that named them (stop "stopped"). */
   needed?: NeededFile[];
+  /** The project setup was on when its time ran out (stop "time"), unless it had been proven. */
+  running?: string;
   /** The run that proved each project setup proved (kept ones have none), in file order. */
   runs: SetupRun[];
 }
@@ -964,7 +966,9 @@ type SetupOptions = { outDir: string; sessionFactory?: SessionFactory; project?:
   /** Builds a project's code index for the map check (`context = "precise"`; default: in its Docker environment). */
   indexer?: typeof projectIndex;
   /** Where the exec tool runs its commands (default: a container on the project's image). */
-  execFactory?: ExecFactory };
+  execFactory?: ExecFactory;
+  /** Setup's time limit, which its proof shares (default: `setup_minutes` from now). */
+  timeLimit?: TimeLimit };
 
 /** The allowed files of a review.yaml no setup has approved yet (a seed, or a failed setup's last attempt); none when
  * it does not read as YAML: secret-looking files then stay out. */
@@ -982,11 +986,13 @@ export async function runSetup(repo: string, settings: Settings, agentModel: Age
   : Promise<SetupResult> {
   const id = new Date().toISOString().slice(0, 10).replaceAll("-", "") + "-" + randomHex(3);
   const log = new EventLog(join(o.outDir, id, EVENTS_FILE), id);
-  return withEvents(log, () => setupBody(repo, settings, agentModel, o));
+  const now = () => performance.now();
+  const limit = o.timeLimit ?? { at: now() + settings.setupMinutes * 60_000, now, minutes: settings.setupMinutes };
+  return withEvents(log, () => withTimeLimit(limit, () => setupBody(repo, settings, agentModel, o, limit)));
 }
 
-async function setupBody(repo: string, settings: Settings, agentModel: AgentModel | null, o: SetupOptions)
-  : Promise<SetupResult> {
+async function setupBody(repo: string, settings: Settings, agentModel: AgentModel | null, o: SetupOptions,
+                         limit: TimeLimit): Promise<SetupResult> {
   const say = o.progress ?? (() => {});
   mkdirSync(o.outDir, { recursive: true });
   const existing = o.project || o.add ? loadReviewFile(repo, { requireApproved: false }) : null;
@@ -994,7 +1000,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     throw new ArnxError(`no project ${o.project} in .arnx/review.yaml`);
   }
   emit("setup.started", { arnx_version: VERSION, model: o.brain?.label ?? refString(setupRef(settings)),
-    project: o.project ?? null, add: !!o.add });
+    project: o.project ?? null, add: !!o.add, minutes: limit.minutes });
   const keep = new Map(existing ? existing.projects.filter((p) => p.name !== o.project)
     .map((p) => [p.name, projectDigest(existing, p.name)] as const) : []);
   const state = { accepted: null as string | null, lastTried: null as string | null, summary: "no project tried",
@@ -1003,6 +1009,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     failing: [] as string[], failingProject: null as string | null, problem: "", needed: null as NeededFile[] | null,
     usesChecked: false, pathsChecked: false, pathHints: [] as UsesHint[],
     lastFile: null as string | null,
+    // The project the last try was on, and whether a tool found too little time left to go on (OutOfTime).
+    current: null as string | null, outOfTime: false,
     // What went back to the agent once (failures that look like the environment, tests left out), per project, with the
     // run it came from: the same environment tried again goes on from that run without running the suite again.
     held: new Map<string, { env: string; shown: Set<string>; run: { digest: string; summary: string; skips: string[];
@@ -1203,6 +1211,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           "every project runs, submit the file with propose.";
       }
       state.tried.add(name);
+      state.current = name;
       // exec's container sits idle while the suite runs: it goes now (memory), and the next exec starts it again.
       exec?.close();
       const log = join(o.outDir, `build-${n}-${name}.log`);
@@ -1259,6 +1268,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       } catch (e) {
         if (!(e instanceof ArnxError)) throw e;
         announce = null;
+        if (e instanceof OutOfTime) {
+          attempt({ ok: false, reused: false, summary: "", failing: 0, skips: 0, hints: "", error: e.message });
+          throw e;
+        }
         // Files .arnxignore leaves out go into the sandbox (scrubbed as the snapshot is), and the project runs again.
         if (e instanceof LeftOutNeeded && e.files.every((p) => !secret.has(p))) {
           const r = addToSandbox(repo, snap, e.files, pins, { known: replaced });
@@ -1483,9 +1496,21 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       state.final = parseReviewFile(state.accepted);
       return `accepted:\n${describeCoverage(map)}\nStop here and summarise.`;
     };
-    // A note the agent gets once, with the next tool result (known_failing taken out of its file).
-    const noted = (run: (i: Record<string, unknown>) => Promise<string>) => async (i: Record<string, unknown>) => {
-      const r = await run(i);
+    // A note the agent gets once, with the next tool result (known_failing taken out of its file). With too little
+    // time left for a Docker step, a tool stops the round instead: setup ends at its time limit. `runs`: the tool
+    // always starts one (propose starts one only for a project changed since its run).
+    type Run = (i: Record<string, unknown>) => Promise<string>;
+    const noted = (run: Run, runs = true): Run => async (i) => {
+      let r: string;
+      try {
+        if (runs) requireTime();
+        r = await run(i);
+      } catch (e) {
+        if (!(e instanceof OutOfTime)) throw e;
+        if (!state.outOfTime) say(`✗ ${e.message}`);
+        state.outOfTime = true;
+        throw new StopRound(`stopped: ${e.message}. Setup ends here.`);
+      }
       const note = state.notice;
       state.notice = "";
       return note + r;
@@ -1493,7 +1518,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const shell = exec = new SetupExec({ snap, dir: join(tmp, "exec"), outDir: o.outDir,
       factory: o.execFactory ?? dockerExec, tried: state.lastTry, say });
     const ws = new Workspace(snap, { extra: { try_project: [TRY_PROJECT, noted(tryProject)],
-      propose: [PROPOSE, noted(propose)], exec: [EXEC, noted((i) => shell.call(i))] } });
+      propose: [PROPOSE, noted(propose, false)], exec: [EXEC, noted((i) => shell.call(i))] } });
     const detection = detectReadable(repo, untracked);
     const brain: Brain = o.brain ?? new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings),
       prompts: promptsFor(repo) });
@@ -1516,7 +1541,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       withheld: withheld.length ? describeWithheld(withheld) : "", current, detection, tree: treeOf(repo, untracked),
       withheldFiles: withheld,
       ...(o.project ? { project: o.project } : {}), ...(o.add ? { add: true } : {}),
-      budgetUsd: settings.setupBudgetUsd, outDir: o.outDir }, Promise.resolve(tools)));
+      budgetUsd: settings.setupBudgetUsd, outDir: o.outDir, deadline: { at: limit.at, now: limit.now } },
+    Promise.resolve(tools)));
     logUsage(repo, "setup", [agentUse(brain.label ? `${brain.label}/setup` : refString(setupRef(settings)), result)],
       new Date());
     const projects = (state.final?.projects ?? []).map((p) => state.proofs.get(p.name) ??
@@ -1528,9 +1554,13 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     } catch (e) {
       if (!(e instanceof ArnxError)) throw e;
     }
-    const webOnly = state.accepted === null && !state.needed && last.length > 0 && last.every((n) => state.webUi.has(n));
+    // A run cut short at the limit, then the agent's last word: out of time all the same.
+    const late = state.outOfTime || result.stop === "time" || (state.accepted === null && timeIsUp(limit));
+    const webOnly = state.accepted === null && !state.needed && !late && last.length > 0 &&
+      last.every((n) => state.webUi.has(n));
     if (webOnly) state.problem = ONLY_WEB_UI;
-    const stop = state.needed ? "stopped" : webOnly ? WEB_UI_STOP : result.stop;
+    const stop = state.needed ? "stopped" : late ? "time" : webOnly ? WEB_UI_STOP : result.stop;
+    const running = stop === "time" && state.current && !state.proven.has(state.current) ? state.current : null;
     emit("setup.completed", { ok: state.accepted !== null, stop, cost_usd: result.costUsd,
       attempts: state.attempts, projects: projects.map((p) => p.name), summary: clip(state.summary, 500) });
     return { ok: state.accepted !== null, yamlText: state.accepted ?? state.lastTried, summary: state.summary,
@@ -1538,6 +1568,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       blanked, standIns, sandboxed: [...sandbox].sort(),
       failing: state.accepted !== null ? [] : state.failing, failingProject: state.accepted !== null ? null
         : state.failingProject, problem: state.problem, ...(state.needed ? { needed: state.needed } : {}),
+      ...(running ? { running } : {}),
       runs: (state.final?.projects ?? []).flatMap((p) => state.runs.get(p.name) ?? []) };
   } finally {
     exec?.close();

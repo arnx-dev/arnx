@@ -33,8 +33,11 @@ export function setupPreview(repo: string, s: Settings, untracked = s.untracked)
   const minutes = MIN_PER_PROJECT.map((m) => m * n + 1);
   // Said before anything runs: with no tests of its own, a project is checked with arnx's tests, not a suite.
   const bare = found.length > 0 && found.every((c) => c.language !== "rust" && /^0 test files/.test(c.evidence[0] ?? ""));
-  return `Setup${s.cloud?.models ? " with arnx cloud" : ""}: finding how to run your tests in Docker (about ` +
-    `${minutes[0]}–${minutes[1]} min, stops at $${s.setupBudgetUsd.toFixed(2)}).` +
+  // Never more than setup's time limit, at which it stops.
+  const capped = minutes[1]! > s.setupMinutes;
+  const time = capped ? `up to ${s.setupMinutes} min` : `about ${minutes[0]}–${minutes[1]} min`;
+  return `Setup${s.cloud?.models ? " with arnx cloud" : ""}: finding how to run your tests in Docker (${time}, ` +
+    `stops at ${capped ? "" : `${s.setupMinutes} min or `}$${s.setupBudgetUsd.toFixed(2)}).` +
     (bare ? " No tests of your own were found: arnx checks the environment with its own one-line test." : "");
 }
 

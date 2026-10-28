@@ -266,7 +266,8 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
 - `challenge.verdict` (`challenge.ts`, `reviewer.ts`): the second model's verdict on a finding (also when resumed);
   `timed_out` when the call ran out of time.
 - `suspect.outcome`, `report.done` (`reviewer.ts`): what became of each suspect; the report's totals.
-- `setup.started`, `setup.attempt`, `setup.completed` (`setup.ts`): the setup agent's attempts and result;
+- `setup.started` (with `minutes`, the time limit), `setup.attempt`, `setup.completed` (with `stop`; `time` at the
+  limit) (`setup.ts`): the setup agent's attempts and result;
   `setup.withheld`: files left out of its snapshot as secret-looking, `blanked`, files kept with comment lines
   blanked, and `stand_ins`, files kept with stand-ins (only when there are some); `setup.sandbox_only`: files
   `.arnxignore` leaves out that a run needed, copied into the sandbox before the project runs again; `setup.exec`: each exec command (`n`, project, `secs`, `exit`, `timed_out`,
@@ -373,6 +374,9 @@ copy of the snapshot reset before each command (`Mirror`), with the sandbox-only
 what the agent gets of the output has their quotes taken out (`stripSandbox`), `exec-<n>.log` keeps it whole. It builds no image and nothing it does is kept: 120 s per command
 by default (at most 900), 80 commands or 60 minutes per setup, output cut to its first 2,000 and last 10,000
 characters (all of it in `exec-<n>.log`).
+Setup stops at `[budget] setup_minutes` (default 40, its proof included; `TimeLimit` in `sandbox.ts`) as at
+`setup_usd`: no model call starts past it (stop `time`), and each Docker step (build, suite, list step, exec, index)
+gets the time left when that is less than its own timeout, none when under a minute is left (`stepTimeout`).
 A round clears every file with the adapter's writable names from tests_dir, so a tests_dir holding the project's own
 such files (Python's test_*.py, conftest.py, __init__.py; not those under the folders `accept` keeps tests in) is
 refused by `try_project`, `propose`, `approve` and `review` (`ownTestsInWriteDir`). Rust's writable names are arnx's own

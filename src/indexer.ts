@@ -8,7 +8,8 @@ import { adapterFor, type AdapterId } from "./adapters";
 import type { ReviewConfig } from "./config";
 import { emit } from "./events";
 import { readIndex, type ScipIndex } from "./scip";
-import { BUILD_TIMEOUT, DEFAULT_LIMITS, docker, dockerAsync, ensureEnv, requireDocker, runArgv } from "./sandbox";
+import { BUILD_TIMEOUT, DEFAULT_LIMITS, docker, dockerAsync, ensureEnv, requireDocker, runArgv, stepTimeout }
+  from "./sandbox";
 import { randomHex } from "./util";
 
 /** Seconds an index may take (Phase 0, 2026-10-25: 7–46 s per project). */
@@ -37,7 +38,8 @@ export const INDEXERS: Partial<Record<AdapterId, { layer: (env: string) => strin
 async function indexImage(env: string, layer: string[]): Promise<string> {
   const tag = `${env}-${LAYER_VERSION}`;
   if (docker(["image", "inspect", tag]).status === 0) return tag;
-  const r = await dockerAsync(["build", "-t", tag, "-"], { timeout: BUILD_TIMEOUT, stdin: layer.join("\n") + "\n" });
+  const r = await dockerAsync(["build", "-t", tag, "-"], { timeout: stepTimeout(BUILD_TIMEOUT),
+    stdin: layer.join("\n") + "\n" });
   if (r.status !== 0) throw new Error(`the indexer layer did not build: ${(r.stderr || r.stdout).trim().slice(-300)}`);
   return tag;
 }
@@ -72,7 +74,7 @@ export async function projectIndex(cfg: ReviewConfig, snap: string, outDir: stri
       mounts: [`${dir}:/arnx-index`] });
     let r;
     try {
-      r = await dockerAsync(args, { timeout: INDEX_TIMEOUT });
+      r = await dockerAsync(args, { timeout: stepTimeout(INDEX_TIMEOUT) });
     } catch (e) {
       docker(["rm", "-fv", name]);
       throw e;

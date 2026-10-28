@@ -16,6 +16,7 @@ effort = "medium"                             # low, medium or high
 review_usd = 3.0
 setup_usd = 3.0
 answer_usd = 0.5
+setup_minutes = 40                # minutes setup may take, its proof included
 
 [review]
 runs = 3                          # each test runs 3 times; a finding fails every time

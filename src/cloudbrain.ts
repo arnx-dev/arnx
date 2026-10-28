@@ -113,6 +113,8 @@ interface Drive {
   /** Each final step, before it is passed on (the hunt's record). */
   onFinal?: (s: WireStep) => void;
   stream: CallOptions;
+  /** Past it, a step's results are not sent and the loop ends (stop "time"). */
+  deadline?: { at: number; now: () => number };
 }
 
 export class CloudBrain implements Brain {
@@ -310,7 +312,7 @@ export class CloudBrain implements Brain {
       project: x.project ?? null, add: !!x.add, budget_cap_micro_usd: micro(x.budgetUsd) },
     { ...stream, idempotencyKey: randomUUID() });
     const { agent } = await this.drive({ first: Promise.resolve(started.step), path: `/v1/setup/${started.setup_id}/steps`,
-      tools, outDir: x.outDir, say, agentRole: null, stream });
+      tools, outDir: x.outDir, say, agentRole: null, stream, ...(x.deadline ? { deadline: x.deadline } : {}) });
     return { agent };
   }
 
@@ -390,6 +392,7 @@ export class CloudBrain implements Brain {
           ...(error ? { error: true } : {}) });
       }
       log({ turn: step.turn, tools_ran: timed });
+      const late = !!d.deadline && d.deadline.now() >= d.deadline.at;
       emitTurn({ turn: step.turn, stop_reason: "tool_use", tools: actions.map((a) => a.name),
         paths: actions.filter((a) => READ_PATH_TOOLS.has(a.name)).flatMap((a) => {
           const p = isObject(a.input) ? a.input.path : undefined;
@@ -397,6 +400,14 @@ export class CloudBrain implements Brain {
         }), tool_errors: timed.filter((x) => x.error).length,
         writes: actions.filter((a) => a.name === "write_file").length,
         test_runs: actions.filter((a) => a.name === "run_tests").length });
+      // Out of time, the results are not sent: no further call starts, as LocalBrain's loop stops before its next one.
+      if (late) {
+        log({ turn: step.turn, type: "done", reason: "time", stop: "time" });
+        t.onStep?.({ type: "done", stop: "time", turns: step.turn });
+        return { uses, agent: { finalText: finals.at(-1) ?? "", costUsd: round6(agentCost), turns: step.turn,
+          stop: "time", usage: NO_USAGE, calls: agentCalls,
+          ...(finals.length > 1 ? { earlierTexts: finals.slice(0, -1) } : {}) } };
+      }
       t0 = performance.now();
       step = await this.step(d.path, { turn: step.turn, results, cost_so_far_micro_usd: micro(cost) }, d.stream, d.say);
     }

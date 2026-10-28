@@ -123,6 +123,8 @@ export interface SetupInput extends RoundBase {
   detection?: Detection;
   tree?: string;
   withheldFiles?: Withheld[];
+  /** Setup's time limit: no model call starts once `now()` reaches `at` (stop "time"). */
+  deadline?: { at: number; now: () => number };
 }
 
 export interface RoundInputs { review: ReviewInput; answer: AnswerInput; setup: SetupInput }

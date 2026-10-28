@@ -54,6 +54,48 @@ export const NETWORK_TROUBLE = /Read timed out|ReadTimeoutError|Connection (?:re
 export const networkRetry = { waitSeconds: 20 };
 const stepLog = (line: Record<string, unknown>) => dockerSteps.log?.({ at: new Date().toISOString(), ...line });
 export const BUILD_TIMEOUT = 1800;
+
+/** The running command's time limit (setup's `setup_minutes`, its proof included): `at` on the `now` clock (ms), null
+ * when there is none. Set by the command for its Docker steps (withTimeLimit); `floorSeconds` is mutable for tests. */
+export interface TimeLimit { at: number; now: () => number; minutes: number }
+export const timeLimit: { current: TimeLimit | null; floorSeconds: number } = { current: null, floorSeconds: 60 };
+
+/** A Docker step that would start with too little of the command's time left. */
+export class OutOfTime extends ArnxError {
+  override name = "OutOfTime";
+  constructor(readonly minutes: number) {
+    super(`setup reached its ${minutes}-minute limit`);
+  }
+}
+
+/** Runs `fn` with each Docker step bounded by `limit` (none: as it is). */
+export async function withTimeLimit<T>(limit: TimeLimit | null | undefined, fn: () => Promise<T>): Promise<T> {
+  if (!limit) return fn();
+  const saved = timeLimit.current;
+  timeLimit.current = limit;
+  try {
+    return await fn();
+  } finally {
+    timeLimit.current = saved;
+  }
+}
+
+/** Seconds a Docker step may take: its own timeout, or the time left when that is less. With less than the floor
+ * left the step does not start (OutOfTime): it could not finish. */
+export function stepTimeout(own: number): number {
+  const limit = timeLimit.current;
+  if (!limit) return own;
+  const left = Math.floor((limit.at - limit.now()) / 1000);
+  if (left < timeLimit.floorSeconds) throw new OutOfTime(limit.minutes);
+  return Math.min(own, left);
+}
+
+/** Throws OutOfTime when no Docker step could start now. */
+export const requireTime = (): void => void stepTimeout(Infinity);
+
+/** Whether `limit` leaves too little time for a Docker step (a step cut short at it ends with less than that). */
+export const timeIsUp = (limit: TimeLimit | null | undefined): boolean =>
+  !!limit && limit.at - limit.now() < timeLimit.floorSeconds * 1000;
 export const READY_TIMEOUT = 90;
 export const OUTPUT_LIMIT = 200_000;
 export const REPORT_DIR = ".arnx-run";
@@ -247,7 +289,8 @@ export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: st
   dockerSteps.say?.(`${cfg.name}: building its test image (minutes on a first build)`);
   const text = dockerfile(cfg, { cache: buildkit(), ...(mark ? { mark: tag } : {}) });
   const labels = envLabels(cfg);
-  let r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", snapshot], { timeout: BUILD_TIMEOUT, stdin: text });
+  let r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", snapshot], { timeout: stepTimeout(BUILD_TIMEOUT),
+    stdin: text });
   stepLog({ step: "image", project: cfg.name, tag, built: true, ok: r.status === 0, secs: secsSince(t0) });
   mkdirSync(dirname(logPath), { recursive: true });
   writeFileSync(logPath, r.stdout + r.stderr);
@@ -257,7 +300,8 @@ export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: st
     dockerSteps.say?.(`${cfg.name}: the package index did not answer; trying again in ${networkRetry.waitSeconds}s`);
     await sleep(networkRetry.waitSeconds * 1000);
     const t1 = performance.now();
-    r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", snapshot], { timeout: BUILD_TIMEOUT, stdin: text });
+    r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", snapshot], { timeout: stepTimeout(BUILD_TIMEOUT),
+      stdin: text });
     stepLog({ step: "image", project: cfg.name, tag, built: true, ok: r.status === 0, retry: "network", secs: secsSince(t1) });
     writeFileSync(logPath, r.stdout + r.stderr);
   }
@@ -377,7 +421,7 @@ export class Session implements Runner {
           const args = ["run", "-d", "--rm", "--name", name, "--network", this.network, "--network-alias", svc.name,
             "--cpus", "1", "--memory", "1g"];
           for (const k of Object.keys(svc.env).sort()) args.push("-e", `${k}=${envValue(svc.env[k]!)}`);
-          r = docker([...args, svc.image], { timeout: 900 });
+          r = docker([...args, svc.image], { timeout: stepTimeout(900) });
           if (r.status !== 0) throw new ArnxError(`service ${svc.name} did not start: ${r.stderr.trim().slice(0, 300)}`);
           this.started.push(name);
           if (svc.ready) await this.waitReady(name, svc.name, svc.ready);
@@ -424,6 +468,7 @@ export class Session implements Runner {
   /** `emptied`: null runs the command in a new container; otherwise in the shared one, these directories emptied
    * first. */
   private runIn(command: string, timeout: number, emptied: string[] | null, step: "run" | "exec"): RunResult {
+    timeout = stepTimeout(timeout);
     command = depsLink(this.cfg) + command;
     // A closed session (an interrupt) starts no container that nothing would remove.
     if (!emptied || this.closed || !this.mayShare()) {

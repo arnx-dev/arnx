@@ -87,6 +87,8 @@ export interface Settings {
   effort: string;
   reviewBudgetUsd: number;
   setupBudgetUsd: number;
+  /** Setup stops here, its proof included (`[budget] setup_minutes`, default 40). */
+  setupMinutes: number;
   answerBudgetUsd: number;
   runs: number;
   maxQuestions: number;
@@ -128,8 +130,8 @@ export function settingsPath(repo: string): string {
 
 function withDefaults(consentAt: string | null, reviewer: ModelRef, challenger: ModelRef): Settings {
   return { consentAt, telemetry: false, reviewer, challenger, effort: "medium", reviewBudgetUsd: 3.0,
-    setupBudgetUsd: 3.0, answerBudgetUsd: 0.5, runs: 3, maxQuestions: 5, maxProjects: 4, beforeCheck: true, untracked: false,
-    standIns: true, fixProofMax: 20, acceptedTestsDir: "tests/arnx", context: "names", jev: false, prices: {} };
+    setupBudgetUsd: 3.0, setupMinutes: 40, answerBudgetUsd: 0.5, runs: 3, maxQuestions: 5, maxProjects: 4,
+    beforeCheck: true, untracked: false, standIns: true, fixProofMax: 20, acceptedTestsDir: "tests/arnx", context: "names", jev: false, prices: {} };
 }
 
 export const HAIKU = "anthropic:claude-haiku-5-5";
@@ -259,6 +261,8 @@ export function loadSettings(repo: string): Settings {
   if (review.context !== undefined && review.context !== "names" && review.context !== "precise") {
     throw new ArnxError(".arnx/config.toml: review.context: write \"names\" or \"precise\"");
   }
+  const setupMinutes = float(budget.setup_minutes ?? 40);
+  if (!(setupMinutes > 0)) throw new ArnxError(".arnx/config.toml: budget.setup_minutes: write a number above 0");
   if (setup.jev !== undefined && typeof setup.jev !== "boolean") {
     throw new ArnxError(".arnx/config.toml: setup.jev: write true or false");
   }
@@ -281,6 +285,7 @@ export function loadSettings(repo: string): Settings {
     effort: str(models.effort, "medium"),
     reviewBudgetUsd: float(budget.review_usd ?? 3.0),
     setupBudgetUsd: float(budget.setup_usd ?? 3.0),
+    setupMinutes,
     answerBudgetUsd: float(budget.answer_usd ?? 0.5),
     runs: Math.trunc(float(review.runs ?? 3)),
     maxQuestions: Math.trunc(float(review.max_questions ?? 5)),
@@ -411,6 +416,7 @@ export function writeSettings(repo: string, s: Settings, opts: { known?: boolean
     "", `${"[budget]".padEnd(19)} # the most a run may spend, in USD; it stops there`,
     `review_usd = ${pyFloat(s.reviewBudgetUsd)}`, `setup_usd = ${pyFloat(s.setupBudgetUsd)}`,
     `answer_usd = ${pyFloat(s.answerBudgetUsd)}`,
+    setting(`setup_minutes = ${s.setupMinutes}`, "minutes setup may take, its proof included"),
     "", "[review]", setting(`runs = ${s.runs}`, `each test runs ${s.runs} times; a finding fails every time`),
     setting(`max_questions = ${s.maxQuestions}`, "questions you are asked, at most"),
     ...(s.maxProjects !== 4 ? [setting(`max_projects = ${s.maxProjects}`, "projects one review covers, at most")] : []),

@@ -184,7 +184,7 @@ export class LocalBrain implements Brain {
     }
     let last = 0, unasked: { text: string; turn: number } | null = null;
     const agent = await runAgent(this.m.agentModel, t, { system: this.p.setupSystem(), user, budgetUsd: x.budgetUsd,
-      prices: this.m.prices, transcript: transcriptOf(x),
+      prices: this.m.prices, transcript: transcriptOf(x), ...(x.deadline ? { deadline: x.deadline } : {}),
       onTurn: (turn, names, cost, said, calls) => {
         last = turn;
         t.onTurn?.(turn, names, cost, said);

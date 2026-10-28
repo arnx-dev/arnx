@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isFileApproved, parseReviewFile, reviewConfigPath } from "../src/config";
-import { dockerSteps, type Runner, type SessionFactory } from "../src/sandbox";
+import { BUILD_TIMEOUT, dockerSteps, type Runner, type SessionFactory, stepTimeout } from "../src/sandbox";
 import { Cli } from "./helpers/cli";
 import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
@@ -268,7 +268,8 @@ test("setup --json: the object; proven with or without --yes", async () => {
       accepted_failing: 0, unexpected: [] }],
     files: { projects: [{ name: "shop", owned: 3, used: 0 }], not_tested: [], untracked_left_out: ["notes.md"] },
     warnings: ["shop: 1 command(s) ignore their own errors (|| true)"], review_yaml: ".arnx/review.yaml",
-    approval_record: ".arnx/setup/approval.md", cost_usd: 0, seconds: 0, failure: null, next: ["arnx review"] });
+    approval_record: ".arnx/setup/approval.md", cost_usd: 0, seconds: 0, stop: "end_turn", failure: null,
+    next: ["arnx review"] });
   expect(cli.stderr).toContain("✓ Environment proven\n\nWorth a look:\n  ! shop: 1 command(s) ignore their own errors (|| true)");
 });
 
@@ -280,4 +281,66 @@ test("setup --json on a failure: kind and reason", async () => {
   expect(JSON.parse(cli.stdout)).toMatchObject({ result: "fail", exit_code: 2, approved: false,
     review_yaml: ".arnx/review.yaml", files: null, failure: { kind: "environment", failing: [] },
     next: ["arnx approve"] });
+});
+
+test("setup stops at its time limit: one line says so, and the project it was on goes on with --project", async () => {
+  const repo = await shop();
+  const path = join(repo, ".arnx", "config.toml");
+  writeFileSync(path, readFileSync(path, "utf8").replace("setup_minutes = 40", "setup_minutes = 15"));
+  for (const json of [false, true]) {
+    // Each suite run takes 20 minutes and writes no report.
+    let ms = 0;
+    const slow: SessionFactory = async <T>(_cfg: { name: string }, snap: string, _log: string,
+                                           body: (r: Runner) => Promise<T>) => {
+      ms += 20 * 60_000;
+      return body(new FakeSession(snap, () => [null, "out", false]));
+    };
+    const model = new ScriptedAgent([[tool("try_project", { yaml: GOOD })], [text("never asked")]]);
+    const cli = new Cli({ cwd: repo, env: ENV, now: () => ms, setupModel: model, setupSessions: slow });
+    expect(await cli.run("setup", ...(json ? ["--json"] : []))).toBe(2);
+    expect(model.calls).toHaveLength(1);
+    if (json) {
+      expect(JSON.parse(cli.stdout)).toMatchObject({ result: "fail", stop: "time", review_yaml: ".arnx/review.yaml",
+        failure: { kind: "time", failing: [] }, next: ["arnx setup --project shop"] });
+    } else {
+      expect(cli.stdout).toContain("Setup reached its 15-minute limit while on shop; to give it longer, raise " +
+        "setup_minutes under [budget].\n");
+      expect(cli.stdout).toContain("\nNext: arnx setup --project shop");
+    }
+  }
+});
+
+test("the proof after setup counts inside the limit: past it, the proof stops and arnx approve runs it again", async () => {
+  // Setup takes 10 of its 15 minutes and the code changes meanwhile: its run does not stand, the proof runs the suite.
+  for (const [cut, json] of [[true, false], [false, true]] as const) {
+    const repo = await shop();
+    const path = join(repo, ".arnx", "config.toml");
+    writeFileSync(path, readFileSync(path, "utf8").replace("setup_minutes = 40", "setup_minutes = 15"));
+    let ms = 0;
+    const setupRun: SessionFactory = async <T>(_cfg: { name: string }, snap: string, _log: string,
+                                               body: (r: Runner) => Promise<T>) => {
+      ms += 10 * 60_000;
+      writeFileSync(join(repo, "pricing.py"), "def total(xs):\n    return sum(xs) + 0\n");
+      return body(new FakeSession(snap, () => [junitXml([PASS]), "out", false]));
+    };
+    // The proof's run: cut short at the limit, or not started with too little time left (as a Docker step is not).
+    const proofRun: SessionFactory = async <T>(_cfg: { name: string }, snap: string, _log: string,
+                                               body: (r: Runner) => Promise<T>) => {
+      if (!cut) stepTimeout(BUILD_TIMEOUT);
+      ms += 5 * 60_000;
+      return body(new FakeSession(snap, () => [null, "out", true]));
+    };
+    const model = new ScriptedAgent([[tool("try_project", { yaml: GOOD })], [tool("propose", { yaml: GOOD })],
+      [text("One project.")]]);
+    const cli = new Cli({ cwd: repo, env: ENV, now: () => ms, setupModel: model, setupSessions: setupRun,
+      approveSessions: proofRun });
+    expect(await cli.run("setup", "--yes", ...(json ? ["--json"] : []))).toBe(2);
+    if (json) {
+      expect(JSON.parse(cli.stdout)).toMatchObject({ result: "fail", approved: false, stop: "time",
+        failure: { kind: "time", reason: "✗ setup reached its 15-minute limit", failing: [] }, next: ["arnx approve"] });
+    } else {
+      expect(cli.stdout).toContain("Not proven:\n✗ setup reached its 15-minute limit\n");
+      expect(cli.stdout).toEndWith("\nNext: arnx approve");
+    }
+  }
 });

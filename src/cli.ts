@@ -41,7 +41,7 @@ import { acceptData, checkData, reportTelemetry, reviewData, type Sender, setupD
   from "./telemetry";
 import { Progress, type Live } from "./progress";
 import { runReview } from "./reviewer";
-import { envOwner, requireDocker } from "./sandbox";
+import { envOwner, OutOfTime, requireDocker, type TimeLimit, timeIsUp, withTimeLimit } from "./sandbox";
 import { ageDays, type CacheRecord, type EnvImage, KEEP_DAYS, oldImages, pruneEnv, totalSize } from "./envprune";
 import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSettings, missingKeys, modelRefs, type ModelsMode,
   modelsMode,
@@ -876,12 +876,14 @@ class Commands {
     }
     const failureModel = jev ? jevModel(jev, join(outDir, "jev.jsonl")) : undefined;
     const started = this.clock();
+    // One limit for setup and its proof, on the clock its progress shows.
+    const limit: TimeLimit = { at: started + s.setupMinutes * 60_000, now: () => this.clock(), minutes: s.setupMinutes };
     const cloud = await this.cloudBrain(repo, s, mode);
     if (cloud) this.cloudPrompts(repo);
     const unpriced = !cloud && this.unpriced(s, [setupRef(s)]);
     const result = await this.withProgress(a, (progress) => runSetup(repo, s,
       cloud ? null : this.d.setupModel ?? makeAgentModel(setupSettings(s), this.d.env), { outDir, project, add, progress,
-        failureModel, untracked, localPins: localPinsPath(this.d.env, repo),
+        failureModel, untracked, localPins: localPinsPath(this.d.env, repo), timeLimit: limit,
         ...(this.d.setupSessions ? { sessionFactory: this.d.setupSessions } : {}),
         ...(cloud ? { brain: cloud(progress) } : {}) }), { cost: true, since: started });
     if (result.withheld.length) {
@@ -902,7 +904,7 @@ class Commands {
       : unpriced ? "Cost unknown" : `Cost $${result.costUsd.toFixed(2)}`;
     if (!result.ok && result.stop === WEB_UI_STOP) {
       // Nothing to fix and nothing to run next: setup has nothing here to set up.
-      const failure = setupFailure(result, s.setupBudgetUsd);
+      const failure = setupFailure(result, s.setupBudgetUsd, s.setupMinutes);
       this.d.out(failure.text);
       this.d.out(`${cost} · logs: .arnx/setup/`);
       this.emit("fail", 2, setupJson({ file: tryParse(result.yamlText), result, approved: false, auto: false,
@@ -911,19 +913,23 @@ class Commands {
     }
     if (!result.ok) {
       const saved = result.yamlText ? this.saveAttempt(repo, result.yamlText) : null;
-      const failure = setupFailure(result, s.setupBudgetUsd);
+      const failure = setupFailure(result, s.setupBudgetUsd, s.setupMinutes);
       this.d.out(failure.text);
       this.d.out(`${cost} · last attempt: ${saved ? `${saved} (not proven)` : "none"} · logs: .arnx/setup/`);
       // Files the tests need and the snapshot left out: only letting them in helps, then the same setup again.
       const again = `arnx setup${project ? ` --project ${project}` : add ? " --add" : ""}`;
       const letIn = neededSteps(result.needed ?? []);
-      const next = letIn.length ? `${letIn.join("; ")}, then ${again}` : !saved ? "arnx setup --force"
+      // Out of time: the project it was on goes on by itself (from the attempt in review.yaml), or the same setup runs
+      // again (with more time).
+      const goOn = result.stop !== "time" ? null
+        : result.running && saved === REVIEW_FILE ? `arnx setup --project ${result.running}` : again;
+      const next = letIn.length ? `${letIn.join("; ")}, then ${again}` : goOn ? goOn : !saved ? "arnx setup --force"
         : saved === REVIEW_FILE ? `fix ${REVIEW_FILE}, then arnx approve`
         : `fix ${saved}, copy it to ${REVIEW_FILE}, then arnx approve`;
       this.d.out(`Next: ${next}`);
       this.emit("fail", 2, setupJson({ file: tryParse(result.yamlText), result, approved: false, auto: false,
         files: null, warnings: [], reviewYaml: saved, record: null, seconds: seconds(), failure: failure.json,
-        next: letIn.length ? [...letIn, again] : [saved ? "arnx approve" : "arnx setup --force"] }));
+        next: letIn.length ? [...letIn, again] : goOn ? [goOn] : [saved ? "arnx approve" : "arnx setup --force"] }));
       return finish(2, false);
     }
     this.replaceFile(repo, result.yamlText!);
@@ -934,9 +940,9 @@ class Commands {
     const files = filesSummary(proposed, repo, untracked);
     const warnings = approvalWarnings(proposed, result.projects);
     const json = (o: { approved: boolean; record?: string | null; approval?: ApprovedProject[];
-      failure?: Record<string, unknown> | null; next: string[] }) => setupJson({ file: proposed, result,
-      approved: o.approved, auto: o.approved, files, warnings, reviewYaml: REVIEW_FILE, record: o.record ?? null,
-      seconds: seconds(), failure: o.failure ?? null, next: o.next, approval: o.approval ?? [] });
+      failure?: Record<string, unknown> | null; next: string[]; stop?: "time" }) => setupJson({ file: proposed,
+      result: o.stop ? { ...result, stop: o.stop } : result, approved: o.approved, auto: o.approved, files, warnings,
+      reviewYaml: REVIEW_FILE, record: o.record ?? null, seconds: seconds(), failure: o.failure ?? null, next: o.next, approval: o.approval ?? [] });
     this.d.out("");
     this.d.out(approvalScreen(proposed, repo, { proofs: result.projects, untracked }));
     this.d.out("");
@@ -945,14 +951,16 @@ class Commands {
       `${notes ? `; notes in ${relative(repo, notes)}` : ""}.`);
     // Nobody is asked: setup's runs stand for the projects unchanged since, the others run again, and the file is
     // stamped; what is worth a look comes at the end.
-    const r = await this.approveRun(repo, a, project, untracked, { warnings, since: started, afterSetup: result.runs });
+    const r = await this.approveRun(repo, a, project, untracked, { warnings, since: started, afterSetup: result.runs,
+      limit });
     if (r.code !== 0) {
       this.d.out(`Not proven:\n${r.detail}`);
       this.d.out(`${cost} · last attempt: ${REVIEW_FILE} (not proven) · logs: .arnx/run/`);
-      this.d.out(`Next: fix ${REVIEW_FILE}, then arnx approve`);
-      const failing = r.projects.flatMap((p) => p.unexpected);
+      this.d.out(r.outOfTime ? "Next: arnx approve" : `Next: fix ${REVIEW_FILE}, then arnx approve`);
+      const failing = r.outOfTime ? [] : r.projects.flatMap((p) => p.unexpected);
+      const kind = r.outOfTime ? "time" : failing.length ? "tests" : "environment";
       this.emit("fail", 2, json({ approved: false, approval: r.projects, next: ["arnx approve"],
-        failure: { kind: failing.length ? "tests" : "environment", reason: r.detail, failing } }));
+        ...(r.outOfTime ? { stop: "time" as const } : {}), failure: { kind, reason: r.detail, failing } }));
       return finish(r.code, false);
     }
     this.provenEnd(repo, proposed, r.projects, { proofs: result.projects, untracked });
@@ -1092,19 +1100,31 @@ class Commands {
    * is copied to PROVEN_COPY, what the next change is compared with. Says nothing but progress. */
   private async approveRun(repo: string, a: Args, project: string | undefined, untracked: boolean | undefined,
                            o: { warnings: string[]; since?: number; changes?: string[] | "no-copy" | null;
-                             afterSetup?: SetupRun[] })
-    : Promise<{ code: number; projects: ApprovedProject[]; detail: string; record: string | null }> {
+                             afterSetup?: SetupRun[]; limit?: TimeLimit })
+    : Promise<{ code: number; projects: ApprovedProject[]; detail: string; record: string | null; outOfTime?: true }> {
     // Who ran the proof: the git user (a coding agent running arnx is not told apart from its user).
     const by = git(repo, ["config", "user.name"], [0, 1]).trim() || "unknown";
     const at = isoSeconds(new Date());
-    const [ok, detail, suites] = await this.withProgress(a, (progress) =>
-      approveFile(repo, { by, at, project, untracked, progress, afterSetup: o.afterSetup,
-        localPins: localPinsPath(this.d.env, repo),
-        ...(this.d.approveSessions ? { sessionFactory: this.d.approveSessions } : {}) }),
-    o.since !== undefined ? { since: o.since } : {});
+    let proof;
+    try {
+      proof = await this.withProgress(a, (progress) => withTimeLimit(o.limit, () =>
+        approveFile(repo, { by, at, project, untracked, progress, afterSetup: o.afterSetup,
+          localPins: localPinsPath(this.d.env, repo),
+          ...(this.d.approveSessions ? { sessionFactory: this.d.approveSessions } : {}) })),
+      o.since !== undefined ? { since: o.since } : {});
+    } catch (e) {
+      // Setup's proof shares its time limit: past it, the proof stops where it is and `arnx approve` runs it again.
+      if (!(e instanceof OutOfTime)) throw e;
+      return { code: 2, projects: [], detail: `✗ ${e.message}`, record: null, outOfTime: true };
+    }
+    const [ok, detail, suites] = proof;
     const projects = suites.map((s) => ({ name: s.name, ok: s.ok, summary: s.summary,
       accepted_failing: s.acceptedFailing, unexpected: s.unexpected, baseline_failing: s.baselineFailing,
       left_baseline: s.left, flaky: s.flaky }));
+    // A run cut short at the limit fails as out of time, not as the file's fault.
+    if (!ok && o.limit && timeIsUp(o.limit)) {
+      return { code: 2, projects, detail: `✗ ${new OutOfTime(o.limit.minutes).message}`, record: null, outOfTime: true };
+    }
     if (!ok) return { code: 2, projects, detail, record: null };
     return { code: 0, projects, detail, record: this.proofRecord(repo, by, at, o.warnings, o.changes,
       untracked ?? untrackedSetting(repo)) };
@@ -1793,8 +1813,14 @@ export function neededSteps(needed: NeededFile[]): string[] {
     ...ignored.length ? [`add ${ignored.join(" ")} to .arnxignore`] : []];
 }
 
-export function setupFailure(r: SetupResult, budgetUsd: number)
-  : { text: string; json: { kind: "environment" | "tests"; reason: string; failing: string[] } } {
+export function setupFailure(r: SetupResult, budgetUsd: number, minutes: number)
+  : { text: string; json: { kind: "environment" | "tests" | "time"; reason: string; failing: string[] } } {
+  if (r.stop === "time") {
+    const on = r.running ? ` while on ${r.running}` : "";
+    return { text: `Setup reached its ${minutes}-minute limit${on}; to give it longer, raise setup_minutes under [budget].`,
+      json: { kind: "time", reason: `reached the ${minutes}-minute limit (last: ${r.problem || r.summary})`,
+        failing: [] } };
+  }
   if (r.failing.length) {
     const n = r.failing.length;
     const more = n - SHOWN_FAILING;
@@ -1843,7 +1869,7 @@ function setupJson(o: { file: ReviewFile | null; result: SetupResult; approved: 
     files: o.files && { projects: o.files.projects, not_tested: o.files.notTested,
       untracked_left_out: o.files.untrackedLeftOut },
     warnings: o.warnings, review_yaml: o.reviewYaml, approval_record: o.record, cost_usd: r.costUsd,
-    seconds: o.seconds, failure: o.failure, next: o.next };
+    seconds: o.seconds, stop: r.stop, failure: o.failure, next: o.next };
 }
 
 /** One project's suite in `approve --json` (skills/arnx/references/json.md). */
