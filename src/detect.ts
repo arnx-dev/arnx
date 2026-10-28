@@ -32,6 +32,8 @@ export interface Detection {
   others?: OtherLanguage[];
   /** What the files settle about each candidate (versions, managers, CI, services), for the draft. */
   facts?: Facts;
+  /** Python, JavaScript/TypeScript and Rust source files, by language, for the draft. */
+  sources?: Record<string, string[]>;
 }
 
 const EXT_LANG: Record<string, string> = { py: "python", js: "typescript", jsx: "typescript", mjs: "typescript",
@@ -125,9 +127,11 @@ export function detect(repo: string, files?: string[]): Detection {
   const paths = all.filter((p) => !p.split("/").includes("node_modules"));
   const set = new Set(paths);
   const languages: Record<string, number> = {};
+  const sources: Record<string, string[]> = { python: [], typescript: [], rust: [] };
   for (const p of paths) {
     const lang = EXT_LANG[posix.extname(p).slice(1)];
     if (lang) languages[lang] = (languages[lang] ?? 0) + 1;
+    if (lang && lang in sources) sources[lang]!.push(p);
   }
   const testFiles = (root: string) =>
     paths.filter((p) => (root === "." || p.startsWith(root + "/")) &&
@@ -199,7 +203,7 @@ export function detect(repo: string, files?: string[]): Detection {
     }
   }
   return { candidates, workspaces: [...workspaces].sort(), ci, compose, services: [...services].sort(), languages,
-    others: notableOthers(surveyLanguages(paths)), facts: readFacts(repo, paths, candidates, ownFiles) };
+    others: notableOthers(surveyLanguages(paths)), facts: readFacts(repo, paths, candidates, ownFiles), sources };
 }
 
 /** The detection as hints for the setup agent. */

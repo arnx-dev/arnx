@@ -177,11 +177,30 @@ test("compose: a service the code depends on is named in the hints, not put in t
   expect(hints).toContain("Example env files name: api: REDIS_URL, API_KEY");
 });
 
-test("no draft without candidates; untested candidates are drafted only when nothing has tests", () => {
+test("no draft without candidates; with no tests or sources anywhere, the outermost candidate", () => {
   expect(draftYaml(detect(repoWith({ "README.md": "" })))).toBe("");
   const d = detect(repoWith({ "package.json": pkg({}), "web/package.json": pkg({}) }));
   expect(Object.keys(projects(d))).toEqual(["main"]);
   expect(unsure(d)).toContain("projects.main.root: no test files found here");
+});
+
+test("a package without tests is drafted only when it holds sources no drafted project owns", () => {
+  const d = detect(repoWith({
+    "package.json": pkg({ private: true, workspaces: ["packages/*"] }),
+    "package-lock.json": "{}",
+    "scripts/release.ts": "",
+    "packages/api/package.json": pkg({ devDependencies: { vitest: "2" } }),
+    "packages/api/src/a.ts": "",
+    "packages/api/src/a.test.ts": "",
+    "packages/api/tools/package.json": pkg({}),
+    "packages/api/tools/gen.ts": "",
+    "packages/ui/package.json": pkg({}),
+    "packages/ui/src/button.tsx": "",
+    "packages/config/package.json": pkg({}),
+    "packages/config/README.md": "",
+  }));
+  expect(Object.values(projects(d)).map((p) => p.root)).toEqual([".", "packages/api", "packages/ui"]);
+  expect(unsure(d)).toContain("projects.ui.root: no test files found here");
 });
 
 test("version ranges", () => {

@@ -21,12 +21,20 @@ const READY: Record<string, (env: Record<string, string>) => string> = {
 };
 const MAX_PROJECTS = 40;
 
-/** The candidates the draft proposes as projects: those with test files of their own; with none anywhere, the
- * outermost candidate of each language. */
+/** The candidates the draft proposes as projects: those with test files of their own, and those without that hold
+ * source files of their language no other drafted project owns (setup proves them with arnx's one-line test; the
+ * rest the coverage map lists as untested). Deeper candidates are taken first, so a workspace root claims only the
+ * files its packages leave. Without any test files or sources: the outermost candidate of each language. */
 function chosen(d: Detection): Candidate[] {
   const supported = d.candidates.filter((c) => c.language !== "other");
-  const tested = supported.filter((c) => (c.ownTests ?? 0) > 0);
-  if (tested.length) return tested.slice(0, MAX_PROJECTS);
+  const under = (p: string, root: string) => root === "." || p.startsWith(root + "/");
+  const out = supported.filter((c) => (c.ownTests ?? 0) > 0);
+  const depth = (c: Candidate) => (c.root === "." ? 0 : c.root.split("/").length);
+  for (const c of supported.filter((x) => !out.includes(x)).sort((a, b) => depth(b) - depth(a))) {
+    if ((d.sources?.[c.language] ?? []).some((p) => under(p, c.root) && !out.some((o) => under(p, o.root)))) out.push(c);
+  }
+  // Past the cap, packages with tests stay before ones without.
+  if (out.length) return out.slice(0, MAX_PROJECTS).sort((a, b) => supported.indexOf(a) - supported.indexOf(b));
   return supported.filter((c) => !supported.some((o) => o.language === c.language && o.root !== c.root &&
     (o.root === "." || c.root.startsWith(o.root + "/")))).slice(0, 10);
 }
@@ -150,7 +158,8 @@ function jsProject(c: Candidate, f: ProjectFacts, d: Detection, mark: MarkFn): R
   // node --test has describe and it too, as imports: mocha suites run under it with those made global.
   if (c.runner === "mocha") mark("runner", "the tests are mocha's; node --test runs them once describe and it are global");
   else if (!runner) mark("runner", "no runner found");
-  runner ??= c.runner === "mocha" ? "node" : manager === "bun" ? "bun" : "vitest";
+  // A package without tests runs arnx's one-line test, which node --test runs with nothing installed.
+  runner ??= c.runner === "mocha" || !(c.ownTests ?? 0) ? "node" : manager === "bun" ? "bun" : "vitest";
   const bun = runner === "bun" || manager === "bun";
   const p: Raw = { runner, image: image(f, bun ? "bun" : "node", mark) };
   const ci = !f.lockfile ? "npm install"
