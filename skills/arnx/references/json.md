@@ -168,7 +168,7 @@ code changed since. With `--json` the consent to send code needs `--yes` when no
 | `approval_record` | string or null | `.arnx/setup/approval.md` once proven (who ran the proof: the git user; when, the file's sha256 and the warnings); else `null`. |
 | `cost_usd` | number | What setup's model calls cost. |
 | `seconds` | number | How long setup took, the proof included. |
-| `failure` | object or null | Why setup failed: `{ kind, reason, failing }`. `kind` is `environment` (it never got a suite running: a build that fails, a runner that does not start, the budget or the turns used up, no proposal, or a run that needs a file arnx left out, after which setup stops) or `tests` (the suite runs and the current code fails tests outside the baseline; `failing` holds their ids). `null` unless `fail`. |
+| `failure` | object or null | Why setup failed: `{ kind, reason, failing }`. `kind` is `environment` (it never got a suite running: a build that fails, a runner that does not start, the budget or the turns used up, no proposal, a run that needs a file arnx left out, after which setup stops, or only web UI apps whose one try failed: `reason` is `only web UI here, which arnx does not set up` and `next` is empty) or `tests` (the suite runs and the current code fails tests outside the baseline; `failing` holds their ids). `null` unless `fail`. |
 | `next` | array of strings | The commands to run next: `arnx review` once proven; `arnx approve` (after fixing `review_yaml`: it proves it again); `arnx setup --force` when there was no attempt. When setup stopped for a file it left out: `arnx allow-secret PATH` (secret-looking) or `add !PATH to .arnxignore`, then `arnx setup`. |
 
 | `result` | Exit | When |

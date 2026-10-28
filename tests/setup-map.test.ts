@@ -139,7 +139,7 @@ test("a web UI app that is the only project ends setup after its one try", async
   ]);
   const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: sessions });
   expect(r.ok).toBe(false);
-  expect(r.problem).toContain("web: web UI app whose tests did not run on the first try, and no other project");
+  expect([r.stop, r.problem]).toEqual(["web-ui", "only web UI here, which arnx does not set up"]);
 });
 
 test("browser suites: Playwright, Cypress, Storybook and vitest's browser mode", () => {

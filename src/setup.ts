@@ -470,6 +470,10 @@ export interface ProjectProof { name: string; summary: string; skips: string[]; 
 export interface SetupRun { name: string; digest: string; env: string; snapshot: string; untracked: boolean;
   summary: string; after: string; skips: string[]; counts: SuiteCounts }
 
+/** Why setup stops when its only projects are web UI apps whose one try failed (SetupResult stop WEB_UI_STOP). */
+export const ONLY_WEB_UI = "only web UI here, which arnx does not set up";
+export const WEB_UI_STOP = "web-ui";
+
 export interface SetupResult {
   ok: boolean;
   yamlText: string | null;
@@ -492,7 +496,8 @@ export interface SetupResult {
   failing: string[];
   /** The project `failing` belongs to (null with none). */
   failingProject: string | null;
-  /** Why the last attempt did not go through, in a few words (a refused proposal, a suite that does not run). */
+  /** Why the last attempt did not go through, in a few words (a refused proposal, a suite that does not run,
+   * ONLY_WEB_UI). */
   problem: string;
   /** Files the snapshot left out that the tests need: setup stopped at the run that named them (stop "stopped"). */
   needed?: NeededFile[];
@@ -1363,9 +1368,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       // of in the file. Done on the agent's file; arnx's own keys (withOurs) are added again to check it.
       const drop = [...state.webUi].filter((name) => parsed.f.projects.some((p) => p.name === name));
       if (drop.length && drop.length === parsed.f.projects.length) {
-        state.problem = `${drop.join(", ")}: web UI app${drop.length === 1 ? "" : "s"} whose tests did not run on the ` +
-          "first try, and no other project; `arnx setup --add` tries again";
-        throw new StopRound(`stopped: ${state.problem}. Setup gives a web UI app one try, so it ends here.`);
+        state.problem = ONLY_WEB_UI;
+        throw new StopRound(`stopped: ${ONLY_WEB_UI}: ${drop.join(", ")} did not run on ${drop.length === 1 ? "its" :
+          "their"} one try, and there is no other project. Setup ends here.`);
       }
       const derived = [...browser.map((b) => ({ path: b.path, reason: `${BROWSER_TESTS} (${b.tool})` })),
         ...drop.flatMap((name) => webUiPaths(parsed.f, name, mapFiles).map((path) => ({ path, reason: WEB_UI })))];
@@ -1507,10 +1512,20 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       new Date());
     const projects = (state.final?.projects ?? []).map((p) => state.proofs.get(p.name) ??
       { name: p.name, summary: keep.has(p.name) ? "approved earlier" : "not run", skips: [] });
-    emit("setup.completed", { ok: state.accepted !== null, stop: result.stop, cost_usd: result.costUsd,
+    // Every project of the last file a web UI app whose one try failed: nothing here arnx sets up.
+    let last: string[] = [];
+    try {
+      last = state.lastFile ? parseReviewFile(state.lastFile).projects.map((p) => p.name) : [];
+    } catch (e) {
+      if (!(e instanceof ArnxError)) throw e;
+    }
+    const webOnly = state.accepted === null && !state.needed && last.length > 0 && last.every((n) => state.webUi.has(n));
+    if (webOnly) state.problem = ONLY_WEB_UI;
+    const stop = state.needed ? "stopped" : webOnly ? WEB_UI_STOP : result.stop;
+    emit("setup.completed", { ok: state.accepted !== null, stop, cost_usd: result.costUsd,
       attempts: state.attempts, projects: projects.map((p) => p.name), summary: clip(state.summary, 500) });
     return { ok: state.accepted !== null, yamlText: state.accepted ?? state.lastTried, summary: state.summary,
-      costUsd: result.costUsd, stop: state.needed ? "stopped" : result.stop, notes: result.finalText, projects, withheld,
+      costUsd: result.costUsd, stop, notes: result.finalText, projects, withheld,
       blanked, standIns, sandboxed: [...sandbox].sort(),
       failing: state.accepted !== null ? [] : state.failing, failingProject: state.accepted !== null ? null
         : state.failingProject, problem: state.problem, ...(state.needed ? { needed: state.needed } : {}),

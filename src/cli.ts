@@ -51,8 +51,8 @@ import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSetting
 import { type ModelRef, providerLines, refString, setupRef, setupSettings, unusedKeysNote } from "./settings";
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
-import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile,
-  type ProjectProof, rerecordBaseline, runSetup, type SetupResult, type SetupRun, stillRed } from "./setup";
+import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, type ProjectProof,
+  rerecordBaseline, runSetup, type SetupResult, type SetupRun, stillRed, WEB_UI_STOP } from "./setup";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, notTestedRecord, PROVEN_BASELINE,
   PROVEN_COPY, proofState, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
 import { isoSeconds } from "./util";
@@ -900,6 +900,15 @@ class Commands {
     // With arnx cloud the figure is what it billed (its price), not the models' cost.
     const cost = cloud ? `Billed $${result.costUsd.toFixed(2)} by arnx cloud`
       : unpriced ? "Cost unknown" : `Cost $${result.costUsd.toFixed(2)}`;
+    if (!result.ok && result.stop === WEB_UI_STOP) {
+      // Nothing to fix and nothing to run next: setup has nothing here to set up.
+      const failure = setupFailure(result, s.setupBudgetUsd);
+      this.d.out(failure.text);
+      this.d.out(`${cost} · logs: .arnx/setup/`);
+      this.emit("fail", 2, setupJson({ file: tryParse(result.yamlText), result, approved: false, auto: false,
+        files: null, warnings: [], reviewYaml: null, record: null, seconds: seconds(), failure: failure.json, next: [] }));
+      return finish(2, false);
+    }
     if (!result.ok) {
       const saved = result.yamlText ? this.saveAttempt(repo, result.yamlText) : null;
       const failure = setupFailure(result, s.setupBudgetUsd);
@@ -1794,7 +1803,7 @@ export function setupFailure(r: SetupResult, budgetUsd: number)
       `${ids}.`, json: { kind: "tests", reason: `${r.failingProject}: ${n} failing outside the baseline`,
       failing: r.failing } };
   }
-  if (r.needed?.length) {
+  if (r.needed?.length || r.stop === WEB_UI_STOP) {
     return { text: `Setup stopped: ${r.problem}.`, json: { kind: "environment", reason: r.problem, failing: [] } };
   }
   const stop = r.stop === "budget" ? `the $${budgetUsd.toFixed(2)} budget ran out`

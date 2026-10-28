@@ -192,6 +192,31 @@ test("an environment that never runs: that failure, told apart from failing test
   expect(cli.out.at(-2)).toMatch(/^Cost \$\d+\.\d\d · last attempt: \.arnx\/review\.yaml \(not proven\) · logs: /);
 });
 
+test("only web UI apps whose one try failed: setup stops with exit 2, nothing to fix", async () => {
+  const repo = initRepo(join(tmp(), "site"));
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ dependencies: { "react-dom": "18.3.1" } }));
+  mkdirSync(join(repo, "src"), { recursive: true });
+  writeFileSync(join(repo, "src", "app.test.tsx"), "test('a', () => {});\n");
+  commit(repo, "site");
+  const init = new Cli({ cwd: repo, env: ENV });
+  expect(await init.run("init")).toBe(0);
+  expect(await init.run("consent", "--yes")).toBe(0);
+  const site = "version: 1\nprojects:\n  site:\n    root: .\n    language: typescript\n    runner: vitest\n" +
+    "    image: node:22-slim\n    test_command: npx vitest run {targets}\n";
+  const model = new ScriptedAgent([[tool("try_project", { yaml: site })], [tool("propose", { yaml: site })],
+    [text("unreachable")]]);
+  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: suites(null) });
+  expect(await cli.run("setup", "--yes")).toBe(2);
+  expect(cli.out.slice(-2)).toEqual(["Setup stopped: only web UI here, which arnx does not set up.", cli.out.at(-1)!]);
+  expect(cli.out.at(-1)).toMatch(/^Cost \$\d+\.\d\d · logs: \.arnx\/setup\/$/);
+  expect(existsSync(reviewConfigPath(repo))).toBe(false);
+  const json = new Cli({ cwd: repo, env: ENV, setupModel: new ScriptedAgent([[tool("try_project", { yaml: site })],
+    [text("done")]]), setupSessions: suites(null) });
+  expect(await json.run("setup", "--yes", "--json")).toBe(2);
+  expect(JSON.parse(json.stdout)).toMatchObject({ result: "fail", exit_code: 2, review_yaml: null,
+    failure: { kind: "environment", reason: "only web UI here, which arnx does not set up" }, next: [] });
+});
+
 test("a proven file is kept: setup says it is set up; changed by hand, the next review proves it again", async () => {
   const repo = await shop();
   const model = () => new ScriptedAgent([[tool("try_project", { yaml: GOOD })], [tool("propose", { yaml: GOOD })],
