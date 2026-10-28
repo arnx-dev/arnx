@@ -48,7 +48,7 @@ import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSetting
   modelsSetting, recordCloudModels, recordConsent, type Settings, settingsPath, untrackedSetting, withModels,
   writeSettings }
   from "./settings";
-import { type ModelRef, providerLines, unusedKeysNote } from "./settings";
+import { type ModelRef, providerLines, refString, setupRef, setupSettings, unusedKeysNote } from "./settings";
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile,
@@ -581,8 +581,10 @@ class Commands {
 
 
   /** What a command that sends code needs, checked as doctor shows it: a config that reads, the models it names and
-   * their keys (or arnx cloud's login, and with `balance` its balance), and Docker. */
-  private async prerequisites(repo: string, a: Args, { balance = true }: { balance?: boolean } = {})
+   * their keys (or arnx cloud's login, and with `balance` its balance), and Docker. With `refs`, only the keys of the
+   * models the command runs. */
+  private async prerequisites(repo: string, a: Args,
+                              { balance = true, refs }: { balance?: boolean; refs?: (s: Settings) => ModelRef[] } = {})
     : Promise<{ checks: Check[]; file: Settings | null; s: Settings | null; mode: ModelsMode | null }> {
     const checks: Check[] = [];
     let file: Settings | null = null, mode: ModelsMode | null = null, s: Settings | null = null;
@@ -602,8 +604,8 @@ class Commands {
       s = mode && withModels(file, mode);
       if (s && mode?.cloud) checks.push(...await this.cloudChecks(s, mode, balance));
       else if (s) {
-        const missing = missingKeys(s, this.d.env);
-        const n = keyNames(s).length;
+        const missing = missingKeys(s, this.d.env, refs?.(s));
+        const n = keyNames(s, refs?.(s)).length;
         checks.push([!missing.length, "Keys", missing.length ? keysHint(missing)
           : n ? `${n} required key${n === 1 ? "" : "s"} present` : "none needed"]);
       }
@@ -623,8 +625,9 @@ class Commands {
 
   /** doctor's checks before a command sends code: on a ✗, its line on stderr (as doctor shows it) and the exit code.
    * The balance is not asked here: arnx cloud refuses the first call when it is out. */
-  private async ready(repo: string, a: Args): Promise<{ s: Settings; mode: ModelsMode } | number> {
-    const r = await this.prerequisites(repo, a, { balance: false });
+  private async ready(repo: string, a: Args, refs?: (s: Settings) => ModelRef[])
+    : Promise<{ s: Settings; mode: ModelsMode } | number> {
+    const r = await this.prerequisites(repo, a, { balance: false, ...(refs ? { refs } : {}) });
     const bad = r.checks.filter(([ok]) => ok === false);
     for (const [, name, text] of bad) this.d.err(`✗ ${name}: ${text}`);
     if (!bad.length && r.s && r.mode) return { s: r.s, mode: r.mode };
@@ -691,8 +694,14 @@ class Commands {
     const used = new Set(s ? modelRefs(s).map((r) => r.provider) : []);
     const unused = settings && !cloudModels(settings) ? unusedKeysNote(repo, this.d.env) : null;
     const providers = settings ? providerLines(settings, this.d.env).filter((l) => used.has(l.split(/[ :]/)[1]!)) : [];
+    // Setup's own model or effort, when it is not the reviewer's (on your own keys only).
+    const own = s && !cloudModels(s) ? setupSettings(s) : null;
+    const ownEffort = own && own.effort !== s!.effort ? `, effort ${own.effort}` : "";
+    const setupLine = own && (ownEffort || refString(own.reviewer) !== refString(s!.reviewer))
+      ? `setup: ${refString(own.reviewer)}${ownEffort}` : null;
     for (const [good, name, text] of checks) {
       this.d.out(`${good ? "✓" : good === null ? "·" : "✗"} ${name}: ${text}`);
+      if (name === "Models" && setupLine) this.d.out(`  ${setupLine}`);
       if (name === "Models") for (const line of providers) this.d.out(`  ${line}`);
       if (name === "Keys" && unused) this.d.out(`  ${unused}`);
       if (name === "Environment" && knownNote) this.d.out(`  ${knownNote}`);
@@ -850,7 +859,8 @@ class Commands {
       }
     }
     // doctor's checks first: a missing key or a stopped Docker ends setup here, before it reads or spends anything.
-    const ready = await this.ready(repo, a);
+    // Setup runs one model, so only its key is needed.
+    const ready = await this.ready(repo, a, (s) => [setupRef(s)]);
     if (typeof ready === "number") return ready;
     const { mode } = ready;
     const s = await this.agreed(repo, ready.s, mode, a.values.yes as boolean);
@@ -869,10 +879,10 @@ class Commands {
     const started = this.clock();
     const cloud = await this.cloudBrain(repo, s, mode);
     if (cloud) this.cloudPrompts(repo);
-    const unpriced = !cloud && this.unpriced(s, [s.reviewer]);
+    const unpriced = !cloud && this.unpriced(s, [setupRef(s)]);
     const result = await this.withProgress(a, (progress) => runSetup(repo, s,
-      cloud ? null : this.d.setupModel ?? makeAgentModel(s, this.d.env), { outDir, project, add, progress, failureModel,
-        untracked, localPins: localPinsPath(this.d.env, repo),
+      cloud ? null : this.d.setupModel ?? makeAgentModel(setupSettings(s), this.d.env), { outDir, project, add, progress,
+        failureModel, untracked, localPins: localPinsPath(this.d.env, repo),
         ...(this.d.setupSessions ? { sessionFactory: this.d.setupSessions } : {}),
         ...(cloud ? { brain: cloud(progress) } : {}) }), { cost: true, since: started });
     if (result.withheld.length) {

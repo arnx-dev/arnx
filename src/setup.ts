@@ -34,7 +34,7 @@ import { promptsFor } from "./userprompts";
 import type { Say } from "./progress";
 import { copyManifests, dockerSteps, envKey, type Runner, type SessionFactory } from "./sandbox";
 import type { ScipIndex } from "./scip";
-import { loadSettings, refString, type Settings, settingsPath } from "./settings";
+import { loadSettings, refString, type Settings, settingsPath, setupRef } from "./settings";
 import { runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
 import { SOURCE } from "./untested";
 import { otherLanguageOf } from "./languages";
@@ -808,7 +808,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
   if (o.project && !existing!.projects.some((p) => p.name === o.project)) {
     throw new ArnxError(`no project ${o.project} in .arnx/review.yaml`);
   }
-  emit("setup.started", { arnx_version: VERSION, model: o.brain?.label ?? refString(settings.reviewer),
+  emit("setup.started", { arnx_version: VERSION, model: o.brain?.label ?? refString(setupRef(settings)),
     project: o.project ?? null, add: !!o.add });
   const keep = new Map(existing ? existing.projects.filter((p) => p.name !== o.project)
     .map((p) => [p.name, projectDigest(existing, p.name)] as const) : []);
@@ -1207,7 +1207,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       withheldFiles: withheld,
       ...(o.project ? { project: o.project } : {}), ...(o.add ? { add: true } : {}),
       budgetUsd: settings.setupBudgetUsd, outDir: o.outDir }, Promise.resolve(tools)));
-    logUsage(repo, "setup", [agentUse(brain.label ? `${brain.label}/setup` : refString(settings.reviewer), result)],
+    logUsage(repo, "setup", [agentUse(brain.label ? `${brain.label}/setup` : refString(setupRef(settings)), result)],
       new Date());
     const projects = (state.final?.projects ?? []).map((p) => state.proofs.get(p.name) ??
       { name: p.name, summary: keep.has(p.name) ? "approved earlier" : "not run", skips: [] });

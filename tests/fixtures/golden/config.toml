@@ -3,6 +3,7 @@ telemetry = false   # true: send anonymous usage counts, never code or file name
 
 [models]
 reviewer = "anthropic:claude-sonnet-5-5"      # reviews the change, writes and runs the tests
+# setup = "anthropic:claude-sonnet-5-5"       # sets up the test environment; default: reviewer
 hunter = "anthropic:claude-haiku-5-5"         # looks at each part of a big change
 # second_hunter = "openai:gpt-6.1-sol"        # harness; needs OPENAI_API_KEY
 challenger = "anthropic:claude-sonnet-5-5"    # second opinion on each finding
