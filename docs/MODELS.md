@@ -9,6 +9,7 @@ Which models arnx uses, how to change them, and what they cost. With arnx cloud 
 
     [models]
     reviewer = "anthropic:claude-sonnet-5-5"      # reviews the change, writes and runs the tests
+    # setup = "anthropic:claude-sonnet-5-5"       # sets up the test environment; default: reviewer
     hunter = "anthropic:claude-haiku-5-5"         # looks at each part of a big change
     second_hunter = "openai:gpt-6.1-sol"          # a second look, from another vendor
     challenger = "river:zai-org/GLM-5.3-Flash"    # second opinion on each finding
@@ -49,11 +50,12 @@ named like a built-in provider (`[providers.openai]`, say with another `url`) ch
 `other`.
 Endpoints that copy only OpenAI's Chat Completions API come in a later version.
 
-More settings under `[models]`, written only when set: `second_hunter_effort` (the second hunter's own effort),
-`openai_tier`, `openai_transport`.
+More settings under `[models]`, written only when set: `setup` (the model `arnx setup` runs on; default: `reviewer`),
+`setup_effort` (its own effort, `"low"`, `"medium"` or `"high"`; default: `effort`), `second_hunter_effort` (the
+second hunter's own effort), `openai_tier`, `openai_transport`.
 
-`effort` (default `"medium"`) applies to every role. `second_hunter_effort` gives the configured `second_hunter` its
-own, sent as is (`"none"`, `"low"`, …; the provider rejects a value it does not take): a second hunter that reasons
+`effort` (default `"medium"`) applies to every role (setup takes `setup_effort` when set). `second_hunter_effort`
+gives the configured `second_hunter` its own, sent as is (`"none"`, `"low"`, …; the provider rejects a value it does not take): a second hunter that reasons
 long can run past the time a hunt is given. OpenAI calls run as background responses
 that arnx polls every 3 s and cancels when the call runs out of time, since a long OpenAI stream can stall on some
 networks; `openai_transport = "stream"` streams them instead. Generic tables always stream. Background mode needs

@@ -65,6 +65,10 @@ export interface Settings {
   /** Anonymous usage counts after setup, review, accept and check (`telemetry`, default off: opt-in). */
   telemetry: boolean;
   reviewer: ModelRef;
+  /** The model that sets up the test environment (`setup`, default: the reviewer). */
+  setup?: ModelRef;
+  /** Setup's own effort (`setup_effort`, default: `effort`). */
+  setupEffort?: Tier;
   challenger: ModelRef;
   /** The model that hunts each part of a big change (default: the reviewer). */
   hunter?: ModelRef;
@@ -231,6 +235,11 @@ export function loadSettings(repo: string): Settings {
     throw new ArnxError(".arnx/config.toml: second_hunter_effort needs second_hunter");
   }
   const ownEffort = typeof rawEffort === "string" ? rawEffort.trim() : undefined;
+  const setupEffort = models.setup_effort;
+  if (setupEffort !== undefined && !TIERS.includes(setupEffort as Tier)) {
+    throw new ArnxError(`.arnx/config.toml: models.setup_effort: ${JSON.stringify(setupEffort)}; write ` +
+      TIERS.map((x) => JSON.stringify(x)).join(", "));
+  }
   if (review.before_check !== undefined && typeof review.before_check !== "boolean") {
     throw new ArnxError(".arnx/config.toml: review.before_check: write true or false");
   }
@@ -252,6 +261,8 @@ export function loadSettings(repo: string): Settings {
     telemetry: telemetrySetting(data.telemetry),
     ...(typeof data.cloud_consent_at === "string" ? { cloudConsentAt: data.cloud_consent_at } : {}),
     reviewer: parseRef(str(models.reviewer, REVIEWER)),
+    ...(models.setup !== undefined ? { setup: parseRef(String(models.setup)) } : {}),
+    ...(setupEffort !== undefined ? { setupEffort: setupEffort as Tier } : {}),
     challenger: parseRef(str(models.challenger, REVIEWER)),
     ...(models.hunter !== undefined ? { hunter: parseRef(String(models.hunter)) } : {}),
     ...(models.openai_tier !== undefined ? { openaiTier: String(models.openai_tier) } : {}),
@@ -365,6 +376,9 @@ export function writeSettings(repo: string, s: Settings, opts: { known?: boolean
       ? [`${`# ${key} = ${q(HARNESS[role])}`.padEnd(45)} # harness; needs ${keysOf(HARNESS[role]).join(", ")}`] : [];
   lines.push("", "[models]",
     model("reviewer", q(refString(s.reviewer)), "reviews the change, writes and runs the tests"),
+    s.setup ? model("setup", q(refString(s.setup)), "sets up the test environment")
+      : `${`# setup = ${q(REVIEWER)}`.padEnd(45)} # sets up the test environment; default: reviewer`,
+    ...(s.setupEffort ? [model("setup_effort", q(s.setupEffort), "setup's own effort")] : []),
     ...ref("hunter", s.hunter, "looks at each part of a big change"),
     ...ref("second_hunter", s.secondHunter, "a second look, from another vendor"),
     ...harness("second_hunter", "secondHunter", s.secondHunter),
@@ -502,24 +516,33 @@ export function recordConsent(repo: string, key: "consent_at" | "cloud_consent_a
 
 /** Every model these settings call, whatever its role. */
 export const modelRefs = (s: Settings): ModelRef[] =>
-  [s.reviewer, s.challenger, s.challengerFallback, s.secondHunter, s.hunter, s.answerModel]
+  [s.reviewer, s.setup, s.challenger, s.challengerFallback, s.secondHunter, s.hunter, s.answerModel]
     .filter((r): r is ModelRef => r != null);
+
+/** The model setup runs on: `setup`, else the reviewer. */
+export const setupRef = (s: Settings): ModelRef => s.setup ?? s.reviewer;
+
+/** The settings setup's agent runs on: `setup` and `setup_effort` in the reviewer's and `effort`'s place. Without
+ * them, the settings as they are. */
+export const setupSettings = (s: Settings): Settings => s.setup || s.setupEffort
+  ? { ...s, reviewer: setupRef(s), effort: s.setupEffort ?? s.effort } : s;
 
 /** The provider a ref names under these settings (a preset, the user's table, or both merged). */
 export function providerOfRef(s: Pick<Settings, "providers"> | null | undefined, ref: ModelRef): Provider | undefined {
   return resolveProvider(ref.provider, s?.providers);
 }
 
-/** The variables the models in these settings read their keys (and base URLs) from, each once. */
-export function keyNames(s: Settings): string[] {
-  return [...new Set(modelRefs(s).flatMap((r) => {
+/** The variables the models in these settings read their keys (and base URLs) from, each once; with `refs`, only
+ * those models'. */
+export function keyNames(s: Settings, refs: ModelRef[] = modelRefs(s)): string[] {
+  return [...new Set(refs.flatMap((r) => {
     const p = providerOfRef(s, r);
     return p ? envNames(p) : [];
   }))];
 }
 
-export function missingKeys(s: Settings, env: Env): string[] {
-  return keyNames(s).filter((k) => !env[k]);
+export function missingKeys(s: Settings, env: Env, refs?: ModelRef[]): string[] {
+  return keyNames(s, refs).filter((k) => !env[k]);
 }
 
 /** How messages name a built-in provider (from PRESETS). */
