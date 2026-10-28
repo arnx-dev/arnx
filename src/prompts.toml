@@ -329,6 +329,8 @@ back to you once, and trying the project again unchanged records them with their
 not (jest roots, vitest include or a testMatch that leaves the folder out), set tests_dir to a new, empty subfolder \
 inside a folder the configuration includes (for example __tests__/unit/arnx_generated), never to a folder that \
 holds the project's own tests; do not change the project's own configuration.
+- Once try_project has built a project's image, look around in it with exec (versions, files, a single test), not \
+with probes in test_command: each try_project runs the whole suite.
 - Record untested or unsupported paths under uncovered with a reason instead of leaving them out.
 - Stop when propose accepts the file. Then reply with a short summary of what you chose and why."""
 
