@@ -233,3 +233,36 @@ test("the sample: the smallest files the listing names, found under the project 
   // Few more files than the sample: the whole suite is about as quick.
   expect(sampleOf({ ...listing, files: listing.files.slice(1, 4) }, cfg, snap)).toEqual([]);
 });
+
+test("with tests_dir from the runner's configuration, the listed one-line test and the probe run are the same file",
+  async () => {
+  const r = gitRepo(tmp());
+  const unit = FILES.map((f) => f.replace("tests/", "tests/unit/"));
+  mkdirSync(join(r, "tests", "unit"), { recursive: true });
+  writeFileSync(join(r, "pyproject.toml"), "[tool.pytest.ini_options]\ntestpaths = [\"tests/unit\"]\n");
+  unit.forEach((f, i) => writeFileSync(join(r, f), "def test_x():\n    pass\n" + "# padding\n".repeat(i * 10)));
+  commit(r, "tests");
+  const probe = "tests/unit/arnx_generated/test_arnx_probe.py";
+  const answer = (command: string): Answer => {
+    const isProbe = command.includes("test_arnx_probe.py");
+    if (command.includes("--collect-only")) {
+      return { output: isProbe ? `${probe}::test_arnx_probe` : unit.map((f) => `${f}::test_x`).join("\n") };
+    }
+    if (isProbe) return { xml: passed([probe]), output: "1 passed" };
+    const targets = unit.filter((f) => command.includes(f));
+    return { xml: passed(targets.length ? targets : unit), output: "passed" };
+  };
+  const model = new ScriptedAgent([[tool("try_project", { yaml: YAML })], [tool("propose", { yaml: YAML })],
+    [text("done")]]);
+  const sessions: Session[] = [];
+  const done = await runSetup(r, defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(answer, sessions) });
+  expect(done.ok).toBe(true);
+  const probes = sessions.flatMap((s) => s.commands).filter((c) => c.includes("test_arnx_probe.py"));
+  // The probe's listing and the probe run after the suite.
+  expect(probes.length).toBe(2);
+  for (const c of probes) {
+    expect(c).toContain(probe);
+    expect(c).not.toContain("tests/arnx_generated/");
+  }
+});

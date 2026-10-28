@@ -5,7 +5,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSy
 import { join } from "node:path";
 import { parseReviewFile, type ReviewConfig } from "../src/config";
 import { EventLog, withEvents } from "../src/events";
-import type { ExecFactory, ExecRunner, RunResult } from "../src/sandbox";
+import { dockerSteps, type ExecFactory, type ExecRunner, type RunResult, type SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { runSetup } from "../src/setup";
 import { clipOutput, EXEC_CALLS, EXEC_MAX_TIMEOUT, EXEC_TIMEOUT, Mirror, SetupExec, type TriedEnv }
@@ -209,6 +209,22 @@ test("exec's container goes while try_project runs, and the next exec starts it 
   // No exec container is up during any suite run.
   expect(during.length).toBeGreaterThan(0);
   expect(during.every((n) => n === 0)).toBe(true);
+});
+
+test("exec runs in the image the try's run used: one rebuilt for the code is named by its image step", async () => {
+  const { made, factory } = boxes();
+  const inner = fakeFactory(() => [junitXml([["tests/test_a.py", "test_a", "passed", ""]]), "1 passed", false]);
+  const rebuilt: SessionFactory = (cfg, snap, log, body, ...rest) => {
+    dockerSteps.log?.({ step: "image", project: cfg.name, tag: "arnx-env:abc", built: false });
+    dockerSteps.log?.({ step: "image", project: cfg.name, tag: "arnx-env:abc-src-0123", built: true, ok: true });
+    dockerSteps.log?.({ step: "image", project: "other", tag: "arnx-env:zzz", built: true, ok: true });
+    return inner(cfg, snap, log, body, ...rest);
+  };
+  const model = new ScriptedAgent([[tool("try_project", { yaml: YAML, project: "app" })],
+    [tool("exec", { project: "app", command: "ls" })], [text("done")]]);
+  await runSetup(gitRepo(tmp()), defaultSettings(), model, { outDir: join(tmp(), "s"), sessionFactory: rebuilt,
+    execFactory: factory });
+  expect(made.map((b) => b.image)).toEqual(["arnx-env:abc-src-0123"]);
 });
 
 test("setup offers exec; it runs in the image the project's last try_project used, and goes at the end", async () => {

@@ -366,9 +366,10 @@ and the three smallest listed files run. No tests, files that do not load, a run
 with no report or no test passing: each goes back to the agent with the output, and the same environment tried
 again runs the whole suite. A listing it cannot read for sure changes nothing.
 Setup's `exec` tool (`setupexec.ts`; never offered to reviews) runs one command in the image a project's last
-try_project used, as its tests run (the test user, no internet, its services, the same limits), in one container kept
-between commands (`Session.exec`, the kept box) and removed at the end of setup or on an interrupt; /src is a copy of
-the snapshot reset before each command (`Mirror`). It builds no image and nothing it does is kept: 120 s per command
+try_project used (the one its image step in `docker.jsonl` names, a rebuild for the code included), as its tests run
+(the test user, no internet, its services, deps_dir's links, the same limits), in one container kept between commands
+(`Session.exec`, the kept box), removed while a try_project runs, at the end of setup and on an interrupt; /src is a
+copy of the snapshot reset before each command (`Mirror`), without the sandbox-only files. It builds no image and nothing it does is kept: 120 s per command
 by default (at most 900), 80 commands or 60 minutes per setup, output cut to its first 2,000 and last 10,000
 characters (all of it in `exec-<n>.log`).
 A round clears every file with the adapter's writable names from tests_dir, so a tests_dir holding the project's own

@@ -1029,6 +1029,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
   dockerSteps.log = (line) => {
     mkdirSync(o.outDir, { recursive: true });
     appendFileSync(join(o.outDir, "docker.jsonl"), JSON.stringify(line) + "\n");
+    // The image a project's run uses, for exec.
+    const tried = line.step === "image" && line.ok !== false ? state.lastTry.get(String(line.project)) : undefined;
+    if (tried && typeof line.tag === "string") state.lastTry.set(String(line.project), { ...tried, image: line.tag });
   };
   // A try's first line says whether an image is built for it: the build line of the project about to run takes its
   // place; otherwise the line comes as the run starts.
@@ -1203,7 +1206,11 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       // exec's container sits idle while the suite runs: it goes now (memory), and the next exec starts it again.
       exec?.close();
       const log = join(o.outDir, `build-${n}-${name}.log`);
-      state.lastTry.set(name, { cfg, image: envTag(keyOf(cfg)), env: envDigest(cfg) });
+      // exec runs in the image this try runs in: its key's, or the one the run's image step names (dockerSteps.log
+      // below; an image rebuilt for the code). The same environment keeps the image its last run named.
+      const before = state.lastTry.get(name);
+      state.lastTry.set(name, { cfg, env: envDigest(cfg),
+        image: before?.env === envDigest(cfg) ? before.image : envTag(keyOf(cfg)) });
       // One line as the run starts: the image build, when there is one, is said in the same line.
       announce = { name, n };
       let ok: boolean, summary: string, tail: string, skips: string[], failing: string[], hints: string,
