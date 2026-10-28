@@ -359,6 +359,12 @@ A round clears every file with the adapter's writable names from tests_dir, so a
 such files (Python's test_*.py, conftest.py, __init__.py; not those under the folders `accept` keeps tests in) is
 refused by `try_project`, `propose`, `approve` and `review` (`ownTestsInWriteDir`). Rust's writable names are arnx's own
 (`arnx_generated_*.rs`), so a crate's tests in `tests/` never count.
+A project the agent gives no tests_dir gets one from its runner's own configuration when the default folder lies
+outside it (`testsdir.ts`: vitest include and projects, jest roots, testMatch and testRegex, pytest testpaths; set in
+the file by `withTestsDirs`, said once to the agent): a new `arnx_generated` folder beside most of the project's own
+tests. Configuration in JavaScript is read only where it is literal; otherwise the default stays and the probe decides.
+An accepted test changed since `arnx accept` does not stop setup or the proof right after it (said once); `arnx
+approve` on its own and `arnx check` still refuse it.
 
 ## Language adapters
 
