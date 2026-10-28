@@ -13,8 +13,8 @@ import { bakedError, bakedIn, bakedKey, type BakedCopy, copyOnly, type CopyOnly,
 import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
   fixText, judgeBefore, judgeFix, notChecked, SKIP_REASONS, textBefore, textFix } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
-import { snapshot } from "./change";
-import { type ReviewConfig, secretPinsOf } from "./config";
+import { snapshot, withSandboxFiles } from "./change";
+import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
 import { clip, emit, testMessage } from "./events";
 import { type Classified, classify, describeRun, funcOf, ownerFile, runTests, type TestResult } from "./outcomes";
@@ -52,7 +52,7 @@ export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, e
   // An image holding an older copy of the code (baked.ts) is built again for the code in the snapshot, once per version
   // of that code (keyed on it: later sessions and reviews of the same code reuse it). The before/after check copies its
   // code in once the session is up: a copy that differs from it then refuses the first run.
-  let guard: ((s: Session) => Runner) | null = null;
+  let guard: ((s: Runner) => Runner) | null = null;
   let copies: BakedCopy[] = [];
   if (existsSync(snap) && readdirSync(snap).length) {
     const baked = bakedIn(cfg, image, snap);
@@ -76,7 +76,9 @@ export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, e
     };
   }
   const session = await new Session(image, cfg, snap).start();
-  const runner = guard ? guard(session) : session;
+  // Files the tests need that no model may read are in the snapshot only while a test runs.
+  const placed = withSandboxFiles(session, snap);
+  const runner = guard ? guard(placed) : placed;
   try {
     return await body(copies.length ? { run: (command, timeout) => runner.run(command, timeout),
       copies: (output) => copyOnly(cfg, image, copies, snap, output) } : runner);
@@ -285,7 +287,8 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   const dbNames = databaseEnv(cfg.env, cfg.services);
   try {
     const snap = join(tmp, "repo");
-    removed = snapshot(repo, head, snap, secretPinsOf(cfg.raw), { untracked: !!o.untracked }).map((w) => w.path);
+    removed = snapshot(repo, head, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw),
+      untracked: !!o.untracked }).map((w) => w.path);
     // Clear earlier generated files only: for some languages the tests directory also holds the project's own tests.
     mkdirSync(join(snap, o.writeDir), { recursive: true });
     for (const rel of collect(snap, o.writeDir, adapter.writable)) rmSync(join(snap, rel), { force: true });
@@ -465,7 +468,7 @@ export async function typecheckRound(repo: string, head: string | null, cfg: Rev
   const tmp = mkdtempSync(join(tmpdir(), "arnx-"));
   try {
     const snap = join(tmp, "repo");
-    snapshot(repo, head, snap, secretPinsOf(cfg.raw), { untracked: !!o.untracked });
+    snapshot(repo, head, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw), untracked: !!o.untracked });
     const headKey = envKey(cfg, snap);
     const run = await sessionFactory({ ...cfg, services: [] }, snap, join(o.outDir, "env-build.log"),
       async (session) => typecheckHere(session, snap, cfg, writeDirOf(cfg), say));
@@ -513,7 +516,7 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
     else {
       try {
         const snap = join(o.tmp, "typecheck-before");
-        snapshot(repo, o.base, snap, secretPinsOf(cfg.raw));
+        snapshot(repo, o.base, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw) });
         clearArnxFiles(snap, cfg, writeDirOf(cfg));
         if (envKey(cfg, snap) !== o.headKey) before = { status: "dependencies-changed" };
         else {
@@ -617,7 +620,7 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
       // The code before the change is copied only once the image is ready: its files are then newer than any build
       // in the image, so cargo rebuilds them instead of running the change's build as fresh.
       const t0 = performance.now();
-      snapshot(repo, o.base!, snap, secretPinsOf(cfg.raw));
+      snapshot(repo, o.base!, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw) });
       // Generated files the base happens to hold are cleared, as for the round; the round's own go in as they ran.
       mkdirSync(join(snap, o.writeDir), { recursive: true });
       for (const rel of collect(snap, o.writeDir, adapterFor(cfg).writable)) rmSync(join(snap, rel), { force: true });

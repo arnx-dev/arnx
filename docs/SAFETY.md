@@ -26,15 +26,27 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   never sent to a model. A file left out this way is named at setup and in each review. When every key-shaped
   string in a JavaScript, TypeScript, Python or Rust file is inside a comment that has its lines to itself (a doc
   example), the file is sent with those comment lines blanked instead (a private key's whole block too, when it lies
-  in the comment), and setup names the file and its lines; one in code, or on a line that also holds code, still
-  leaves the whole file out. A review's diff blanks such lines the same way and names them; a key in code
-  in the diff still stops the review. When its key-shaped text
+  in the comment), and setup names the file and its lines. A key in code, or on a line that also holds code, gets a
+  stand-in: the file is sent and copied with each key-shaped string, and each run of key-body-like text beside one
+  (40 or more base64 characters with both cases and a digit, `+` or `/`), replaced by a fake of the same prefix,
+  length and kinds of characters; the same key gets the same fake everywhere, and the real values never leave your
+  machine. Setup names these files once. A private key with a body cannot get a stand-in: its file is still left out
+  (a header with no body anywhere in the file, such as a form's placeholder, is kept as it is). `[review] stand_ins =
+  false` in `.arnx/config.toml` leaves every such file out instead. A review's diff blanks comment lines the same
+  way and names them; a key in code in the diff still stops the review. When its key-shaped text
   is test fixtures (a secret detector's own tests), `arnx allow-secret PATH` pins each such string in
   `.arnx/review.yaml`, which is then proven again before the next review; a new key-shaped string in that file
   withholds it again, and `arnx allow-secret --remove PATH` takes a file off the list (proven again too). Setup lists
   allowed files under "Worth a look".
-  When a setup run fails on a file left out this way (or by `.arnxignore`), setup stops and names it: only you can
-  let it in.
+  When a setup run fails on a file left out this way, setup stops and names it: only you can let it in. When it
+  fails on a file `.arnxignore` leaves out, setup copies that file into the sandbox (scrubbed the same way, never sent
+  to a model; it is in the snapshot only while a test runs), says so in one line, runs the project again, and lists
+  the file under `sandbox_only` in `.arnx/review.yaml` and under "Worth a look". This holds for every line of
+  `.arnxignore`, arnx's defaults and yours alike: `init` writes data files it finds there by name, so the file does
+  not tell them apart. A test's output still goes to the model, and may quote such a file.
+- A variable whose name looks like a secret (KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL, …) is refused in
+  `.arnx/review.yaml` unless listed under `allow_env_names` or set to `arnx:generated` (64 hex digits arnx makes) or
+  `arnx:generated:base64` (32 bytes, URL-safe base64): throwaway values, the same in every run.
 - arnx never edits your code or your tests. `accept` writes only into `.arnx/` (accepted tests in `.arnx/tests/`,
   where your own test run never collects them).
 - Accepted tests are code a model wrote. They run only through `arnx check`, in the proven sandbox. Read them

@@ -267,8 +267,9 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   `timed_out` when the call ran out of time.
 - `suspect.outcome`, `report.done` (`reviewer.ts`): what became of each suspect; the report's totals.
 - `setup.started`, `setup.attempt`, `setup.completed` (`setup.ts`): the setup agent's attempts and result;
-  `setup.withheld`: files left out of its snapshot as secret-looking, and `blanked`, files kept with comment lines
-  blanked (only when there are some); `setup.paths_check`:
+  `setup.withheld`: files left out of its snapshot as secret-looking, `blanked`, files kept with comment lines
+  blanked, and `stand_ins`, files kept with stand-ins (only when there are some); `setup.sandbox_only`: files
+  `.arnxignore` leaves out that a run needed, copied into the sandbox before the project runs again; `setup.paths_check`:
   the map's paths (uses entries wider than meant), with each hint's project and kind; `setup.uses_check`
   (`context = "precise"` only): the map against the code, with the projects indexed and each hint's project and kind.
 - `context.index` (`indexer.ts`, `context = "precise"` only): one project's code index: `ok`, `secs`, `files`, and

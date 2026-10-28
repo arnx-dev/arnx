@@ -21,7 +21,7 @@ import { worthALook } from "../src/setupview";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
 import { GOOD, PROJECTS } from "./helpers/yaml";
-import { AWS_KEY } from "./helpers/fakekeys";
+import { AWS_KEY, PRIVATE_KEY_BLOCK } from "./helpers/fakekeys";
 
 const tmp = useTmp();
 const FIXTURE = `AWS = '${AWS_KEY}'\n`;
@@ -106,15 +106,15 @@ const firstUser = (m: ScriptedAgent) => JSON.stringify(m.calls[0]!.messages[0]!.
 
 test("setup reports the files it withheld, to the agent and in its result", async () => {
   const repo = gitRepo(tmp());
-  writeFileSync(join(repo, "detect.py"), FIXTURE);
+  writeFileSync(join(repo, "detect.py"), `KEY = """${PRIVATE_KEY_BLOCK}"""\n`);
   runGit(repo, "add", "detect.py");
   const model = new ScriptedAgent([[tool("propose", { yaml: YAML })], [text("done")]]);
   const held: boolean[] = [];
   const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "setup"),
     sessionFactory: seeing("detect.py", held) });
-  expect(r.withheld).toEqual([{ path: "detect.py", line: 1, label: "AKIA…" }]);
+  expect(r.withheld).toEqual([{ path: "detect.py", line: 1, label: "a private key" }]);
   expect(held).toEqual([false]);
-  expect(firstUser(model)).toContain("detect.py (AKIA…, line 1)");
+  expect(firstUser(model)).toContain("detect.py (a private key, line 1)");
   expect(r.yamlText).toBe(YAML);
 });
 

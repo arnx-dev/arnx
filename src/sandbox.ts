@@ -11,7 +11,7 @@ import { adapterFor, getAdapter, LANGUAGES } from "./adapters";
 import type { CopyOnly } from "./baked";
 import { digest, type ReviewConfig } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
-import { globRegex } from "./secrets";
+import { envValue, globRegex } from "./secrets";
 import { pyJson, randomHex, shQuote, sleep } from "./util";
 
 /** The repository the running command works on (set by the command): environment images are labelled with it, so
@@ -268,7 +268,7 @@ export function runArgv(o: { image: string; name: string; network: string; snaps
     "-v", `${o.snapshot}:/src`, "-w", workdirIn("/src", o.workdir), "-e", "HOME=/tmp"];
   for (const m of o.mounts ?? []) argv.push("-v", m);
   for (const e of o.runEnv) argv.push("-e", e);
-  for (const k of Object.keys(o.env).sort()) argv.push("-e", `${k}=${o.env[k]}`);
+  for (const k of Object.keys(o.env).sort()) argv.push("-e", `${k}=${envValue(o.env[k]!)}`);
   return [...argv, o.image, "sh", "-c", o.command];
 }
 
@@ -361,7 +361,7 @@ export class Session implements Runner {
           const name = `arnx-${this.id}-${svc.name}`;
           const args = ["run", "-d", "--rm", "--name", name, "--network", this.network, "--network-alias", svc.name,
             "--cpus", "1", "--memory", "1g"];
-          for (const k of Object.keys(svc.env).sort()) args.push("-e", `${k}=${svc.env[k]}`);
+          for (const k of Object.keys(svc.env).sort()) args.push("-e", `${k}=${envValue(svc.env[k]!)}`);
           r = docker([...args, svc.image], { timeout: 900 });
           if (r.status !== 0) throw new ArnxError(`service ${svc.name} did not start: ${r.stderr.trim().slice(0, 300)}`);
           this.started.push(name);

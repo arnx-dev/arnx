@@ -13,11 +13,11 @@ import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { AdapterId, TestResult } from "./adapters/types";
-import { type Blanked, describeBlanked, filesAt, hasCommits, snapshot, takeSnapshot, type Withheld, workingTreeFiles }
-  from "./change";
+import { addToSandbox, type Blanked, describeBlanked, filesAt, hasCommits, snapshot, someNames, takeSnapshot,
+  type Withheld, workingTreeFiles } from "./change";
 import {
   loadReviewFile, parseReviewFile, projectDigest, readSecretPins, type ReviewConfig, reviewConfigPath, type ReviewFile,
-  secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampFile,
+  sandboxOnlyOf, sandboxYaml, secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampFile,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
 import { classify, describeHints, diagnose, firstErrors, firstLine, type Hint, missingLeftOut, npxDownload, npxText,
@@ -439,6 +439,10 @@ export interface SetupResult {
   withheld: Withheld[];
   /** Source files kept with comment lines blanked: their only such text was in comments. */
   blanked: Blanked[];
+  /** Files kept with a stand-in for each key-shaped string (the real values never left this machine). */
+  standIns: string[];
+  /** Files .arnxignore leaves out that the tests need: in the sandbox only (review.yaml sandbox_only). */
+  sandboxed: string[];
   /** The failing tests (outside known_failing) of the last suite that ran with some tests passing: setup got the
    * suite running, the current code fails them. Empty when the last run never got that far. */
   failing: string[];
@@ -854,19 +858,22 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     // Files the user allowed although they look like secrets: the approved file's, or a seed's before the first setup.
     const pins = existing ? secretPinsOf(existing.raw) : seedPins(repo);
     const untracked = !!o.untracked;
-    const { withheld, blanked } = takeSnapshot(repo, null, snap, pins, { untracked });
+    // Files .arnxignore leaves out that the tests need: in the sandbox only. A fresh setup finds them again.
+    const sandbox = new Set(existing ? sandboxOnlyOf(existing.raw) : []);
+    const { withheld, blanked, standIns } = takeSnapshot(repo, null, snap, pins, { untracked, sandbox: [...sandbox] });
     // Image keys come from the manifests as they were before any run wrote into the snapshot.
     copyManifests(snap, join(tmp, "manifests"));
     const keyOf = (cfg: ReviewConfig) => envKey(cfg, join(tmp, "manifests"));
     const accepted = settings.acceptedTestsDir;
     // Tests kept by `arnx accept` fail until their bugs are fixed: as pinned, they do not stop a project.
     const trusted = acceptedPins(repo, o.localPins ?? null);
-    // What the snapshot left out: secret-looking files, and the files .arnxignore matches. A run that needs one stops
-    // setup (see LeftOutNeeded).
+    // What the snapshot left out: secret-looking files, and the files .arnxignore matches. A run that needs one of the
+    // latter gets it in the sandbox; one that needs a secret-looking file stops setup (see LeftOutNeeded).
     const files = workingTreeFiles(repo, untracked).files;
     const ignoredFile = loadIgnore(repo);
     const secret = new Set(withheld.map((w) => w.path));
-    const leftOut: LeftOut = { paths: [...secret, ...files.filter((p) => ignoredFile(p) && !secret.has(p))], all: files };
+    const leftOut: LeftOut = { paths: [...secret, ...files.filter((p) => ignoredFile(p) && !secret.has(p) &&
+      !sandbox.has(p))], all: files };
     const stopped = () => new StopRound(`stopped: ${state.problem}. Only the user can let ` +
       `${state.needed!.length === 1 ? "it" : "them"} in, so setup ends here; do not work around it.`);
     if (withheld.length) {
@@ -874,12 +881,17 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         "it with `arnx allow-secret PATH` and run setup again");
     }
     if (blanked.length) say(`comment lines blanked as secret-looking: ${describeBlanked(blanked)}`);
-    if (withheld.length || blanked.length) {
-      emit("setup.withheld", { files: withheld.map((w) => w.path), blanked: blanked.map((b) => b.path) });
+    if (standIns.length) say(`stand-ins for key-shaped text, the real values kept here: ${someNames(standIns)}`);
+    if (withheld.length || blanked.length || standIns.length) {
+      emit("setup.withheld", { files: withheld.map((w) => w.path), blanked: blanked.map((b) => b.path),
+        stand_ins: standIns });
     }
+    // What arnx adds to the agent's file: the user's allow-list and the sandbox-only files.
+    const ours = () => (pins.length ? secretPinsYaml(pins) : "") + (sandbox.size ? sandboxYaml([...sandbox]) : "");
+    const withOurs = (yaml: string) => ours() ? `${yaml.trimEnd()}\n${ours()}` : yaml;
     const current = existing ? readFileSync(reviewConfigPath(repo), "utf8") : "";
     // The agent's file, with the user's allow-list added: the agent may not write one.
-    const parse = (args: Record<string, unknown>): { f: ReviewFile; text: string } | string => {
+    const parse = (args: Record<string, unknown>): { f: ReviewFile; text: string; yaml: string } | string => {
       if (typeof args.yaml !== "string") return "invalid: yaml must be a string";
       const [yaml, dropped] = withoutKnownFailing(args.yaml, new Set(keep.keys()));
       if (dropped) {
@@ -888,7 +900,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           "file.)\n";
       }
       // Saved when setup fails: with the user's allow-list, so the file left behind keeps it.
-      state.lastTried = pins.length ? `${yaml.trimEnd()}\n${secretPinsYaml(pins)}` : yaml;
+      state.lastTried = withOurs(yaml);
       try {
         const own = parseReviewFile(yaml);
         if ("approved" in own.raw) return "invalid: remove the approved key; arnx stamps the file after its proof";
@@ -896,10 +908,13 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           return "invalid: remove allow_secret_looking; only the user allows secret-looking files, and setup adds " +
             "their list itself";
         }
-        const text = pins.length ? `${yaml.trimEnd()}\n${secretPinsYaml(pins)}` : yaml;
+        if ("sandbox_only" in own.raw) {
+          return "invalid: remove sandbox_only; setup adds the files the tests need itself";
+        }
+        const text = withOurs(yaml);
         state.lastTried = text;
         state.lastFile = yaml;
-        return { f: pins.length ? parseReviewFile(text) : own, text };
+        return { f: text !== yaml ? parseReviewFile(text) : own, text, yaml };
       } catch (e) {
         if (!(e instanceof ArnxError)) throw e;
         return `invalid: ${e.message}`;
@@ -922,6 +937,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       // The current review.yaml's stamp and allow-list are arnx's, never the agent's.
       doc.delete("approved");
       doc.delete("allow_secret_looking");
+      doc.delete("sandbox_only");
       doc.setIn(["projects", args.project], block.contents);
       return { yaml: String(doc), project: args.project };
     };
@@ -995,6 +1011,24 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       } catch (e) {
         if (!(e instanceof ArnxError)) throw e;
         announce = null;
+        // Files .arnxignore leaves out go into the sandbox (scrubbed as the snapshot is), and the project runs again.
+        if (e instanceof LeftOutNeeded && e.files.every((p) => !secret.has(p))) {
+          const r = addToSandbox(repo, snap, e.files, pins);
+          r.sandboxed.forEach((p) => sandbox.add(p));
+          r.withheld.forEach((w) => secret.add(w.path));
+          leftOut.paths = leftOut.paths.filter((p) => !sandbox.has(p));
+          if (r.standIns.length) {
+            say(`stand-ins for key-shaped text, the real values kept here: ${someNames(r.standIns)}`);
+          }
+          if (r.sandboxed.length && !r.withheld.length) {
+            say(`${name}: the tests need ${someNames(r.sandboxed)}, which .arnxignore leaves out: copied into the ` +
+              "sandbox, not sent to the model");
+            emit("setup.sandbox_only", { project: name, files: r.sandboxed });
+            attempt({ ok: false, reused: false, summary: "", failing: 0, skips: 0, hints: "",
+              error: clip(`sandbox: ${r.sandboxed.join(", ")}`, 500) });
+            return tryProject(input);
+          }
+        }
         if (e instanceof LeftOutNeeded) {
           state.needed = e.files.map((path) => ({ path, secret: secret.has(path) }));
           state.failing = [];
@@ -1092,7 +1126,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       if (state.needed) throw stopped();
       const parsed = parse(args);
       if (typeof parsed === "string") return parsed;
-      const { f, text } = parsed;
+      const { f } = parsed;
       const problems: string[] = [];
       const ownTests: string[] = [];
       const changed = [...keep].filter(([name, d]) => !f.projects.some((p) => p.name === name) ||
@@ -1173,8 +1207,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
             hints.map((h) => `- ${h.text}`).join("\n") + "\nFix them, or propose the same file again to keep it as it is.";
         }
       }
-      state.accepted = text;
-      state.final = f;
+      // With the sandbox-only files the runs just now found.
+      state.accepted = withOurs(parsed.yaml);
+      state.final = parseReviewFile(state.accepted);
       return `accepted:\n${describeCoverage(map)}\nStop here and summarise.`;
     };
     // A note the agent gets once, with the next tool result (known_failing taken out of its file).
@@ -1214,7 +1249,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     emit("setup.completed", { ok: state.accepted !== null, stop: result.stop, cost_usd: result.costUsd,
       attempts: state.attempts, projects: projects.map((p) => p.name), summary: clip(state.summary, 500) });
     return { ok: state.accepted !== null, yamlText: state.accepted ?? state.lastTried, summary: state.summary,
-      costUsd: result.costUsd, stop: state.needed ? "stopped" : result.stop, notes: result.finalText, projects, withheld, blanked,
+      costUsd: result.costUsd, stop: state.needed ? "stopped" : result.stop, notes: result.finalText, projects, withheld,
+      blanked, standIns, sandboxed: [...sandbox].sort(),
       failing: state.accepted !== null ? [] : state.failing, failingProject: state.accepted !== null ? null
         : state.failingProject, problem: state.problem, ...(state.needed ? { needed: state.needed } : {}) };
   } finally {
@@ -1296,7 +1332,8 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
   const tmp = tempDir("arnx-approve-");
   try {
     const snap = join(tmp, "repo");
-    snapshot(repo, null, snap, secretPinsOf(f.raw), { untracked: o.untracked ?? settings?.untracked ?? false });
+    snapshot(repo, null, snap, secretPinsOf(f.raw), { sandbox: sandboxOnlyOf(f.raw),
+      untracked: o.untracked ?? settings?.untracked ?? false });
     copyManifests(snap, join(tmp, "manifests"));
     // Every project runs, so one approve names every project that needs fixing.
     for (const cfg of run) {
@@ -1362,7 +1399,8 @@ export async function rerecordBaseline(repo: string, o: { by: string; at: string
   const tmp = tempDir("arnx-baseline-");
   try {
     const snap = join(tmp, "repo");
-    snapshot(repo, null, snap, secretPinsOf(f.raw), { untracked: o.untracked ?? settings?.untracked ?? false });
+    snapshot(repo, null, snap, secretPinsOf(f.raw), { sandbox: sandboxOnlyOf(f.raw),
+      untracked: o.untracked ?? settings?.untracked ?? false });
     copyManifests(snap, join(tmp, "manifests"));
     for (const cfg of f.projects) {
       const log = join(repo, ".arnx", "run", f.legacy ? "baseline-build.log" : `baseline-build-${cfg.name}.log`);

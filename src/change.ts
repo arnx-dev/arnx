@@ -6,14 +6,16 @@
 // checkout.
 import { spawnSync } from "node:child_process";
 import {
-  copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync,
-  statSync, symlinkSync, unlinkSync, writeFileSync,
+  copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync,
+  rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, posix, resolve, sep } from "node:path";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
-import { excludePathspecs, firstUnpinned, hasKeyBody, isSecretPath, type KeyScan, scanKeys, type SecretPin }
+import { excludePathspecs, firstUnpinned, hasKeyBody, isSecretPath, scanKeys, type SecretPin, standIn }
   from "./secrets";
+import type { Runner } from "./sandbox";
+import { standInsSetting } from "./settings";
 import { splitLines } from "./util";
 
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -419,23 +421,37 @@ export function describeBlanked(b: Blanked[]): string {
   }).join(", ");
 }
 
+/** How a snapshot treats what it may not hold as it is. `standIns` (default on: `[review] stand_ins`): a file holding
+ * key-shaped text in code is kept with a stand-in for each such string (secrets.ts standIn) instead of left out.
+ * `sandbox`: files .arnxignore leaves out that the tests need (review.yaml sandbox_only): kept beside the snapshot
+ * (sandboxDir), never in it, and placed in it only while a test runs (withSandboxFiles). */
+export interface SnapshotOptions { untracked?: boolean; standIns?: boolean; sandbox?: readonly string[] }
+
+/** What a snapshot left out or changed: files left out for their content, files kept with comment lines blanked,
+ * files kept with stand-ins, and the sandbox-only files it holds beside it. */
+export interface Scrubbed { withheld: Withheld[]; blanked: Blanked[]; standIns: string[]; sandboxed: string[] }
+
+/** Where a snapshot's sandbox-only files are kept: beside it, so nothing that reads the snapshot sees them. */
+export const sandboxDir = (snap: string) => `${snap}.sandbox`;
+
 /** Copy the code at `head` (or the working tree when null) to `dest`, then scrub it. Returns the files removed for
  * their content; `allow` keeps files the user allowed while every key-shaped string in them is pinned. A working-tree
  * snapshot holds tracked files only unless `untracked` (or the repository has no commits yet): whatever reads it (an
  * agent, or tests whose output goes to a model) never sees untracked files the owner did not opt in to. */
 export function snapshot(repo: string, head: string | null, dest: string, allow: readonly SecretPin[] = [],
-                         o: { untracked?: boolean } = {}): Withheld[] {
+                         o: SnapshotOptions = {}): Withheld[] {
   return takeSnapshot(repo, head, dest, allow, o).withheld;
 }
 
-/** snapshot, also naming the files kept with comment lines blanked. */
+/** snapshot, also naming the files kept with comment lines blanked or with stand-ins, and the sandbox-only files. */
 export function takeSnapshot(repo: string, head: string | null, dest: string, allow: readonly SecretPin[] = [],
-                             o: { untracked?: boolean } = {}): { withheld: Withheld[]; blanked: Blanked[] } {
+                             o: SnapshotOptions = {}): Scrubbed {
   mkdirSync(dest, { recursive: true });
   const ignored = loadIgnore(repo);
   const limit = changeLimits.maxSnapshotFiles;
+  const sandbox = new Set(o.sandbox ?? []);
   if (head === null) {
-    const paths = workingTreeFiles(repo, !!o.untracked).files.filter((p) => !ignored(p));
+    const paths = workingTreeFiles(repo, !!o.untracked).files.filter((p) => !ignored(p) || sandbox.has(p));
     if (paths.length > limit) {
       throw new ArnxError(`the working tree has ${paths.length} files; arnx copies up to ${limit}. ` +
         "Add large generated directories to .gitignore");
@@ -466,30 +482,140 @@ export function takeSnapshot(repo: string, head: string | null, dest: string, al
       throw new ArnxError(`unpacking the snapshot failed: ${(tar.stderr || tar.error?.message || "").trim().slice(0, 300)}`);
     }
   }
-  return scrub(dest, ignored, allow);
+  return scrub(dest, ignored, allow, { standIns: o.standIns ?? standInsSetting(repo), sandbox });
+}
+
+/** Copy `paths` (files .arnxignore leaves out that the tests need) from the working tree to the snapshot's sandbox-only
+ * files, scrubbed as a snapshot's files are. Returns those copied, and those left out for their content. */
+export function addToSandbox(repo: string, snap: string, paths: readonly string[], allow: readonly SecretPin[] = [],
+                             o: { standIns?: boolean } = {}): Scrubbed {
+  const out = sandboxDir(snap);
+  const at = join(out, ".arnx-add");
+  rmSync(at, { recursive: true, force: true });
+  for (const rel of paths) {
+    let st;
+    try {
+      st = lstatSync(join(repo, rel));
+    } catch {
+      continue;
+    }
+    if (!st.isFile()) continue;
+    mkdirSync(dirname(join(at, rel)), { recursive: true });
+    copyFileSync(join(repo, rel), join(at, rel));
+  }
+  mkdirSync(at, { recursive: true });
+  const r = scrub(at, () => false, allow, { standIns: o.standIns ?? standInsSetting(repo), sandbox: new Set() });
+  const sandboxed: string[] = [];
+  const move = (dir: string, prefix: string) => {
+    for (const name of readdirSync(dir)) {
+      const rel = prefix ? `${prefix}/${name}` : name;
+      if (lstatSync(join(dir, name)).isDirectory()) move(join(dir, name), rel);
+      else {
+        mkdirSync(dirname(join(out, rel)), { recursive: true });
+        renameSync(join(dir, name), join(out, rel));
+        sandboxed.push(rel);
+      }
+    }
+  };
+  move(at, "");
+  rmSync(at, { recursive: true, force: true });
+  return { ...r, sandboxed: sandboxed.sort() };
+}
+
+/** `runner` with the snapshot's sandbox-only files placed in it for each run, and taken out after: the tests read them,
+ * and nothing that reads the snapshot between runs (an agent's tools, the text sent to a model) sees them. A file the
+ * snapshot already holds is left as it is. */
+export function withSandboxFiles(runner: Runner, snap: string): Runner {
+  const from = sandboxDir(snap);
+  if (!existsSync(from)) return runner;
+  const files: string[] = [];
+  const walk = (prefix: string) => {
+    for (const name of readdirSync(join(from, prefix))) {
+      const rel = prefix ? `${prefix}/${name}` : name;
+      if (lstatSync(join(from, rel)).isDirectory()) walk(rel);
+      else files.push(rel);
+    }
+  };
+  walk("");
+  if (!files.length) return runner;
+  const copies = runner.copies ? { copies: (output: string) => runner.copies!(output) } : {};
+  return { ...copies, run: (command, timeout) => {
+    const placed: string[] = [], made: string[] = [];
+    try {
+      for (const rel of files) {
+        const to = join(snap, rel);
+        if (existsSync(to)) continue;
+        // Folders made for a file go again after the run, deepest first.
+        for (let d = dirname(rel); d !== "." && !existsSync(join(snap, d)); d = dirname(d)) made.unshift(join(snap, d));
+        mkdirSync(dirname(to), { recursive: true });
+        copyFileSync(join(from, rel), to);
+        // Its time as the copy beside the snapshot has it: a run never sees it as changed since the last one.
+        const st = statSync(join(from, rel));
+        utimesSync(to, st.atime, st.mtime);
+        placed.push(to);
+      }
+      return runner.run(command, timeout);
+    } finally {
+      for (const p of placed) rmSync(p, { force: true });
+      for (const d of made.reverse()) {
+        try {
+          rmdirSync(d);
+        } catch {
+          // a run wrote into it
+        }
+      }
+    }
+  } };
 }
 
 /** Remove .git, .arnx, paths matched by .arnxignore, secret files, files with secret content and symlinks leaving
- * the tree; blank the comment lines of a source file whose only secret content is in comments. Returns the files
- * removed for their content (the others are never expected in a snapshot) and the files blanked. */
-function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly SecretPin[])
-  : { withheld: Withheld[]; blanked: Blanked[] } {
+ * the tree; blank the comment lines of a source file whose only secret content is in comments, and give one whose
+ * key-shaped text is in code stand-ins (with `standIns`). Files .arnxignore matches that `sandbox` names move beside
+ * the tree (sandboxDir), scrubbed the same way. Returns the files removed for their content (the others are never
+ * expected in a snapshot), blanked, given stand-ins, and moved beside it. */
+function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly SecretPin[],
+               o: { standIns: boolean; sandbox: ReadonlySet<string> }): Scrubbed {
   const realRoot = realpathSync(root);
   const removedFiles: Withheld[] = [];
   const blanked: Blanked[] = [];
+  const standIns: string[] = [];
+  const sandboxed: string[] = [];
+  const beside = sandboxDir(root);
   const inside = (p: string) => p === realRoot || p.startsWith(realRoot + sep);
-  const walk = (dir: string, relDir: string) => {
+  const holds = (dir: string) => [...o.sandbox].some((p) => p.startsWith(`${dir}/`));
+  /** A regular file kept (in the tree or beside it): left out, blanked or given stand-ins for its content. */
+  const scan = (p: string, rel: string, size: number): boolean => {
+    const hit = secretContent(p, rel, size, allow.find((a) => a.path === rel)?.matches ?? [], o.standIns);
+    if (hit && "withhold" in hit) {
+      unlinkSync(p);
+      removedFiles.push({ path: rel, ...hit.withhold });
+      return false;
+    }
+    if (hit) {
+      writeFileSync(p, hit.text);
+      if ("standIn" in hit) standIns.push(rel);
+      else blanked.push({ path: rel, lines: hit.blank });
+    }
+    return true;
+  };
+  const walk = (dir: string, relDir: string, out: boolean) => {
     for (const name of readdirSync(dir)) {
       const p = join(dir, name);
       const rel = relDir ? `${relDir}/${name}` : name;
       const st = lstatSync(p);
       if (st.isDirectory()) {
-        if (name === ".git" || name === ".arnx" || ignored(rel + "/")) rmSync(p, { recursive: true, force: true });
-        else walk(p, rel);
+        const left = out || ignored(rel + "/");
+        if (name === ".git" || name === ".arnx" || (left && !holds(rel))) rmSync(p, { recursive: true, force: true });
+        else walk(p, rel, left);
         continue;
       }
-      if (ignored(rel) || (st.isSymbolicLink() && ignored(rel + "/"))) {
-        unlinkSync(p);
+      if (out || ignored(rel) || (st.isSymbolicLink() && ignored(rel + "/"))) {
+        // A file the tests need goes beside the tree, unless it is a secret file or a link.
+        if (o.sandbox.has(rel) && st.isFile() && !isSecretPath(name) && scan(p, rel, st.size)) {
+          mkdirSync(dirname(join(beside, rel)), { recursive: true });
+          renameSync(p, join(beside, rel));
+          sandboxed.push(rel);
+        } else rmSync(p, { force: true });
         continue;
       }
       if (st.isSymbolicLink()) {
@@ -506,27 +632,38 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
         unlinkSync(p);
         continue;
       }
-      const hit = secretContent(p, rel, st.size, allow.find((a) => a.path === rel)?.matches ?? []);
-      if (hit && "withhold" in hit) {
-        unlinkSync(p);
-        removedFiles.push({ path: rel, ...hit.withhold });
-      } else if (hit) {
-        writeFileSync(p, hit.text);
-        blanked.push({ path: rel, lines: hit.blank });
-      }
+      scan(p, rel, st.size);
     }
   };
-  walk(root, "");
+  walk(root, "", false);
+  // Folders the moves left empty go.
+  for (const rel of sandboxed) {
+    for (let d = posix.dirname(rel); d !== "."; d = posix.dirname(d)) {
+      const at = join(root, d);
+      if (!existsSync(at) || readdirSync(at).length) break;
+      rmdirSync(at);
+    }
+  }
   const byPath = (a: { path: string }, b: { path: string }) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
-  return { withheld: removedFiles.sort(byPath), blanked: blanked.sort(byPath) };
+  return { withheld: removedFiles.sort(byPath), blanked: blanked.sort(byPath), standIns: standIns.sort(),
+    sandboxed: sandboxed.sort() };
 }
 
-function secretContent(p: string, rel: string, size: number, pins: readonly string[]): KeyScan | null {
+/** What a snapshot does with a file's key-shaped text (scanKeys), with stand-ins in place of withholding where they
+ * keep every real value out. */
+type Scan = { withhold: { line: number; label: string } } | { blank: number[]; text: string }
+  | { standIn: number; text: string };
+
+function secretContent(p: string, rel: string, size: number, pins: readonly string[], standIns: boolean): Scan | null {
   if (size > SCAN_LIMIT) return null;
+  let text: string;
   try {
-    return scanKeys(rel, readFileSync(p, "utf8"), pins);
+    text = readFileSync(p, "utf8");
   } catch {
     return null;
   }
+  const scan = scanKeys(rel, text, pins);
+  if (!scan || !("withhold" in scan) || !standIns) return scan;
+  const fake = standIn(text, pins);
+  return fake ? { standIn: fake.count, text: fake.text } : scan;
 }
-
