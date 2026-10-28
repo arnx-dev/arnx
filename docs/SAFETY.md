@@ -26,13 +26,21 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   never sent to a model. A file left out this way is named at setup and in each review. When every key-shaped
   string in a JavaScript, TypeScript, Python or Rust file is inside a comment that has its lines to itself (a doc
   example), the file is sent with those comment lines blanked instead (a private key's whole block too, when it lies
-  in the comment), and setup names the file and its lines. A key in code, or on a line that also holds code, gets a
-  stand-in: the file is sent and copied with each key-shaped string, and each run of key-body-like text beside one
-  (40 or more base64 characters with both cases and a digit, `+` or `/`), replaced by a fake of the same prefix,
-  length and kinds of characters; the same key gets the same fake everywhere, and the real values never leave your
-  machine. Setup names these files once. A private key with a body cannot get a stand-in: its file is still left out
-  (a header with no body anywhere in the file, such as a form's placeholder, is kept as it is). `[review] stand_ins =
-  false` in `.arnx/config.toml` leaves every such file out instead. A review's diff blanks comment lines the same
+  in the comment), and setup names the file and its lines. Everything else that may be a secret gets a stand-in, a
+  fake of the same shape (its prefix such as `sk-`, `whsec_` or `AKIA` kept, then the same length and kinds of
+  characters, hex staying hex), and the tests run with the fake: key-shaped text; a literal given to a secret-looking
+  name (token, secret, password, credential, private, authorization, API key; also key, auth, salt or cookie when
+  the value looks random) in code, JSON, YAML, TOML, INI or env files, as an assignment, a keyword argument or a
+  `("NAME", "value")` pair, unless it is words or a name (`password123`, `PublicKey`), a placeholder, a URL or a path,
+  or the name says hash, signature, public, id or label; and a random-looking run of 40 or more base64 characters
+  anywhere. Hex digits are faked only where such a name marks them: unnamed, they are hashes and commit ids that
+  tests compare. Inline data (`base64,`), lockfiles, binary files and JWTs are left alone. Each value is then
+  replaced wherever it appears in the snapshot, so no file keeps it and every file gets the same fake; the real
+  values never leave your machine. Setup names these files once. A test that checks a signature made with the real
+  value (a signed license key) fails with the fake. A private key with a body cannot get a stand-in: its file is
+  still left out (a header with no body anywhere in the file, such as a form's placeholder, is kept as it is).
+  `[review] stand_ins = false` in `.arnx/config.toml` turns stand-ins off: files with key-shaped text in code are left
+  out, and other values are sent as they are. A review's diff blanks comment lines the same
   way and names them; a key in code in the diff still stops the review. When its key-shaped text
   is test fixtures (a secret detector's own tests), `arnx allow-secret PATH` pins each such string in
   `.arnx/review.yaml`, which is then proven again before the next review; a new key-shaped string in that file

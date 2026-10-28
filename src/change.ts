@@ -12,9 +12,9 @@ import {
 import { dirname, join, posix, resolve, sep } from "node:path";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
-import { excludePathspecs, firstUnpinned, hasKeyBody, isSecretPath, scanKeys, type SecretPin, standIn }
-  from "./secrets";
-import type { Runner } from "./sandbox";
+import { excludePathspecs, firstUnpinned, hasKeyBody, isSecretPath, privateKeyBody, scanKeys, type SecretPin,
+  standInsFor, suspects } from "./secrets";
+import { REPORT_DIR, type Runner } from "./sandbox";
 import { standInsSetting } from "./settings";
 import { splitLines } from "./util";
 
@@ -429,7 +429,9 @@ export interface SnapshotOptions { untracked?: boolean; standIns?: boolean; sand
 
 /** What a snapshot left out or changed: files left out for their content, files kept with comment lines blanked,
  * files kept with stand-ins, and the sandbox-only files it holds beside it. */
-export interface Scrubbed { withheld: Withheld[]; blanked: Blanked[]; standIns: string[]; sandboxed: string[] }
+export interface Scrubbed { withheld: Withheld[]; blanked: Blanked[]; standIns: string[]; sandboxed: string[];
+  /** The values given stand-ins: kept in memory for a later copy into the sandbox (addToSandbox), never logged. */
+  secrets: ReadonlySet<string> }
 
 /** Where a snapshot's sandbox-only files are kept: beside it, so nothing that reads the snapshot sees them. */
 export const sandboxDir = (snap: string) => `${snap}.sandbox`;
@@ -486,9 +488,10 @@ export function takeSnapshot(repo: string, head: string | null, dest: string, al
 }
 
 /** Copy `paths` (files .arnxignore leaves out that the tests need) from the working tree to the snapshot's sandbox-only
- * files, scrubbed as a snapshot's files are. Returns those copied, and those left out for their content. */
+ * files, scrubbed as a snapshot's files are; `known`: the values the snapshot replaced, replaced here too. Returns
+ * those copied, and those left out for their content. */
 export function addToSandbox(repo: string, snap: string, paths: readonly string[], allow: readonly SecretPin[] = [],
-                             o: { standIns?: boolean } = {}): Scrubbed {
+                             o: { standIns?: boolean; known?: ReadonlySet<string> } = {}): Scrubbed {
   const out = sandboxDir(snap);
   const at = join(out, ".arnx-add");
   rmSync(at, { recursive: true, force: true });
@@ -504,7 +507,8 @@ export function addToSandbox(repo: string, snap: string, paths: readonly string[
     copyFileSync(join(repo, rel), join(at, rel));
   }
   mkdirSync(at, { recursive: true });
-  const r = scrub(at, () => false, allow, { standIns: o.standIns ?? standInsSetting(repo), sandbox: new Set() });
+  const r = scrub(at, () => false, allow, { standIns: o.standIns ?? standInsSetting(repo), sandbox: new Set(),
+    known: o.known });
   const sandboxed: string[] = [];
   const move = (dir: string, prefix: string) => {
     for (const name of readdirSync(dir)) {
@@ -522,9 +526,66 @@ export function addToSandbox(repo: string, snap: string, paths: readonly string[
   return { ...r, sandboxed: sandboxed.sort() };
 }
 
+/** What a run's output says in place of text from a sandbox-only file. */
+export const SANDBOX_MARK = "[sandbox-only file content]";
+/** The shortest text taken for a quote of a sandbox-only file: shorter lines (`{`, `"a": 1,`) say nothing. */
+const PRINT_MIN = 10;
+
+/** What a quote of the sandbox-only files `files` (under `from`) looks like: each line, trimmed, with a trailing comma
+ * off, and each quoted string, of PRINT_MIN characters or more; with `xml`, each also as an XML report escapes it. */
+function sandboxPrints(from: string, files: readonly string[], xml = false): string[] {
+  const out = new Set<string>();
+  for (const rel of files) {
+    const text = scrubText(join(from, rel));
+    if (text === null) continue;
+    for (const line of text.split(/\r?\n/)) {
+      const bare = line.trim().replace(/,$/, "");
+      if (bare.length >= PRINT_MIN) out.add(bare);
+      for (const m of line.matchAll(/"((?:[^"\\]|\\.){10,})"|'([^'\\]{10,})'/g)) out.add(m[1] ?? m[2]!);
+    }
+  }
+  if (xml) {
+    const escape = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+    for (const p of [...out]) out.add(escape(p));
+  }
+  return [...out];
+}
+
+/** `text` with every quote of `prints` (sandboxPrints) replaced by SANDBOX_MARK, runs of them as one. A line that only
+ * names a sandbox-only file (a path in an error) is not a quote of it and stays. */
+export function stripSandbox(text: string, prints: readonly string[]): string {
+  if (!prints.length || !text) return text;
+  const byStart = new Map<string, string[]>();
+  for (const p of prints) {
+    const key = p.slice(0, 8);
+    byStart.set(key, [...byStart.get(key) ?? [], p]);
+  }
+  for (const list of byStart.values()) list.sort((a, b) => b.length - a.length);
+  const spans: [number, number][] = [];
+  for (let i = 0; i + PRINT_MIN <= text.length; i++) {
+    const hit = byStart.get(text.slice(i, i + 8))?.find((p) => text.startsWith(p, i));
+    if (!hit) continue;
+    const end = i + hit.length;
+    const last = spans.at(-1);
+    // Quotes next to each other (blanks between) are one.
+    if (last && /^\s*$/.test(text.slice(last[1], i))) last[1] = Math.max(last[1], end);
+    else spans.push([i, end]);
+    i = end - 1;
+  }
+  if (!spans.length) return text;
+  let out = "", at = 0;
+  for (const [a, b] of spans) {
+    out += text.slice(at, a) + SANDBOX_MARK;
+    at = b;
+  }
+  return out + text.slice(at);
+}
+
 /** `runner` with the snapshot's sandbox-only files placed in it for each run, and taken out after: the tests read them,
  * and nothing that reads the snapshot between runs (an agent's tools, the text sent to a model) sees them. A file the
- * snapshot already holds is left as it is. */
+ * snapshot already holds is left as it is. What a run's output and its reports quote of them is taken out
+ * (stripSandbox) before anything reads them. */
 export function withSandboxFiles(runner: Runner, snap: string): Runner {
   const from = sandboxDir(snap);
   if (!existsSync(from)) return runner;
@@ -538,9 +599,13 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
   };
   walk("");
   if (!files.length) return runner;
+  const prints = sandboxPrints(from, files);
+  const xmlPrints = sandboxPrints(from, files, true);
+  const reports = join(snap, REPORT_DIR);
   const copies = runner.copies ? { copies: (output: string) => runner.copies!(output) } : {};
   return { ...copies, run: (command, timeout) => {
     const placed: string[] = [], made: string[] = [];
+    let result;
     try {
       for (const rel of files) {
         const to = join(snap, rel);
@@ -554,7 +619,7 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
         utimesSync(to, st.atime, st.mtime);
         placed.push(to);
       }
-      return runner.run(command, timeout);
+      result = runner.run(command, timeout);
     } finally {
       for (const p of placed) rmSync(p, { force: true });
       for (const d of made.reverse()) {
@@ -565,39 +630,39 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
         }
       }
     }
+    if (existsSync(reports)) {
+      for (const name of readdirSync(reports, { recursive: true }).map(String)) {
+        const p = join(reports, name);
+        const text = statSync(p).isFile() ? scrubText(p) : null;
+        if (text === null) continue;
+        const clean = stripSandbox(text, xmlPrints);
+        if (clean !== text) writeFileSync(p, clean);
+      }
+    }
+    return { ...result, output: stripSandbox(result.output, prints) };
   } };
 }
 
-/** Remove .git, .arnx, paths matched by .arnxignore, secret files, files with secret content and symlinks leaving
- * the tree; blank the comment lines of a source file whose only secret content is in comments, and give one whose
- * key-shaped text is in code stand-ins (with `standIns`). Files .arnxignore matches that `sandbox` names move beside
- * the tree (sandboxDir), scrubbed the same way. Returns the files removed for their content (the others are never
- * expected in a snapshot), blanked, given stand-ins, and moved beside it. */
+/** Remove .git, .arnx, paths matched by .arnxignore, secret files and symlinks leaving the tree; then scrub every text
+ * file kept (in the tree, or beside it: files .arnxignore matches that `sandbox` names move beside the tree,
+ * sandboxDir). A file whose key-shaped text is all in comments gets those lines blanked. With `standIns`, every
+ * suspect (secrets.ts suspects) of every file, and of `known` (another scrub's), is collected first, and then each
+ * whole occurrence of one, in any file but a lockfile, gets its stand-in: a value is replaced wherever it appears, so
+ * no file keeps it and the files agree. A file is left out only when no stand-in keeps a key out (a private key with
+ * its body), or, without `standIns`, when it holds key-shaped text in code. Returns those files, the files blanked,
+ * given stand-ins and moved beside the tree, and the values replaced (in memory only: never logged or sent). */
 function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly SecretPin[],
-               o: { standIns: boolean; sandbox: ReadonlySet<string> }): Scrubbed {
+               o: { standIns: boolean; sandbox: ReadonlySet<string>; known?: ReadonlySet<string> }): Scrubbed {
   const realRoot = realpathSync(root);
   const removedFiles: Withheld[] = [];
   const blanked: Blanked[] = [];
   const standIns: string[] = [];
-  const sandboxed: string[] = [];
+  const sandboxed = new Set<string>();
   const beside = sandboxDir(root);
   const inside = (p: string) => p === realRoot || p.startsWith(realRoot + sep);
   const holds = (dir: string) => [...o.sandbox].some((p) => p.startsWith(`${dir}/`));
-  /** A regular file kept (in the tree or beside it): left out, blanked or given stand-ins for its content. */
-  const scan = (p: string, rel: string, size: number): boolean => {
-    const hit = secretContent(p, rel, size, allow.find((a) => a.path === rel)?.matches ?? [], o.standIns);
-    if (hit && "withhold" in hit) {
-      unlinkSync(p);
-      removedFiles.push({ path: rel, ...hit.withhold });
-      return false;
-    }
-    if (hit) {
-      writeFileSync(p, hit.text);
-      if ("standIn" in hit) standIns.push(rel);
-      else blanked.push({ path: rel, lines: hit.blank });
-    }
-    return true;
-  };
+  /** Regular files kept: where they are now, and their path in the repository. */
+  const kept: { p: string; rel: string }[] = [];
   const walk = (dir: string, relDir: string, out: boolean) => {
     for (const name of readdirSync(dir)) {
       const p = join(dir, name);
@@ -611,10 +676,12 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
       }
       if (out || ignored(rel) || (st.isSymbolicLink() && ignored(rel + "/"))) {
         // A file the tests need goes beside the tree, unless it is a secret file or a link.
-        if (o.sandbox.has(rel) && st.isFile() && !isSecretPath(name) && scan(p, rel, st.size)) {
-          mkdirSync(dirname(join(beside, rel)), { recursive: true });
-          renameSync(p, join(beside, rel));
-          sandboxed.push(rel);
+        if (o.sandbox.has(rel) && st.isFile() && !isSecretPath(name)) {
+          const to = join(beside, rel);
+          mkdirSync(dirname(to), { recursive: true });
+          renameSync(p, to);
+          sandboxed.add(rel);
+          kept.push({ p: to, rel });
         } else rmSync(p, { force: true });
         continue;
       }
@@ -632,10 +699,45 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
         unlinkSync(p);
         continue;
       }
-      scan(p, rel, st.size);
+      kept.push({ p, rel });
     }
   };
   walk(root, "", false);
+  const pinsOf = (rel: string) => allow.find((a) => a.path === rel)?.matches ?? [];
+  const fakes = (rel: string) => o.standIns && !isLockfile(rel);
+  // First every file's suspects, and what each file needs: left out, or blanked lines.
+  const values = new Set<string>(o.known ?? []);
+  const blanks = new Map<string, number[]>();
+  const scanned: { p: string; rel: string }[] = [];
+  for (const f of kept) {
+    const text = scrubText(f.p);
+    if (text === null) continue;
+    const pins = pinsOf(f.rel);
+    const scan = scanKeys(f.rel, text, pins);
+    if (scan && "withhold" in scan && (!o.standIns || privateKeyBody(text, pins))) {
+      unlinkSync(f.p);
+      sandboxed.delete(f.rel);
+      removedFiles.push({ path: f.rel, ...scan.withhold });
+      continue;
+    }
+    const blank = scan && "blank" in scan ? scan : null;
+    if (blank) blanks.set(f.rel, blank.blank);
+    if (fakes(f.rel)) for (const v of suspects(f.rel, blank ? blank.text : text, pins)) values.add(v);
+    scanned.push(f);
+  }
+  // Then each value's stand-in, wherever it is.
+  const made = new Map<string, string>();
+  const replace = values.size ? standInsFor(values, made) : null;
+  for (const f of scanned) {
+    const lines = blanks.get(f.rel);
+    let text = scrubText(f.p)!;
+    if (lines) text = (scanKeys(f.rel, text, pinsOf(f.rel)) as { text: string }).text;
+    const r = replace && fakes(f.rel) ? replace(text, pinsOf(f.rel)) : { text, count: 0 };
+    if (!lines && !r.count) continue;
+    writeFileSync(f.p, r.text);
+    if (lines) blanked.push({ path: f.rel, lines });
+    if (r.count) standIns.push(f.rel);
+  }
   // Folders the moves left empty go.
   for (const rel of sandboxed) {
     for (let d = posix.dirname(rel); d !== "."; d = posix.dirname(d)) {
@@ -646,24 +748,16 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   }
   const byPath = (a: { path: string }, b: { path: string }) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
   return { withheld: removedFiles.sort(byPath), blanked: blanked.sort(byPath), standIns: standIns.sort(),
-    sandboxed: sandboxed.sort() };
+    sandboxed: [...sandboxed].sort(), secrets: values };
 }
 
-/** What a snapshot does with a file's key-shaped text (scanKeys), with stand-ins in place of withholding where they
- * keep every real value out. */
-type Scan = { withhold: { line: number; label: string } } | { blank: number[]; text: string }
-  | { standIn: number; text: string };
-
-function secretContent(p: string, rel: string, size: number, pins: readonly string[], standIns: boolean): Scan | null {
-  if (size > SCAN_LIMIT) return null;
-  let text: string;
+/** A file's text when it is text (no NUL in its first 8000 bytes) and no larger than SCAN_LIMIT; null otherwise. */
+function scrubText(p: string): string | null {
   try {
-    text = readFileSync(p, "utf8");
+    if (statSync(p).size > SCAN_LIMIT) return null;
+    const bytes = readFileSync(p);
+    return bytes.subarray(0, 8000).includes(0) ? null : bytes.toString("utf8");
   } catch {
     return null;
   }
-  const scan = scanKeys(rel, text, pins);
-  if (!scan || !("withhold" in scan) || !standIns) return scan;
-  const fake = standIn(text, pins);
-  return fake ? { standIn: fake.count, text: fake.text } : scan;
 }

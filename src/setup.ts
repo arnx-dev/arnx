@@ -860,7 +860,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const untracked = !!o.untracked;
     // Files .arnxignore leaves out that the tests need: in the sandbox only. A fresh setup finds them again.
     const sandbox = new Set(existing ? sandboxOnlyOf(existing.raw) : []);
-    const { withheld, blanked, standIns } = takeSnapshot(repo, null, snap, pins, { untracked, sandbox: [...sandbox] });
+    const { withheld, blanked, standIns, secrets: replaced } = takeSnapshot(repo, null, snap, pins,
+      { untracked, sandbox: [...sandbox] });
     // Image keys come from the manifests as they were before any run wrote into the snapshot.
     copyManifests(snap, join(tmp, "manifests"));
     const keyOf = (cfg: ReviewConfig) => envKey(cfg, join(tmp, "manifests"));
@@ -1013,7 +1014,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         announce = null;
         // Files .arnxignore leaves out go into the sandbox (scrubbed as the snapshot is), and the project runs again.
         if (e instanceof LeftOutNeeded && e.files.every((p) => !secret.has(p))) {
-          const r = addToSandbox(repo, snap, e.files, pins);
+          const r = addToSandbox(repo, snap, e.files, pins, { known: replaced });
           r.sandboxed.forEach((p) => sandbox.add(p));
           r.withheld.forEach((w) => secret.add(w.path));
           leftOut.paths = leftOut.paths.filter((p) => !sandbox.has(p));

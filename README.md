@@ -152,8 +152,8 @@ More: [docs/WORKFLOW.md](docs/WORKFLOW.md#coding-agents).
 | Tests | your Docker | your Docker |
 | Sent | the diff, files the agent reads, its tests and their output, to your providers | the same, to arnx cloud, which passes them to its model providers |
 
-Secret files, key-shaped text (a file holding some is sent with fakes in its place, or left out when no fake can keep
-the key out) and paths in `.arnxignore` are never sent; untracked files only with `--untracked`. Sending code needs your consent, once per repository and
+Secret files, values that look like secrets (sent and tested as fakes of the same shape; a file is left out only when
+no fake can keep a key out) and paths in `.arnxignore` are never sent; untracked files only with `--untracked`. Sending code needs your consent, once per repository and
 destination. Switch with `arnx cloud on` / `off`. Details: [docs/MODELS.md](docs/MODELS.md), [docs/CLOUD.md](docs/CLOUD.md), [docs/SAFETY.md](docs/SAFETY.md).
 
 ## Safety and data
