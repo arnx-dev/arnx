@@ -104,7 +104,7 @@ export interface HuntRecord {
 /** One answered question, turned into tests. */
 export interface AnswerInput extends RoundBase { cfg: ReviewConfig; question: string; answer: string; diff: string }
 
-/** The setup agent's round: its tools are try_project and propose besides the read tools. */
+/** The setup agent's round: its tools are try_project, exec and propose besides the read tools. */
 export interface SetupInput extends RoundBase {
   /** What detect.ts found, as text. */
   hints: string;

@@ -34,8 +34,10 @@ import { precheck as lookFirst } from "./precheck";
 import { LocalBrain } from "./localbrain";
 import { promptsFor } from "./userprompts";
 import type { Say } from "./progress";
-import { copyManifests, dockerSteps, envKey, type Runner, type RunResult, type SessionFactory } from "./sandbox";
+import { copyManifests, dockerExec, dockerSteps, envKey, envTag, type ExecFactory, type Runner, type RunResult,
+  type SessionFactory } from "./sandbox";
 import type { ScipIndex } from "./scip";
+import { EXEC, SetupExec, type TriedEnv } from "./setupexec";
 import { loadSettings, refString, type Settings, settingsPath, setupRef } from "./settings";
 import { runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
 import { SOURCE } from "./untested";
@@ -939,7 +941,9 @@ type SetupOptions = { outDir: string; sessionFactory?: SessionFactory; project?:
   /** This machine's record of the accepted tests' pins (localPinsPath). */
   localPins?: string | null;
   /** Builds a project's code index for the map check (`context = "precise"`; default: in its Docker environment). */
-  indexer?: typeof projectIndex };
+  indexer?: typeof projectIndex;
+  /** Where the exec tool runs its commands (default: a container on the project's image). */
+  execFactory?: ExecFactory };
 
 /** The allowed files of a review.yaml no setup has approved yet (a seed, or a failed setup's last attempt); none when
  * it does not read as YAML: secret-looking files then stay out. */
@@ -995,8 +999,11 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     // Source files outside every project went back to the agent once (by folder); the rest arnx lists itself.
     placesAsked: false,
     // Projects tried at least once, and the web UI apps whose one try failed (their owns, listed as web UI).
-    tried: new Set<string>(), webUi: new Map<string, string[]>() };
+    tried: new Set<string>(), webUi: new Map<string, string[]>(),
+    // The environment of each project's last try, which exec runs in.
+    lastTry: new Map<string, TriedEnv>() };
   const tmp = tempDir("arnx-setup-");
+  let exec: SetupExec | null = null;
   // Docker steps of this setup, with their durations.
   dockerSteps.log = (line) => {
     mkdirSync(o.outDir, { recursive: true });
@@ -1172,6 +1179,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       }
       state.tried.add(name);
       const log = join(o.outDir, `build-${n}-${name}.log`);
+      state.lastTry.set(name, { cfg, image: envTag(keyOf(cfg)), env: envDigest(cfg) });
       // One line as the run starts: the image build, when there is one, is said in the same line.
       announce = { name, n };
       let ok: boolean, summary: string, tail: string, skips: string[], failing: string[], hints: string,
@@ -1451,8 +1459,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       state.notice = "";
       return note + r;
     };
+    const shell = exec = new SetupExec({ snap, dir: join(tmp, "exec"), outDir: o.outDir,
+      factory: o.execFactory ?? dockerExec, tried: state.lastTry, say });
     const ws = new Workspace(snap, { extra: { try_project: [TRY_PROJECT, noted(tryProject)],
-      propose: [PROPOSE, noted(propose)] } });
+      propose: [PROPOSE, noted(propose)], exec: [EXEC, noted((i) => shell.call(i))] } });
     const detection = detectReadable(repo, untracked);
     const brain: Brain = o.brain ?? new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings),
       prompts: promptsFor(repo) });
@@ -1489,6 +1499,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         : state.failingProject, problem: state.problem, ...(state.needed ? { needed: state.needed } : {}),
       runs: (state.final?.projects ?? []).flatMap((p) => state.runs.get(p.name) ?? []) };
   } finally {
+    exec?.close();
     rmSync(tmp, { recursive: true, force: true });
     dockerSteps.log = null;
     dockerSteps.say = null;
