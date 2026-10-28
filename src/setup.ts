@@ -627,6 +627,22 @@ export function sourceGroups(unexplained: string[], claimed: string[]): SourceGr
 }
 
 
+/** Where the web UI app `name`, whose one try failed, goes under uncovered: the folders and files of its source (of
+ * any file when it has none) that no other project in `f` owns or uses, each folder the shallowest that holds none of
+ * theirs. An app at the repository root next to other projects lists its own paths, never `**`. */
+export function webUiPaths(f: ReviewFile, name: string, files: string[]): string[] {
+  const app = f.projects.find((p) => p.name === name);
+  if (!app) return [];
+  const owns = matcher(app.owns.join("\n"));
+  const others = f.projects.filter((p) => p.name !== name)
+    .map((p) => ({ owns: matcher(p.owns.join("\n")), uses: matcher(p.uses.join("\n")) }));
+  const claimed = files.filter((x) => others.some((o) => o.owns(x) || o.uses(x)));
+  const taken = new Set(claimed);
+  const mine = files.filter((x) => owns(x) && !taken.has(x));
+  const source = mine.filter((x) => SOURCE.test(x));
+  return sourceGroups(source.length ? source : mine, claimed).map((g) => g.path);
+}
+
 /** Which project owns or uses each file a snapshot holds (tracked, and with `untracked` untracked ones git does not
  * ignore; minus .arnxignore and secret files), and what is left out. Only source files must be explained;
  * documentation, configuration and data may stay unmentioned. Untracked files are counted (only when setup and reviews
@@ -998,8 +1014,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     notice: "",
     // Source files outside every project went back to the agent once (by folder); the rest arnx lists itself.
     placesAsked: false,
-    // Projects tried at least once, and the web UI apps whose one try failed (their owns, listed as web UI).
-    tried: new Set<string>(), webUi: new Map<string, string[]>(),
+    // Projects tried at least once, and the web UI apps whose one try failed (listed as web UI: webUiPaths).
+    tried: new Set<string>(), webUi: new Set<string>(),
     // The environment of each project's last try, which exec runs in.
     lastTry: new Map<string, TriedEnv>() };
   const tmp = tempDir("arnx-setup-");
@@ -1062,7 +1078,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         return "";
       }
     };
-    const browser = browserSuites(coverageFiles(repo, untracked).files, readSnap);
+    const mapFiles = coverageFiles(repo, untracked).files;
+    const browser = browserSuites(mapFiles, readSnap);
     const stopped = () => new StopRound(`stopped: ${state.problem}. Only the user can let ` +
       `${state.needed!.length === 1 ? "it" : "them"} in, so setup ends here; do not work around it.`);
     if (withheld.length) {
@@ -1155,7 +1172,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const uiApp = !state.tried.has(name) && !keep.has(name) && cfg.language === "typescript"
         ? uiFramework(readSnap(join(cfg.workdir, "package.json"))) : null;
       const webUi = (why: string): string => {
-        state.webUi.set(name, cfg.owns);
+        state.webUi.add(name);
         say(`${name}: a web UI app (${uiApp}); its first try failed, so it is listed as ${WEB_UI}`);
         return `the suite of ${name} does not run: ${why}\n${name} is a web UI app (${uiApp} among its dependencies), ` +
           `which gets one try: arnx lists it under uncovered as ${WEB_UI} and propose leaves it out of the file. Do not ` +
@@ -1322,8 +1339,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       state.proven.set(name, projectDigest(f, name));
       // A run that proves a project ran the whole suite (a rerun of failing files that passes is followed by one).
       const [, counted] = suiteOk(counts.all, cfg, trusted, accepted, "record");
-      state.runs.set(name, { name, digest: ranWith, env, snapshot: withSandbox(code, sandbox), untracked, summary, skips, counts,
-        after: summary.startsWith(counted) ? summary.slice(counted.length) : "" });
+      state.runs.set(name, { name, digest: ranWith, env, snapshot: withSandbox(code, sandbox), untracked, summary,
+        skips, counts, after: summary.startsWith(counted) ? summary.slice(counted.length) : "" });
       state.proofs.set(name, { name, summary, skips,
         failed: counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined)),
         ...(gap ? { gap: gap.line } : {}) });
@@ -1344,14 +1361,14 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       if (typeof parsed === "string") return parsed;
       // arnx's part of the map: browser suites under uncovered, and the web UI apps whose one try failed there instead
       // of in the file. Done on the agent's file; arnx's own keys (withOurs) are added again to check it.
-      const drop = [...state.webUi.keys()].filter((name) => parsed.f.projects.some((p) => p.name === name));
+      const drop = [...state.webUi].filter((name) => parsed.f.projects.some((p) => p.name === name));
       if (drop.length && drop.length === parsed.f.projects.length) {
         state.problem = `${drop.join(", ")}: web UI app${drop.length === 1 ? "" : "s"} whose tests did not run on the ` +
           "first try, and no other project; `arnx setup --add` tries again";
         throw new StopRound(`stopped: ${state.problem}. Setup gives a web UI app one try, so it ends here.`);
       }
       const derived = [...browser.map((b) => ({ path: b.path, reason: `${BROWSER_TESTS} (${b.tool})` })),
-        ...drop.flatMap((name) => state.webUi.get(name)!.map((path) => ({ path, reason: WEB_UI })))];
+        ...drop.flatMap((name) => webUiPaths(parsed.f, name, mapFiles).map((path) => ({ path, reason: WEB_UI })))];
       let yaml = withUncovered(parsed.yaml, derived, drop);
       let f: ReviewFile;
       try {

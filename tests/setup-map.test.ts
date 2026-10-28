@@ -8,7 +8,7 @@ import { browserSuites, uiFramework } from "../src/browser";
 import { parseReviewFile } from "../src/config";
 import { ArnxError } from "../src/errors";
 import type { SessionFactory } from "../src/sandbox";
-import { coverageMap, runSetup, sourceGroups, withUncovered } from "../src/setup";
+import { coverageMap, runSetup, sourceGroups, webUiPaths, withUncovered } from "../src/setup";
 import { filesLine, worthALook } from "../src/setupview";
 import { defaultSettings } from "../src/settings";
 import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -118,6 +118,16 @@ test("a web UI app gets one try; propose asks once about the rest, then lists it
     "not tested (no tests): /legacy/ (1 file)",
     "not tested (scripts): /tools/ (1 file)",
   ]);
+});
+
+test("a web UI app at the repository root lists only its own paths, not **", () => {
+  const f = parseReviewFile(`version: 1\nprojects:\n${API}  site:\n    root: .\n    language: typescript\n` +
+    "    runner: vitest\n    image: node:22-slim\n    test_command: npx vitest run {targets}\n");
+  const files = ["package.json", "index.html", "src/main.tsx", "src/app/view.tsx", "api/app.py", "api/tests/test_app.py",
+    "README.md"];
+  expect(webUiPaths(f, "site", files)).toEqual(["/src/"]);
+  // In its own folder, the folder.
+  expect(webUiPaths(parseReviewFile(BOTH), "web", Object.keys(FILES))).toEqual(["/web/"]);
 });
 
 test("a web UI app that is the only project ends setup after its one try", async () => {
