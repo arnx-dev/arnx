@@ -68,6 +68,8 @@ export function promptCases(p: P.Prompts = P.DEFAULT_PROMPTS): Record<string, st
   out["rankTask"] = p.rankTask(SUSPECTS);
   out["setupSystem"] = p.setupSystem();
   out["setupTask"] = p.setupTask("Found: python (pyproject.toml), $HOME");
+  out["setupTask/draft"] = p.setupTask("Found: python (pyproject.toml), $HOME",
+    "version: 1\nprojects:\n  app:\n    image: python:3.12 # unsure: no Python version found ($yaml)\n");
   out["challengeSystem"] = p.challengeSystem();
   out["challengeUser"] = p.challengeUser(diff, "app/t.py", "def test_1(): ...", "t.py::test_1", "assert 1 == 2", "");
   out["challengeUser/questions"] = p.challengeUser(big, "t.py", "x".repeat(50_000), "t.py::t", "y".repeat(5000),

@@ -289,7 +289,7 @@ project's suite runs, then submit the whole file with propose. propose checks th
 and that every file is owned, used, or listed under uncovered, and runs any project changed since it was proven: \
 there is no need to try every project again after editing another one.
 
-$hints
+$hints$draft
 
 The YAML has these keys:
 version: 1
@@ -331,6 +331,17 @@ inside a folder the configuration includes (for example __tests__/unit/arnx_gene
 holds the project's own tests; do not change the project's own configuration.
 - Record untested or unsupported paths under uncovered with a reason instead of leaving them out.
 - Stop when propose accepts the file. Then reply with a short summary of what you chose and why."""
+
+# Fills $draft in setup.task when the detector could write a draft (nothing otherwise).
+draft = """
+
+
+A draft review.yaml, written from the repository's files without a model, is below. Start from it instead of \
+writing one: correct what is wrong, add what is missing (owns, uses, notes, uncovered) and drop projects that are \
+not units. Values marked `# unsure:` are guesses the files did not settle; check those first. Try its projects early: \
+a run shows what is wrong faster than reading.
+<draft>
+$yaml</draft>"""
 
 # The fix prompt: what `arnx accept` writes to fix-prompt.md for your coding agent. arnx sends it to no model, so it
 # is not part of PROMPT_VERSION, and it is built on this machine also with arnx cloud.

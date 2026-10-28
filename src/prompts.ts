@@ -43,7 +43,8 @@ export const PLACEHOLDERS = {
   "answer.task": ["question", "answer", "diff", "runner", "tests_dir"],
   "explain.system": [],
   "setup.system": [],
-  "setup.task": ["hints"],
+  "setup.task": ["hints", "draft"],
+  "setup.draft": ["yaml"],
   "fix.intro": ["id", "change"],
   "fix.rules": [],
   "fix.decided": [],
@@ -62,7 +63,7 @@ export const NEEDED: Partial<Record<PromptKey, readonly string[]>> = {
   "review.coverage_db": ["files"], "hunt.opening": ["diff"], "hunt.second_files": ["files"],
   "prove.task": ["suspects"], "prove.untested": ["list"], "rank.task": ["list"], "questions.asked": ["list"],
   "questions.task": ["list"], "challenge.task": ["diff", "test_source", "failure"], "challenge.depends": ["questions"],
-  "answer.task": ["question", "answer"], "setup.task": ["hints"],
+  "answer.task": ["question", "answer"], "setup.task": ["hints"], "setup.draft": ["yaml"],
 };
 
 // `$$` first, so `$$name` is a `$` and the word, not a placeholder.
@@ -233,9 +234,11 @@ export class Prompts {
     return literal(this.t["setup.system"]);
   }
 
-  /** The setup task, with hints: what the detector found and the language-specific advice of each adapter present. */
-  setupTask(hints: string): string {
-    return substitute(this.t["setup.task"], { hints });
+  /** The setup task, with hints: what the detector found and the language-specific advice of each adapter present;
+   * and the review.yaml draft.ts wrote from the facts ("" when none). */
+  setupTask(hints: string, draft = ""): string {
+    return substitute(this.t["setup.task"], { hints,
+      draft: draft ? substitute(this.t["setup.draft"], { yaml: draft }) : "" });
   }
 
   challengeSystem(): string {
@@ -355,7 +358,7 @@ export function explainUser(diff: string, findings: { id: string; testId: string
 const VERSIONED: PromptKey[] = ["review.system", "review.task", "setup.system", "setup.task", "challenge.system",
   "challenge.task", "answer.task", "review.env_hint", "review.coverage", "hunt.system", "hunt.opening", "hunt.task",
   "hunt.no_tests", "hunt.second_files", "prove.task", "review.coverage_db", "prove.untested", "rank.system",
-  "rank.task", "challenge.depends", "questions.asked", "questions.system", "questions.task"];
+  "rank.task", "challenge.depends", "questions.asked", "questions.system", "questions.task", "setup.draft"];
 
 export const PROMPT_VERSION = createHash("sha256").update(VERSIONED.map((k) => DEFAULTS[k]).join("\0"))
   .digest("hex").slice(0, 12);

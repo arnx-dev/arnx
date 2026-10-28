@@ -108,6 +108,8 @@ export interface AnswerInput extends RoundBase { cfg: ReviewConfig; question: st
 export interface SetupInput extends RoundBase {
   /** What detect.ts found, as text. */
   hints: string;
+  /** The review.yaml draft.ts wrote from the detection's facts, for a setup from scratch ("" or absent: none). */
+  draft?: string;
   /** Files left out of the snapshot as secret-looking, described ("" when none). */
   withheld: string;
   /** Re-prove only this project of the current review.yaml. */
