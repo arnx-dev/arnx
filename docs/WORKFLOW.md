@@ -28,7 +28,8 @@ runs`). Reviews then run only the tests arnx writes. A `test_command` that delet
 
 Before it starts, setup says what it will do and gives a rough time and cost estimate. While it runs, it shows on
 stderr each model reply, each file it reads and each suite it runs (`--quiet` turns this off). It then shows one
-line per project, runs every suite once more and stamps `.arnx/review.yaml` with a hash (the proof); nothing is asked.
+line per project and stamps `.arnx/review.yaml` with a hash (the proof); nothing is asked. Setup's own run of each
+suite is the proof; a suite runs again only when its project's part of the file or the code changed since that run.
 It ends with what is worth a look, only what applies: how many tests fail today (the baseline), tests skipped for want
 of a service or variable, commands that ignore their own errors (`|| true`), install lines that download from outside
 the package registries (`curl`, `wget`, `git clone`), files allowed although they look like secrets, and what no

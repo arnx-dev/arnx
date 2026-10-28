@@ -7,7 +7,8 @@ import { type Baseline, baselineText, describeBaselineChanges, parseBaseline, re
   from "../src/baseline";
 import { isProven, loadReviewFile, parseReviewConfig, parseReviewFile, reviewConfigPath } from "../src/config";
 import { defaultSettings } from "../src/settings";
-import { approveFile, coverageGap, runSetup, suiteOk, withoutKnownFailing } from "../src/setup";
+import { snapshot, snapshotDigest } from "../src/change";
+import { approveFile, coverageGap, envDigest, runSetup, type SetupRun, suiteOk, withoutKnownFailing } from "../src/setup";
 import { approvalChecks, baselineLines } from "../src/setupview";
 import { fakeFactory, type FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { gitRepo, runGit } from "./helpers/gitutil";
@@ -135,26 +136,45 @@ test("a proof reruns a test failing outside the baseline: passing then, it does 
   expect(detail).toContain("failing outside the baseline:\n  tests/test_b.py::test_b");
 });
 
-test("right after setup recorded a project, a test failing outside its baseline joins it as flaky", async () => {
+/** A run of setup that proved `name` on the repository's code as it is now, with an older part of review.yaml (so it
+ * does not stand, and the suite runs again). */
+function olderRun(repo: string, name = "main"): SetupRun {
+  const dest = join(tmp(), `snap-${name}`);
+  snapshot(repo, null, dest);
+  const cfg = loadReviewFile(repo, { requireApproved: false }).projects[0]!;
+  const [, summary, counts] = suiteOk([t("tests/test_a.py", "test_a", "passed")], cfg, undefined, undefined, "record");
+  return { name, digest: "an older file", env: envDigest(cfg), snapshot: snapshotDigest(dest), untracked: false,
+    summary, after: "", skips: [], counts };
+}
+
+test("right after setup, a project run again on setup's code and environment: a test failing outside its baseline " +
+  "joins it as flaky", async () => {
   const repo = repoWith(YAML);
   const whole: Row[] = [["tests/test_a.py", "test_a", "passed", ""], ["tests/test_b.py", "test_b", "failed", "timing"]];
-  const [ok] = await approveFile(repo, { by: "Dev", at: "2026-10-27", afterSetup: ["main"],
+  const [ok] = await approveFile(repo, { by: "Dev", at: "2026-10-27", afterSetup: [olderRun(repo)],
     sessionFactory: fakeFactory(runs(whole, whole)) });
   expect(ok).toBe(true);
   expect(readBaseline(repo).get("main")).toEqual([{ id: "tests/test_b.py::test_b", file: "tests/test_b.py",
     first: "timing", flaky: true }]);
   // A project setup did not run this time (setup --add) gets no such pass: a test failing twice fails the proof.
   const other = repoWith(YAML, undefined, "other");
-  const [kept] = await approveFile(other, { by: "Dev", at: "2026-10-27", afterSetup: ["web"],
+  const [kept] = await approveFile(other, { by: "Dev", at: "2026-10-27", afterSetup: [olderRun(other, "web")],
     sessionFactory: fakeFactory(runs(whole, whole)) });
   expect(kept).toBe(false);
+  // Nor does one whose code changed since setup's run: the change may be what fails.
+  const edited = repoWith(YAML, undefined, "edited");
+  const run = olderRun(edited);
+  writeFileSync(join(edited, "app.py"), "def add(a, b):\n    return a - b\n");
+  const [changed] = await approveFile(edited, { by: "Dev", at: "2026-10-27", afterSetup: [run],
+    sessionFactory: fakeFactory(runs(whole, whole)) });
+  expect(changed).toBe(false);
 });
 
 test("right after setup, most of the suite failing is the environment: the proof fails, nothing joins", async () => {
   const repo = repoWith(YAML);
   const whole: Row[] = [["tests/test_a.py", "test_a", "passed", ""], ["tests/test_b.py", "test_b", "failed", "refused"],
     ["tests/test_c.py", "test_c", "failed", "refused"]];
-  const [ok] = await approveFile(repo, { by: "Dev", at: "2026-10-27", afterSetup: ["main"],
+  const [ok] = await approveFile(repo, { by: "Dev", at: "2026-10-27", afterSetup: [olderRun(repo)],
     sessionFactory: fakeFactory(runs(whole, whole)) });
   expect(ok).toBe(false);
   expect(existsSync(join(repo, ".arnx", "baseline.json"))).toBe(false);

@@ -152,8 +152,9 @@ The code to enter and the page to open are on stderr while it waits.
 
 ### setup
 
-`arnx setup` finds how each project's tests run in Docker, writes `.arnx/review.yaml`, runs the suites again and
-stamps it (the proof; nobody is asked). With `--json` the consent to send code needs `--yes` when none is recorded
+`arnx setup` finds how each project's tests run in Docker, writes `.arnx/review.yaml` and
+stamps it (the proof; nobody is asked): setup's own suite runs stand, and a suite runs again only when the file or the
+code changed since. With `--json` the consent to send code needs `--yes` when none is recorded
 (else `error`, exit 3, nothing sent). What is worth a look is in `warnings` and in `.arnx/setup/approval.md`.
 
 | Field | Type | Meaning |

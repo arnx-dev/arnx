@@ -94,7 +94,7 @@ test("interactive: one reading milestone, the build in the suite line, a short r
     "Proposal rejected: 2 files unaccounted for (pricing.py, tests/test_pricing.py). Retrying...",
     "shop: running its suite (try 2)",
     "shop: ✓ 1 passed",
-    "shop: ✓ 1 passed",
+    "shop: ✓ setup's run stands: 1 passed",
   ]);
   // One clock from setup's start to the proof's last line.
   const t = stamps(cli.err);

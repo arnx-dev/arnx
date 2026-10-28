@@ -1,6 +1,6 @@
 // Setup: an agent reads the repository and proposes `.arnx/review.yaml` as a list of projects, proving each one by
-// building its environment and running its existing suite. Nobody is asked: the proof runs the suites once more and
-// stamps the file.
+// building its environment and running its existing suite. Nobody is asked: the proof takes setup's last whole-suite
+// run of each project unchanged since (same file, same code), runs the others again, and stamps the file.
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync,
   writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,8 +13,8 @@ import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { AdapterId, TestResult } from "./adapters/types";
-import { type Blanked, describeBlanked, filesAt, hasCommits, snapshot, takeSnapshot, type Withheld, workingTreeFiles }
-  from "./change";
+import { type Blanked, describeBlanked, filesAt, hasCommits, snapshot, snapshotDigest, takeSnapshot, type Withheld,
+  workingTreeFiles } from "./change";
 import {
   loadReviewFile, parseReviewFile, projectDigest, readSecretPins, type ReviewConfig, reviewConfigPath, type ReviewFile,
   secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampFile,
@@ -426,6 +426,13 @@ export interface ProjectProof { name: string; summary: string; skips: string[]; 
   /** Tests its test_command leaves out, kept by the agent (coverageGap). */
   gap?: string }
 
+/** The whole-suite run of setup that proved a project, on the file and the code it ran with: `digest`, the project's
+ * part of review.yaml (projectDigest); `env`, what its suite needs (envDigest); `snapshot`, the code (snapshotDigest)
+ * and whether it held untracked files. Approval right after setup takes it as the project's proof while all of these
+ * are unchanged (approveFile's `afterSetup`). `after`: what the run's summary says after its counts (the type check). */
+export interface SetupRun { name: string; digest: string; env: string; snapshot: string; untracked: boolean;
+  summary: string; after: string; skips: string[]; counts: SuiteCounts }
+
 export interface SetupResult {
   ok: boolean;
   yamlText: string | null;
@@ -448,6 +455,8 @@ export interface SetupResult {
   problem: string;
   /** Files the snapshot left out that the tests need: setup stopped at the run that named them (stop "stopped"). */
   needed?: NeededFile[];
+  /** The run that proved each project setup proved (kept ones have none), in file order. */
+  runs: SetupRun[];
 }
 
 /** A file left out of the snapshot that a run's failure names: `secret`, left out as secret-looking; otherwise
@@ -820,8 +829,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     lastFile: null as string | null,
     // What went back to the agent once (failures that look like the environment, tests left out), per project, with the
     // run it came from: the same environment tried again goes on from that run without running the suite again.
-    held: new Map<string, { env: string; shown: Set<string>; run: { summary: string; skips: string[];
+    held: new Map<string, { env: string; shown: Set<string>; run: { digest: string; summary: string; skips: string[];
       counts: SuiteCounts } }>(),
+    // The whole-suite run that proved each project (SetupRun).
+    runs: new Map<string, SetupRun>(),
     // The most tests a whole-suite run of each project reported, and the test_command that ran them.
     mostRan: new Map<string, { tests: number; command: string }>(),
     notice: "" };
@@ -855,6 +866,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const pins = existing ? secretPinsOf(existing.raw) : seedPins(repo);
     const untracked = !!o.untracked;
     const { withheld, blanked } = takeSnapshot(repo, null, snap, pins, { untracked });
+    // The code every run of this setup sees, before any run writes into the snapshot (SetupRun).
+    const code = snapshotDigest(snap);
     // Image keys come from the manifests as they were before any run wrote into the snapshot.
     copyManifests(snap, join(tmp, "manifests"));
     const keyOf = (cfg: ReviewConfig) => envKey(cfg, join(tmp, "manifests"));
@@ -965,12 +978,15 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       // A run that went back to the agent, tried again in the same environment: that run stands.
       const held = state.held.get(name);
       let onlySubset = false;
+      // The project's part of the file the run ran with.
+      let ranWith = projectDigest(f, name);
       try {
         if (held && held.env === env) {
           announce = null;
           say(`${name}: same environment as the last try; its run stands`);
           [ok, summary, tail, skips, failing, hints, counts] = [true, held.run.summary, "", held.run.skips, [], "",
             held.run.counts];
+          ranWith = held.run.digest;
         } else if (subset.length) {
           say(`${name}: same environment as the last try; rerunning the ${subset.length} file(s) that failed`);
           [ok, summary, tail, skips, failing, hints, counts] = await runSuite(cfg, snap, log, { sessionFactory: factory,
@@ -1020,7 +1036,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       // Each kind of doubt goes back to the agent once; what it keeps, tried again unchanged, goes on from the same run.
       const shown = held && held.env === env ? held.shown : new Set<string>();
       const hold = (key: string) => state.held.set(name, { env, shown: new Set([...shown, key]),
-        run: { summary, skips, counts } });
+        run: { digest: ranWith, summary, skips, counts } });
       // Failures that look like the environment go back to the agent once before they are recorded.
       const faults = ok && counts.failed.length ? environmentFaults(counts, cfg) : null;
       if (faults && !shown.has(faults.key)) {
@@ -1067,6 +1083,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         "fixed yet) do not count; leave those tests as they are." : "";
       if (red) say(stillRed(counts.acceptedFailing));
       state.proven.set(name, projectDigest(f, name));
+      // A run that proves a project ran the whole suite (a rerun of failing files that passes is followed by one).
+      const [, counted] = suiteOk(counts.all, cfg, trusted, accepted, "record");
+      state.runs.set(name, { name, digest: ranWith, env, snapshot: code, untracked, summary, skips, counts,
+        after: summary.startsWith(counted) ? summary.slice(counted.length) : "" });
       state.proofs.set(name, { name, summary, skips,
         failed: counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined)),
         ...(gap ? { gap: gap.line } : {}) });
@@ -1216,7 +1236,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     return { ok: state.accepted !== null, yamlText: state.accepted ?? state.lastTried, summary: state.summary,
       costUsd: result.costUsd, stop: state.needed ? "stopped" : result.stop, notes: result.finalText, projects, withheld, blanked,
       failing: state.accepted !== null ? [] : state.failing, failingProject: state.accepted !== null ? null
-        : state.failingProject, problem: state.problem, ...(state.needed ? { needed: state.needed } : {}) };
+        : state.failingProject, problem: state.problem, ...(state.needed ? { needed: state.needed } : {}),
+      runs: (state.final?.projects ?? []).flatMap((p) => state.runs.get(p.name) ?? []) };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
     dockerSteps.log = null;
@@ -1237,7 +1258,9 @@ function settingsOf(repo: string): Settings | null {
 /** One project's suite in an approval: whether it passed, its counts (or why it failed), its accepted tests that
  * still fail, the failures that block it, and where its whole output is (relative to the repository). */
 export interface ApprovedSuite { name: string; ok: boolean; summary: string; acceptedFailing: number;
-  unexpected: string[]; log: string; baselineFailing: number; left: string[]; flaky: string[] }
+  unexpected: string[]; log: string; baselineFailing: number; left: string[]; flaky: string[];
+  /** Setup's run stood for this proof: the suite did not run again. */
+  reused?: true }
 
 /** Failing tests a failed approval names per project; the rest are counted. */
 const SHOWN_FAILURES = 5;
@@ -1257,11 +1280,13 @@ function failedSuite(s: ApprovedSuite, legacy: boolean, repo: string): string {
  * ones only with `untracked` (default: `[review] untracked`). Tests kept by `arnx accept` may fail while they match
  * their pins (`localPins`: this machine's record, localPinsPath). Tests in the baseline may fail; those that no longer
  * do leave it. A test failing outside it runs once more, and passing then it does not count (flaky). `afterSetup`: the
- * projects setup recorded moments ago, where a test failing outside the baseline is flaky and joins it as such;
- * otherwise the baseline never grows here. [approved, text, each suite that ran] */
+ * runs that proved the projects setup recorded moments ago (SetupRun). A project whose part of the file, environment
+ * and code are what its run had is not run again: that run, judged against today's baseline and accepted tests, is its
+ * proof. One that runs again on the same code and environment passed moments ago, so a test failing outside the
+ * baseline is flaky and joins it as such; otherwise the baseline never grows here. [approved, text, each suite] */
 export async function approveFile(repo: string, o: { by: string; at: string; project?: string;
   sessionFactory?: SessionFactory; progress?: Say; untracked?: boolean; localPins?: string | null;
-  afterSetup?: string[] })
+  afterSetup?: SetupRun[] })
   : Promise<[boolean, string, ApprovedSuite[]]> {
   const say = o.progress ?? (() => {});
   const f = loadReviewFile(repo, { requireApproved: false });
@@ -1296,27 +1321,35 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
   const tmp = tempDir("arnx-approve-");
   try {
     const snap = join(tmp, "repo");
-    snapshot(repo, null, snap, secretPinsOf(f.raw), { untracked: o.untracked ?? settings?.untracked ?? false });
+    const untracked = o.untracked ?? settings?.untracked ?? false;
+    snapshot(repo, null, snap, secretPinsOf(f.raw), { untracked });
+    // The code now, against the code setup's runs saw: only taken right after setup.
+    const code = o.afterSetup?.length ? snapshotDigest(snap) : null;
     copyManifests(snap, join(tmp, "manifests"));
     // Every project runs, so one approve names every project that needs fixing.
     for (const cfg of run) {
       const log = join(repo, ".arnx", "run", f.legacy ? "approve-build.log" : `approve-build-${cfg.name}.log`);
       const output = posix.join(".arnx", "run", f.legacy ? "approve.log" : `approve-${cfg.name}.log`);
       const mine = base.get(cfg.name) ?? [];
-      const fresh = !!o.afterSetup?.includes(cfg.name);
-      const [ok, summary, , skips, , , counts] = await runSuite(cfg, snap, log, { sessionFactory: o.sessionFactory,
-        key: envKey(cfg, join(tmp, "manifests")), acceptedTestsDir: accepted, accepted: trusted,
-        outputLog: join(repo, output), baseline: mine, rerun: true, passedBefore: fresh });
+      const prior = o.afterSetup?.find((r) => r.name === cfg.name && r.snapshot === code && r.untracked === untracked &&
+        r.env === envDigest(cfg));
+      const stands = prior && prior.digest === projectDigest(f, cfg.name)
+        ? setupRunStands(prior, cfg, mine, trusted, accepted) : null;
+      if (stands) rmSync(join(repo, output), { force: true });
+      const [ok, summary, , skips, , , counts] = stands ?? await runSuite(cfg, snap, log, {
+        sessionFactory: o.sessionFactory, key: envKey(cfg, join(tmp, "manifests")), acceptedTestsDir: accepted,
+        accepted: trusted, outputLog: join(repo, output), baseline: mine, rerun: true, passedBefore: !!prior });
       const moved = [counts.left.length ? `${counts.left.length} left the baseline (they pass now)` : "",
         counts.flaky.length ? `${plural(counts.flaky.length, "test")} failed, then passed when run again (flaky): ` +
           few(counts.flaky) : ""].filter(Boolean).map((x) => ` · ${x}`).join("");
-      say(`${cfg.name}: ${ok ? "✓" : "✗"} ${gist(summary)}${ok ? moved : ""}` +
+      say(`${cfg.name}: ${ok ? "✓" : "✗"} ${stands ? "setup's run stands: " : ""}${gist(summary)}${ok ? moved : ""}` +
         `${skips.length ? ` · skipped because ${skips.join("; ")}` : ""}`);
       suites.push({ name: cfg.name, ok, summary, acceptedFailing: counts.acceptedFailing, unexpected: counts.unexpected,
-        log: output, baselineFailing: counts.baselineFailing, left: counts.left, flaky: counts.flaky });
+        log: output, baselineFailing: counts.baselineFailing, left: counts.left, flaky: counts.flaky,
+        ...(stands ? { reused: true as const } : {}) });
       if (ok) summaries.push(f.legacy ? summary : `${cfg.name}: ${summary}`);
       const left = new Set(counts.left);
-      const joined = fresh ? counts.failed.filter((t) => counts.flaky.includes(t.testId))
+      const joined = prior ? counts.failed.filter((t) => counts.flaky.includes(t.testId))
         .map((t) => ({ ...entryOf(t), flaky: true as const })) : [];
       next.set(cfg.name, [...mine.filter((b) => !left.has(b.id)), ...joined]);
     }
@@ -1333,6 +1366,17 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
 }
 
 export const approveConfig = approveFile;
+
+/** Setup's run as a project's proof, judged against today's baseline (`mine`) and accepted tests, in runSuite's terms
+ * ([ok, summary, tail, skips, failing files, hints, counts]); null when it does not stand: a test failing outside the
+ * baseline, an accepted test changed since accept, or a baseline that no longer matches the run. */
+function setupRunStands(run: SetupRun, cfg: ReviewConfig, mine: BaselineTest[], trusted: AcceptedPins,
+                        accepted?: string): [boolean, string, string, string[], string[], string, SuiteCounts] | null {
+  // A project with no tests of its own ran only arnx's one-line test: there is nothing to judge again.
+  if (!run.counts.all.length) return [true, run.summary, "", run.skips, [], "", run.counts];
+  const [ok, verdict, counts] = suiteOk(run.counts.all, cfg, trusted, accepted, mine);
+  return ok && !counts.left.length ? [true, verdict + run.after, "", run.skips, [], "", counts] : null;
+}
 
 /** One project in `arnx setup --baseline`: its suite, how many tests it fails today, and, when it had known_failing,
  * how many tests in those files pass and count again. */
