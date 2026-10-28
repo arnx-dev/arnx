@@ -203,6 +203,22 @@ test("a package without tests is drafted only when it holds sources no drafted p
   expect(unsure(d)).toContain("projects.ui.root: no test files found here");
 });
 
+test("a package without tests under docs or examples is not drafted: the map lists it as not tested", () => {
+  const d = detect(repoWith({
+    "package.json": pkg({ private: true, workspaces: ["packages/*", "examples/*", "docs"] }),
+    "package-lock.json": "{}",
+    "packages/api/package.json": pkg({ devDependencies: { vitest: "2" } }),
+    "packages/api/src/a.test.ts": "",
+    "examples/basic/package.json": pkg({}),
+    "examples/basic/index.ts": "",
+    "docs/package.json": pkg({}),
+    "docs/site.ts": "",
+    "packages/demo-kit/package.json": pkg({}),
+    "packages/demo-kit/src/kit.ts": "",
+  }));
+  expect(Object.values(projects(d)).map((p) => p.root)).toEqual(["packages/api", "packages/demo-kit"]);
+});
+
 test("version ranges", () => {
   expect(satisfies("3.12", ">=3.9")).toBe(true);
   expect(satisfies("3.12", ">=3.9,<3.12")).toBe(false);

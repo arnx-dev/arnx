@@ -1,6 +1,7 @@
 // A first review.yaml written from the detection's facts without a model, for the setup agent to edit instead of
 // writing one from scratch. Values the files did not settle carry a `# unsure: <why>` comment. It leaves out what
 // setup decides from the runs (tests_dir) and from the coverage (owns beyond the root, uses, uncovered).
+import { posix } from "node:path";
 import { Document, isMap, isScalar, isSeq, type Node } from "yaml";
 import type { Candidate, Detection } from "./detect";
 import type { ProjectFacts, ServiceFact } from "./facts";
@@ -21,22 +22,28 @@ const READY: Record<string, (env: Record<string, string>) => string> = {
 };
 const MAX_PROJECTS = 40;
 
+/** Folders of docs and examples: a package without tests in one is left to the coverage map, as not tested. */
+const ASIDE = new Set(["docs", "doc", "examples", "example", "demo", "demos", "samples"]);
+
 /** The candidates the draft proposes as projects: those with test files of their own, and those without that hold
- * source files of their language no other drafted project owns (setup proves them with arnx's one-line test; the
- * rest the coverage map lists as untested). Deeper candidates are taken first, so a workspace root claims only the
- * files its packages leave. Without any test files or sources: the outermost candidate of each language. */
+ * source files of their language no other drafted project owns, outside docs and examples (setup proves them with
+ * arnx's one-line test; the rest the coverage map lists as untested). Deeper candidates are taken first, so a
+ * workspace root claims only the files its packages leave. Without any test files or sources: the outermost
+ * candidate of each language. */
 function chosen(d: Detection): Candidate[] {
   const supported = d.candidates.filter((c) => c.language !== "other");
   const under = (p: string, root: string) => root === "." || p.startsWith(root + "/");
   const out = supported.filter((c) => (c.ownTests ?? 0) > 0);
   const depth = (c: Candidate) => (c.root === "." ? 0 : c.root.split("/").length);
-  for (const c of supported.filter((x) => !out.includes(x)).sort((a, b) => depth(b) - depth(a))) {
-    if ((d.sources?.[c.language] ?? []).some((p) => under(p, c.root) && !out.some((o) => under(p, o.root)))) out.push(c);
+  const aside = (path: string) => path.split("/").some((part) => ASIDE.has(part));
+  for (const c of supported.filter((x) => !out.includes(x) && !aside(x.root)).sort((a, b) => depth(b) - depth(a))) {
+    if ((d.sources?.[c.language] ?? []).some((p) => under(p, c.root) && !aside(posix.dirname(p)) &&
+      !out.some((o) => under(p, o.root)))) out.push(c);
   }
   // Past the cap, packages with tests stay before ones without.
   if (out.length) return out.slice(0, MAX_PROJECTS).sort((a, b) => supported.indexOf(a) - supported.indexOf(b));
-  return supported.filter((c) => !supported.some((o) => o.language === c.language && o.root !== c.root &&
-    (o.root === "." || c.root.startsWith(o.root + "/")))).slice(0, 10);
+  return supported.filter((c) => !aside(c.root) && !supported.some((o) => o.language === c.language &&
+    o.root !== c.root && (o.root === "." || c.root.startsWith(o.root + "/")))).slice(0, 10);
 }
 
 /** Project names from roots: the last folder, or the last two when that is taken. */
