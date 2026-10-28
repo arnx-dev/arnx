@@ -29,6 +29,7 @@ import { projectIndex } from "./indexer";
 import { isSecretPath, type SecretPin } from "./secrets";
 import { type AgentModel, allPrices, type Tool } from "./llm";
 import { ownerFile, runTests } from "./outcomes";
+import { precheck as lookFirst } from "./precheck";
 import { LocalBrain } from "./localbrain";
 import { promptsFor } from "./userprompts";
 import type { Say } from "./progress";
@@ -231,14 +232,16 @@ const APART_MAX = 20;
  * come back all the same). `rerun`: tests failing outside the baseline run once more, and those that pass then count
  * as flaky, not as failures. `passedBefore`: the whole suite ran moments ago with every test outside the baseline
  * passing (setup's own run), so a test failing again on the rerun is flaky too, unless most of the suite fails.
- * `outputLog`: where the whole output goes. */
+ * `outputLog`: where the whole output goes. `precheck`: before the whole suite, the runner lists the tests and a few
+ * small files run (precheck.ts); what they show wrong comes back without the whole suite running. */
 export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string,
                                { sessionFactory = dockerSession, targets = [], failureModel, key, acceptedTestsDir,
-                                 accepted, outputLog, leftOut, baseline = [], rerun = false, passedBefore = false }: {
+                                 accepted, outputLog, leftOut, baseline = [], rerun = false, passedBefore = false,
+                                 precheck = false }: {
                                  sessionFactory?: SessionFactory; targets?: string[]; failureModel?: FailureModel;
                                  key?: string; acceptedTestsDir?: string; accepted?: AcceptedPins;
                                  outputLog?: string; leftOut?: LeftOut; baseline?: BaselineTest[] | "record";
-                                 rerun?: boolean; passedBefore?: boolean } = {})
+                                 rerun?: boolean; passedBefore?: boolean; precheck?: boolean } = {})
   : Promise<[boolean, string, string, string[], string[], string, SuiteCounts]> {
   const none = noCounts();
   // A review clears and collects every writable file in tests_dir: the project's own tests may not live there.
@@ -255,6 +258,11 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
   };
   return sessionFactory(cfg, snap, buildLog, async (session) => {
     type Out = [boolean, string, string, string[], string[], string, SuiteCounts];
+    // A project with no tests of its own has nothing to list: its run below is quick.
+    if (precheck && !targets.length && (cfg.language === "rust" || hasOwnTests(cfg, snap))) {
+      const early = lookFirst(session, snap, cfg, acceptedTestsDir);
+      if (early) return [false, early.summary, tailOf(early.output), [], [], early.hints, none] as Out;
+    }
     // A whole-suite run carries a canary: one-line tests where arnx keeps accepted tests (.arnx/tests/), which the
     // project's own run must never collect.
     const canary = targets.length ? [] : getAdapter(cfg.language).probes(cfg.runner)
@@ -883,6 +891,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     mostRan: new Map<string, { tests: number; command: string }>(),
     // The tests_dir arnx set on each project from its runner's configuration (withTestsDirs).
     placed: new Map<string, string>(),
+    // The environment of each project whose tests were listed before its whole suite ran (precheck.ts): tried again
+    // unchanged, it runs the whole suite.
+    looked: new Map<string, string>(),
     notice: "" };
   const tmp = tempDir("arnx-setup-");
   // Docker steps of this setup, with their durations.
@@ -1059,9 +1070,11 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
             summary = `rerun of the ${subset.length} file(s) that failed last time: ${summary}`;
           }
         } else {
+          const look = state.looked.get(name) !== env;
           [ok, summary, tail, skips, failing, hints, counts] = await runSuite(cfg, snap, log, { sessionFactory: factory,
             failureModel: o.failureModel, key: keyOf(cfg), acceptedTestsDir: accepted,
-            accepted: trusted, leftOut, baseline: "record" });
+            accepted: trusted, leftOut, baseline: "record", precheck: look });
+          state.looked.set(name, env);
         }
         if (ok) state.lastFailing.delete(name);
         else state.lastFailing.set(name, { env, files: failing.length ? failing : last?.files ?? [] });

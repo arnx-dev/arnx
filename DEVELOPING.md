@@ -355,6 +355,12 @@ uncovered (`propose`, `coverageMap`). Both count the files a working-tree snapsh
 and untracked unless git ignores them), and the counts name the untracked ones; an untracked file never refuses a
 proposal (not unexplained, not an overlap), so a scratch file cannot block setup. With no commits yet no file counts
 as untracked: every file is the repository's, and the change a review looks at.
+Before an environment's first whole-suite run, `try_project` looks first (`precheck.ts`, in the same session): the
+runner lists the tests (adapter `listCommand`: pytest `--collect-only`, `vitest list`, jest `--listTests`,
+`cargo nextest list`; node:test and bun have none), arnx's one-line test must be among what it lists from tests_dir,
+and the three smallest listed files run. No tests, files that do not load, a runner that does not start, a sample
+with no report or no test passing: each goes back to the agent with the output, and the same environment tried
+again runs the whole suite. A listing it cannot read for sure changes nothing.
 A round clears every file with the adapter's writable names from tests_dir, so a tests_dir holding the project's own
 such files (Python's test_*.py, conftest.py, __init__.py; not those under the folders `accept` keeps tests in) is
 refused by `try_project`, `propose`, `approve` and `review` (`ownTestsInWriteDir`). Rust's writable names are arnx's own

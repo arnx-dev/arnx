@@ -2,7 +2,7 @@
 import { posix } from "node:path";
 import { endOnce, pyRepr, shQuote } from "../util";
 import { parseJunit } from "./junit";
-import type { Adapter } from "./types";
+import type { Adapter, Listing } from "./types";
 
 const DEF = /^(\s*)(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/;
 const IMPORT_PYTEST = /^import\s+(?:[\w.]+\s*,\s*)*pytest\s*(?:,|#|$)/;
@@ -163,6 +163,28 @@ function pythonUnmark(source: string, names?: Set<string>): { text: string; name
   return { text: lines.join(""), names: out };
 }
 
+/** What `pytest --collect-only -q` shows: node ids (path::name), or with -qq a count per file (path: n), and the
+ * files that did not load. Exit 1 is files that did not load, 5 nothing collected; 2 (interrupted), 3 (internal
+ * error), 4 (a usage error, a conftest that does not import), 126 and 127 (no such command) stop before listing. */
+export function parsePytestList(output: string, exitCode: number | null): Listing | null {
+  if (exitCode === null) return null;
+  if ([2, 3, 4, 126, 127].includes(exitCode)) return { tests: null, files: [], broken: [], failed: true };
+  const files = new Map<string, number>();
+  const broken = new Set<string>();
+  for (const line of output.split("\n").map((l) => l.trimEnd())) {
+    const id = /^([^\s:]+\.py)::\S/.exec(line);
+    const count = /^([^\s:]+\.py): (\d+)$/.exec(line);
+    if (id) files.set(id[1]!, (files.get(id[1]!) ?? 0) + 1);
+    else if (count) files.set(count[1]!, (files.get(count[1]!) ?? 0) + Number(count[2]));
+    const error = /^ERROR ([^\s:]+)(?:\s|$)/.exec(line) ?? /^_+ ERROR collecting (\S+) _+$/.exec(line);
+    if (error) broken.add(error[1]!);
+  }
+  const tests = [...files.values()].reduce((a, b) => a + b, 0);
+  const listing = { tests, files: [...files.keys()], broken: [...broken].sort(), failed: false };
+  if (exitCode === 5) return { ...listing, tests: 0 };
+  return (exitCode === 1 && broken.size) || (exitCode === 0 && files.size) ? listing : null;
+}
+
 const WORDS = {
   language: "Python",
   runner: "pytest",
@@ -194,6 +216,9 @@ export const python: Adapter = {
     " -p no:cacheprovider --continue-on-collection-errors -o junit_family=xunit1" +
     ` --junitxml=${shQuote(reportPath)}`,
   parseReport: (text) => parseJunit(text, (f) => f.endsWith(".py") ? f.slice(0, -3).replaceAll("/", ".") : ""),
+  listCommand: (testCommand, targets) => testCommand.replaceAll("{targets}", targets.map(shQuote).join(" ")) +
+    " -p no:cacheprovider --continue-on-collection-errors --collect-only -q",
+  parseList: (output, _listed, exitCode) => parsePytestList(output, exitCode),
   skip: pythonSkip,
   drop: pythonDrop,
   unmark: pythonUnmark,

@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { endOnce, shQuote } from "../util";
 import { junitCases } from "./junit";
-import type { Adapter, TestResult, Words } from "./types";
+import type { Adapter, Listing, TestResult, Words } from "./types";
 
 const GENERATED = /^arnx_generated_[a-z0-9_]+\.rs$/;
 // What accept keeps: arnx_<tag>_<name>.rs in tests/, never a generated file.
@@ -95,6 +95,26 @@ function parseNextest(text: string, exists: (rel: string) => boolean): TestResul
     const fileAttr = sourceFile(pkg, kind ? kind.slice(4) : null, name, exists);
     return { testId: `${binary}::${name}`, fileAttr, name, outcome, message };
   });
+}
+
+/** `cargo nextest list --message-format json`: each test binary's tests, and whether the filters keep each one. A
+ * failed build stops it (101). An option only a run takes (--no-fail-fast, --retries) makes it refuse its arguments,
+ * which says nothing about the tests. */
+export function parseNextestList(output: string, exitCode: number | null): Listing | null {
+  if (exitCode === null || exitCode > 128 || /\bunexpected argument\b|\bFound argument\b/.test(output)) return null;
+  if (exitCode !== 0) return { tests: null, files: [], broken: [], failed: true };
+  type Suites = Record<string, { testcases?: Record<string, { "filter-match"?: { status?: string } }> }>;
+  let suites: Suites | undefined;
+  try {
+    suites = (JSON.parse(output.split("\n").find((l) => l.startsWith("{")) ?? "") as { "rust-suites"?: Suites })[
+      "rust-suites"];
+  } catch {
+    return null;
+  }
+  if (!suites || typeof suites !== "object") return null;
+  const tests = Object.values(suites).flatMap((s) => Object.values(s.testcases ?? {}))
+    .filter((c) => c["filter-match"]?.status === "matches").length;
+  return { tests, files: [], broken: [], failed: false };
 }
 
 const rustString = (s: string) => `"${s.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
@@ -203,6 +223,13 @@ export const rust: Adapter = {
     `${testCommand.replaceAll("{targets}", targetFlags(targets))} --config-file ${CONFIG} --profile arnx; s=$?; ` +
     `cp ${JUNIT} ${shQuote(reportPath)} 2>/dev/null; exit $s`,
   parseReport: (text, _runner, _root, exists = () => false) => parseNextest(text, exists),
+  // The run's own steps, listing instead of running: no report, so no profile.
+  listCommand: (testCommand, targets) => /\bcargo nextest run\b/.test(testCommand)
+    ? `${WORKSPACE} [ -f "$ws/Cargo.lock" ] || cp ${LOCK} "$ws/Cargo.lock" 2>/dev/null; ${PACKAGE} cd "$ws" && ` +
+      `${testCommand.replace(/\bcargo nextest run\b/, "cargo nextest list").replaceAll("{targets}", targetFlags(targets))}` +
+      " --message-format json"
+    : null,
+  parseList: (output, _listed, exitCode) => parseNextestList(output, exitCode),
   skip,
   drop,
   unmark,

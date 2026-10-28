@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { endOnce, shQuote } from "../util";
 import { junitCases, MESSAGE_LIMIT } from "./junit";
-import { type Adapter, DEFAULT_ACCEPTED_DIR, type TestResult, type Words } from "./types";
+import { type Adapter, DEFAULT_ACCEPTED_DIR, type Listing, type TestResult, type Words } from "./types";
 
 const RUNNERS = ["vitest", "jest", "node", "bun"];
 const RUNNER_WORDS: Record<string, string> = { vitest: "vitest", jest: "jest", node: "node:test", bun: "bun test" };
@@ -137,6 +137,40 @@ function parseJunitJs(text: string, root: string): TestResult[] | null {
     const name = [...describes, attrs.name ?? ""].join(" > ");
     return { testId: `${file || attrs.classname || ""}::${name}`, fileAttr: file, name, outcome, message };
   });
+}
+
+/** vitest 2 and later list a run's tests (`vitest list`, as JSON in a file), jest its test files (--listTests); node:test
+ * and bun test have no list form. vitest's must come from a test_command that says `vitest run`. */
+function listCommand(testCommand: string, targets: string[], listPath: string, runner: string): string | null {
+  const t = targets.map(shQuote).join(" ");
+  if (runner === "jest") return `${testCommand.replaceAll("{targets}", t)} --listTests --json`;
+  if (runner !== "vitest" || !/\bvitest\s+run\b/.test(testCommand)) return null;
+  return `${testCommand.replace(/\bvitest\s+run\b/, "vitest list").replaceAll("{targets}", t)} --json=${shQuote(listPath)}`;
+}
+
+// vitest 1 has no list command and no --json option; jest names an option it does not know this way.
+const UNKNOWN_OPTION = /\bUnknown option\b|\bUnrecognized CLI Parameter\b/i;
+
+/** vitest's list (its file: one entry per test, with its file) or jest's (a JSON array of file paths on one line). An
+ * exit by a signal (137: out of memory) or an option the runner does not know says nothing about the tests. */
+function parseList(output: string, listed: string | null, exitCode: number | null, runner: string, root: string)
+  : Listing | null {
+  if (exitCode === null || exitCode > 128 || UNKNOWN_OPTION.test(output)) return null;
+  if (exitCode !== 0) return { tests: null, files: [], broken: [], failed: true };
+  const json = runner === "vitest" ? listed
+    : output.split("\n").map((l) => l.trim()).find((l) => l.startsWith("[") && l.endsWith("]")) ?? null;
+  let entries: unknown;
+  try {
+    entries = JSON.parse(json ?? "");
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(entries)) return null;
+  const paths = entries.map((e) => runner === "vitest" ? (e as { file?: unknown } | null)?.file : e)
+    .filter((f): f is string => typeof f === "string");
+  if (paths.length !== entries.length) return null;
+  return { tests: runner === "vitest" ? entries.length : null, files: [...new Set(paths.map((f) => projectPath(f, root)))],
+    broken: [], failed: false };
 }
 
 const escapeRx = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -329,6 +363,8 @@ export const typescript: Adapter = {
   },
   parseReport: (text, runner, root) =>
     runner === "jest" ? parseJest(text, root) : runner === "node" ? parseNode(text, root) : parseJunitJs(text, root),
+  listCommand,
+  parseList,
   reportSetup: (snapshot, runner) => {
     if (runner !== "node") return;
     mkdirSync(join(snapshot, ".arnx-run"), { recursive: true });
