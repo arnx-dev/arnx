@@ -1,5 +1,5 @@
-// Setup goes on where a stand-in or a sandbox copy keeps every real value out: key-shaped text, values given to
-// secret-looking names and random-looking runs get stand-ins; a file .arnxignore leaves out that the tests need is in
+// Setup goes on where a stand-in or a sandbox copy keeps every real value out: key-shaped text and values given to
+// secret-looking names get stand-ins; a file .arnxignore leaves out that the tests need is in
 // the sandbox only while a test runs, and what runs quote of it is taken out; a secret-looking variable may take a
 // value arnx generates. Keys here are built from parts.
 import { expect, test } from "bun:test";
@@ -205,7 +205,7 @@ test("a run gets the generated values: 64 hex digits, or 32 bytes of URL-safe ba
   expect(argv).toContain("MODE=test");
 });
 
-// The wider rule: what a name marks as secret, and random-looking runs, get stand-ins too; hashes and ids do not.
+// The wider rule: what a name marks as secret gets a stand-in too; hashes, ids and other unnamed strings do not.
 const HEX64 = "9f86d081884c7d659a2feaa0c55ad015" + "a3bf4f1b2b0b822cd15d6c15b0f00a08";
 
 test("a literal given to a secret-looking name gets a stand-in, in code and in config files", () => {
@@ -249,8 +249,43 @@ test("hashes, commit ids, UUIDs, names and words are left as they are", () => {
     `jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36"\n`,
   ];
   for (const text of kept) expect(`${text}: ${suspects("x.py", text, [])}`).toBe(`${text}: `);
-  // Unnamed, a random-looking base64 run is a key's body.
-  expect(suspects("x.py", `blob = "${AWS_SECRET}"\n`, [])).toEqual([AWS_SECRET]);
+  // Unnamed, a random-looking base64 run is left as it is too; a secret-looking name marks it.
+  expect(suspects("x.py", `blob = "${AWS_SECRET}"\n`, [])).toEqual([]);
+  expect(suspects("x.py", `secret = "${AWS_SECRET}"\n`, [])).toEqual([AWS_SECRET]);
+});
+
+// Made-up base58 values: an address (44 characters) and a signature (88), and a long base64 run.
+const ADDRESS = "7Xq3vN9kLm2Pz" + "R5tW8yB4cD6fG1hJ3sK9uE2aQ";
+const SIGNATURE = "4vJ9kX2mQ7pL3zR8tW5yB1cD6fG9hN2sK4uE7aP3xV8nM5qT1rY6wZ" + "9jH2gF4dS7bC3eA8kL5mN1pQ6rT9uW2xY4z";
+const BLOB = "QmFzZTY0IGRhdGEgdGhhdCBpcyBub3QgYSBzZWNy" + "ZXQgYnV0IGxvb2tzIHJhbmRvbSA5ODc2NTQzMjEw";
+
+test("an unnamed random-looking string (an address, a signature, base64) is left as it is, in a test and a fixture",
+  () => {
+    const test = `def test_decode():\n    assert decode(SIG) == "${ADDRESS}"\n\nSIG = "${SIGNATURE}"\n` +
+      `BLOB = "${BLOB}"\n`;
+    const fixture = `{"mint": "${ADDRESS}", "signature": "${SIGNATURE}", "data": "${BLOB}"}\n`;
+    expect(suspects("tests/test_decode.py", test, [])).toEqual([]);
+    expect(suspects("tests/fixtures/tx.json", fixture, [])).toEqual([]);
+    expect(standIn(test, [], "tests/test_decode.py")!.text).toBe(test);
+    const repo = gitRepo(tmp());
+    mkdirSync(join(repo, "tests/fixtures"), { recursive: true });
+    writeFileSync(join(repo, "tests/test_decode.py"), test);
+    writeFileSync(join(repo, "tests/fixtures/tx.json"), fixture);
+    commit(repo, "decode");
+    const snap = join(tmp(), "snap");
+    expect(takeSnapshot(repo, null, snap).standIns).toEqual([]);
+    expect(readFileSync(join(snap, "tests/test_decode.py"), "utf8")).toBe(test);
+    expect(readFileSync(join(snap, "tests/fixtures/tx.json"), "utf8")).toBe(fixture);
+  });
+
+test("the same strings under a secret-looking name get stand-ins, in code and in a fixture", () => {
+  for (const value of [ADDRESS, SIGNATURE, BLOB]) {
+    expect(suspects("wallet.py", `PRIVATE_KEY = "${value}"\n`, [])).toEqual([value]);
+    expect(suspects("tests/fixtures/wallet.json", `{"secret_key": "${value}"}\n`, [])).toEqual([value]);
+  }
+  const named = standIn(`WALLET_SECRET = "${ADDRESS}"\nassert pubkey() != "${ADDRESS}"\n`, [])!;
+  expect(named.count).toBe(2);
+  expect(named.text).not.toContain(ADDRESS);
 });
 
 test("a value one file marks secret gets the same stand-in in every file, also where nothing marks it", () => {

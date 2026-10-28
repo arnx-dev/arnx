@@ -32,9 +32,9 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   name (token, secret, password, credential, private, authorization, API key; also key, auth, salt or cookie when
   the value looks random) in code, JSON, YAML, TOML, INI or env files, as an assignment, a keyword argument or a
   `("NAME", "value")` pair, unless it is words or a name (`password123`, `PublicKey`), a placeholder, a URL or a path,
-  or the name says hash, signature, public, id or label; and a random-looking run of 40 or more base64 characters
-  anywhere. Hex digits are faked only where such a name marks them: unnamed, they are hashes and commit ids that
-  tests compare. Inline data (`base64,`), lockfiles, binary files and JWTs are left alone. Each value is then
+  or the name says hash, signature, public, id or label. A random-looking string (hex or base64) is faked only where
+  such a name marks it: unnamed, it is a hash, a commit id, an address or a signature that tests compare. Lockfiles
+  and binary files are left alone. Each value is then
   replaced wherever it appears in the snapshot, so no file keeps it and every file gets the same fake; the real
   values never leave your machine. Setup names these files once. A test that checks a signature made with the real
   value (a signed license key) fails with the fake. A private key with a body cannot get a stand-in: its file is

@@ -168,13 +168,6 @@ function fake(original: string, made: Map<string, string>): string {
   return out;
 }
 const PREFIX = /^(sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|AKIA|gh[pousr]_|xox[abpr]-)/;
-/** A run like a key's body: 40 or more base64 characters in both cases, with a digit, + or /. A long name in code has
- * none of these; a hash in hex has one case. */
-const BODY = /[A-Za-z0-9+/=]{40,}/g;
-const isBody = (run: string) => /[a-z]/.test(run) && /[A-Z]/.test(run) && /[0-9+/]/.test(run) && random(run) &&
-  !IDENTIFIER.test(run);
-/** A long name in code: words, then digits (a migration's class, `AlterExifExposureTimeToString1674757936889`). */
-const IDENTIFIER = /^[A-Za-z]+[0-9]*$/;
 /** Random-looking: its characters' entropy near what random ones of its length have. A path, a long name or a URL
  * repeats letters (≈ 0.7-0.8 of the most), a key does not (≈ 0.9). */
 function random(s: string): boolean {
@@ -184,11 +177,6 @@ function random(s: string): boolean {
   for (const n of counts.values()) bits -= (n / s.length) * Math.log2(n / s.length);
   return bits >= 0.84 * Math.log2(Math.min(s.length, 64));
 }
-/** Where such a run is data, not a key: an inline file (`base64,`), a subresource or lockfile hash (`sha512-`,
- * `h1:`), a value named as a hash (`checksum_sha256_base64="…"`), or a part of a JWT (claims a test decodes). */
-const DATA_BEFORE = new RegExp("(?:base64,|sha(?:1|256|384|512)-|h1:|" +
-  "(?:hash|checksum|digest|integrity|etag|sha\\d*|md5)\\w*[\"'`]?\\s*[:=]\\s*[\"'`]?)$", "i");
-const JWT = /eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g;
 
 /** Words of a name that make its value a secret, whatever it looks like (`STRIPE_SECRET`, `apiKey`, `db_password`). */
 const STRONG = new Set(["token", "secret", "secrets", "password", "passwd", "pwd", "passphrase", "credential",
@@ -255,9 +243,9 @@ function namedLines(text: string): string {
 }
 
 /** The strings of `text` (the file at `path`) that get stand-ins, `pins` aside: key-shaped strings (private key headers
- * aside), literal values given to secret-looking names (a `Bearer`/`Basic` value: its token), and runs like a key's
- * body that are not data. Hex digits are a key only where a name says so: unnamed, they are hashes and commit ids
- * that tests compare. */
+ * aside) and literal values given to secret-looking names (a `Bearer`/`Basic` value: its token). A random-looking
+ * string, hex or base64, is a key only where a name says so: unnamed, it is a hash, a commit id, an address or a
+ * signature that tests compare. */
 export function suspects(path: string, text: string, pins: readonly string[], why?: Map<string, string>): string[] {
   const out = new Set<string>();
   const add = (v: string, rule: string) => {
@@ -278,13 +266,6 @@ export function suspects(path: string, text: string, pins: readonly string[], wh
   for (const m of near.matchAll(ASSIGNED)) named(m[2]!, m[4]!);
   for (const m of near.matchAll(PAIR)) named(m[2]!, m[4]!);
   if (CONFIG.test(path)) for (const m of near.matchAll(UNQUOTED)) named(m[1]!, m[2]!);
-  const jwts = [...text.matchAll(JWT)].map((m) => [m.index!, m.index! + m[0].length]);
-  for (const m of text.matchAll(BODY)) {
-    const [at, end] = [m.index!, m.index! + m[0].length];
-    if (!isBody(m[0]) || allowed(m[0]) || DATA_BEFORE.test(text.slice(Math.max(0, at - 80), at)) ||
-      jwts.some(([a, b]) => a! < end && at < b!)) continue;
-    add(m[0], "key-body");
-  }
   return [...out];
 }
 
