@@ -30,9 +30,10 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   fake of the same shape (its prefix such as `sk-`, `whsec_` or `AKIA` kept, then the same length and kinds of
   characters, hex staying hex), and the tests run with the fake: key-shaped text; a literal given to a secret-looking
   name (token, secret, password, credential, private, authorization, API key; also key, auth, salt or cookie when
-  the value looks random) in code, JSON, YAML, TOML, INI or env files, as an assignment, a keyword argument or a
-  `("NAME", "value")` pair, unless it is words or a name (`password123`, `PublicKey`), a placeholder, a URL or a path,
-  or the name says hash, signature, public, id or label. A random-looking string (hex or base64) is faked only where
+  the value looks random; the word must be what the name is, its last one: `AUTH_TOKEN`, `secret_key`, not
+  `TOKEN_PROGRAM` or `account_key`) in code, JSON, YAML, TOML, INI or env files, as an assignment, a keyword argument
+  or a `("NAME", "value")` pair, unless it is words or a name (`password123`, `PublicKey`), a placeholder, a URL or a
+  path, or the name says hash, signature, public, id or label. A random-looking string (hex or base64) is faked only where
   such a name marks it: unnamed, it is a hash, a commit id, an address or a signature that tests compare. Lockfiles
   and binary files are left alone. Each value is then
   replaced wherever it appears in the snapshot, so no file keeps it and every file gets the same fake; the real

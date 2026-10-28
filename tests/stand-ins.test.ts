@@ -288,6 +288,24 @@ test("the same strings under a secret-looking name get stand-ins, in code and in
   expect(named.text).not.toContain(ADDRESS);
 });
 
+test("a name marks a secret only when the secret word is what it names: its last word", () => {
+  // A secret word that says what kind of thing ends the name, and a public key, are left as they are.
+  for (const name of ["tokenProgram", "TOKEN_PROGRAM", "TOKEN_ACCOUNT", "TOKEN_2022_MINT", "token_address", "keyId",
+    "key_path", "public_key", "publicKey", "pubkey", "pub_key", "account_key", "accountKey", "account_keys",
+    "accountKeys", "password_hint"]) {
+    expect(`${name}: ${suspects("x.py", `${name} = "${ADDRESS}"\n`, [])}`).toBe(`${name}: `);
+    expect(`${name}: ${suspects("x.json", `{"${name}": "${ADDRESS}"}\n`, [])}`).toBe(`${name}: `);
+  }
+  // A secret word that is what the name is, a key that a secret word or api says is one, and a qualifier after it.
+  for (const name of ["api_key", "apiKey", "secret_key", "private_key", "signing_key", "SECRET_KEY", "keypair",
+    "keyPair", "botToken", "AUTH_TOKEN", "access_token", "SECRET", "client_secret", "password", "passwd",
+    "credentials", "SECRET_KEY_BASE", "API_KEY_2", "db_password_new"]) {
+    expect(`${name}: ${suspects("x.py", `${name} = "${ADDRESS}"\n`, [])}`).toBe(`${name}: ${ADDRESS}`);
+  }
+  // Key-shaped text is faked whatever its name.
+  expect(suspects("x.py", `TOKEN_PROGRAM = "${AWS_KEY}"\n`, [])).toEqual([AWS_KEY]);
+});
+
 test("a value one file marks secret gets the same stand-in in every file, also where nothing marks it", () => {
   const repo = gitRepo(tmp());
   mkdirSync(join(repo, "tests"), { recursive: true });

@@ -178,9 +178,10 @@ function random(s: string): boolean {
   return bits >= 0.84 * Math.log2(Math.min(s.length, 64));
 }
 
-/** Words of a name that make its value a secret, whatever it looks like (`STRIPE_SECRET`, `apiKey`, `db_password`). */
+/** Words that make a name a secret when the name is one (its last word: `STRIPE_SECRET`, `apiKey`, `db_password`),
+ * whatever its value looks like. */
 const STRONG = new Set(["token", "secret", "secrets", "password", "passwd", "pwd", "passphrase", "credential",
-  "credentials", "private", "authorization", "bearer", "apikey", "privatekey", "accesskey", "secretkey"]);
+  "credentials", "private", "authorization", "bearer", "apikey", "privatekey", "accesskey", "secretkey", "keypair"]);
 /** Words that name a secret only beside a long random-looking value (`sort_key`, `auth_method` do not). */
 const WEAK = new Set(["key", "auth", "salt", "cookie"]);
 /** Words that make a name something else: a hash or a signature a test compares (`token_hash`), a public key, a name,
@@ -189,14 +190,23 @@ const NOT = new Set(["hash", "hashed", "checksum", "digest", "sha", "sha1", "sha
   "etag", "integrity", "id", "ids", "url", "uri", "path", "file", "name", "type", "header", "field", "label",
   "placeholder", "prefix", "length", "len", "env", "var", "count", "expires", "expiry", "ttl", "format", "pattern",
   "regex", "kind", "mode", "method", "provider", "scope", "scopes", "http", "https", "public", "publishable",
-  "signature", "sig"]);
+  "signature", "sig", "pub", "pubkey"]);
+/** Last words that only qualify what comes before them (`SECRET_KEY_BASE`, `password_new`, `api_key_b64`). */
+const QUALIFIER = new Set(["value", "val", "base", "b64", "base64", "hex", "raw", "str", "string", "bytes", "encoded",
+  "test", "live", "prod", "dev", "old", "new", "default"]);
 
-/** How secret a name is: "strong", "weak" or null. */
+/** How secret a name is: "strong", "weak" or null. What the name is counts: its last word, past numbers and
+ * qualifiers. A secret word before it only says what kind (`tokenProgram`, `TOKEN_ACCOUNT`, `token_address` are not
+ * secrets), except before a key (`secret_key`, `private_key`, `api_key`). An account's key is public. */
 function secretName(name: string): "strong" | "weak" | null {
   const words = name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   if (words.some((w) => NOT.has(w))) return null;
-  if (words.some((w) => STRONG.has(w)) || (words.includes("api") && words.includes("key"))) return "strong";
-  return words.some((w) => WEAK.has(w)) ? "weak" : null;
+  while (words.length > 1 && (/^[0-9]+$/.test(words.at(-1)!) || QUALIFIER.has(words.at(-1)!))) words.pop();
+  const head = words.pop() ?? "";
+  if (STRONG.has(head) || (head === "pair" && words.at(-1) === "key")) return "strong";
+  if (!WEAK.has(head)) return null;
+  if (head === "key" && words.some((w) => w === "api" || STRONG.has(w))) return "strong";
+  return head === "key" && words.includes("account") ? null : "weak";
 }
 
 /** A literal that may be a secret: 8 printable ASCII characters or more, no blanks, two of lower case, upper case and
