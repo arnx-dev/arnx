@@ -184,6 +184,33 @@ test("each command is a setup.exec event: project, seconds, exit, timed_out and 
   ]);
 });
 
+test("exec's container goes while try_project runs, and the next exec starts it again", async () => {
+  let open: FakeBox[] = [];
+  const { made, factory } = boxes();
+  const counting: ExecFactory = async (image, cfg, src) => {
+    const b = await factory(image, cfg, src);
+    open = made.filter((x) => !x.closed);
+    return b;
+  };
+  const during: number[] = [];
+  const runs = fakeFactory(() => {
+    during.push(made.filter((x) => !x.closed).length);
+    return [junitXml([["tests/test_a.py", "test_a", "passed", ""]]), "1 passed", false];
+  });
+  const model = new ScriptedAgent([[tool("try_project", { yaml: YAML, project: "app" })],
+    [tool("exec", { project: "app", command: "ls" })],
+    [tool("try_project", { yaml: YAML.replace("-q {targets}", "-q -x {targets}"), project: "app" })],
+    [tool("exec", { project: "app", command: "ls" })], [text("done")]]);
+  await runSetup(gitRepo(tmp()), defaultSettings(), model, { outDir: join(tmp(), "s"), sessionFactory: runs,
+    execFactory: counting });
+  expect(made).toHaveLength(2);
+  expect(made[0]!.closed).toBe(true);
+  expect(open).toHaveLength(1);
+  // No exec container is up during any suite run.
+  expect(during.length).toBeGreaterThan(0);
+  expect(during.every((n) => n === 0)).toBe(true);
+});
+
 test("setup offers exec; it runs in the image the project's last try_project used, and goes at the end", async () => {
   const passing = (): [string | null, string, boolean] =>
     [junitXml([["tests/test_a.py", "test_a", "passed", ""]]), "1 passed", false];

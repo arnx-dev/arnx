@@ -1200,6 +1200,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           "every project runs, submit the file with propose.";
       }
       state.tried.add(name);
+      // exec's container sits idle while the suite runs: it goes now (memory), and the next exec starts it again.
+      exec?.close();
       const log = join(o.outDir, `build-${n}-${name}.log`);
       state.lastTry.set(name, { cfg, image: envTag(keyOf(cfg)), env: envDigest(cfg) });
       // One line as the run starts: the image build, when there is one, is said in the same line.

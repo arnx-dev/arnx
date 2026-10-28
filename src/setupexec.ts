@@ -98,7 +98,7 @@ export class Mirror {
 }
 
 /** The exec tool over one setup: at most one container at a time (a project's environment), started on the first
- * command for it and kept until another environment's command or close. */
+ * command for it and kept until another environment's command or close (setup closes it while try_project runs). */
 export class SetupExec {
   private box: { env: string; runner: ExecRunner; mirror: Mirror } | null = null;
   private calls = 0;
