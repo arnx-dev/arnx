@@ -1,14 +1,16 @@
 // Hints for the setup agent about why a suite's tests fail, read from the failures themselves: a module that is not
 // installed or not importable, a system library or a program missing from the image, an environment variable read
-// without a default, a variable env sets that the error names, a host that does not resolve, a connection refused, a
-// test file that does not load, and tests that pass once the rest of the suite is left out. Each hint quotes the line it comes
-// from and is only a hint: the agent still reads the output and decides, and arnx changes nothing in the file.
+// without a default, a variable env sets that the error names or whose value it quotes, a host that does not resolve, a
+// connection refused, a test file that does not load, and tests that pass once the rest of the suite is left out. Each
+// hint quotes the line it comes from and is only a hint: the agent still reads the output and decides, and arnx
+// changes nothing in the file.
 // A failure that matches no signature gets no hint, so the agent sees it as it did before; a wrong hint is worse than
 // none, which is why every signature here is narrow.
 import { existsSync } from "node:fs";
 import { join, posix } from "node:path";
 import type { TestResult } from "./adapters/types";
 import type { ReviewConfig } from "./config";
+import { envValue } from "./secrets";
 
 export type HintKind = "missing-package" | "import-path" | "missing-library" | "missing-program" |
   "missing-variable" | "env-value" | "unresolved-host" | "connection-refused" | "does-not-load" | "order-dependent" |
@@ -101,15 +103,23 @@ export function classify(message: string, cfg: ReviewConfig, snap: string): Omit
   if ((m = /ECONNREFUSED ([\w.:[\]-]+)|connection to server at "([^"]+)"[^\n]*(?:\n[^\n]*)?refused|Connection refused|\[Errno 111\]/.exec(message))) {
     return { kind: "connection-refused", detail: m[1] ?? m[2] ?? "", evidence: lineOf(message, m.index) };
   }
-  // A variable env sets, named by the line that says what went wrong (not the source lines a traceback prints): the
-  // value env gives is wrong, or it overrides a default the tests set themselves. A KeyError names a key of some
-  // mapping; os.environ cannot raise one for a variable env sets.
+  // A variable env sets, named or quoted by its value on the line that says what went wrong (not the source lines a
+  // traceback prints): the value env gives is wrong, or it overrides a default the tests set themselves. A KeyError
+  // names a key of some mapping; os.environ cannot raise one for a variable env sets.
   const line = errorLine(message);
-  const name = !/^KeyError\b/.test(line) && Object.keys(cfg.env).find((k) => ENV_NAME.test(k) &&
-    new RegExp(`(?<![\\w$])${escaped(k)}(?![\\w$])`).test(line));
+  if (/^KeyError\b/.test(line)) return null;
+  const keys = Object.keys(cfg.env);
+  const name = keys.find((k) => ENV_NAME.test(k) && word(k).test(line)) ??
+    keys.find((k) => [cfg.env[k]!, envValue(cfg.env[k]!)].some((v) => ENV_VALUE.test(v) && word(v).test(line)));
   if (name) return { kind: "env-value", detail: name, evidence: line };
   return null;
 }
+
+// A value worth looking for in an error line: 4+ characters, not a number, not a word any line may hold.
+const ENV_VALUE = /^(?![\d.]+$)(?!(?:true|false|none|null|test|yes)$).{4,}$/i;
+
+/** `s` as a whole token: no letter, digit, `_` or `$` right before or after it. */
+const word = (s: string) => new RegExp(`(?<![\\w$])${escaped(s)}(?![\\w$])`);
 
 // A line saying a module or a file is not there, in the words of pytest, node, vitest and the OS.
 const MISSING = /Cannot find (?:module|package)|Failed to (?:resolve import|load url)|Could not resolve|No module named|ModuleNotFoundError|ENOENT|FileNotFoundError|No such file or directory|does not exist/;

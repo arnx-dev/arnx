@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { TestResult } from "../src/adapters/types";
 import { parseReviewConfig } from "../src/config";
 import { classify, describeHints, diagnose, passingApart, unexplainedFiles } from "../src/diagnose";
+import { envValue } from "../src/secrets";
 import { useTmp } from "./helpers/tmp";
 import { CFG } from "./helpers/yaml";
 
@@ -55,6 +56,34 @@ test("a variable env sets is the cause only when the error line names it", () =>
   expect(describeHints(diagnose([{ testId: "tests/test_credits.py::test_grant", name: "test_grant",
     fileAttr: "tests/test_credits.py", outcome: "failed", message: raised } as TestResult], cfg, tmp()), cfg))
     .toContain("variable `PAY_LINK_SECRET`, which env sets");
+});
+
+test("a variable env sets is the cause when the error line quotes its value as a whole token", () => {
+  const cfg = parseReviewConfig(CFG.replace("env: {MODE: test}",
+    "env: {MODE: test, DB_HOST: mongo, CACHE_HOST: unused.invalid, PORT_X: '8080', FLAG_X: 'true', ZONE_X: abc}"));
+  const host = (v: string) => `pymongo.errors.ConfigurationError: Invalid URI host: ${v} is not a valid hostname ` +
+    "for 'mongodb+srv://'. Did you mean to use 'mongodb://'?\n    client = MongoClient(f'mongodb+srv://u:p@{host}')";
+  expect(classify(host("mongo"), cfg, tmp())).toMatchObject({ kind: "env-value", detail: "DB_HOST",
+    evidence: expect.stringContaining("Invalid URI host: mongo is") });
+  expect(classify(host("unused.invalid"), cfg, tmp())).toMatchObject({ kind: "env-value", detail: "CACHE_HOST" });
+  // Inside a longer word, only in the traceback's source lines, or on a KeyError: no hint.
+  expect(classify("pymongo.errors.ConfigurationError: bad scheme mongodb+srv", cfg, tmp())).toBeNull();
+  expect(classify("assert 500 == 200\n    url = 'http://mongo:27017'", cfg, tmp())).toBeNull();
+  expect(classify("KeyError: 'mongo'", cfg, tmp())).toBeNull();
+  // A short value, a number, or a word any line may hold is never looked for.
+  expect(classify("ValueError: zone abc is not known", cfg, tmp())).toBeNull();
+  expect(classify("ValueError: port 8080 is in use", cfg, tmp())).toBeNull();
+  expect(classify("AssertionError: assert true is false", cfg, tmp())).toBeNull();
+  expect(classify("AssertionError: expected test to pass", cfg, tmp())).toBeNull();
+  expect(describeHints(diagnose([{ testId: "tests/test_db.py::test_find", name: "test_find",
+    fileAttr: "tests/test_db.py", outcome: "failed", message: host("mongo") } as TestResult], cfg, tmp()), cfg))
+    .toContain("variable `DB_HOST`, which env sets");
+});
+
+test("a value arnx generates for env counts as the value env sets", () => {
+  const cfg = parseReviewConfig(CFG.replace("env: {MODE: test}", "env: {MODE: test, SIGNING_KEY: arnx:generated}"));
+  expect(classify(`ValueError: key ${envValue("arnx:generated")} must be 32 bytes`, cfg, tmp()))
+    .toMatchObject({ kind: "env-value", detail: "SIGNING_KEY" });
 });
 
 test("hosts that do not resolve, and connections refused", () => {
