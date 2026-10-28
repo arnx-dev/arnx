@@ -318,5 +318,5 @@ test("a value that is a name in code is never replaced: a replacement everywhere
     `{ key = "S3_PUBLIC_IMAGES_BUCKET" }\n`, `dkim_public_key = "p=MIGfMA0GCSq"\n`]) {
     expect(`${text}: ${suspects("main.tf", text, [])}`).toBe(`${text}: `);
   }
-  expect(suspects("x.py", `token = "polar_at_u_9xQ2kLm7Pz"\n`, [])).toEqual(["polar_at_u_9xQ2kLm7Pz"]);
+  expect(suspects("x.py", `token = "shop_at_u_9xQ2kLm7Pz"\n`, [])).toEqual(["shop_at_u_9xQ2kLm7Pz"]);
 });
