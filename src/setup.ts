@@ -20,6 +20,7 @@ import {
   secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampFile,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
+import { draftYaml } from "./draft";
 import { classify, describeHints, diagnose, firstErrors, firstLine, type Hint, missingLeftOut, npxDownload, npxText,
   loadFailure, passingApart, unexplainedFiles } from "./diagnose";
 import type { FailureModel } from "./jev";
@@ -1431,6 +1432,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       } };
     const { agent: result } = await withRole("setup", () => brain.agentRound("setup", {
       hints: setupHintsFor(detection, browser),
+      draft: o.project || o.add ? "" : draftYaml(detection),
       withheld: withheld.length ? describeWithheld(withheld) : "", current, detection, tree: treeOf(repo, untracked),
       withheldFiles: withheld,
       ...(o.project ? { project: o.project } : {}), ...(o.add ? { add: true } : {}),

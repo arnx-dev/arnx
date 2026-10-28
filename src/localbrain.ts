@@ -165,7 +165,7 @@ export class LocalBrain implements Brain {
   /** The setup agent: it proves projects with try_project and submits the file with propose. */
   private async setup(x: SetupInput, tools: Promise<RoundTools>): Promise<RoundResult> {
     const t = await tools;
-    let user = this.p.setupTask(x.hints);
+    let user = this.p.setupTask(x.hints, x.draft ?? "");
     if (x.withheld) {
       user += `\n\nThese files are left out of the copy you see and of the sandbox, because they hold text that looks ` +
         `like a key: ${x.withheld}. Code that needs them cannot build or run here; do not recreate ` +
