@@ -39,7 +39,8 @@ test("propose checks the file first, then runs the projects not yet proven itsel
     [text("Two services.")],
   ]);
   const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: passing });
-  expect(result(m, 2)).toContain("not explained: app.py");
+  expect(result(m, 2)).toContain("source files outside every project, by folder");
+  expect(result(m, 2)).toContain("- /app.py (1 file): no tests");
   expect(result(m, 2)).toContain("not proven yet: feed");
   expect(ran).toEqual(["pay", "feed"]); // the refused propose ran nothing; the second ran feed, never pay again
   expect(result(m, 3)).toContain("accepted");

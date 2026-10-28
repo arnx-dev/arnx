@@ -123,10 +123,13 @@ test("setup ends with a worth-a-look block: failing today, not tested, allowed s
     "  ! shop: 1 test fails today, recorded in .arnx/baseline.json",
     "  ! shop: install downloads from get.example.com (not a package registry)",
     "  ! tests/fixture.py: allowed although secret-looking; sent to the model and the sandbox",
-    "  ! not tested: docs/ (1 file): examples only",
+    "  ! not tested (examples only): docs/ (1 file)",
     "",
   ]);
   expect(tail.split("\n").at(-1)).toStartWith("Next: arnx review");
+  // The screen groups what no project tests by reason; the approval record keeps every entry.
+  expect(readFileSync(join(repo, ".arnx", "setup", "approval.md"), "utf8"))
+    .toEndWith("\nNot tested:\n- docs/ (1 file): examples only\n");
 });
 
 test("install lines downloading from outside the package registries are worth a look; registries are not", () => {

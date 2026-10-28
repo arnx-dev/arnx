@@ -37,6 +37,7 @@ import type { ScipIndex } from "./scip";
 import { loadSettings, refString, type Settings, settingsPath } from "./settings";
 import { runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
 import { SOURCE } from "./untested";
+import { BROWSER_TESTS, type BrowserSuite, browserSuites, uiFramework, WEB_UI } from "./browser";
 import { otherLanguageOf } from "./languages";
 import { fileReferences, mapHints, type UsesHint, usesHints } from "./usescheck";
 import { agentUse, logUsage } from "./usage";
@@ -168,8 +169,8 @@ function ownTestsIn(cfg: ReviewConfig, snap: string, acceptedTestsDir?: string):
 }
 
 /** Folders that hold other people's code, never the project's own tests (build output is rarely committed, and a
- * test there is still a test). */
-const NOT_OWN = new Set(["node_modules", ".git", ".venv", "venv", "__pycache__", ".arnx-run"]);
+ * test there is still a test); .arnx holds arnx's (accepted tests). */
+const NOT_OWN = new Set(["node_modules", ".git", ".venv", "venv", "__pycache__", ".arnx-run", ".arnx"]);
 /** Runner configuration that names its own test files (pytest python_files, jest testMatch/testRegex, a vitest
  * test.include): file names alone cannot tell such a project has no tests. */
 const CUSTOM_TESTS = /\bpython_files\b|\btestMatch\b|\btestRegex\b|\btest\s*:\s*\{[^}]*\binclude\b/s;
@@ -510,9 +511,10 @@ export const TRY_PROJECT: Tool = {
 
 export const PROPOSE: Tool = {
   name: "propose",
-  description: "Submit the whole review.yaml. Accepted when no file is owned by two projects, every source file is " +
-    "owned, used or listed under uncovered, and every project runs: propose itself runs each project whose part of " +
-    "the file changed since try_project proved it (a project's part: its own entry and the services it uses).",
+  description: "Submit the whole review.yaml. Accepted when no file is owned by two projects and every project runs: " +
+    "propose itself runs each project whose part of the file changed since try_project proved it (a project's part: " +
+    "its own entry and the services it uses). Source files outside every project come back once, by folder; then " +
+    "arnx lists them under uncovered itself.",
   input_schema: yamlSchema(),
 };
 
@@ -524,6 +526,55 @@ export interface Coverage {
   unexplained: string[];
   /** Files owned by more than one project: "path (a, b)". */
   overlaps: string[];
+  /** The unexplained files by folder (sourceGroups), each with the reason arnx lists it under uncovered with. */
+  groups: SourceGroup[];
+}
+
+/** arnx's own folder: never part of the coverage map, nor of any setup check that counts files. */
+export const isArnxPath = (p: string) => p === ".arnx" || p.startsWith(".arnx/");
+
+/** The files the coverage map counts: the snapshot's (tracked, and with `untracked` untracked ones git does not
+ * ignore), minus .arnxignore, secret files and .arnx/; `untracked` holds those not committed. */
+export function coverageFiles(repo: string, untracked = false): { files: string[]; untracked: Set<string> } {
+  const ignored = loadIgnore(repo);
+  const tree = workingTreeFiles(repo, untracked);
+  if (!hasCommits(repo)) tree.untracked.clear();
+  return { files: tree.files.filter((p) => !ignored(p) && !isSecretPath(p) && !isArnxPath(p)), untracked: tree.untracked };
+}
+
+/** Source files outside every project, by folder, with the reason arnx lists them under uncovered with. */
+export interface SourceGroup { path: string; reason: string; files: number }
+
+/** Reasons arnx states itself for a group of source files no project owns or uses. */
+export const NO_TESTS = "no tests";
+export const SCRIPTS = "scripts";
+const SCRIPT_DIRS = new Set(["scripts", "script", "bin", "tools", "tool", "hack", "ci", ".github", ".husky", "devtools"]);
+
+/** `unexplained` grouped by the shallowest folder that holds no file a project owns or uses (`claimed`); a file with
+ * no such folder above it is a group of its own. */
+export function sourceGroups(unexplained: string[], claimed: string[]): SourceGroup[] {
+  const taken = new Set<string>();
+  for (const f of claimed) {
+    const parts = f.split("/");
+    for (let i = 1; i < parts.length; i++) taken.add(parts.slice(0, i).join("/"));
+  }
+  const groups = new Map<string, SourceGroup>();
+  for (const f of unexplained) {
+    const parts = f.split("/");
+    let path = `/${f}`, top = "";
+    for (let i = 1; i < parts.length; i++) {
+      const dir = parts.slice(0, i).join("/");
+      if (!taken.has(dir)) {
+        path = `/${dir}/`;
+        top = parts[i - 1]!;
+        break;
+      }
+    }
+    const g = groups.get(path) ?? { path, reason: SCRIPT_DIRS.has(top) ? SCRIPTS : NO_TESTS, files: 0 };
+    g.files += 1;
+    groups.set(path, g);
+  }
+  return [...groups.values()];
 }
 
 
@@ -532,12 +583,11 @@ export interface Coverage {
  * documentation, configuration and data may stay unmentioned. Untracked files are counted (only when setup and reviews
  * read them) but never refuse a proposal: a scratch file neither appears in unexplained nor in overlaps, so what is
  * accepted depends on committed files alone. With no commits yet every file is the repository's (and the change a
- * review looks at), so none counts as untracked. */
+ * review looks at), so none counts as untracked. arnx's own .arnx/ (accepted tests among it) is never counted. */
 export function coverageMap(repo: string, file: ReviewFile, untracked = false): Coverage {
-  const ignored = loadIgnore(repo);
-  const tree = workingTreeFiles(repo, untracked);
-  if (!hasCommits(repo)) tree.untracked.clear();
-  const files = tree.files.filter((p) => !ignored(p) && !isSecretPath(p));
+  const tree = coverageFiles(repo, untracked);
+  const files = tree.files;
+  const claimed: string[] = [];
   const projects = file.projects.map((p) => ({ name: p.name, owns: matcher(p.owns.join("\n")),
     uses: matcher(p.uses.join("\n")), owned: 0, used: 0, untracked: { owned: 0, used: 0 } }));
   const uncovered = file.uncovered.map((u) => ({ ...u, test: matcher(u.path), files: 0, untracked: 0 }));
@@ -551,6 +601,7 @@ export function coverageMap(repo: string, file: ReviewFile, untracked = false): 
     const users = projects.filter((p) => !p.owns(f) && p.uses(f));
     owners.forEach((p) => { p.owned += 1; p.untracked.owned += fresh ? 1 : 0; });
     users.forEach((p) => { p.used += 1; p.untracked.used += fresh ? 1 : 0; });
+    if (owners.length || users.length) claimed.push(f);
     if (owners.length > 1 && !fresh) overlaps.push(`${f} (${owners.map((p) => p.name).sort().join(", ")})`);
     let listed = false;
     for (const u of uncovered) {
@@ -574,7 +625,8 @@ export function coverageMap(repo: string, file: ReviewFile, untracked = false): 
   return { projects: projects.map(({ name, owned, used, untracked }) =>
     ({ name, owned, used, ...(untracked.owned || untracked.used ? { untracked } : {}) })),
   uncovered: uncovered.map(({ path, reason, files: n, untracked }) =>
-    ({ path, reason, files: n, ...(untracked ? { untracked } : {}) })), unexplained, overlaps };
+    ({ path, reason, files: n, ...(untracked ? { untracked } : {}) })), unexplained, overlaps,
+  groups: sourceGroups(unexplained, claimed) };
 }
 
 /** What a project's suite needs to run, apart from which files are set aside: a retry that changes none of it can
@@ -648,6 +700,29 @@ export function withoutKnownFailing(text: string, keep: ReadonlySet<string> = ne
   return dropped ? [doc.toString({ flowCollectionPadding: false, lineWidth: 0 }), true] : [text, false];
 }
 
+/** `text` with the projects in `drop` taken out and `add` appended under uncovered (entries whose path is listed
+ * already are left out); `text` itself when nothing changes. */
+export function withUncovered(text: string, add: { path: string; reason: string }[], drop: string[] = []): string {
+  const doc = parseDocument(text);
+  if (doc.errors.length) return text;
+  let changed = false;
+  for (const name of drop) {
+    if (doc.hasIn(["projects", name])) {
+      doc.deleteIn(["projects", name]);
+      changed = true;
+    }
+  }
+  const before = (parseDocument(text).toJS() as { uncovered?: unknown } | null)?.uncovered;
+  const listed = new Set(Array.isArray(before) ? before.map((u: { path?: unknown } | null) => u?.path) : []);
+  const fresh = add.filter((u, i) => !listed.has(u.path) && add.findIndex((x) => x.path === u.path) === i);
+  if (fresh.length) {
+    if (!doc.has("uncovered") || doc.get("uncovered") === null) doc.set("uncovered", doc.createNode([]));
+    for (const u of fresh) doc.addIn(["uncovered"], doc.createNode({ path: u.path, reason: u.reason }));
+    changed = true;
+  }
+  return changed ? doc.toString({ flowCollectionPadding: false, lineWidth: 0 }) : text;
+}
+
 /** Folders of test data: what sits in them under tests/ is not a test. */
 const TEST_DATA = new Set(["fixtures", "__fixtures__", "testdata", "test-data", "__snapshots__", "__mocks__"]);
 
@@ -707,6 +782,18 @@ export function coverageGap(cfg: ReviewConfig, snap: string, results: TestResult
   return parts.length ? { line: parts.join("; ") } : null;
 }
 
+/** Most folder groups named to the setup agent at once. */
+const GROUPS_SHOWN = 30;
+
+/** What the setup agent is told, once, about source files outside every project. */
+export function placesText(groups: SourceGroup[]): string {
+  const more = groups.length - GROUPS_SHOWN;
+  return "source files outside every project, by folder (with the reason arnx lists them under uncovered with):\n" +
+    groups.slice(0, GROUPS_SHOWN).map((g) => `- ${g.path} (${plural(g.files, "file")}): ${g.reason}`).join("\n") +
+    (more > 0 ? `\n- and ${more} more` : "") + "\nPut those a project tests under its owns or uses; propose again " +
+    "and arnx lists the rest under uncovered itself.";
+}
+
 /** What a tool call does, in a few words, for progress lines. Setup's own tools report themselves. */
 export function describeTool(name: string, input: Record<string, unknown>): string | null {
   const arg = (k: string) => (typeof input[k] === "string" ? input[k] as string : "").slice(0, 100);
@@ -751,7 +838,7 @@ function detectReadable(repo: string, untracked: boolean): Detection {
 
 /** What the setup agent is told about the repository: the detector's findings and each present language's advice
  * (exported for a brain that is sent the detection as data). */
-export function setupHintsFor(d: Detection): string {
+export function setupHintsFor(d: Detection, browser: BrowserSuite[] = []): string {
   const languages = [...new Set(d.candidates.map((c) => c.language))].filter((l) => LANGUAGES.includes(l as AdapterId));
   const advice = (languages.length ? languages : ["python"]).flatMap((l) => {
     try {
@@ -761,7 +848,9 @@ export function setupHintsFor(d: Detection): string {
       return [];
     }
   });
-  return [describeDetection(d), ...advice, SHARED_ENV].join("\n\n");
+  const suites = browser.length ? [`Browser tests (not set up; arnx lists them under uncovered itself): ` +
+    browser.map((s) => `${s.path} (${s.tool})`).join(", ")] : [];
+  return [describeDetection(d), ...suites, ...advice, SHARED_ENV].join("\n\n");
 }
 
 /** Every project gets its own image unless told otherwise: a 14-crate Rust workspace was built 14 times. */
@@ -824,7 +913,11 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       counts: SuiteCounts } }>(),
     // The most tests a whole-suite run of each project reported, and the test_command that ran them.
     mostRan: new Map<string, { tests: number; command: string }>(),
-    notice: "" };
+    notice: "",
+    // Source files outside every project went back to the agent once (by folder); the rest arnx lists itself.
+    placesAsked: false,
+    // Projects tried at least once, and the web UI apps whose one try failed (their owns, listed as web UI).
+    tried: new Set<string>(), webUi: new Map<string, string[]>() };
   const tmp = tempDir("arnx-setup-");
   // Docker steps of this setup, with their durations.
   dockerSteps.log = (line) => {
@@ -867,6 +960,15 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const ignoredFile = loadIgnore(repo);
     const secret = new Set(withheld.map((w) => w.path));
     const leftOut: LeftOut = { paths: [...secret, ...files.filter((p) => ignoredFile(p) && !secret.has(p))], all: files };
+    // Suites that run in a browser are never set up: listed under uncovered as browser tests.
+    const readSnap = (rel: string) => {
+      try {
+        return readFileSync(join(snap, rel), "utf8");
+      } catch {
+        return "";
+      }
+    };
+    const browser = browserSuites(coverageFiles(repo, untracked).files, readSnap);
     const stopped = () => new StopRound(`stopped: ${state.problem}. Only the user can let ` +
       `${state.needed!.length === 1 ? "it" : "them"} in, so setup ends here; do not work around it.`);
     if (withheld.length) {
@@ -936,6 +1038,21 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const name = typeof args.project === "string" ? args.project : f.projects.length === 1 ? f.projects[0]!.name : "";
       const cfg = f.projects.find((p) => p.name === name);
       if (!cfg) return `invalid: name the project to try; projects: ${f.projects.map((p) => p.name).join(", ")}`;
+      // --- web UI rule (0.1.5): a UI app gets one try; when it fails, setup lists it under uncovered as web UI. ---
+      if (state.webUi.has(name)) {
+        return `${name} is listed under uncovered as ${WEB_UI}: do not try it again; go on with the other projects ` +
+          "(propose leaves it out of the file).";
+      }
+      const uiApp = !state.tried.has(name) && !keep.has(name) && cfg.language === "typescript"
+        ? uiFramework(readSnap(join(cfg.workdir, "package.json"))) : null;
+      const webUi = (why: string): string => {
+        state.webUi.set(name, cfg.owns);
+        say(`${name}: a web UI app (${uiApp}); its first try failed, so it is listed as ${WEB_UI}`);
+        return `the suite of ${name} does not run: ${why}\n${name} is a web UI app (${uiApp} among its dependencies), ` +
+          `which gets one try: arnx lists it under uncovered as ${WEB_UI} and propose leaves it out of the file. Do not ` +
+          "try it again; go on with the other projects.";
+      };
+      // --- end of the web UI rule ---
       const t0 = performance.now();
       const attempt = (a: { ok: boolean; reused: boolean; summary: string; failing: number; skips: number;
         hints: string; error?: string }) => emit("setup.attempt", { n, project: name, ...a,
@@ -951,6 +1068,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         return `the suite of ${name} runs: ${proof.summary} (unchanged since it last ran, so not run again). When ` +
           "every project runs, submit the file with propose.";
       }
+      state.tried.add(name);
       const log = join(o.outDir, `build-${n}-${name}.log`);
       // One line as the run starts: the image build, when there is one, is said in the same line.
       announce = { name, n };
@@ -1010,6 +1128,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         state.problem = `${name}: ${gist(e.message)}`;
         attempt({ ok: false, reused: false, summary: "", failing: 0, skips: 0, hints: "",
           error: clip(e.message, 500) });
+        if (uiApp) return webUi(gist(e.message)); // web UI rule
         return `failed: ${e.message}\n${existsSync(log) ? readFileSync(log, "utf8").slice(-OUTPUT_TAIL) : ""}`;
       }
       announce = null;
@@ -1059,6 +1178,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         "for (a service and env) unless it needs the internet." : "";
       if (!ok) {
         say(`${name}: ✗ does not run yet: ${gist(summary)}`);
+        if (uiApp) return webUi(gist(summary)); // web UI rule
         return `the suite of ${name} does not run yet: ${summary}${skipped}${hints ? `\n${hints}` : ""}\n${tail}`;
       }
       say(`${name}: ✓ ${summary}${counts.failed.length ? ` · ${counts.failed.length} failing today, recorded` : ""}` +
@@ -1071,14 +1191,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         failed: counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined)),
         ...(gap ? { gap: gap.line } : {}) });
       // A TypeScript project that can be type checked and has no typecheck yet: say so while the agent is here.
-      const read = (rel: string) => {
-        try {
-          return readFileSync(join(snap, rel), "utf8");
-        } catch {
-          return "";
-        }
-      };
-      const typed = cfg.language === "typescript" && !cfg.typecheck && typeCheckable(read, cfg.workdir)
+      const typed = cfg.language === "typescript" && !cfg.typecheck && typeCheckable(readSnap, cfg.workdir)
         ? ` ${name} has a tsconfig.json and typescript among its dependencies: add typecheck (for example ` +
           `${TYPECHECK_EXAMPLE}, with the same node_modules link as test_command) and try it again.` : "";
       const bare = summary.startsWith(NO_OWN_TESTS) ? ` ${name} has no tests of its own, which is fine: reviews run the ` +
@@ -1092,7 +1205,24 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       if (state.needed) throw stopped();
       const parsed = parse(args);
       if (typeof parsed === "string") return parsed;
-      const { f, text } = parsed;
+      // arnx's part of the map: browser suites under uncovered, and the web UI apps whose one try failed there instead
+      // of in the file.
+      const drop = [...state.webUi.keys()].filter((name) => parsed.f.projects.some((p) => p.name === name));
+      if (drop.length && drop.length === parsed.f.projects.length) {
+        state.problem = `${drop.join(", ")}: web UI app${drop.length === 1 ? "" : "s"} whose tests did not run on the ` +
+          "first try, and no other project; `arnx setup --add` tries again";
+        throw new StopRound(`stopped: ${state.problem}. Setup gives a web UI app one try, so it ends here.`);
+      }
+      const derived = [...browser.map((b) => ({ path: b.path, reason: `${BROWSER_TESTS} (${b.tool})` })),
+        ...drop.flatMap((name) => state.webUi.get(name)!.map((path) => ({ path, reason: WEB_UI })))];
+      let text = withUncovered(parsed.text, derived, drop);
+      let f: ReviewFile;
+      try {
+        f = text === parsed.text ? parsed.f : parseReviewFile(text);
+      } catch (e) {
+        if (!(e instanceof ArnxError)) throw e;
+        return `invalid: ${e.message}`;
+      }
       const problems: string[] = [];
       const ownTests: string[] = [];
       const changed = [...keep].filter(([name, d]) => !f.projects.some((p) => p.name === name) ||
@@ -1100,11 +1230,18 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       if (changed.length) problems.push(`must stay as approved: ${changed.join(", ")}`);
       const unproven = f.projects.filter((p) => !keep.has(p.name) && state.proven.get(p.name) !== projectDigest(f, p.name))
         .map((p) => p.name);
-      const map = coverageMap(repo, f, untracked);
+      let map = coverageMap(repo, f, untracked);
       if (map.overlaps.length) problems.push(`owned by more than one project: ${list(map.overlaps)}`);
-      if (map.unexplained.length) {
-        problems.push(`not explained: ${list(map.unexplained)}; add them to a project's owns or uses, or to uncovered ` +
-          "with a reason");
+      // Source files outside every project go back to the agent once, by folder; after that arnx lists what is left
+      // under uncovered itself, with the reason it can tell.
+      const asked = map.groups.length > 0 && !state.placesAsked;
+      if (asked) {
+        state.placesAsked = true;
+        problems.push(placesText(map.groups));
+      } else if (map.groups.length) {
+        text = withUncovered(text, map.groups.map(({ path, reason }) => ({ path, reason })));
+        f = parseReviewFile(text);
+        map = coverageMap(repo, f, untracked);
       }
       for (const p of f.projects.filter((x) => !keep.has(x.name))) {
         const own = ownTestsIn(p, snap, accepted);
@@ -1115,8 +1252,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       }
       if (problems.length) {
         if (unproven.length) problems.push(`not proven yet: ${unproven.join(", ")} (propose runs them once the rest is right)`);
-        state.problem = rejectedReason({ changed, overlaps: map.overlaps, unexplained: map.unexplained, ownTests,
-          failed: [] });
+        state.problem = rejectedReason({ changed, overlaps: map.overlaps, unexplained: asked ? map.unexplained : [],
+          ownTests, failed: [] });
         say(`Proposal rejected: ${state.problem}. Retrying...`);
         return `refused:\n${problems.join("\n")}`;
       }
@@ -1124,7 +1261,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       // and the same file proposed again is accepted. Approved projects must stay as they are, so none is named.
       if (!state.pathsChecked) {
         state.pathsChecked = true;
-        state.pathHints = mapHints(f, files.filter((p) => !ignoredFile(p) && !isSecretPath(p)))
+        state.pathHints = mapHints(f, files.filter((p) => !ignoredFile(p) && !isSecretPath(p) && !isArnxPath(p)))
           .filter((h) => !keep.has(h.project));
         const hints = state.pathHints;
         emit("setup.paths_check", { projects: f.projects.length,
@@ -1202,7 +1339,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         reading = true;
         say("reading the repository");
       } };
-    const { agent: result } = await withRole("setup", () => brain.agentRound("setup", { hints: setupHintsFor(detection),
+    const { agent: result } = await withRole("setup", () => brain.agentRound("setup", {
+      hints: setupHintsFor(detection, browser),
       withheld: withheld.length ? describeWithheld(withheld) : "", current, detection, tree: treeOf(repo, untracked),
       withheldFiles: withheld,
       ...(o.project ? { project: o.project } : {}), ...(o.add ? { add: true } : {}),

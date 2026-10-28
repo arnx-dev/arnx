@@ -111,8 +111,9 @@ test("the setup screen names the file, one line per project; what is worth a loo
   const screen = approvalScreen(file, repo, { proofs });
   expect(screen.startsWith("  project")).toBe(true);
   expect(screen).not.toContain("! ");
-  expect(worthALook(file, repo, { proofs }).filter((l) => l.startsWith("not tested: "))).toEqual([
-    expect.stringMatching(/^not tested: \/app\.py \(/), "not tested: infra/ (1 file): Terraform; no adapter"]);
+  // One line per kind of reason: an entry holding no source file is docs and data.
+  expect(worthALook(file, repo, { proofs }).filter((l) => l.startsWith("not tested"))).toEqual([
+    "not tested (legacy script, no tests): /app.py (1 file)", "not tested (docs and data): infra/ (1 file)"]);
   expect(screen).not.toMatch(/setup agent's notes|The full file/);
   // No project has services: no services column.
   const plain = { ...file, projects: file.projects.map((p) => ({ ...p, services: [] })) };
