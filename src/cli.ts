@@ -52,7 +52,7 @@ import { type ModelRef, providerLines, refString, setupRef, setupSettings, unuse
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile,
-  type ProjectProof, rerecordBaseline, runSetup, type SetupResult, stillRed } from "./setup";
+  type ProjectProof, rerecordBaseline, runSetup, type SetupResult, type SetupRun, stillRed } from "./setup";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, PROVEN_BASELINE, PROVEN_COPY,
   proofState, REVIEW_FILE, setupPreview, worthALook }
   from "./setupview";
@@ -935,9 +935,9 @@ class Commands {
     this.d.out(`Wrote ${REVIEW_FILE} (${minutes(this.clock() - started)}, ` +
       `${unpriced ? "cost unknown" : `$${result.costUsd.toFixed(2)}`})` +
       `${notes ? `; notes in ${relative(repo, notes)}` : ""}.`);
-    // Nobody is asked: the suites run once more and the file is stamped; what is worth a look comes at the end.
-    const r = await this.approveRun(repo, a, project, untracked, { warnings, since: started,
-      afterSetup: result.projects.filter((p) => p.failed).map((p) => p.name) });
+    // Nobody is asked: setup's runs stand for the projects unchanged since, the others run again, and the file is
+    // stamped; what is worth a look comes at the end.
+    const r = await this.approveRun(repo, a, project, untracked, { warnings, since: started, afterSetup: result.runs });
     if (r.code !== 0) {
       this.d.out(`Not proven:\n${r.detail}`);
       this.d.out(`${cost} · last attempt: ${REVIEW_FILE} (not proven) · logs: .arnx/run/`);
@@ -1084,7 +1084,7 @@ class Commands {
    * is copied to PROVEN_COPY, what the next change is compared with. Says nothing but progress. */
   private async approveRun(repo: string, a: Args, project: string | undefined, untracked: boolean | undefined,
                            o: { warnings: string[]; since?: number; changes?: string[] | "no-copy" | null;
-                             afterSetup?: string[] })
+                             afterSetup?: SetupRun[] })
     : Promise<{ code: number; projects: ApprovedProject[]; detail: string; record: string | null }> {
     // Who ran the proof: the git user (a coding agent running arnx is not told apart from its user).
     const by = git(repo, ["config", "user.name"], [0, 1]).trim() || "unknown";

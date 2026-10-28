@@ -5,6 +5,7 @@
 // snapshot is the code at the change's head with secrets left out; tests run against the snapshot, never the user's
 // checkout.
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync,
   statSync, symlinkSync, unlinkSync, writeFileSync,
@@ -467,6 +468,25 @@ export function takeSnapshot(repo: string, head: string | null, dest: string, al
     }
   }
   return scrub(dest, ignored, allow);
+}
+
+/** A digest of what a snapshot holds: each path, a link's target, a file's executable bit and content. Two snapshots
+ * of an unchanged working tree agree; a file edited, added, removed or let in (a secret pin, untracked files) between
+ * them shows. Taken before any run writes into the snapshot. */
+export function snapshotDigest(dest: string): string {
+  const h = createHash("sha256");
+  const walk = (dir: string, relDir: string) => {
+    for (const name of readdirSync(dir).sort()) {
+      const p = join(dir, name);
+      const rel = relDir ? `${relDir}/${name}` : name;
+      const st = lstatSync(p);
+      if (st.isDirectory()) walk(p, rel);
+      else if (st.isSymbolicLink()) h.update(`l\0${rel}\0${readlinkSync(p)}\0`);
+      else h.update(`${st.mode & 0o111 ? "x" : "f"}\0${rel}\0${st.size}\0`).update(readFileSync(p)).update("\0");
+    }
+  };
+  walk(dest, "");
+  return h.digest("hex");
 }
 
 /** Remove .git, .arnx, paths matched by .arnxignore, secret files, files with secret content and symlinks leaving
