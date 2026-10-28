@@ -12,6 +12,18 @@ export interface TestResult {
   message: string;
 }
 
+/** What a runner lists before anything runs (Adapter.listCommand). */
+export interface Listing {
+  /** How many tests it would run; null when the runner lists files only. */
+  tests: number | null;
+  /** The test files, relative to the project root (some may be missing when the output was cut). */
+  files: string[];
+  /** Test files it could not load (an import error while collecting). */
+  broken: string[];
+  /** It stopped with an error before listing (a runner that does not start, a configuration that does not load). */
+  failed: boolean;
+}
+
 /** Words the prompts need. */
 export interface Words {
   language: string;
@@ -50,6 +62,14 @@ export interface Adapter {
    * relative to the repository root; `exists` tells whether a path relative to it is a file in the snapshot (Rust
    * finds the source file of a test inside src/ by its module path). */
   parseReport(text: string, runner: string, projectRoot: string, exists?: (rel: string) => boolean): TestResult[] | null;
+  /** Shell command that lists the tests a run of the targets would run (all of them with none), running none; null when
+   * the runner has no list form or test_command cannot be turned into one safely. A runner that writes its list to a
+   * file writes it to listPath (inside the container). */
+  listCommand?(testCommand: string, targets: string[], listPath: string, runner: string): string | null;
+  /** What a list run shows, from its output, the file at listPath (null when none was written) and its exit code;
+   * null when that cannot be read for sure (an older runner without the list form, a cut-off output). */
+  parseList?(output: string, listed: string | null, exitCode: number | null, runner: string, projectRoot: string)
+    : Listing | null;
   /** Files the runner needs before a run (written into the throwaway snapshot). */
   reportSetup?(snapshot: string, runner: string): void;
   /** Mark the named tests as skipped in a test file's source, with a reason. */
