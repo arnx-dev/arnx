@@ -602,13 +602,11 @@ export function stripSandbox(text: string, prints: readonly string[]): string {
   return out + text.slice(at);
 }
 
-/** `runner` with the snapshot's sandbox-only files placed in it for each run, and taken out after: the tests read them,
- * and nothing that reads the snapshot between runs (an agent's tools, the text sent to a model) sees them. A file the
- * snapshot already holds is left as it is. What a run's output and its reports quote of them is taken out
- * (stripSandbox) before anything reads them. */
-export function withSandboxFiles(runner: Runner, snap: string): Runner {
+/** The snapshot's sandbox-only files: where they are, each path (relative to the snapshot) and what a quote of them
+ * looks like (stripSandbox); null when there are none. */
+export function sandboxOnly(snap: string): { from: string; files: string[]; prints: string[] } | null {
   const from = sandboxDir(snap);
-  if (!existsSync(from)) return runner;
+  if (!existsSync(from)) return null;
   const files: string[] = [];
   const walk = (prefix: string) => {
     for (const name of readdirSync(join(from, prefix))) {
@@ -618,8 +616,17 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
     }
   };
   walk("");
-  if (!files.length) return runner;
-  const prints = sandboxPrints(from, files);
+  return files.length ? { from, files, prints: sandboxPrints(from, files) } : null;
+}
+
+/** `runner` with the snapshot's sandbox-only files placed in it for each run, and taken out after: the tests read them,
+ * and nothing that reads the snapshot between runs (an agent's tools, the text sent to a model) sees them. A file the
+ * snapshot already holds is left as it is. What a run's output and its reports quote of them is taken out
+ * (stripSandbox) before anything reads them. */
+export function withSandboxFiles(runner: Runner, snap: string): Runner {
+  const only = sandboxOnly(snap);
+  if (!only) return runner;
+  const { from, files, prints } = only;
   const xmlPrints = sandboxPrints(from, files, true);
   const reports = join(snap, REPORT_DIR);
   const copies = runner.copies ? { copies: (output: string) => runner.copies!(output) } : {};

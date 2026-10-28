@@ -1,10 +1,12 @@
 // Setup's exec tool: one command in a project's test environment, run as its tests run (the test user, no internet,
 // its services reachable, the same limits), so the agent can look around (versions, files, one test) without paying
 // for a whole try_project. It runs in the image the project's last try_project built and builds none; nothing it does
-// is kept: /src is reset to the snapshot before each command, and the container goes at the end of setup.
-import { copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, type Stats, symlinkSync,
-  writeFileSync } from "node:fs";
-import { join } from "node:path";
+// is kept: /src is reset to the snapshot (with the sandbox-only files a run has) before each command, and the
+// container goes at the end of setup.
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, type Stats,
+  statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { sandboxOnly, stripSandbox } from "./change";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
 import { emit } from "./events";
@@ -97,6 +99,26 @@ export class Mirror {
   }
 }
 
+/** Places the snapshot's sandbox-only files in the copy `to`, as a test run has them (withSandboxFiles in change.ts):
+ * each the snapshot lacks, copied when it is missing or differs, with its own mtime, so a build kept in the container
+ * does not see it as changed. Returns what a quote of them looks like, for stripSandbox. */
+export function placeSandbox(snap: string, to: string): string[] {
+  const only = sandboxOnly(snap);
+  if (!only) return [];
+  for (const rel of only.files) {
+    if (existsSync(join(snap, rel))) continue;
+    const src = join(only.from, rel);
+    const dest = join(to, rel);
+    if (existsSync(dest) && readFileSync(dest).equals(readFileSync(src))) continue;
+    mkdirSync(dirname(dest), { recursive: true });
+    rmSync(dest, { force: true });
+    copyFileSync(src, dest);
+    const st = statSync(src);
+    utimesSync(dest, st.atime, st.mtime);
+  }
+  return only.prints;
+}
+
 /** The exec tool over one setup: at most one container at a time (a project's environment), started on the first
  * command for it and kept until another environment's command or close (setup closes it while try_project runs). */
 export class SetupExec {
@@ -150,8 +172,10 @@ export class SetupExec {
       this.box = { env: tried.env, runner, mirror: new Mirror(this.o.snap, src) };
     }
     const box = this.box;
+    let prints: string[] = [];
     try {
       box.mirror.sync();
+      prints = placeSandbox(this.o.snap, box.mirror.to);
     } catch (e) {
       this.close();
       return refuse("reset", `failed: /src could not be reset (${e instanceof Error ? e.message : String(e)}); the ` +
@@ -160,6 +184,8 @@ export class SetupExec {
     const n = ++this.calls;
     const cwd = typeof input.cwd === "string" && input.cwd.trim() ? input.cwd.trim() : "";
     const r: RunResult = box.runner.exec(cwd ? `cd -- ${shQuote(cwd)} || exit 1; ${command}` : command, timeout);
+    // The agent gets the output with quotes of sandbox-only files taken out; the log, which no model reads, keeps it.
+    const output = stripSandbox(r.output, prints);
     this.seconds += r.seconds;
     const secs = Math.round(r.seconds * 10) / 10;
     try {
@@ -174,7 +200,7 @@ export class SetupExec {
       : `exit ${r.exitCode ?? "unknown"} after ${secs} s`;
     const left = EXEC_CALLS - this.calls;
     return `${head}${asked > timeout ? ` (timeout capped at ${EXEC_MAX_TIMEOUT} s)` : ""}\n` +
-      `${clipOutput(r.output.trimEnd()) || "(no output)"}${left <= 10 ? `\n(${left} exec commands left)` : ""}`;
+      `${clipOutput(output.trimEnd()) || "(no output)"}${left <= 10 ? `\n(${left} exec commands left)` : ""}`;
   }
 
   /** Removes the container, its services and its copy of the repository. */

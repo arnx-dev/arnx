@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, symlinkSync, utimesSync,
   writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { sandboxDir } from "../src/change";
 import { parseReviewFile, type ReviewConfig } from "../src/config";
 import { EventLog, withEvents } from "../src/events";
 import { dockerSteps, type ExecFactory, type ExecRunner, type RunResult, type SessionFactory } from "../src/sandbox";
@@ -147,6 +148,37 @@ test("commands of one environment share one container, closed with the tool; ano
   expect(made.map((b) => b.image)).toEqual(["arnx-env:abc", "arnx-env:def"]);
   exec.close();
   expect(made[1]!.closed).toBe(true);
+});
+
+test("exec's /src holds the sandbox-only files a run has; the agent gets their quotes taken out, the log keeps them",
+  async () => {
+  const secret = "{ \"signing\": \"local-dev-signing-value-0042\" }";
+  let src = "";
+  const { made, factory } = boxes((c) => ({ output: c === "cat config/local.json"
+    ? `${readFileSync(join(src, "config", "local.json"), "utf8")}\n` : "ok\n" }));
+  const counting: ExecFactory = async (image, cfg, dir) => {
+    src = dir;
+    return factory(image, cfg, dir);
+  };
+  const { exec, snap } = tool_({ factory: counting });
+  writeFileSync(join(snap, "app.py"), "x = 1\n");
+  mkdirSync(join(sandboxDir(snap), "config"), { recursive: true });
+  writeFileSync(join(sandboxDir(snap), "config", "local.json"), secret);
+  utimesSync(join(sandboxDir(snap), "config", "local.json"), 1_000_000, 1_000_000);
+  writeFileSync(join(sandboxDir(snap), "app.py"), "x = 333\n");
+  const got = await exec.call({ project: "app", command: "cat config/local.json" });
+  expect(got).toBe("exit 0 after 0.4 s\n[sandbox-only file content]");
+  expect(got).not.toContain("local-dev-signing-value-0042");
+  const placed = join(made[0]!.src, "config", "local.json");
+  expect(readFileSync(placed, "utf8")).toBe(secret);
+  // Its own mtime, kept from one command to the next: a build kept in the container sees no change.
+  expect(lstatSync(placed).mtimeMs).toBe(1_000_000_000);
+  await exec.call({ project: "app", command: "ls" });
+  expect(lstatSync(placed).mtimeMs).toBe(1_000_000_000);
+  expect(readFileSync(join(tmp(), "out", "exec-1.log"), "utf8")).toBe(`$ cat config/local.json\n${secret}\n`);
+  // A file the snapshot holds itself is left as the snapshot has it.
+  expect(readFileSync(join(made[0]!.src, "app.py"), "utf8")).toBe("x = 1\n");
+  exec.close();
 });
 
 test("cwd runs the command there; a timeout past the most is capped, and a timed-out command says so", async () => {
