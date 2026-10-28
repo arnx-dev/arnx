@@ -1,6 +1,7 @@
 // The default prompts live in src/prompts.toml; every prompt built from them is byte for byte what arnx 0.1.2 built
 // from the templates in code (tests/fixtures/prompts-0.1.2.json), except the setup task, which 0.1.5 changed (setup
-// records failing tests one by one; tests/fixtures/prompts-0.1.5.json), and so PROMPT_VERSION.
+// records failing tests one by one and sets tests_dir from the runner's configuration;
+// tests/fixtures/prompts-0.1.5.json), and so PROMPT_VERSION.
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -14,7 +15,7 @@ const FROZEN = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompt
 const CHANGED = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompts-0.1.5.json"), "utf8")) as Frozen;
 
 test("PROMPT_VERSION has 0.1.5's value: the setup task changed, no review prompt did", () => {
-  expect(PROMPT_VERSION).toBe("a2996516d532");
+  expect(PROMPT_VERSION).toBe("7a6d7164111a");
   expect(Object.keys(CHANGED)).toEqual(["setupTask", "PROMPT_VERSION"]);
 });
 

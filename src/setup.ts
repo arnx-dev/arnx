@@ -45,6 +45,7 @@ import { VERSION } from "./version";
 import { acceptedPins, type AcceptedPins } from "./check";
 import { collect, DOME, dockerSession, isKeptPath, ownTestsInWriteDir, ownTestsProblem, probeRun, writeDirOf }
   from "./testround";
+import { type TestsDirChoice, testsDirFor } from "./testsdir";
 
 export const SUITE_TIMEOUT = 1800;
 export const OUTPUT_TAIL = 6000;
@@ -118,6 +119,12 @@ export function suiteOk(results: TestResult[] | null, cfg: ReviewConfig, accepte
   }
   if (!counts.get("passed")) return [false, `${summary}; no test passed, so the suite does not run yet`, c];
   return [true, summary, c];
+}
+
+/** The note setup gives on accepted tests changed since `arnx accept`. */
+export function changedNote(changed: AcceptedPins["changed"]): string {
+  return `${plural(changed.length, "accepted test file")} changed since \`arnx accept\` (${few(changed.map((c) =>
+    `${c.change} ${c.path}`))}); setup goes on, \`arnx check\` says what to do`;
 }
 
 /** The line approve and setup print when accepted tests still fail. */
@@ -648,6 +655,30 @@ export function withoutKnownFailing(text: string, keep: ReadonlySet<string> = ne
   return dropped ? [doc.toString({ flowCollectionPadding: false, lineWidth: 0 }), true] : [text, false];
 }
 
+/** `text` with tests_dir set on each project that has none, from its runner's configuration in the snapshot `snap`
+ * (testsDirFor), the projects in `keep` aside (they must stay as they are); and what was set, by project. */
+export function withTestsDirs(text: string, snap: string, keep: ReadonlySet<string> = new Set())
+  : [string, (TestsDirChoice & { project: string })[]] {
+  let f: ReviewFile;
+  try {
+    f = parseReviewFile(text);
+  } catch (e) {
+    if (!(e instanceof ArnxError)) throw e;
+    return [text, []];
+  }
+  const doc = parseDocument(text);
+  const set: (TestsDirChoice & { project: string })[] = [];
+  for (const cfg of f.projects) {
+    const spec = f.legacy ? f.raw : (f.raw.projects as Record<string, Record<string, unknown>> | undefined)?.[cfg.name];
+    if (keep.has(cfg.name) || !spec || "tests_dir" in spec) continue;
+    const c = testsDirFor(snap, cfg);
+    if (!c) continue;
+    doc.setIn(f.legacy ? ["tests_dir"] : ["projects", cfg.name, "tests_dir"], c.dir);
+    set.push({ project: cfg.name, ...c });
+  }
+  return set.length ? [doc.toString({ flowCollectionPadding: false, lineWidth: 0 }), set] : [text, []];
+}
+
 /** Folders of test data: what sits in them under tests/ is not a test. */
 const TEST_DATA = new Set(["fixtures", "__fixtures__", "testdata", "test-data", "__snapshots__", "__mocks__"]);
 
@@ -824,6 +855,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       counts: SuiteCounts } }>(),
     // The most tests a whole-suite run of each project reported, and the test_command that ran them.
     mostRan: new Map<string, { tests: number; command: string }>(),
+    // The tests_dir arnx set on each project from its runner's configuration (withTestsDirs).
+    placed: new Map<string, string>(),
     notice: "" };
   const tmp = tempDir("arnx-setup-");
   // Docker steps of this setup, with their durations.
@@ -859,8 +892,11 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     copyManifests(snap, join(tmp, "manifests"));
     const keyOf = (cfg: ReviewConfig) => envKey(cfg, join(tmp, "manifests"));
     const accepted = settings.acceptedTestsDir;
-    // Tests kept by `arnx accept` fail until their bugs are fixed: as pinned, they do not stop a project.
-    const trusted = acceptedPins(repo, o.localPins ?? null);
+    // Tests kept by `arnx accept` fail until their bugs are fixed: as pinned, they do not stop a project. One changed
+    // since accept is `arnx check`'s to refuse, not a fault of the environment: said once, it does not stop setup.
+    const pinsNow = acceptedPins(repo, o.localPins ?? null);
+    const trusted = { ...pinsNow, changed: [] };
+    if (pinsNow.changed.length) say(changedNote(pinsNow.changed));
     // What the snapshot left out: secret-looking files, and the files .arnxignore matches. A run that needs one stops
     // setup (see LeftOutNeeded).
     const files = workingTreeFiles(repo, untracked).files;
@@ -881,12 +917,18 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     // The agent's file, with the user's allow-list added: the agent may not write one.
     const parse = (args: Record<string, unknown>): { f: ReviewFile; text: string } | string => {
       if (typeof args.yaml !== "string") return "invalid: yaml must be a string";
-      const [yaml, dropped] = withoutKnownFailing(args.yaml, new Set(keep.keys()));
+      const [kept, dropped] = withoutKnownFailing(args.yaml, new Set(keep.keys()));
       if (dropped) {
-        args = { ...args, yaml };
         state.notice = "(known_failing is not used: arnx records each failing test itself, so it was taken out of the " +
           "file.)\n";
       }
+      // A project without tests_dir gets the folder its runner's configuration collects, said once to the agent.
+      const [yaml, placed] = withTestsDirs(kept, snap, new Set(keep.keys()));
+      for (const p of placed.filter((x) => state.placed.get(x.project) !== x.dir)) {
+        state.placed.set(p.project, p.dir);
+        state.notice += `(tests_dir of ${p.project} set to ${p.dir}: the default folder lies outside its ${p.why}.)\n`;
+      }
+      if (dropped || placed.length) args = { ...args, yaml };
       // Saved when setup fails: with the user's allow-list, so the file left behind keeps it.
       state.lastTried = pins.length ? `${yaml.trimEnd()}\n${secretPinsYaml(pins)}` : yaml;
       try {
@@ -1292,7 +1334,9 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
   const suites: ApprovedSuite[] = [];
   const settings = settingsOf(repo);
   const accepted = settings?.acceptedTestsDir;
-  const trusted = acceptedPins(repo, o.localPins ?? null);
+  const pins = acceptedPins(repo, o.localPins ?? null);
+  // Right after setup, which said so, an accepted test changed since accept does not stop the proof.
+  const trusted = o.afterSetup ? { ...pins, changed: [] } : pins;
   const tmp = tempDir("arnx-approve-");
   try {
     const snap = join(tmp, "repo");

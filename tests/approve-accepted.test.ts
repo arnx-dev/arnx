@@ -1,6 +1,6 @@
 // Tests kept by `arnx accept` fail by design until their bug is fixed: approve and setup let them fail while each file
-// matches its pin (check's trust rules), and still refuse one changed since accept. A failing approval names a few
-// tests and where the whole output is, not the end of the runner's output.
+// matches its pin (check's trust rules). approve still refuses one changed since accept; setup says so and goes on. A
+// failing approval names a few tests and where the whole output is, not the end of the runner's output.
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -146,4 +146,26 @@ test("setup proves a project whose accepted tests are still red, and says so in 
   expect(r.ok).toBe(true);
   expect(lines).toContain("1 accepted test still fails (bugs not fixed yet): arnx check");
   expect(existsSync(join(repo, KEPT))).toBe(true);
+});
+
+test("an accepted test changed since accept does not stop setup or its proof: said once, `arnx check` refuses it", async () => {
+  const { repo } = await acceptedRepo();
+  writeFileSync(join(repo, KEPT), "def test_y():\n    assert True\n");
+  const yaml = "version: 1\nimage: python:3.12-slim\ntest_command: python -m pytest {targets}\n";
+  const model = new ScriptedAgent([[tool("try_project", { yaml })], [tool("propose", { yaml })], [text("Done.")]]);
+  const lines: string[] = [];
+  const session = suite([["tests/test_a.py", "test_a", "passed", ""]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "setup"), progress: (l) => lines.push(l),
+    sessionFactory: session });
+  expect(r.ok).toBe(true);
+  const note = `1 accepted test file changed since \`arnx accept\` (modified ${KEPT}); setup goes on, \`arnx check\` ` +
+    "says what to do";
+  expect(lines.filter((l) => l === note)).toHaveLength(1);
+  expect(lines.join("\n")).not.toContain("accepted test changed");
+  const [ok] = await approveFile(repo, { by: "Dev", at: "x", sessionFactory: session, afterSetup: [] });
+  expect(ok).toBe(true);
+  // `arnx approve` on its own still names it.
+  const [later, why] = await approveFile(repo, { by: "Dev", at: "x", sessionFactory: session });
+  expect(later).toBe(false);
+  expect(why).toContain(`modified ${KEPT}`);
 });
