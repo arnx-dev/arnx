@@ -184,8 +184,8 @@ test("an environment that never runs: that failure, told apart from failing test
   const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: suites(null) });
   expect(await cli.run("setup", "--yes")).toBe(2);
   expect(cli.out.slice(-3)).toEqual([
-    "Setup could not build a working environment: shop: the suite produced no report (timed out, or the runner " +
-      "could not start).",
+    "Setup could not build a working environment: shop: the suite produced no report (exit 0; pytest never said it " +
+      "wrote one, so it stopped first or missed arnx's report option); last lines: out.",
     cli.out.at(-2)!,
     "Next: fix .arnx/review.yaml, then arnx approve",
   ]);

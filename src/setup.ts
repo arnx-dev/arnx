@@ -32,7 +32,7 @@ import { ownerFile, runTests } from "./outcomes";
 import { LocalBrain } from "./localbrain";
 import { promptsFor } from "./userprompts";
 import type { Say } from "./progress";
-import { copyManifests, dockerSteps, envKey, type Runner, type SessionFactory } from "./sandbox";
+import { copyManifests, dockerSteps, envKey, type Runner, type RunResult, type SessionFactory } from "./sandbox";
 import type { ScipIndex } from "./scip";
 import { loadSettings, refString, type Settings, settingsPath } from "./settings";
 import { runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
@@ -69,6 +69,20 @@ function acceptedOf(cfg: ReviewConfig, accepted: AcceptedPins, dir?: string): Ac
 }
 
 const failedTest = (t: TestResult) => t.outcome === "failed" || t.outcome === "error";
+
+/** Why a run wrote no report, shortly: its exit code or time-out, whether the runner says it wrote one (arnx's
+ * report option reached it then) when it is a runner that says, and the last lines of its output. */
+export function noReport(result: RunResult, cfg: ReviewConfig): string {
+  const adapter = getAdapter(cfg.language);
+  const runner = adapter.words(cfg.runner).runner;
+  const said = result.timedOut ? undefined : adapter.reportSaid?.(result.output, cfg.runner);
+  const reach = said === undefined ? ""
+    : said === null ? `; ${runner} never said it wrote one, so it stopped first or missed arnx's report option`
+    : `; ${runner} got arnx's report option but wrote ${said}, which arnx could not read`;
+  const last = result.output.split("\n").map((l) => l.trim()).filter(Boolean).slice(-3).join(" | ");
+  return `the suite produced no report (${result.timedOut ? `timed out after ${Math.round(result.seconds)} s`
+    : `exit ${result.exitCode}`}${reach})${last ? `; last lines: ${clip(last, 300)}` : ""}`;
+}
 
 /** `accepted`: the repository's accepted tests (acceptedPins); a pinned one may fail, a changed one blocks.
  * `acceptedTestsDir`: settings' folder for them. `baseline`: the project's tests that fail today, which may fail;
@@ -279,7 +293,8 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
       }
     }
     const fetched = all === null ? npxDownload(result.output) : null;
-    const summary = fetched ? `the suite produced no report: ${npxText(fetched)}` : verdict;
+    const summary = fetched ? `the suite produced no report: ${npxText(fetched)}`
+      : all === null ? noReport(result, cfg) : verdict;
     // Accepted tests that fail as pinned are not the environment's to fix: diagnosis and retries leave them out.
     const results = withoutAccepted(all, cfg, accepted, acceptedTestsDir);
     let said = "";
@@ -581,7 +596,7 @@ export function coverageMap(repo: string, file: ReviewFile, untracked = false): 
  * rerun just the files that failed. */
 export function envDigest(cfg: ReviewConfig): string {
   return JSON.stringify([cfg.image, cfg.workdir, cfg.install, cfg.testCommand, cfg.services, cfg.env, cfg.testsDir,
-    cfg.installRoot, cfg.runner, cfg.typecheck ?? null]);
+    cfg.installRoot, cfg.runner, cfg.typecheck ?? null, cfg.depsDir ?? null]);
 }
 
 /** known_failing entries that no note explains (by path or file name): each hides a whole test file. */
@@ -1080,7 +1095,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       };
       const typed = cfg.language === "typescript" && !cfg.typecheck && typeCheckable(read, cfg.workdir)
         ? ` ${name} has a tsconfig.json and typescript among its dependencies: add typecheck (for example ` +
-          `${TYPECHECK_EXAMPLE}, with the same node_modules link as test_command) and try it again.` : "";
+          `${TYPECHECK_EXAMPLE}; deps_dir links node_modules for it too) and try it again.` : "";
       const bare = summary.startsWith(NO_OWN_TESTS) ? ` ${name} has no tests of its own, which is fine: reviews run the ` +
         "tests arnx writes with this test_command. Do not write tests for it." : "";
       const recorded = counts.failed.length ? ` Its ${plural(counts.failed.length, "failing test")} ` +

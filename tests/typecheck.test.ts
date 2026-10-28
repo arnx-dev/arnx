@@ -347,7 +347,7 @@ ${typecheck ? `    typecheck: ${typecheck}\n` : ""}uncovered: []
     const said = (call: number) => (m.calls[call]!.messages.at(-1)!.content as Record<string, unknown>[])
       .map((x) => String(x.content)).join("\n");
     expect(said(1)).toContain("web has a tsconfig.json and typescript among its dependencies: add typecheck (for " +
-      "example npx tsc --noEmit -p tsconfig.json, with the same node_modules link as test_command) and try it again.");
+      "example npx tsc --noEmit -p tsconfig.json; deps_dir links node_modules for it too) and try it again.");
     expect(said(2)).toContain("the suite of web runs: 1 passed; type check: 1 type error.");
     expect(said(2)).not.toContain("add typecheck");
     expect(r.ok).toBe(true);

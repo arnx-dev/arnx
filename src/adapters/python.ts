@@ -187,6 +187,8 @@ export const python: Adapter = {
   validateCommand: (command) =>
     typeof command === "string" && command.includes("pytest") && command.includes("{targets}")
       ? [] : ["test_command: must run pytest and contain {targets}"],
+  runs: () => /\bpytest\b/,
+  reportSaid: (output) => [...output.matchAll(/generated xml file: (\S+)/g)].at(-1)?.[1] ?? null,
   command: (testCommand, targets, reportPath) =>
     testCommand.replaceAll("{targets}", targets.map(shQuote).join(" ")) +
     " -p no:cacheprovider --continue-on-collection-errors -o junit_family=xunit1" +

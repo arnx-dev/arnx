@@ -192,6 +192,7 @@ export const rust: Adapter = {
   validateCommand: (command) =>
     typeof command === "string" && command.includes("cargo nextest run") && command.includes("{targets}")
       ? [] : ["test_command: must run cargo nextest run and contain {targets}"],
+  runs: () => /\bcargo\s+nextest\s+run\b/,
   reportSetup: (snapshot) => {
     mkdirSync(join(snapshot, ".arnx-run"), { recursive: true });
     writeFileSync(join(snapshot, ".arnx-run", "nextest.toml"), PROFILE);

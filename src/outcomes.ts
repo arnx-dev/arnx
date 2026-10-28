@@ -101,7 +101,19 @@ export function runTests(session: Runner, snap: string, cfg: ReviewConfig, targe
   adapter.reportSetup?.(snap, cfg.runner);
   const result = session.run(adapter.command(cfg.testCommand, targets, `/src/${REPORT_DIR}/${reportName}`, cfg.runner),
     timeout);
-  if (result.timedOut || !existsSync(report)) return [result, null];
+  if (result.timedOut) return [result, null];
+  const file = existsSync(report) ? report : reportElsewhere(adapter.reportSaid?.(result.output, cfg.runner), snap);
+  if (!file || !existsSync(file)) return [result, null];
+  const text = readFileSync(file, "utf8");
+  if (file !== report) rmSync(file, { force: true });
   const exists = (rel: string) => existsSync(join(snap, cfg.workdir, rel));
-  return [result, adapter.parseReport(readFileSync(report, "utf8"), cfg.runner, cfg.workdir, exists)];
+  return [result, adapter.parseReport(text, cfg.runner, cfg.workdir, exists)];
+}
+
+/** The report a runner says it wrote somewhere else in the code under test, as a path in the snapshot: vitest keeps
+ * the file a project's configuration names for its junit reporter (`reporters: [["junit", { outputFile }]]`) over
+ * arnx's --outputFile. Elsewhere, or not said: null. */
+function reportElsewhere(said: string | null | undefined, snap: string): string | null {
+  if (!said?.startsWith("/src/") || said.split("/").includes("..")) return null;
+  return join(snap, said.slice("/src/".length));
 }
