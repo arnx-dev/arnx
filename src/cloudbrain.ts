@@ -304,7 +304,7 @@ export class CloudBrain implements Brain {
       cli_version: VERSION, effort: this.tier, detection: { candidates: d.candidates.map((c) => ({ root: c.root,
         language: c.language, manifest: c.manifest, runner: c.runner, package_manager: c.packageManager,
         evidence: c.evidence })), workspaces: d.workspaces, ci: d.ci, compose: d.compose, services: d.services,
-      languages: d.languages }, tree: x.tree ?? "", existing_yaml: x.current || null,
+      languages: d.languages }, draft: x.draft || null, tree: x.tree ?? "", existing_yaml: x.current || null,
       withheld: withheld.map((w) => w.path), withheld_files: withheld.map((w) => ({ path: w.path, label: w.label,
         line: w.line })),
       project: x.project ?? null, add: !!x.add, budget_cap_micro_usd: micro(x.budgetUsd) },

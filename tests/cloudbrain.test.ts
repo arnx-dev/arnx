@@ -369,6 +369,10 @@ test("judge sends the whole change and each finding's question link; setup sends
   const last = c.seen.filter((x) => x.path === "/v1/setup").at(-1)!.body as { withheld: unknown; withheld_files: unknown };
   expect([last.withheld, last.withheld_files]).toEqual([["config/prod.env"],
     [{ path: "config/prod.env", label: "AWS key", line: 3 }]]);
+  // The draft review.yaml goes with the detection it was written from; none is null.
+  await setup({ draft: "version: 1\nprojects: {}\n" });
+  expect(c.seen.filter((x) => x.path === "/v1/setup").map((x) => (x.body as { draft: unknown }).draft))
+    .toEqual([null, null, null, null, "version: 1\nprojects: {}\n"]);
 });
 
 test("--resume names the cloud review it continues: its id was kept in state.json", async () => {
