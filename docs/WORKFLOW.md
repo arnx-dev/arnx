@@ -26,6 +26,8 @@ arnx's own one-line test instead of a suite, and says so in the table (`no tests
 runs`). Reviews then run only the tests arnx writes. A `test_command` that deletes or writes files (`rm`, `mv`, `cp`,
 `sed -i`, `tee`, `> file`) is refused: every run must see the repository as it is.
 
+arnx adds the runner's report options after `{targets}`, so `test_command` must call the runner itself with `{targets}` (`cd app && npx vitest run {targets}`); one wrapped in `sh -c '...'` or that hands `{targets}` to another command is refused before anything runs. A TypeScript project that installs outside `/src` (the code is mounted there and hides what install wrote) sets `deps_dir` (such as `/opt/deps`): before every run arnx links each `node_modules` under it into the same place under the install root.
+
 Before it starts, setup says what it will do and gives a rough time and cost estimate. While it runs, it shows on
 stderr each model reply, each file it reads and each suite it runs (`--quiet` turns this off). It then shows one
 line per project and stamps `.arnx/review.yaml` with a hash (the proof); nothing is asked. Setup's own run of each

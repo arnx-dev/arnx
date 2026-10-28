@@ -139,6 +139,18 @@ export function requireDocker(): void {
 
 const workdirIn = (root: string, workdir: string) => posix.normalize(posix.join(root, workdir));
 
+/** What a run does first for a project with deps_dir: link each node_modules under it into the same place under the
+ * install root, since the code mounted over /src hides what install wrote there. A link already there is replaced, a
+ * real folder left alone; a deps_dir the image lacks is said in the run's output. */
+export function depsLink(cfg: Pick<ReviewConfig, "depsDir" | "installRoot">): string {
+  if (!cfg.depsDir) return "";
+  const dir = shQuote(cfg.depsDir);
+  const root = shQuote(workdirIn("/src", cfg.installRoot));
+  return `if [ -d ${dir} ]; then (cd ${dir} && find . -name .git -prune -o -name node_modules -prune -type d -print) | ` +
+    `while read -r d; do t=${root}/"\${d#./}"; [ -d "$t" ] && [ ! -L "$t" ] || ln -sfn ${dir}/"\${d#./}" "$t" ` +
+    `2>/dev/null; done; else echo "arnx: deps_dir ${cfg.depsDir} is not in the image" >&2; fi; `;
+}
+
 /** Copies every file that can key an image (any language's manifests, at any depth) from `snapshot` to `dest`:
  * keys computed there stay as the snapshot was before runs wrote into it (cargo writes a missing Cargo.lock). */
 export function copyManifests(snapshot: string, dest: string): void {
@@ -397,6 +409,7 @@ export class Session implements Runner {
   }
 
   run(command: string, timeout: number): RunResult {
+    command = depsLink(this.cfg) + command;
     const keep = adapterFor(this.cfg).keepBuild;
     // A closed session (an interrupt) starts no container that nothing would remove.
     if (!keep || this.closed || !this.mayShare()) {

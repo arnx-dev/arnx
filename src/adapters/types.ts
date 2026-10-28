@@ -44,6 +44,12 @@ export interface Adapter {
   isSupportFile(name: string): boolean;
   /** Problems with the configured test command; empty when it is usable. */
   validateCommand(command: unknown, runner: string): string[];
+  /** The runner's own call in a test command (vitest: `vitest`): the command that gets {targets} must make it, since
+   * arnx's report options follow {targets}. */
+  runs(runner: string): RegExp;
+  /** Where the runner says it wrote its report (the last such line of its output); null: it said none. Absent, or
+   * undefined, for a runner that never says. */
+  reportSaid?(output: string, runner: string): string | null | undefined;
   /** Shell command that runs the targets and writes a report to reportPath (inside the container). */
   command(testCommand: string, targets: string[], reportPath: string, runner: string): string;
   /** Parse the report file the command wrote; null when it is unreadable. projectRoot is the project's directory

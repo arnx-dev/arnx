@@ -97,9 +97,11 @@ export function findCopies(imagePaths: string[], scopes: { scope: string; files:
 }
 
 /** The absolute paths the project's test command, type check and environment name, outside /src (the code under
- * test is mounted there): where its runs can reach into the image. */
-export function commandPaths(cfg: Pick<ReviewConfig, "testCommand" | "typecheck" | "env">): string[] {
-  const text = [cfg.testCommand, cfg.typecheck ?? "", ...Object.values(cfg.env)].join("\n");
+ * test is mounted there): where its runs can reach into the image. deps_dir counts by its node_modules, which runs
+ * link (depsLink in sandbox.ts). */
+export function commandPaths(cfg: Pick<ReviewConfig, "testCommand" | "typecheck" | "env" | "depsDir">): string[] {
+  const text = [cfg.testCommand, cfg.typecheck ?? "", cfg.depsDir ? `${cfg.depsDir}/node_modules` : "",
+    ...Object.values(cfg.env)].join("\n");
   const paths = [...text.matchAll(/(?<![\w.~$}/-])\/[^\s'"`;&|()<>:,=]*/g)].map((m) => m[0].replace(/\/+$/, ""));
   return [...new Set(paths)].filter((p) => p && p !== "/src" && !p.startsWith("/src/")).sort();
 }

@@ -11,6 +11,8 @@ const RUNNERS = ["vitest", "jest", "node", "bun"];
 const RUNNER_WORDS: Record<string, string> = { vitest: "vitest", jest: "jest", node: "node:test", bun: "bun test" };
 const RUNS: Record<string, RegExp> = { vitest: /\bvitest\b/, jest: /\bjest\b/, node: /\bnode\b.*\s--test\b/,
   bun: /\bbun\s+test\b/ };
+/** The line a runner prints once it has written its report, with the file. */
+const SAYS: Record<string, RegExp> = { vitest: /JUNIT report written to (.+)/g, jest: /Test results written to: (.+)/g };
 const SOURCE = /\.(?:c|m)?[jt]sx?$/;
 const TEST_FILE = /\.(?:test|spec)\.(?:c|m)?[jt]sx?$/;
 const SUPPORT = /^arnx-helpers\.(?:c|m)?[jt]sx?$/;
@@ -302,6 +304,13 @@ export const typescript: Adapter = {
     if (!rx || !rx.test(command)) return [`test_command: must run ${RUNNER_WORDS[runner] ?? runner} (the runner set for this project)`];
     return [];
   },
+  runs: (runner) => RUNS[runner] ?? /$^/,
+  // vitest names the file it wrote, which the project's configuration can choose over arnx's (see runTests); jest
+  // names it relative to where it ran. node and bun say nothing.
+  reportSaid: (output, runner) => {
+    const said = SAYS[runner];
+    return said ? [...output.matchAll(said)].at(-1)?.[1]?.trim() ?? null : undefined;
+  },
   command: (testCommand, targets, reportPath, runner) => {
     const t = targets.map(shQuote).join(" ");
     const r = shQuote(reportPath);
@@ -340,11 +349,13 @@ export const typescript: Adapter = {
       "{targets} (npx jest {targets}, npx vitest run {targets}, node --test {targets}, bun test {targets}).",
     "- Tests run with the repository mounted over /src, which hides anything install wrote under /src (such as " +
       "node_modules). Install dependencies outside /src (for example copy package.json and the lockfile to " +
-      "/opt/deps and install there) and point the tests at them: link node_modules to /opt/deps/node_modules in " +
-      "test_command, or set NODE_PATH.",
+      "/opt/deps and install there, or copy the whole workspace to /opt/app) and set deps_dir to that directory: " +
+      "before every run arnx links each node_modules under it into the same place under /src. Do not link them " +
+      "in test_command, and never wrap it in sh -c: arnx adds its report options after {targets}, so the runner " +
+      "must get them.",
     "- When a project has a tsconfig.json and typescript among its dependencies (its package.json or the workspace " +
       "root's), add typecheck: the project's type check as one command, such as npx tsc --noEmit -p tsconfig.json " +
-      "(with the same node_modules link as test_command). Keep it out of test_command: arnx runs it once per review " +
+      "(deps_dir links node_modules for it too). Keep it out of test_command: arnx runs it once per review " +
       "without its generated tests and reports type errors apart from the tests. Leave it out for projects without " +
       "typescript.",
     "- A workspace is usually one project per package that has tests; when they install from one lockfile at the " +

@@ -15,7 +15,8 @@ import { isSecretEnvName, type SecretPin } from "./secrets";
 import { purePosix, pyJson, pyStr, pyTruthy } from "./util";
 
 export const KEYS = new Set(["version", "image", "workdir", "install", "test_command", "services", "env", "notes",
-  "known_failing", "tests_dir", "allow_env_names", "approved", "language", "allow_secret_looking", "typecheck"]);
+  "known_failing", "tests_dir", "allow_env_names", "approved", "language", "allow_secret_looking", "typecheck",
+  "deps_dir"]);
 export const SERVICE_KEYS = new Set(["image", "env", "ready"]);
 export const SERVICE_NAME = /^[a-z][a-z0-9-]{0,30}$/;
 
@@ -49,6 +50,9 @@ export interface ReviewConfig {
   installRoot: string;
   /** The project's type check (TypeScript only), run once per review apart from the tests; absent when not set. */
   typecheck?: string;
+  /** Where install put the dependencies in the image, outside /src (TypeScript only): every run links each
+   * node_modules under it into the same place under the install root (depsLink in sandbox.ts). */
+  depsDir?: string;
 }
 
 type Raw = Record<string, unknown>;
@@ -244,7 +248,7 @@ export function withoutSecretPins(text: string, paths: string[]): string {
 export const secretPinsYaml = (pins: SecretPin[]) =>
   toYaml({ [SECRET_KEY]: pins.map((p) => ({ path: p.path, matches: [...p.matches] })) });
 export const PROJECT_KEYS = new Set(["root", "language", "runner", "image", "install", "test_command", "services", "env",
-  "owns", "uses", "notes", "known_failing", "tests_dir", "install_root", "typecheck"]);
+  "owns", "uses", "notes", "known_failing", "tests_dir", "install_root", "typecheck", "deps_dir"]);
 
 export interface Uncovered { path: string; reason: string }
 
@@ -320,17 +324,7 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
   const commandProblems = [...adapter.validateCommand(spec.test_command, runner),
     ...typeof spec.test_command === "string" && fileWrite(spec.test_command) !== null
       ? [writes(fileWrite(spec.test_command)!)] : [],
-    ...typeof spec.test_command === "string" && runner !== "node" && afterTargets(spec.test_command) !== null
-      ? [`test_command: \`${afterTargets(spec.test_command)}\` comes after {targets}: arnx adds the runner's report ` +
-        "options at the end, so they would go to that command and no report is written. End test_command with the " +
-        "runner's own options"] : [],
-    ...typeof spec.test_command === "string" && runner !== "node" && quotedTargets(spec.test_command)
-      ? ["test_command: {targets} is inside quotes: arnx adds the runner's report options at the end, after the " +
-        "closing quote, so no report is written. Leave the runner and {targets} outside the quotes (make build && " +
-        "<runner> {targets})"] : [],
-    ...typeof spec.test_command === "string" && runner !== "node" && subshellTargets(spec.test_command)
-      ? ["test_command: {targets} is inside parentheses: the report options arnx adds at the end would follow the " +
-        "`)`, so no report is written. Leave the runner and {targets} outside them (cd app && <runner> {targets})"]
+    ...typeof spec.test_command === "string" && runner !== "node" ? reportProblems(spec.test_command, adapter, runner)
       : []].map((p) => at + p);
   problems.push(...commandProblems);
   const command = commandProblems.length ? "" : spec.test_command as string;
@@ -340,6 +334,14 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
       problems.push(`${at}typecheck: must be one shell command (use && to chain)`);
     } else if (adapter.id !== "typescript") problems.push(`${at}typecheck: only for typescript projects`);
     else typecheck = spec.typecheck;
+  }
+  let depsDir: string | undefined;
+  if ("deps_dir" in spec) {
+    if (typeof spec.deps_dir !== "string" || !/^\/[\w.@+/-]+$/.test(spec.deps_dir) ||
+      /^\/src(?:\/|$)/.test(spec.deps_dir)) {
+      problems.push(`${at}deps_dir: must be an absolute path in the image outside /src, such as /opt/deps`);
+    } else if (adapter.id !== "typescript") problems.push(`${at}deps_dir: only for typescript projects`);
+    else depsDir = spec.deps_dir.replace(/\/+$/, "");
   }
   const env = strMap(spec.env, `${at}env`, problems);
   problems.push(...secretNames(env, `${at}env`, allow));
@@ -359,7 +361,7 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
   const knownFailing = strList(spec.known_failing, `${at}known_failing`, problems);
   return { raw: fileRaw, name, language: adapter.id, runner, image: image as string, workdir, install,
     testCommand: command, services: own, env, notes, knownFailing, testsDir, owns, uses, installRoot,
-    ...(typecheck === undefined ? {} : { typecheck }) };
+    ...(typecheck === undefined ? {} : { typecheck }), ...(depsDir === undefined ? {} : { depsDir }) };
 }
 
 export function parseReviewFile(text: string): ReviewFile {
@@ -517,6 +519,69 @@ export const subshellTargets = (command: string) => {
   const at = atTargets(command);
   return at.quote === "" && at.depth > 0;
 };
+
+/** The simple command that gets the last {targets} (cut at ;, &, | and newlines outside quotes and parentheses),
+ * when it does not call the runner itself outside quotes (`sh -c 'npx vitest run "$@"' _ {targets}`, `echo
+ * {targets}`): arnx's report options follow {targets}, so they would go to that command. null: the runner gets them. */
+export function targetsGoTo(command: string, runs: RegExp): string | null {
+  const end = command.lastIndexOf("{targets}");
+  if (end < 0) return null;
+  // Redirects to another descriptor (2>&1, &>) cut nothing.
+  const text = command.replace(/\d?>&\d?-?|&>>?/g, (r) => " ".repeat(r.length));
+  const bare = [...text]; // the command outside quotes and parentheses; the rest blanked
+  const cuts: number[] = [];
+  let quote = "", depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    const outside = quote === "" && depth === 0;
+    if (quote === "'") {
+      if (c === "'") quote = "";
+    } else if (c === "\\") {
+      bare[i] = " ";
+      if (i + 1 < bare.length) bare[i + 1] = " ";
+      i++;
+      continue;
+    } else if (quote === "\"") {
+      if (c === "\"") quote = "";
+    } else if (c === "'" || c === "\"") quote = c;
+    else if (c === "(") depth++;
+    else if (c === ")" && depth > 0) depth--;
+    else if (outside && /[;&|\n]/.test(c)) cuts.push(i);
+    if (!outside || quote !== "" || depth > 0) bare[i] = " ";
+  }
+  const from = Math.max(-1, ...cuts.filter((i) => i < end)) + 1;
+  const to = Math.min(text.length, ...cuts.filter((i) => i > end));
+  return runs.test(bare.slice(from, to).join("")) ? null : command.slice(from, to).trim();
+}
+
+/** Why arnx's report options would not reach the runner in this test command (they follow {targets}): one problem,
+ * the first that applies. A TypeScript command that links node_modules is told of deps_dir, which does it instead. */
+function reportProblems(command: string, adapter: Adapter, runner: string): string[] {
+  const link = adapter.id === "typescript" && command.includes("node_modules")
+    ? "; to link node_modules, set deps_dir instead" : "";
+  const after = afterTargets(command);
+  if (after !== null) {
+    return [`test_command: \`${after}\` comes after {targets}: arnx adds the runner's report options at the end, so ` +
+      "they would go to that command and no report is written. End test_command with the runner's own options"];
+  }
+  if (quotedTargets(command)) {
+    return ["test_command: {targets} is inside quotes: arnx adds the runner's report options at the end, after the " +
+      "closing quote, so no report is written. Leave the runner and {targets} outside the quotes (make build && " +
+      `<runner> {targets})${link}`];
+  }
+  if (subshellTargets(command)) {
+    return ["test_command: {targets} is inside parentheses: the report options arnx adds at the end would follow the " +
+      `\`)\`, so no report is written. Leave the runner and {targets} outside them (cd app && <runner> {targets})${link}`];
+  }
+  const to = targetsGoTo(command, adapter.runs(runner));
+  if (to !== null) {
+    const shown = to.length > 60 ? `${to.slice(0, 57)}...` : to;
+    return [`test_command: {targets} goes to \`${shown}\`, not to ${adapter.words(runner).runner}: arnx adds the ` +
+      "runner's report options after {targets}, so no report would be written. Call the runner itself with {targets} " +
+      `(make build && <runner> {targets})${link}`];
+  }
+  return [];
+}
 
 /** Why a test_command that writes is refused, naming what writes. A setup approved before the rule fails here on any
  * command after an upgrade, so it says how to fix it. */
