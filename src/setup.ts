@@ -1032,8 +1032,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     current: null as string | null, outOfTime: false,
     // What went back to the agent once (failures that look like the environment, tests left out), per project, with the
     // run it came from: the same environment tried again goes on from that run without running the suite again.
-    held: new Map<string, { env: string; shown: Set<string>; run: { digest: string; summary: string; skips: string[];
-      counts: SuiteCounts } }>(),
+    held: new Map<string, { env: string; files: string; shown: Set<string>; run: { digest: string; summary: string;
+      skips: string[]; counts: SuiteCounts } }>(),
     // The whole-suite run that proved each project (SetupRun).
     runs: new Map<string, SetupRun>(),
     // The most tests a whole-suite run of each project reported, and the test_command that ran them.
@@ -1087,6 +1087,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const untracked = !!o.untracked;
     // Files .arnxignore leaves out that the tests need: in the sandbox only. A fresh setup finds them again.
     const sandbox = new Set(existing ? sandboxOnlyOf(existing.raw) : []);
+    const sandboxKey = () => [...sandbox].sort().join("\n");
     const { withheld, blanked, standIns, secrets: replaced } = takeSnapshot(repo, null, snap, pins,
       { untracked, sandbox: [...sandbox] });
     // The code every run of this setup sees, before any run writes into the snapshot (SetupRun).
@@ -1266,7 +1267,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       // The project's part of the file the run ran with.
       let ranWith = projectDigest(f, name);
       try {
-        if (held && held.env === env) {
+        // Not when files went into the sandbox since: that run did not have them.
+        if (held && held.env === env && held.files === sandboxKey()) {
           announce = null;
           say(`${name}: same environment as the last try; its run stands`);
           [ok, summary, tail, skips, failing, hints, counts] = [true, held.run.summary, "", held.run.skips, [], "",
@@ -1347,7 +1349,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       }
       // Each kind of doubt goes back to the agent once; what it keeps, tried again unchanged, goes on from the same run.
       const shown = held && held.env === env ? held.shown : new Set<string>();
-      const hold = (key: string) => state.held.set(name, { env, shown: new Set([...shown, key]),
+      const hold = (key: string) => state.held.set(name, { env, files: sandboxKey(), shown: new Set([...shown, key]),
         run: { digest: ranWith, summary, skips, counts } });
       // Failures that look like the environment go back to the agent once before they are recorded.
       const faults = ok && counts.failed.length ? environmentFaults(counts, cfg) : null;
