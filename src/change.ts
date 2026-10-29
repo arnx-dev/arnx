@@ -630,7 +630,7 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
   const xmlPrints = sandboxPrints(from, files, true);
   const reports = join(snap, REPORT_DIR);
   const copies = runner.copies ? { copies: (output: string) => runner.copies!(output) } : {};
-  return { ...copies, run: (command, timeout) => {
+  return { ...copies, clean: (report) => stripSandbox(report, xmlPrints), run: (command, timeout) => {
     const placed: string[] = [], made: string[] = [];
     let result;
     try {

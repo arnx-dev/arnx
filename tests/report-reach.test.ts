@@ -122,6 +122,25 @@ test("vitest keeps a configuration's own junit outputFile: the report is read wh
   expect(runTests(oneRun(snap, elsewhere, "done\n"), snap, cfg, [], "suite.xml", 60)[1]).toBeNull();
 });
 
+test("a report written elsewhere is cleaned like arnx's own: what it quotes of sandbox-only files goes", () => {
+  const snap = tmp();
+  const cfg = parseReviewFile(file("typescript", "vitest", "npx vitest run {targets}")).projects[0]!;
+  const elsewhere = "test-results/junit.xml";
+  const xml = '<testsuites><testsuite name="a.test.ts"><testcase classname="a.test.ts" name="reads" file="a.test.ts">' +
+    '<failure message="expected token=fixture-only-value">token=fixture-only-value</failure></testcase></testsuite>' +
+    "</testsuites>";
+  const runner: Runner = {
+    run: (): RunResult => {
+      mkdirSync(join(snap, "test-results"), { recursive: true });
+      writeFileSync(join(snap, elsewhere), xml);
+      return { exitCode: 1, output: `JUNIT report written to /src/${elsewhere}\n`, timedOut: false, seconds: 1 };
+    },
+    clean: (report) => report.replaceAll("token=fixture-only-value", "[sandbox-only file content]"),
+  };
+  const [, results] = runTests(runner, snap, cfg, [], "suite.xml", 60);
+  expect(results![0]!.message).not.toContain("fixture-only-value");
+});
+
 test("a run with no report says its exit, whether the runner got arnx's report option, and its last lines", () => {
   const cfg = (language: string, runner: string, c: string) => parseReviewFile(file(language, runner, c)).projects[0]!;
   const vitest = cfg("typescript", "vitest", "npx vitest run {targets}");

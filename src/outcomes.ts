@@ -104,7 +104,9 @@ export function runTests(session: Runner, snap: string, cfg: ReviewConfig, targe
   if (result.timedOut) return [result, null];
   const file = existsSync(report) ? report : reportElsewhere(adapter.reportSaid?.(result.output, cfg.runner), snap);
   if (!file || !existsSync(file)) return [result, null];
-  const text = readFileSync(file, "utf8");
+  // A report outside arnx's report folder was not cleaned after the run: what it quotes of sandbox-only files goes.
+  const raw = readFileSync(file, "utf8");
+  const text = file !== report && session.clean ? session.clean(raw) : raw;
   if (file !== report) rmSync(file, { force: true });
   const exists = (rel: string) => existsSync(join(snap, cfg.workdir, rel));
   return [result, adapter.parseReport(text, cfg.runner, cfg.workdir, exists)];

@@ -109,6 +109,9 @@ export interface Runner {
   run(command: string, timeout: number): RunResult;
   /** Set when the image holds a copy of the code that runs reach (baked.ts): where, and the files only it holds. */
   copies?(output: string): CopyOnly;
+  /** Set when sandbox-only files are placed for each run (withSandboxFiles): a report's text with what it quotes of
+   * them taken out, for a report the runner wrote outside arnx's own report folder. */
+  clean?(report: string): string;
 }
 /** Runs `body` with a ready session for the config's environment and tears it down afterwards. `envFrom`: the
  * snapshot whose manifests pick the image, when it is not `snap` (the before/after check runs the code before the
