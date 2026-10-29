@@ -5,7 +5,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirS
   writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
-import { isMap as isYamlMap, isScalar, parseDocument } from "yaml";
+import { isMap as isYamlMap, isScalar, parseDocument, visit } from "yaml";
 import { StopRound, Workspace } from "./agent";
 import { type Baseline, BASELINE_FILE, type BaselineTest, baselineDigest, describeBaselineChanges, entryOf, keysOf,
   readBaseline, testKey, writeBaseline } from "./baseline";
@@ -16,8 +16,8 @@ import type { AdapterId, TestResult } from "./adapters/types";
 import { addToSandbox, type Blanked, describeBlanked, filesAt, hasCommits, snapshot, snapshotDigest, someNames,
   takeSnapshot, type Withheld, workingTreeFiles } from "./change";
 import {
-  loadReviewFile, parseReviewFile, projectDigest, readSecretPins, type ReviewConfig, reviewConfigPath, type ReviewFile,
-  sandboxOnlyOf, sandboxYaml, secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampFile,
+  loadReviewFile, parseReviewFile, plainReviewYaml, projectDigest, readSecretPins, type ReviewConfig, reviewConfigPath,
+  type ReviewFile, sandboxOnlyOf, sandboxYaml, secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampFile,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
 import { draftYaml } from "./draft";
@@ -806,8 +806,14 @@ export function withTestsDirs(text: string, snap: string, keep: ReadonlySet<stri
 /** `text` with the projects in `drop` taken out and `add` appended under uncovered (entries whose path is listed
  * already are left out); `text` itself when nothing changes. */
 export function withUncovered(text: string, add: { path: string; reason: string }[], drop: string[] = []): string {
-  const doc = parseDocument(text);
+  let doc = parseDocument(text);
   if (doc.errors.length) return text;
+  // A project taken out may hold the anchor other projects' aliases name (`<<: *base`): the file is written out in
+  // full first.
+  if (drop.length && hasAlias(doc)) {
+    text = plainReviewYaml(text);
+    doc = parseDocument(text);
+  }
   let changed = false;
   for (const name of drop) {
     if (doc.hasIn(["projects", name])) {
@@ -824,6 +830,12 @@ export function withUncovered(text: string, add: { path: string; reason: string 
     changed = true;
   }
   return changed ? doc.toString({ flowCollectionPadding: false, lineWidth: 0 }) : text;
+}
+
+function hasAlias(doc: ReturnType<typeof parseDocument>): boolean {
+  let found = false;
+  visit(doc, { Alias: () => { found = true; return visit.BREAK; } });
+  return found;
 }
 
 /** Folders of test data: what sits in them under tests/ is not a test. */

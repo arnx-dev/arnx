@@ -619,6 +619,9 @@ export function loadReviewConfig(repo: string, { requireApproved = true } = {}):
   return f.projects[0]!;
 }
 
+/** A review.yaml with its anchors, aliases and merge keys (`<<: *base`) written out in full. */
+export const plainReviewYaml = (text: string): string => toYaml(parseYaml(text) as Raw);
+
 function toYaml(raw: Raw): string {
   const doc = new Document(raw, { version: "1.1", customTags: pyyamlTags });
   visit(doc, {

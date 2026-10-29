@@ -178,6 +178,14 @@ test("withUncovered drops projects and appends entries not listed yet; an unchan
   expect(none.uncovered).toEqual([{ path: "/legacy/", reason: "no tests" }]);
 });
 
+test("withUncovered drops a project whose anchor the others' merge keys name, and keeps their settings", () => {
+  const text = "version: 1\nprojects:\n  api: &base\n    root: api\n    language: python\n    runner: pytest\n" +
+    "    image: python:3.12\n    test_command: pytest {targets}\n  web:\n    <<: *base\n    root: web\n";
+  const out = parseReviewFile(withUncovered(text, [{ path: "/api/", reason: "setup reached its time limit" }], ["api"]));
+  expect(out.projects.map((p) => [p.name, p.workdir, p.testCommand])).toEqual([["web", "web", "pytest {targets}"]]);
+  expect(out.uncovered).toEqual([{ path: "/api/", reason: "setup reached its time limit" }]);
+});
+
 test("the files line counts the paths no project tests once there are more than three", () => {
   const f = { projects: [{ name: "api", owned: 3, used: 0 }], untrackedLeftOut: [] };
   expect(filesLine({ ...f, notTested: ["/a/", "/b/"] })).toBe("  Files: api owns 3, uses 0 · not tested: /a/, /b/");
