@@ -43,8 +43,8 @@ test("setup --baseline turns known_failing into the failing tests themselves, sa
     expect(cli.stdout).toContain(["Recording the tests each suite fails today (no model, Docker only).", "Changed:",
       "  baseline main: 1 test added",
       "  known_failing removed (1 file): 1 of its tests passes and counts again", "✓ Environment proven"].join("\n"));
-    expect(cli.stdout).toContain("  ! main: 1 test fails today, recorded in .arnx/baseline.json " +
-      "(1 unresolved-host)");
+    expect(cli.stdout).toContain("Worth a look:\n  ! unresolved-host (1 test in main): add a service by that name, " +
+      "or point env at one\n  ! main: 1 test fails today, recorded in .arnx/baseline.json\n");
     const file = loadReviewFile(repo);
     expect(file.projects[0]!.knownFailing).toEqual([]);
     expect(isProven(repo, file)).toBe(true);

@@ -148,7 +148,8 @@ export function approvalScreen(file: ReviewFile, repo: string, o: { proofs?: Pro
  * no project mentions. */
 export function worthALook(file: ReviewFile, repo: string, o: { proofs?: ProjectProof[]; untracked?: boolean })
   : string[] {
-  const lines = [...baselineLines(file, currentBaseline(repo) ?? new Map()), ...approvalWarnings(file, o.proofs)];
+  const base = currentBaseline(repo) ?? new Map();
+  const lines = [...environmentLines(file, base), ...baselineLines(file, base), ...approvalWarnings(file, o.proofs)];
   if (!file.legacy) {
     const map = coverageMap(repo, file, !!o.untracked);
     lines.push(...notTestedLines(map, repo, !!o.untracked));
@@ -186,11 +187,47 @@ export function notTestedRecord(file: ReviewFile, repo: string, untracked: boole
     `${u.untracked ? `, ${u.untracked} untracked` : ""}): ${u.reason}`);
 }
 
-/** The causes and flaky tests among `tests`, most first: "2 connection-refused: db; 1 flaky". */
+/** The causes of a baseline test that are the environment's, not the code's, and what to fix for each. */
+const ENV_FIX: Record<string, string> = {
+  "missing-package": "add it to install",
+  "import-path": "the import does not resolve in the sandbox; check root and install",
+  "missing-library": "install the system library in install",
+  "missing-program": "install the program in install",
+  "missing-variable": "set it under env",
+  "env-value": "the value env gives does not work; set one that does",
+  "unresolved-host": "add a service by that name, or point env at one",
+  "connection-refused": "nothing listens there; add the service, or fix its host and port in env",
+};
+const environmental = (t: BaselineTest) => !t.flaky && !!t.cause && t.cause.split(":")[0]! in ENV_FIX;
+
+/** Baseline tests that fail on the environment (the agent could not fix it in the sandbox), one line per cause, most
+ * first, with what to fix: "connection-refused: db:5432 (2 tests in shop): nothing listens there; …". */
+export function environmentLines(file: ReviewFile, base: Baseline): string[] {
+  const groups = new Map<string, { tests: number; files: Set<string>; projects: string[] }>();
+  for (const p of file.projects) {
+    for (const t of (base.get(p.name) ?? []).filter(environmental)) {
+      const g = groups.get(t.cause!) ?? { tests: 0, files: new Set<string>(), projects: [] };
+      if (t.load) g.files.add(t.file);
+      else g.tests += 1;
+      if (!g.projects.includes(p.name)) g.projects.push(p.name);
+      groups.set(t.cause!, g);
+    }
+  }
+  const size = (g: { tests: number; files: Set<string> }) => g.tests + g.files.size;
+  return [...groups].sort((a, b) => size(b[1]) - size(a[1])).map(([cause, g]) => {
+    const n = [g.tests ? `${g.tests} test${g.tests === 1 ? "" : "s"}` : "",
+      g.files.size ? `${g.files.size} test file${g.files.size === 1 ? "" : "s"} that do${g.files.size === 1 ? "es" : ""} ` +
+        "not load" : ""].filter(Boolean).join(", ");
+    return `${cause} (${n} in ${g.projects.join(", ")}): ${ENV_FIX[cause.split(":")[0]!]}`;
+  });
+}
+
+/** The causes other than the environment's (environmentLines) and flaky tests among `tests`, most first: "1 flaky;
+ * 1 order-dependent". */
 function causes(tests: BaselineTest[]): string[] {
   const groups = new Map<string, number>();
   for (const t of tests) {
-    const k = t.flaky ? "flaky" : t.cause === "does-not-load" ? undefined : t.cause;
+    const k = t.flaky ? "flaky" : t.cause === "does-not-load" || environmental(t) ? undefined : t.cause;
     if (k) groups.set(k, (groups.get(k) ?? 0) + 1);
   }
   const why = [...groups].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`);

@@ -9,7 +9,7 @@ import { isProven, loadReviewFile, parseReviewConfig, parseReviewFile, reviewCon
 import { defaultSettings } from "../src/settings";
 import { snapshot, snapshotDigest } from "../src/change";
 import { approveFile, coverageGap, envDigest, runSetup, type SetupRun, suiteOk, withoutKnownFailing } from "../src/setup";
-import { approvalChecks, baselineLines } from "../src/setupview";
+import { approvalChecks, baselineLines, environmentLines, worthALook } from "../src/setupview";
 import { fakeFactory, type FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { gitRepo, runGit } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
@@ -250,10 +250,30 @@ test("known_failing comes out of a proposal with the rest of the file as it was 
 test("worth a look: per project, how many tests fail today, with their causes and flaky ones", () => {
   const file = loadReviewFile(repoWith(YAML), { requireApproved: false });
   const base: Baseline = new Map([["main", [entry("a.py", "x", { cause: "connection-refused: db" }),
-    entry("a.py", "y", { cause: "connection-refused: db" }), entry("b.py", "z", { flaky: true }), entry("c.py", "w")]]]);
-  expect(baselineLines(file, base)).toEqual(["main: 4 tests fail today, recorded in .arnx/baseline.json " +
-    "(2 connection-refused: db; 1 flaky)"]);
+    entry("a.py", "y", { cause: "connection-refused: db" }), entry("b.py", "z", { flaky: true }), entry("c.py", "w"),
+    entry("d.py", "v", { cause: "order-dependent" })]]]);
+  // The environment's causes have lines of their own (environmentLines).
+  expect(baselineLines(file, base)).toEqual(["main: 5 tests fail today, recorded in .arnx/baseline.json " +
+    "(1 flaky; 1 order-dependent)"]);
   expect(baselineLines(file, new Map())).toEqual([]);
+});
+
+test("worth a look: environment faults first, one line per cause with its count and what to fix", () => {
+  const repo = repoWith(YAML);
+  const file = loadReviewFile(repo, { requireApproved: false });
+  const base: Baseline = new Map([["main", [entry("a.py", "x", { cause: "connection-refused: db:5432" }),
+    entry("a.py", "y", { cause: "connection-refused: db:5432" }), entry("b.py", "z", { cause: "env-value: API_URL" }),
+    { ...entry("c.py", "c.py"), load: true as const, cause: "missing-package: pg" },
+    entry("e.py", "f", { cause: "connection-refused: db:5432", flaky: true }), entry("f.py", "g")]]]);
+  expect(environmentLines(file, base)).toEqual([
+    "connection-refused: db:5432 (2 tests in main): nothing listens there; add the service, or fix its host and " +
+      "port in env",
+    "env-value: API_URL (1 test in main): the value env gives does not work; set one that does",
+    "missing-package: pg (1 test file that does not load in main): add it to install"]);
+  writeBaseline(repo, base);
+  const look = worthALook(file, repo, {});
+  expect(look.slice(0, 4)).toEqual([...environmentLines(file, base), baselineLines(file, base)[0]!]);
+  expect(environmentLines(file, new Map([["main", [entry("f.py", "g")]]]))).toEqual([]);
 });
 
 test("the baseline's changes are named per project", () => {

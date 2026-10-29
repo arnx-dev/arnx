@@ -9,7 +9,7 @@ import { type Baseline, entryOf, parseBaseline } from "../src/baseline";
 import { loadReviewFile, parseReviewConfig, reviewConfigPath } from "../src/config";
 import { classify, describeHints, diagnose, errorLine, firstErrors, loadFailure } from "../src/diagnose";
 import { causeOf, environmentFaults, type SuiteCounts } from "../src/setup";
-import { baselineLines } from "../src/setupview";
+import { baselineLines, environmentLines } from "../src/setupview";
 import { useTmp } from "./helpers/tmp";
 import { CFG } from "./helpers/yaml";
 
@@ -126,7 +126,10 @@ test("worth a look: files that do not load are named apart from the tests that f
   ]]]);
   expect(baselineLines(file, base)).toEqual([
     "main: 1 test fails today, recorded in .arnx/baseline.json",
-    "main: 2 test files do not load, so none of their tests run: tests/test_p.py, tests/test_s.py " +
-      "(1 missing-library: libgomp.so.1); recorded in .arnx/baseline.json",
+    "main: 2 test files do not load, so none of their tests run: tests/test_p.py, tests/test_s.py; recorded in " +
+      ".arnx/baseline.json",
   ]);
+  // The environment's cause comes first, on a line of its own.
+  expect(environmentLines(file, base)).toEqual(["missing-library: libgomp.so.1 (1 test file that does not load in " +
+    "main): install the system library in install"]);
 });

@@ -41,7 +41,10 @@ time with some projects proven, it keeps those (setup's own runs are their proof
 stderr each model reply, each file it reads and each suite it runs (`--quiet` turns this off). It then shows one
 line per project and stamps `.arnx/review.yaml` with a hash (the proof); nothing is asked. Setup's own run of each
 suite is the proof; a suite runs again only when its project's part of the file or the code changed since that run.
-It ends with what is worth a look, only what applies: how many tests fail today (the baseline), tests skipped for want
+It ends with what is worth a look, only what applies: first the tests recorded as failing on the environment (a
+variable's value, a missing package or library, a host that does not resolve, a refused connection), one line per
+cause with how many and what to fix (`connection-refused: db:5432 (2 tests in api): nothing listens there; add the
+service, or fix its host and port in env`); then how many tests fail today (the baseline), tests skipped for want
 of a service or variable, commands that ignore their own errors (`|| true`), install lines that download from outside
 the package registries (`curl`, `wget`, `git clone`), files allowed although they look like secrets, and what no
 project tests. The same list, with who ran the proof (the git user), is in `.arnx/setup/approval.md`. Open
