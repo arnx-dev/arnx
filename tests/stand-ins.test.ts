@@ -52,6 +52,20 @@ test("the same key gets the same stand-in, in one file, in two, and on every run
   expect(standIn(`Y = "${AWS_KEY_2}"`, [])!.text).not.toBe(`Y = "${first}"`);
 });
 
+test("a lockfile or a binary file with a key is left out: neither gets stand-ins", () => {
+  const repo = gitRepo(tmp());
+  writeFileSync(join(repo, "package-lock.json"), `{"resolved": "https://x:${AWS_KEY}@git.example/dep.tgz"}\n`);
+  writeFileSync(join(repo, "app.db"), Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(`key=${AWS_KEY}`)]));
+  writeFileSync(join(repo, "plain.db"), Buffer.from([0, 1, 2, 3]));
+  commit(repo, "fixtures");
+  const snap = join(tmp(), "snap");
+  const r = takeSnapshot(repo, null, snap);
+  expect(r.withheld.map((w) => w.path)).toEqual(["app.db", "package-lock.json"]);
+  expect(r.standIns).toEqual([]);
+  expect(existsSync(join(snap, "plain.db"))).toBe(true);
+  expect(allText(snap)).not.toContain(AWS_KEY);
+});
+
 test("a run like a key's body beside a key gets a stand-in too; a long name in code does not", () => {
   const name = "handlesTheCaseWhereTheUserHasNoAccountYet";
   const r = standIn(`id = '${AWS_KEY}'\nsecret = '${AWS_SECRET}'\ndef ${name}(): pass\n`, [])!;

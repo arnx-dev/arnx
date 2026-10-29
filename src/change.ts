@@ -556,7 +556,7 @@ const PRINT_MIN = 10;
 function sandboxPrints(from: string, files: readonly string[], xml = false): string[] {
   const out = new Set<string>();
   for (const rel of files) {
-    const text = scrubText(join(from, rel));
+    const text = textOf(join(from, rel));
     if (text === null) continue;
     for (const line of text.split(/\r?\n/)) {
       const bare = line.trim().replace(/,$/, "");
@@ -660,7 +660,7 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
     if (existsSync(reports)) {
       for (const name of readdirSync(reports, { recursive: true }).map(String)) {
         const p = join(reports, name);
-        const text = statSync(p).isFile() ? scrubText(p) : null;
+        const text = statSync(p).isFile() ? textOf(p) : null;
         if (text === null) continue;
         const clean = stripSandbox(text, xmlPrints);
         if (clean !== text) writeFileSync(p, clean);
@@ -737,11 +737,22 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   const blanks = new Map<string, number[]>();
   const scanned: { p: string; rel: string }[] = [];
   for (const f of kept) {
-    const text = scrubText(f.p);
-    if (text === null) continue;
+    const read = scrubText(f.p);
+    if (read === null) continue;
+    const { text, binary } = read;
     const pins = pinsOf(f.rel);
     const scan = scanKeys(f.rel, text, pins);
-    if (scan && "withhold" in scan && (!o.standIns || privateKeyBody(text, pins))) {
+    // A binary file is never edited: any key in it leaves it out.
+    if (scan && binary) {
+      unlinkSync(f.p);
+      sandboxed.delete(f.rel);
+      removedFiles.push({ path: f.rel, ...("withhold" in scan ? scan.withhold
+        : { line: scan.blank[0]! + 1, label: "key-shaped text" }) });
+      continue;
+    }
+    if (binary) continue;
+    // A file that gets no stand-ins (a lockfile, or stand-ins off) is left out, as is a private key's body.
+    if (scan && "withhold" in scan && (!fakes(f.rel) || privateKeyBody(text, pins))) {
       unlinkSync(f.p);
       sandboxed.delete(f.rel);
       removedFiles.push({ path: f.rel, ...scan.withhold });
@@ -757,7 +768,7 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   const replace = values.size ? standInsFor(values, made) : null;
   for (const f of scanned) {
     const lines = blanks.get(f.rel);
-    let text = scrubText(f.p)!;
+    let text = scrubText(f.p)!.text;
     if (lines) text = (scanKeys(f.rel, text, pinsOf(f.rel)) as { text: string }).text;
     const r = replace && fakes(f.rel) ? replace(text, pinsOf(f.rel)) : { text, count: 0 };
     if (!lines && !r.count) continue;
@@ -778,12 +789,19 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
     sandboxed: [...sandboxed].sort(), secrets: values };
 }
 
-/** A file's text when it is text (no NUL in its first 8000 bytes) and no larger than SCAN_LIMIT; null otherwise. */
-function scrubText(p: string): string | null {
+/** A text file's content (scrubText); null for a binary file. */
+function textOf(p: string): string | null {
+  const read = scrubText(p);
+  return read && !read.binary ? read.text : null;
+}
+
+/** A file's content as UTF-8, and whether it is binary (a NUL in its first 8000 bytes); null when larger than
+ * SCAN_LIMIT. */
+function scrubText(p: string): { text: string; binary: boolean } | null {
   try {
     if (statSync(p).size > SCAN_LIMIT) return null;
     const bytes = readFileSync(p);
-    return bytes.subarray(0, 8000).includes(0) ? null : bytes.toString("utf8");
+    return { text: bytes.toString("utf8"), binary: bytes.subarray(0, 8000).includes(0) };
   } catch {
     return null;
   }
