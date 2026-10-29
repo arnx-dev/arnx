@@ -52,7 +52,7 @@ test("a review with an unpriced second opinion: the entry says cost unknown, its
   expect(md).not.toContain("cut off mid-reply");
 });
 
-test("setup with an unpriced reviewer runs, says once that the budget cap does not cover it, and shows cost unknown",
+test("setup on an unpriced model runs, says once that the budget cap does not cover it, and shows cost unknown",
   async () => {
   const repo = initRepo(join(tmp(), "shop"));
   writeFileSync(join(repo, "pricing.py"), "def total(xs):\n    return sum(xs)\n");
@@ -63,7 +63,7 @@ test("setup with an unpriced reviewer runs, says once that the budget cap does n
   expect(await new Cli({ cwd: repo, env }).run("init")).toBe(0);
   expect(await new Cli({ cwd: repo, env }).run("consent", "--yes")).toBe(0);
   const config = readFileSync(settingsPath(repo), "utf8");
-  writeFileSync(settingsPath(repo), config.replace(/^reviewer = .*$/m, 'reviewer = "anthropic:claude-mystery"'));
+  writeFileSync(settingsPath(repo), config.replace(/^setup = .*$/m, 'setup = "anthropic:claude-mystery"'));
   const good = "version: 1\nprojects:\n  shop:\n    root: .\n    language: python\n    image: python:3.12\n" +
     "    install: [pip install pytest]\n    test_command: python -m pytest -q {targets}\n";
   const model = new ScriptedAgent([[tool("try_project", { yaml: good })], [text("Tests fail on the current code.")]]);

@@ -1,5 +1,5 @@
-// `[models] setup` and `setup_effort`: the model setup runs on, and its effort. Unset, setup runs on the reviewer at
-// `effort`, as before.
+// `[models] setup` and `setup_effort`: the model setup runs on, and its effort. Unset, setup runs on Claude Sonnet with
+// a Claude reviewer, else on the reviewer, at `effort`.
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -41,10 +41,18 @@ test("setup and setup_effort load, are checked, and round-trip", () => {
     'setup_effort = "high"                         # setup\'s own effort\n');
 });
 
-test("unset, setup runs on the reviewer and effort; each falls back on its own", () => {
-  const s = defaultSettings();
+test("unset, setup runs on Sonnet with a Claude reviewer, else on the reviewer; effort falls back on its own", () => {
+  const s = { ...defaultSettings(), setup: undefined };
   expect(setupSettings(s)).toBe(s);
   expect(refString(setupRef(s))).toBe("anthropic:claude-sonnet-5-5");
+  const opus = { ...s, reviewer: parseModelRef("anthropic:claude-opus-5-5") };
+  expect(refString(setupRef(opus))).toBe("anthropic:claude-sonnet-5-5");
+  expect([refString(setupSettings(opus).reviewer), setupSettings(opus).effort])
+    .toEqual(["anthropic:claude-sonnet-5-5", "medium"]);
+  const gpt = { ...s, reviewer: parseModelRef("openai:gpt-5.5-2026-04-23") };
+  expect(setupSettings(gpt)).toBe(gpt);
+  expect(missingKeys(gpt, { OPENAI_API_KEY: "o" }, [setupRef(gpt)])).toEqual([]);
+  expect(missingKeys(opus, { OPENAI_API_KEY: "o" }, [setupRef(opus)])).toEqual(["ANTHROPIC_API_KEY"]);
   const model = setupSettings({ ...s, setup: parseModelRef(HAIKU) });
   expect([refString(model.reviewer), model.effort]).toEqual([HAIKU, "medium"]);
   const effort = setupSettings({ ...s, setupEffort: "low" });
@@ -56,13 +64,18 @@ test("unset, setup runs on the reviewer and effort; each falls back on its own",
   expect(missingKeys(openai, { OPENAI_API_KEY: "o" }, [setupRef(openai)])).toEqual([]);
 });
 
-test("init writes setup commented, next to the reviewer", async () => {
+test("init writes setup on Sonnet, next to the reviewer; commented after a reviewer of another vendor", async () => {
   const repo = initRepo(tmp());
   expect(await new Cli({ cwd: repo, env: { ANTHROPIC_API_KEY: "a" } }).run("init")).toBe(0);
   const text = readFileSync(settingsPath(repo), "utf8");
   expect(text).toContain("# reviews the change, writes and runs the tests\n" +
+    'setup = "anthropic:claude-sonnet-5-5"         # sets up the test environment\n');
+  expect(refString(loadSettings(repo).setup!)).toBe("anthropic:claude-sonnet-5-5");
+  const dir = tmp();
+  writeSettings(dir, { ...defaultSettings(), setup: undefined, reviewer: parseModelRef("openai:gpt-5.5-2026-04-23") });
+  expect(readFileSync(settingsPath(dir), "utf8")).toContain(
     '# setup = "anthropic:claude-sonnet-5-5"       # sets up the test environment; default: reviewer\n');
-  expect(loadSettings(repo).setup).toBeUndefined();
+  expect(loadSettings(dir).setup).toBeUndefined();
 });
 
 /** Each request `fn` sends through the global fetch, answered with a text reply that ends the turn. */
@@ -98,7 +111,7 @@ test("setup's agent sends the setup model and its effort; without them, the revi
     messages: [{ role: "user", content: "u" }], maxTokens: 10 }));
   const [own] = await turn({ ...s, setup: parseModelRef(HAIKU), setupEffort: "low" });
   expect([own!.body.model, own!.body.output_config]).toEqual(["claude-haiku-5-5", { effort: "low" }]);
-  const [plain] = await turn(s);
+  const [plain] = await turn({ ...s, setup: undefined });
   expect([plain!.body.model, plain!.body.output_config]).toEqual(["claude-sonnet-5-5", { effort: "medium" }]);
 });
 
@@ -115,7 +128,7 @@ async function shop(): Promise<string> {
   expect(await new Cli({ cwd: repo, env }).run("consent", "--yes")).toBe(0);
   writeFileSync(settingsPath(repo), readFileSync(settingsPath(repo), "utf8")
     .replace(/^reviewer = .*$/m, 'reviewer = "openai:mystery-model"')
-    .replace(/^# setup = .*$/m, `setup = "${HAIKU}"\nsetup_effort = "low"`));
+    .replace(/^setup = .*$/m, `setup = "${HAIKU}"\nsetup_effort = "low"`));
   return repo;
 }
 

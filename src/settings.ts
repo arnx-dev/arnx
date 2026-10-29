@@ -19,6 +19,8 @@ export type Prices = Record<string, Price>;
 export const PROVIDER_KEYS: Record<string, readonly string[]> = Object.fromEntries(Object.keys(PRESETS)
   .map((name) => [name, envNames(resolveProvider(name)!)]));
 export const REVIEWER = "anthropic:claude-sonnet-5-5";
+/** Setup's model when the reviewer is a Claude model and `setup` is unset. */
+export const SETUP = "anthropic:claude-sonnet-5-5";
 export const OPENAI_CHALLENGER = "openai:gpt-5.5-2026-04-23";
 
 export interface ModelRef { provider: string; model: string }
@@ -65,7 +67,8 @@ export interface Settings {
   /** Anonymous usage counts after setup, review, accept and check (`telemetry`, default off: opt-in). */
   telemetry: boolean;
   reviewer: ModelRef;
-  /** The model that sets up the test environment (`setup`, default: the reviewer). */
+  /** The model that sets up the test environment (`setup`, default: SETUP with a Claude reviewer, else the
+   * reviewer). */
   setup?: ModelRef;
   /** Setup's own effort (`setup_effort`, default: `effort`). */
   setupEffort?: Tier;
@@ -181,6 +184,7 @@ export function defaultSettings(env: Env = {}): Settings {
   const has = (ref: string) => keysOf(ref).every((k) => !!env[k]);
   const challenger = has(HARNESS.challenger) ? HARNESS.challenger : REVIEWER;
   const s = withDefaults(null, parseModelRef(HARNESS.reviewer), parseModelRef(challenger));
+  s.setup = parseModelRef(SETUP);
   s.hunter = parseModelRef(HARNESS.hunter);
   s.answerModel = parseModelRef(HARNESS.answerModel);
   if (has(HARNESS.secondHunter)) s.secondHunter = parseModelRef(HARNESS.secondHunter);
@@ -399,7 +403,8 @@ export function writeSettings(repo: string, s: Settings, opts: { known?: boolean
   lines.push("", "[models]",
     model("reviewer", q(refString(s.reviewer)), "reviews the change, writes and runs the tests"),
     s.setup ? model("setup", q(refString(s.setup)), "sets up the test environment")
-      : `${`# setup = ${q(REVIEWER)}`.padEnd(45)} # sets up the test environment; default: reviewer`,
+      : `${`# setup = ${q(SETUP)}`.padEnd(45)} # sets up the test environment; default: ` +
+        (s.reviewer.provider === "anthropic" ? "this" : "reviewer"),
     ...(s.setupEffort ? [model("setup_effort", q(s.setupEffort), "setup's own effort")] : []),
     ...ref("hunter", s.hunter, "looks at each part of a big change"),
     ...ref("second_hunter", s.secondHunter, "a second look, from another vendor"),
@@ -540,16 +545,19 @@ export function recordConsent(repo: string, key: "consent_at" | "cloud_consent_a
 
 /** Every model these settings call, whatever its role. */
 export const modelRefs = (s: Settings): ModelRef[] =>
-  [s.reviewer, s.setup, s.challenger, s.challengerFallback, s.secondHunter, s.hunter, s.answerModel]
+  [s.reviewer, setupRef(s), s.challenger, s.challengerFallback, s.secondHunter, s.hunter, s.answerModel]
     .filter((r): r is ModelRef => r != null);
 
-/** The model setup runs on: `setup`, else the reviewer. */
-export const setupRef = (s: Settings): ModelRef => s.setup ?? s.reviewer;
+/** The model setup runs on: `setup`; else Claude Sonnet with a Claude reviewer (it proved most setups, fastest),
+ * the reviewer with any other. */
+export const setupRef = (s: Settings): ModelRef =>
+  s.setup ?? (s.reviewer.provider === "anthropic" ? parseModelRef(SETUP) : s.reviewer);
 
-/** The settings setup's agent runs on: `setup` and `setup_effort` in the reviewer's and `effort`'s place. Without
- * them, the settings as they are. */
-export const setupSettings = (s: Settings): Settings => s.setup || s.setupEffort
-  ? { ...s, reviewer: setupRef(s), effort: s.setupEffort ?? s.effort } : s;
+/** The settings setup's agent runs on: setup's model and `setup_effort` in the reviewer's and `effort`'s place. When
+ * both are the reviewer's, the settings as they are. */
+export const setupSettings = (s: Settings): Settings =>
+  refString(setupRef(s)) !== refString(s.reviewer) || s.setupEffort
+    ? { ...s, reviewer: setupRef(s), effort: s.setupEffort ?? s.effort } : s;
 
 /** The provider a ref names under these settings (a preset, the user's table, or both merged). */
 export function providerOfRef(s: Pick<Settings, "providers"> | null | undefined, ref: ModelRef): Provider | undefined {
