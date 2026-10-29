@@ -341,6 +341,9 @@ under uncovered as browser tests.
 - A web UI app (react-dom, next, vue, svelte, @angular/core, solid-js, preact, nuxt, @sveltejs/kit, astro or \
 electron among its dependencies) gets one try at its node or jsdom unit tests. If that try fails, arnx lists it \
 under uncovered as web UI. Do not try it again; go on with the rest.
+- Do not set up a project whose tests need three or more services (databases, caches, object stores, queues): \
+it does not run within setup's time. The draft lists it under uncovered, naming them; keep it there and go on with \
+the rest. try_project refuses it while it lists three or more.
 - Stop when propose accepts the file. Then reply with a short summary of what you chose and why."""
 
 # Fills $draft in setup.task when the detector could write a draft (nothing otherwise).

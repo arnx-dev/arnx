@@ -1,10 +1,11 @@
 // A first review.yaml written from the detection's facts without a model, for the setup agent to edit instead of
 // writing one from scratch. Values the files did not settle carry a `# unsure: <why>` comment. It leaves out what
-// setup decides from the runs (tests_dir) and from the coverage (owns beyond the root, uses, uncovered).
+// setup decides from the runs (tests_dir) and from the coverage (owns beyond the root, uses, uncovered), except that a
+// project whose tests need MANY_SERVICES or more goes under uncovered instead.
 import { posix } from "node:path";
 import { Document, isMap, isScalar, isSeq, type Node } from "yaml";
 import type { Candidate, Detection } from "./detect";
-import type { ProjectFacts, ServiceFact } from "./facts";
+import { manyServices, manyServicesReason, type ProjectFacts, type ServiceFact } from "./facts";
 
 type Raw = Record<string, unknown>;
 interface Mark { path: (string | number)[]; why: string }
@@ -72,10 +73,16 @@ export function draftReview(d: Detection): { doc: Raw; marks: Mark[] } | null {
   const projects: Raw = {};
   const used = new Set<string>();
   const allow = new Set<string>();
+  const uncovered: Raw[] = [];
   names(cs).forEach((name, i) => {
     const c = cs[i]!;
     const f = facts.projects.find((p) => p.root === c.root && p.language === c.language);
     if (!f) return;
+    const many = manyServices(f);
+    if (many) {
+      uncovered.push({ path: `/${c.root}/`, reason: manyServicesReason(many) });
+      return;
+    }
     const mark = (key: string | (string | number)[], why: string) =>
       marks.push({ path: ["projects", name, ...(Array.isArray(key) ? key : [key])], why });
     const p: Raw = { root: c.root, language: c.language };
@@ -109,6 +116,7 @@ export function draftReview(d: Detection): { doc: Raw; marks: Mark[] } | null {
   if (Object.keys(services).length) doc.services = services;
   if (allow.size) doc.allow_env_names = [...allow].sort();
   doc.projects = projects;
+  if (uncovered.length) doc.uncovered = uncovered;
   return { doc, marks };
 }
 

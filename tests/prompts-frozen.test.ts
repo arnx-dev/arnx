@@ -2,8 +2,8 @@
 // from the templates in code (tests/fixtures/prompts-0.1.2.json), except the setup task, which 0.1.5 changed
 // (tests/fixtures/prompts-0.1.5.json), and so PROMPT_VERSION: setup records failing tests one by one, sets tests_dir
 // from the runner's configuration, places the map's leftovers itself, leaves browser tests and failed web UI apps
-// out, takes arnx:generated values, offers exec, and starts from a draft review.yaml when the detector wrote one
-// (setup.draft).
+// out, takes arnx:generated values, offers exec, starts from a draft review.yaml when the detector wrote one
+// (setup.draft), and leaves projects that need three or more services under uncovered.
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -17,7 +17,7 @@ const FROZEN = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompt
 const CHANGED = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompts-0.1.5.json"), "utf8")) as Frozen;
 
 test("PROMPT_VERSION has 0.1.5's value: the setup task changed, no review prompt did", () => {
-  expect(PROMPT_VERSION).toBe("887536efc149");
+  expect(PROMPT_VERSION).toBe("a4e3a1e0de4f");
   expect(Object.keys(CHANGED)).toEqual(["setupTask", "setupTask/draft", "PROMPT_VERSION"]);
 });
 

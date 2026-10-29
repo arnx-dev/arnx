@@ -69,6 +69,24 @@ export interface ProjectFacts {
 
 export interface Facts { projects: ProjectFacts[]; jobs: CiJob[]; services: ServiceFact[] }
 
+/** Setup sets up no project whose tests need this many services or more (databases, caches, object stores, queues):
+ * such a backend does not run within setup's time. Counted on what the files say its tests need, not on what an
+ * agent lists: a project its files gave two proved with a third. */
+export const MANY_SERVICES = 3;
+
+/** The services `f`'s tests need when they reach MANY_SERVICES, else null. A project at the repository root is left
+ * out: a CI job there may test another folder. */
+export function manyServices(f: ProjectFacts): string[] | null {
+  return f.root !== "." && f.services.length >= MANY_SERVICES ? f.services.map((s) => s.value) : null;
+}
+
+/** Why such a project is under uncovered: "needs postgres, redis and minio; setup does not start three or more
+ * services: set it up by hand, or with fewer". */
+export function manyServicesReason(names: string[]): string {
+  const all = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names.join("");
+  return `needs ${all}; setup does not start three or more services: set it up by hand, or with fewer`;
+}
+
 type Raw = Record<string, unknown>;
 const isMap = (v: unknown): v is Raw => typeof v === "object" && v !== null && !Array.isArray(v);
 const str = (v: unknown) => (typeof v === "string" ? v : typeof v === "number" ? String(v) : null);

@@ -240,3 +240,59 @@ test("setup sends the draft with the task", async () => {
   expect(parse(first.split("<draft>\n")[1]!.split("</draft>")[0]!).projects.main.test_command)
     .toBe("python -m pytest {targets}");
 });
+
+const MANY_CI = `
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+      redis:
+        image: redis:7
+      minio:
+        image: minio/minio:latest
+    steps:
+      - run: pytest
+        working-directory: server
+`;
+
+test("a backend whose tests need three or more services goes under uncovered, naming them; two still draft", () => {
+  const files = { "server/pyproject.toml": "[project]\nname='server'\n", "server/tests/test_a.py": "",
+    "worker/pyproject.toml": "[project]\nname='worker'\n", "worker/tests/test_w.py": "" };
+  const d = detect(repoWith({ ...files, ".github/workflows/ci.yml": MANY_CI }));
+  const doc = draftReview(d)!.doc as Record<string, any>;
+  expect(Object.keys(doc.projects)).toEqual(["worker"]);
+  expect(doc.services).toBeUndefined();
+  expect(doc.uncovered).toEqual([{ path: "/server/", reason: "needs postgres, redis and minio; setup does not start " +
+    "three or more services: set it up by hand, or with fewer" }]);
+  expect(parseReviewFile(draftYaml(d)).uncovered.map((u) => u.path)).toEqual(["/server/"]);
+  const two = detect(repoWith({ ...files, ".github/workflows/ci.yml": MANY_CI.replace(/ {6}minio:\n.*\n/, "") }));
+  expect(projects(two).server.services).toEqual(["postgres", "redis"]);
+});
+
+test("try_project refuses such a project while it lists three or more services", async () => {
+  const repo = repoWith({ "server/pyproject.toml": "[project]\nname='server'\n", "server/tests/test_a.py": "",
+    ".github/workflows/ci.yml": MANY_CI });
+  const services = "services:\n  postgres: {image: postgres:16}\n  redis: {image: redis:7}\n" +
+    "  minio: {image: minio/minio:latest}\n";
+  const yaml = (names: string) => `version: 1\n${services}projects:\n  server:\n    root: server\n` +
+    `    language: python\n    image: python:3.12\n    test_command: python -m pytest {targets}\n` +
+    `    services: [${names}]\n`;
+  const model = new ScriptedAgent([[{ type: "tool_use", id: "t1", name: "try_project",
+    input: { yaml: yaml("postgres, redis, minio") } }], [text("done")]]);
+  const said: string[] = [];
+  let runs = 0;
+  await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "out"), progress: (m) => said.push(m),
+    sessionFactory: fakeFactory(() => {
+      runs++;
+      return [null, "", false];
+    }) });
+  expect(runs).toBe(0);
+  const result = JSON.stringify(model.calls[1]!.messages.at(-1));
+  expect(result).toContain("refused: server needs postgres, redis and minio; setup does not start three or more " +
+    "services: set it up by hand, or with fewer. Do not try it: keep it under uncovered (path /server/, this reason)");
+  expect(said).toContain("server: not set up: needs postgres, redis and minio; setup does not start three or more " +
+    "services: set it up by hand, or with fewer");
+});

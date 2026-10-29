@@ -356,7 +356,10 @@ project as a `ReviewConfig`. `route.ts` sends each changed file to the projects 
 runs one test round per routed project (at most `max_projects`, budget split evenly) and reports untested paths.
 `detect.ts` finds candidate projects without a model, `facts.ts` reads what the files settle about each (versions,
 package managers, workspace, CI jobs, services) and `draft.ts` writes a first review.yaml from those facts, values
-it is unsure of marked `# unsure:`, which the agent edits; `setup.ts` lets the agent prove each project (`try_project`:
+it is unsure of marked `# unsure:`, which the agent edits (a project, not at the root, whose facts name
+`MANY_SERVICES` (3) or more services goes under uncovered instead, and try_project refuses it while it lists that
+many: such backends ran out of setup's time; the most a proven project ran with was three, its files naming two);
+`setup.ts` lets the agent prove each project (`try_project`:
 the whole file, or after one a project's settings alone by name, which replace them in the last whole file)
 and accepts the file only when every project ran and every committed source file is owned, used or listed as
 uncovered (`propose`, `coverageMap`). Both count the files a working-tree snapshot holds (`workingTreeFiles`: tracked,

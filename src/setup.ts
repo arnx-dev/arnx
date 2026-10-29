@@ -21,6 +21,7 @@ import {
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
 import { draftYaml } from "./draft";
+import { MANY_SERVICES, manyServices, manyServicesReason } from "./facts";
 import { classify, describeHints, diagnose, firstErrors, firstLine, type Hint, missingLeftOut, npxDownload, npxText,
   loadFailure, passingApart, unexplainedFiles } from "./diagnose";
 import type { FailureModel } from "./jev";
@@ -1035,6 +1036,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     placesAsked: false,
     // Projects tried at least once, and the web UI apps whose one try failed (listed as web UI: webUiPaths).
     tried: new Set<string>(), webUi: new Set<string>(),
+    // Projects try_project refused for the services they need (MANY_SERVICES).
+    tooMany: new Map<string, string[]>(),
     // The environment of each project's last try, which exec runs in.
     lastTry: new Map<string, TriedEnv>() };
   const tmp = tempDir("arnx-setup-");
@@ -1186,6 +1189,15 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const name = typeof args.project === "string" ? args.project : f.projects.length === 1 ? f.projects[0]!.name : "";
       const cfg = f.projects.find((p) => p.name === name);
       if (!cfg) return `invalid: name the project to try; projects: ${f.projects.map((p) => p.name).join(", ")}`;
+      // A project whose files say its tests need MANY_SERVICES or more is not tried while it lists that many.
+      const facts = detection.facts?.projects.find((p) => p.root === cfg.workdir && p.language === cfg.language);
+      const many = facts && cfg.services.length >= MANY_SERVICES ? manyServices(facts) : null;
+      if (many) {
+        if (!state.tooMany.has(name)) say(`${name}: not set up: ${manyServicesReason(many)}`);
+        state.tooMany.set(name, many);
+        return `refused: ${name} ${manyServicesReason(many)}. Do not try it: keep it under uncovered (path ` +
+          `/${cfg.workdir}/, this reason) and go on with the other projects.`;
+      }
       // --- web UI rule (0.1.5): a UI app gets one try; when it fails, setup lists it under uncovered as web UI. ---
       if (state.webUi.has(name)) {
         return `${name} is listed under uncovered as ${WEB_UI}: do not try it again; go on with the other projects ` +
@@ -1412,8 +1424,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       if (!proven.length) return null;
       const web = fresh.filter((name) => state.webUi.has(name));
       const aside = fresh.filter((name) => !proven.includes(name) && !web.includes(name));
+      const reason = (name: string) => state.tooMany.has(name) ? manyServicesReason(state.tooMany.get(name)!)
+        : TIME_LEFT_OUT;
       let yaml = withUncovered(state.lastFile, [...derivedOf(f, web), ...aside.flatMap((name) =>
-        webUiPaths(f, name, mapFiles).map((path) => ({ path, reason: TIME_LEFT_OUT })))], [...web, ...aside]);
+        webUiPaths(f, name, mapFiles).map((path) => ({ path, reason: reason(name) })))], [...web, ...aside]);
       let map: Coverage;
       try {
         f = parseReviewFile(withOurs(yaml));

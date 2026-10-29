@@ -21,6 +21,11 @@ more later: it tries every uncovered entry again, so fix what its reason names f
 one lockfile at the root) share one environment image when they have the same `image`, `install` and
 `install_root` (the directory the install runs in); otherwise each project builds its own.
 
+A backend whose tests need three or more services (databases, caches, object stores, queues: what its CI job or
+compose file starts) does not run within setup's time, so setup does not try it: it lists it under `uncovered`
+("needs postgres, redis and minio; setup does not start three or more services: set it up by hand, or with fewer").
+Write its project in `.arnx/review.yaml` yourself, then `arnx approve`; with fewer services setup tries it.
+
 A project with no tests of its own (common in apps a coding agent built) is fine: setup checks its environment with
 arnx's own one-line test instead of a suite, and says so in the table (`no tests of its own; arnx's one-line test
 runs`). Reviews then run only the tests arnx writes. A `test_command` that deletes or writes files (`rm`, `mv`, `cp`,
