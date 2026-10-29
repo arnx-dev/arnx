@@ -1685,6 +1685,22 @@ function failedSuite(s: ApprovedSuite, legacy: boolean, repo: string): string {
     ...(existsSync(join(repo, s.log)) ? [`  Full output: ${s.log}`] : [])].join("\n");
 }
 
+/** The proof of review.yaml before `arnx setup --project` rewrote it: its `approved` stamp, its baseline, and whether
+ * that baseline is the one the stamp proved. */
+export interface ProofBefore { approved: unknown; baseline: Baseline; proven: boolean }
+
+/** The proof review.yaml has now (ProofBefore); null when the file or its baseline does not read. */
+export function proofBefore(repo: string): ProofBefore | null {
+  try {
+    const f = loadReviewFile(repo, { requireApproved: false });
+    return { approved: f.raw.approved, baseline: readBaseline(repo),
+      proven: stampedBaseline(f) === baselineDigest(repo) };
+  } catch (e) {
+    if (!(e instanceof ArnxError)) throw e;
+    return null;
+  }
+}
+
 /** Run the suites again and stamp the file. With `project`, only that project runs, and only when every other
  * project is unchanged since the last approval. The suites run on what reviews will see: tracked files, and untracked
  * ones only with `untracked` (default: `[review] untracked`). Tests kept by `arnx accept` may fail while they match
@@ -1693,10 +1709,12 @@ function failedSuite(s: ApprovedSuite, legacy: boolean, repo: string): string {
  * runs that proved the projects setup recorded moments ago (SetupRun). A project whose part of the file, environment
  * and code are what its run had is not run again: that run, judged against today's baseline and accepted tests, is its
  * proof. One that runs again on the same code and environment passed moments ago, so a test failing outside the
- * baseline is flaky and joins it as such; otherwise the baseline never grows here. [approved, text, each suite] */
+ * baseline is flaky and joins it as such; otherwise the baseline never grows here. `before`: with `project`, the
+ * proof the file had before `arnx setup --project` rewrote it and its baseline (ProofBefore), which the other
+ * projects are checked against. [approved, text, each suite] */
 export async function approveFile(repo: string, o: { by: string; at: string; project?: string;
   sessionFactory?: SessionFactory; progress?: Say; untracked?: boolean; localPins?: string | null;
-  afterSetup?: SetupRun[] })
+  afterSetup?: SetupRun[]; before?: ProofBefore })
   : Promise<[boolean, string, ApprovedSuite[]]> {
   const say = o.progress ?? (() => {});
   const f = loadReviewFile(repo, { requireApproved: false });
@@ -1710,7 +1728,8 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
   const next: Baseline = new Map([...base].filter(([name]) => f.projects.some((p) => p.name === name)));
   let run = f.projects;
   if (o.project) {
-    const prev = (f.raw.approved as { projects?: Record<string, string> } | undefined)?.projects;
+    const prev = ((o.before ? o.before.approved : f.raw.approved) as { projects?: Record<string, string> } |
+      undefined)?.projects;
     if (!f.projects.some((p) => p.name === o.project)) return [false, `no project ${o.project} in review.yaml`, []];
     if (!prev) return [false, "no earlier proof with per-project hashes; run `arnx approve` without --project", []];
     const changed = f.projects.filter((p) => p.name !== o.project && prev[p.name] !== projectDigest(f, p.name));
@@ -1718,7 +1737,9 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
       return [false, `${changed.map((p) => p.name).join(", ")} changed since its proof; run \`arnx approve\` ` +
         "without --project", []];
     }
-    if (stampedBaseline(f) !== baselineDigest(repo)) {
+    const same = (a: unknown, b: unknown) => JSON.stringify(a ?? []) === JSON.stringify(b ?? []);
+    if (o.before ? !o.before.proven || f.projects.some((p) => p.name !== o.project &&
+        !same(base.get(p.name), o.before!.baseline.get(p.name))) : stampedBaseline(f) !== baselineDigest(repo)) {
       return [false, `${BASELINE_FILE} changed since its proof; run \`arnx approve\` without --project`, []];
     }
     run = f.projects.filter((p) => p.name === o.project);

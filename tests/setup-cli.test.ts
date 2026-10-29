@@ -345,3 +345,37 @@ test("the proof after setup counts inside the limit: past it, the proof stops an
     }
   }
 });
+
+test("setup --project after a proven setup: that project is proven again and joins the others' earlier proof",
+  async () => {
+    const repo = initRepo(join(tmp(), "two"));
+    for (const d of ["api", "web"]) {
+      mkdirSync(join(repo, d, "tests"), { recursive: true });
+      writeFileSync(join(repo, d, "app.py"), "x = 1\n");
+      writeFileSync(join(repo, d, "tests", "test_x.py"), "def test_x():\n    assert True\n");
+    }
+    commit(repo, "two");
+    expect(await new Cli({ cwd: repo, env: ENV }).run("init")).toBe(0);
+    expect(await new Cli({ cwd: repo, env: ENV }).run("consent", "--yes")).toBe(0);
+    const two = "version: 1\nprojects:\n" + ["api", "web"].map((d) => `  ${d}:\n    root: ${d}\n    language: python\n` +
+      "    image: python:3.12\n    test_command: python -m pytest -q {targets}\n").join("");
+    const ran: string[] = [];
+    const pass = (): SessionFactory => async <T>(cfg: { name: string }, snap: string, _l: string,
+      body: (r: Runner) => Promise<T>) => {
+      ran.push(cfg.name);
+      return body(new FakeSession(snap, () => [junitXml([[`${cfg.name}/tests/test_x.py`, "test_x", "passed", ""]]),
+        "out", false]));
+    };
+    const all = new ScriptedAgent([[tool("try_project", { yaml: two, project: "api" })],
+      [tool("try_project", { yaml: two, project: "web" })], [tool("propose", { yaml: two })], [text("done")]]);
+    let cli = new Cli({ cwd: repo, env: ENV, setupModel: all, setupSessions: pass(), approveSessions: pass() });
+    expect(await cli.run("setup", "--yes")).toBe(0);
+    ran.length = 0;
+    const one = new ScriptedAgent([[tool("try_project", { yaml: two, project: "web" })], [tool("propose", { yaml: two })],
+      [text("done")]]);
+    cli = new Cli({ cwd: repo, env: ENV, setupModel: one, setupSessions: pass(), approveSessions: pass() });
+    expect(await cli.run("setup", "--project", "web", "--yes")).toBe(0);
+    expect(cli.stdout).toContain("✓ Environment proven");
+    expect(ran).toEqual(["web"]);
+    expect(isFileApproved(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")))).toBe(true);
+  });
