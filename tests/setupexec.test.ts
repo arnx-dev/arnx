@@ -111,6 +111,12 @@ test("the copy at /src is reset to the snapshot: changes undone, additions remov
   utimesSync(join(to, "b.py"), later, later);
   m.sync();
   expect(readFileSync(join(to, "b.py"), "utf8")).toBe("b = 1\n");
+  // A file a run changed in the snapshot since the last sync reaches the copy too.
+  writeFileSync(join(from, "b.py"), "b = 3\n");
+  const after = new Date(Date.now() + 10_000);
+  utimesSync(join(from, "b.py"), after, after);
+  m.sync();
+  expect(readFileSync(join(to, "b.py"), "utf8")).toBe("b = 3\n");
 });
 
 test("exec before any try_project says to call try_project first and starts nothing", async () => {

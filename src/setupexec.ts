@@ -58,7 +58,8 @@ const same = (a: Stats, b: Stats) => a.isDirectory() === b.isDirectory() && a.is
  * the container (Rust) stays valid; one copied anew gets a new mtime, so a build that saw it changed builds again.
  * The reports of earlier runs (REPORT_DIR) are not copied. */
 export class Mirror {
-  /** Each file's size and mtime as last copied or checked: a file that still has them is unchanged. */
+  /** Each file's size and mtime, in `from` and in `to`, as last copied or checked: a file whose two still have them
+   * is unchanged. */
   private seen = new Map<string, string>();
 
   constructor(readonly from: string, readonly to: string) {}
@@ -84,16 +85,16 @@ export class Mirror {
         rmSync(d, { force: true });
         symlinkSync(target, d);
       } else if (st.isFile()) {
-        const stamp = (x: Stats) => `${x.size}:${x.mtimeMs}`;
-        if (now && this.seen.get(r) === stamp(now)) continue;
+        const stamp = (x: Stats, y: Stats) => `${x.size}:${x.mtimeMs}|${y.size}:${y.mtimeMs}`;
+        if (now && this.seen.get(r) === stamp(st, now)) continue;
         // Touched, not changed (a kept run touches what changed since the last one): kept, with its new mtime.
         if (now && now.size === st.size && readFileSync(d).equals(readFileSync(s))) {
-          this.seen.set(r, stamp(now));
+          this.seen.set(r, stamp(st, now));
           continue;
         }
         rmSync(d, { force: true });
         copyFileSync(s, d);
-        this.seen.set(r, stamp(lstatSync(d)));
+        this.seen.set(r, stamp(st, lstatSync(d)));
       }
     }
   }
