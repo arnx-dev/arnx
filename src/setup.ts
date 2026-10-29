@@ -1317,6 +1317,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
             emit("setup.sandbox_only", { project: name, files: r.sandboxed });
             attempt({ ok: false, reused: false, summary: "", failing: 0, skips: 0, hints: "",
               error: clip(`sandbox: ${r.sandboxed.join(", ")}`, 500) });
+            // The same try again, with the files: a web UI app's one try is still to come.
+            state.tried.delete(name);
             return tryProject(input);
           }
         }

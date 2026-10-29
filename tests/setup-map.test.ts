@@ -120,6 +120,18 @@ test("a web UI app gets one try; propose asks once about the rest, then lists it
   ]);
 });
 
+test("a web UI app whose try first needs a file .arnxignore leaves out still gets its one try after it", async () => {
+  writeFileSync(join(repo, "web", "fixture.json"), "{}\n");
+  writeFileSync(join(repo, ".arnxignore"), "web/fixture.json\n");
+  commit(repo, "fixture");
+  const missing = "Error: ENOENT: no such file or directory, open '/src/web/fixture.json'";
+  const web: SessionFactory = async (cfg, snap, _log, body) => body(new FakeSession(snap, () =>
+    [junitXml([["web/src/app.test.tsx", "renders", "error", missing]]), missing, false]));
+  const m = new ScriptedAgent([[tool("try_project", { yaml: BOTH, project: "web" })], [text("stop")]]);
+  await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: web });
+  expect(result(m, 1)).toContain("web is a web UI app (react-dom among its dependencies), which gets one try");
+});
+
 test("a web UI app at the repository root lists only its own paths, not **", () => {
   const f = parseReviewFile(`version: 1\nprojects:\n${API}  site:\n    root: .\n    language: typescript\n` +
     "    runner: vitest\n    image: node:22-slim\n    test_command: npx vitest run {targets}\n");
