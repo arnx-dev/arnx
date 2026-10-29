@@ -1,21 +1,28 @@
 // Hints for the setup agent about why a suite's tests fail, read from the failures themselves: a module that is not
-// installed or not importable, an environment variable read without a default, a host that does not resolve, a
-// connection refused, and tests that pass once the rest of the suite is left out. Each hint quotes the line it comes
-// from and is only a hint: the agent still reads the output and decides, and arnx changes nothing in the file.
+// installed or not importable, a system library or a program missing from the image, an environment variable read
+// without a default, a variable env sets that the error names or whose value it quotes, a host that does not resolve, a
+// connection refused, a test file that does not load, and tests that pass once the rest of the suite is left out. Each
+// hint quotes the line it comes from and is only a hint: the agent still reads the output and decides, and arnx
+// changes nothing in the file.
 // A failure that matches no signature gets no hint, so the agent sees it as it did before; a wrong hint is worse than
 // none, which is why every signature here is narrow.
 import { existsSync } from "node:fs";
 import { join, posix } from "node:path";
 import type { TestResult } from "./adapters/types";
 import type { ReviewConfig } from "./config";
+import { envValue } from "./secrets";
 
-export type HintKind = "missing-package" | "import-path" | "missing-variable" | "unresolved-host" |
-  "connection-refused" | "order-dependent" | "genuine-failure";
+export type HintKind = "missing-package" | "import-path" | "missing-library" | "missing-program" |
+  "missing-variable" | "env-value" | "unresolved-host" | "connection-refused" | "does-not-load" | "order-dependent" |
+  "genuine-failure";
 
 /** source: who judged it when it is not a signature (the experimental JEV, with its confidence). */
 export interface Hint { kind: HintKind; detail: string; files: string[]; evidence: string; source?: string }
 
 const LOCAL = /^(?:localhost|127\.\d+\.\d+\.\d+|::1|\[::1\]|0\.0\.0\.0)$/;
+
+// A name that reads as an environment variable, so a short or lowercase key in env is never looked for in errors.
+const ENV_NAME = /^[A-Z][A-Z0-9_]{3,}$/;
 
 const failed = (t: TestResult) => t.outcome === "failed" || t.outcome === "error";
 
@@ -27,6 +34,26 @@ function lineOf(text: string, index: number): string {
   const start = text.lastIndexOf("\n", index) + 1;
   const end = text.indexOf("\n", index);
   return text.slice(start, end === -1 ? undefined : end).replace(MARKS, "").trim().slice(0, 200);
+}
+
+/** Whether a failing result stands for a whole test file that did not load, so none of its tests ran: pytest's
+ * collection error, or a vitest or node file that failed before its tests (one result named after the file). */
+export function loadFailure(t: TestResult): boolean {
+  if (!failed(t) || !t.fileAttr) return false;
+  if (/^collection failure\b/.test(t.message)) return true;
+  return t.name === t.fileAttr || t.name.endsWith(`/${t.fileAttr}`) || t.fileAttr.endsWith(`/${t.name}`);
+}
+
+/** The line of a failure that says what went wrong: its first line that says something, except under pytest's
+ * "collection failure" header, where it is the traceback's last "E" line (the exception the import raised). */
+export function errorLine(message: string): string {
+  const lines = message.split("\n");
+  if (/^collection failure\b/.test(lines[0] ?? "")) {
+    const rest = lines.slice(1);
+    const line = rest.filter((l) => /^E\s/.test(l)).at(-1) ?? rest.find((l) => l.trim());
+    if (line) return line.replace(MARKS, "").trim().slice(0, 200);
+  }
+  return firstLine(message);
 }
 
 /** Whether a Python top-level module name is a file or folder of the repository, at its root or on the way to the
@@ -54,6 +81,12 @@ export function classify(message: string, cfg: ReviewConfig, snap: string): Omit
     if (name.startsWith("node:")) return null;
     return { kind: "missing-package", detail: name, evidence: lineOf(message, m.index) };
   }
+  if ((m = /(lib[\w+.-]*?\.so(?:\.[\w.]+)?): cannot open shared object file/.exec(message))) {
+    return { kind: "missing-library", detail: m[1]!, evidence: lineOf(message, m.index) };
+  }
+  if ((m = /spawn (\S+) ENOENT|\bsh: \d+: (\S+): not found|(?:^|\s)(?:ba)?sh: ([\w./-]+): command not found/.exec(message))) {
+    return { kind: "missing-program", detail: (m[1] ?? m[2] ?? m[3])!, evidence: lineOf(message, m.index) };
+  }
   // os.environ["X"] raises from os.py; a KeyError on any other mapping is not about the environment.
   if ((m = /KeyError: '([A-Za-z_][A-Za-z0-9_]*)'/.exec(message)) && /raise KeyError\(key\) from None/.test(message)) {
     return { kind: "missing-variable", detail: m[1]!, evidence: lineOf(message, m.index) };
@@ -70,8 +103,23 @@ export function classify(message: string, cfg: ReviewConfig, snap: string): Omit
   if ((m = /ECONNREFUSED ([\w.:[\]-]+)|connection to server at "([^"]+)"[^\n]*(?:\n[^\n]*)?refused|Connection refused|\[Errno 111\]/.exec(message))) {
     return { kind: "connection-refused", detail: m[1] ?? m[2] ?? "", evidence: lineOf(message, m.index) };
   }
+  // A variable env sets, named or quoted by its value on the line that says what went wrong (not the source lines a
+  // traceback prints): the value env gives is wrong, or it overrides a default the tests set themselves. A KeyError
+  // names a key of some mapping; os.environ cannot raise one for a variable env sets.
+  const line = errorLine(message);
+  if (/^KeyError\b/.test(line)) return null;
+  const keys = Object.keys(cfg.env);
+  const name = keys.find((k) => ENV_NAME.test(k) && word(k).test(line)) ??
+    keys.find((k) => [cfg.env[k]!, envValue(cfg.env[k]!)].some((v) => ENV_VALUE.test(v) && word(v).test(line)));
+  if (name) return { kind: "env-value", detail: name, evidence: line };
   return null;
 }
+
+// A value worth looking for in an error line: 4+ characters, not a number, not a word any line may hold.
+const ENV_VALUE = /^(?![\d.]+$)(?!(?:true|false|none|null|test|yes)$).{4,}$/i;
+
+/** `s` as a whole token: no letter, digit, `_` or `$` right before or after it. */
+const word = (s: string) => new RegExp(`(?<![\\w$])${escaped(s)}(?![\\w$])`);
 
 // A line saying a module or a file is not there, in the words of pytest, node, vitest and the OS.
 const MISSING = /Cannot find (?:module|package)|Failed to (?:resolve import|load url)|Could not resolve|No module named|ModuleNotFoundError|ENOENT|FileNotFoundError|No such file or directory|does not exist/;
@@ -126,7 +174,7 @@ export function firstErrors(results: TestResult[] | null, cfg: ReviewConfig): st
     if (!failed(t) || !t.fileAttr || first.has(t.fileAttr) || cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))) {
       continue;
     }
-    const line = firstLine(t.message);
+    const line = errorLine(t.message);
     if (line) first.set(t.fileAttr, line);
   }
   const files = [...first.keys()].sort();
@@ -136,12 +184,14 @@ export function firstErrors(results: TestResult[] | null, cfg: ReviewConfig): st
     files.slice(0, FIRST_ERRORS_MAX).map((f) => `- ${f}: ${first.get(f)}`).join("\n");
 }
 
-/** Hints for the failures outside known_failing, one per kind and detail, with the files they come from. */
+/** Hints for the failures outside known_failing, one per kind and detail, with the files they come from. A file that
+ * does not load and matches no signature gets a hint of its own, named by its error: it hides every test in it. */
 export function diagnose(results: TestResult[] | null, cfg: ReviewConfig, snap: string): Hint[] {
   const hints = new Map<string, Hint>();
   for (const t of results ?? []) {
     if (!failed(t) || cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))) continue;
-    const h = classify(t.message, cfg, snap);
+    const h = classify(t.message, cfg, snap) ??
+      (loadFailure(t) ? { kind: "does-not-load" as const, detail: errorLine(t.message), evidence: "" } : null);
     if (!h) continue;
     const key = `${h.kind}\0${h.detail}`;
     const seen = hints.get(key) ?? { ...h, files: [] };
@@ -184,13 +234,28 @@ function sentence(h: Hint, cfg: ReviewConfig): string {
         ? `\`${h.detail}\` is in the repository but cannot be imported: an import path problem (working directory, ` +
           "rootdir or PYTHONPATH), not a missing package"
         : `the tests import \`${h.detail}\`, which is not there: a file a build step generates, or a wrong path`;
+    case "missing-library":
+      return `system library \`${h.detail}\` is not in the image: install the system package that provides it ` +
+        "(apt-get on Debian images, apk on Alpine) in install, or use an image that has it";
+    case "missing-program":
+      return `program \`${h.detail}\` is not installed where the tests run: install it in install. A server the ` +
+        "test starts itself (redis-server, postgres) must be in the image too: a declared service runs in its own " +
+        "container";
+    case "does-not-load":
+      return `test files do not load (\`${h.detail}\`), so none of their tests run; recorded, each would hide every ` +
+        "test in it. Make them load: install what they import (a package, a system library, a program), set what " +
+        "they read when imported, or fix the import path";
     case "missing-variable":
       return `variable \`${h.detail}\` is read without a default and is not set: give it a test value in env, ` +
         "unless the code needs a real one from outside";
+    case "env-value":
+      return `the tests fail on variable \`${h.detail}\`, which env sets: env's value is not one the code accepts ` +
+        "(its format or length), or it overrides a default the tests set themselves (conftest, a setup file). Give " +
+        "it a valid test value, or take it out of env";
     case "unresolved-host":
       return `a host name does not resolve${h.detail ? ` (${h.detail})` : ""}. Declared services resolve in the ` +
-        "sandbox, so this host is not one: the test needs the internet (then known_failing, with that reason in " +
-        "notes) or a service the file does not declare";
+        "sandbox, so this host is not one: the test needs the internet (then try the project again unchanged and it " +
+        "is recorded as failing today) or a service the file does not declare";
     case "connection-refused":
       if (service) return `service \`${service.name}\` refuses connections: not ready yet (give it a ready check) or another port`;
       if (LOCAL.test(h.detail.replace(/:\d+$/, "").replace(/^\[|\]$/g, ""))) {

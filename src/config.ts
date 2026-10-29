@@ -7,14 +7,16 @@ import { join } from "node:path";
 import { Document, parseDocument, visit } from "yaml";
 import type { ScalarTag, Tags } from "yaml";
 import { getAdapter } from "./adapters";
+import { baselineDigest } from "./baseline";
 import { python } from "./adapters/python";
 import type { Adapter, AdapterId } from "./adapters/types";
 import { ArnxError, SetupRequired } from "./errors";
-import { isSecretEnvName, type SecretPin } from "./secrets";
+import { GENERATED, isSecretEnvName, type SecretPin } from "./secrets";
 import { purePosix, pyJson, pyStr, pyTruthy } from "./util";
 
 export const KEYS = new Set(["version", "image", "workdir", "install", "test_command", "services", "env", "notes",
-  "known_failing", "tests_dir", "allow_env_names", "approved", "language", "allow_secret_looking", "typecheck"]);
+  "known_failing", "tests_dir", "allow_env_names", "approved", "language", "allow_secret_looking", "typecheck",
+  "deps_dir", "sandbox_only"]);
 export const SERVICE_KEYS = new Set(["image", "env", "ready"]);
 export const SERVICE_NAME = /^[a-z][a-z0-9-]{0,30}$/;
 
@@ -48,6 +50,9 @@ export interface ReviewConfig {
   installRoot: string;
   /** The project's type check (TypeScript only), run once per review apart from the tests; absent when not set. */
   typecheck?: string;
+  /** Where install put the dependencies in the image, outside /src (TypeScript only): every run links each
+   * node_modules under it into the same place under the install root (depsLink in sandbox.ts). */
+  depsDir?: string;
 }
 
 type Raw = Record<string, unknown>;
@@ -106,9 +111,9 @@ function strMap(value: unknown, name: string, problems: string[]): Record<string
 }
 
 function secretNames(env: Record<string, string>, where: string, allow: Set<string>): string[] {
-  return Object.keys(env).filter((k) => isSecretEnvName(k) && !allow.has(k)).map((k) =>
-    `${where}.${k}: looks like a secret; arnx passes no secrets to tests (list it under allow_env_names if it is a ` +
-    "throwaway value)");
+  return Object.keys(env).filter((k) => isSecretEnvName(k) && !allow.has(k) && !GENERATED.test(env[k]!)).map((k) =>
+    `${where}.${k}: looks like a secret; arnx passes no secrets to tests (write arnx:generated for a throwaway value ` +
+    "arnx makes, or list the name under allow_env_names if it holds one)");
 }
 
 /** Python's `== 1`: 1, 1.0 and True. */
@@ -145,7 +150,17 @@ function parseYaml(text: string): unknown {
 }
 
 export const FILE_KEYS = new Set(["version", "services", "allow_env_names", "projects", "uncovered", "approved",
-  "allow_secret_looking"]);
+  "allow_secret_looking", "sandbox_only"]);
+/** Files .arnxignore leaves out that the tests need: setup writes them, each run gets them in its sandbox, and no
+ * model is sent them. */
+export const SANDBOX_KEY = "sandbox_only";
+
+function parseSandbox(value: unknown, problems: string[]): string[] {
+  return strList(value, SANDBOX_KEY, problems).map((p) => rel(p, SANDBOX_KEY, problems));
+}
+
+/** The sandbox-only files of a parsed review.yaml (a project's `raw` is the whole file). */
+export const sandboxOnlyOf = (raw: Raw): string[] => parseSandbox(raw[SANDBOX_KEY], []);
 /** Files the user allowed although they hold key-shaped text; written by `arnx allow-secret`. */
 const SECRET_KEY = "allow_secret_looking";
 const PIN = /^[0-9a-f]{16}$/;
@@ -195,7 +210,7 @@ export function approvalStamp(repo: string): { by: string; at: string; current: 
   if (!isMap(raw) || !isMap(raw.approved)) return null;
   let current = false;
   try {
-    current = isFileApproved(parseReviewFile(text));
+    current = isProven(repo, parseReviewFile(text));
   } catch (e) {
     if (!(e instanceof ArnxError)) throw e;
   }
@@ -242,8 +257,10 @@ export function withoutSecretPins(text: string, paths: string[]): string {
 /** The allow-list as YAML to append to a file that has none (setup adds the user's to the agent's file). */
 export const secretPinsYaml = (pins: SecretPin[]) =>
   toYaml({ [SECRET_KEY]: pins.map((p) => ({ path: p.path, matches: [...p.matches] })) });
+/** The sandbox-only files as YAML to append to a file that has none (setup adds them to the agent's file). */
+export const sandboxYaml = (paths: string[]) => toYaml({ [SANDBOX_KEY]: [...paths].sort() });
 export const PROJECT_KEYS = new Set(["root", "language", "runner", "image", "install", "test_command", "services", "env",
-  "owns", "uses", "notes", "known_failing", "tests_dir", "install_root", "typecheck"]);
+  "owns", "uses", "notes", "known_failing", "tests_dir", "install_root", "typecheck", "deps_dir"]);
 
 export interface Uncovered { path: string; reason: string }
 
@@ -319,17 +336,7 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
   const commandProblems = [...adapter.validateCommand(spec.test_command, runner),
     ...typeof spec.test_command === "string" && fileWrite(spec.test_command) !== null
       ? [writes(fileWrite(spec.test_command)!)] : [],
-    ...typeof spec.test_command === "string" && runner !== "node" && afterTargets(spec.test_command) !== null
-      ? [`test_command: \`${afterTargets(spec.test_command)}\` comes after {targets}: arnx adds the runner's report ` +
-        "options at the end, so they would go to that command and no report is written. End test_command with the " +
-        "runner's own options"] : [],
-    ...typeof spec.test_command === "string" && runner !== "node" && quotedTargets(spec.test_command)
-      ? ["test_command: {targets} is inside quotes: arnx adds the runner's report options at the end, after the " +
-        "closing quote, so no report is written. Leave the runner and {targets} outside the quotes (make build && " +
-        "<runner> {targets})"] : [],
-    ...typeof spec.test_command === "string" && runner !== "node" && subshellTargets(spec.test_command)
-      ? ["test_command: {targets} is inside parentheses: the report options arnx adds at the end would follow the " +
-        "`)`, so no report is written. Leave the runner and {targets} outside them (cd app && <runner> {targets})"]
+    ...typeof spec.test_command === "string" && runner !== "node" ? reportProblems(spec.test_command, adapter, runner)
       : []].map((p) => at + p);
   problems.push(...commandProblems);
   const command = commandProblems.length ? "" : spec.test_command as string;
@@ -339,6 +346,14 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
       problems.push(`${at}typecheck: must be one shell command (use && to chain)`);
     } else if (adapter.id !== "typescript") problems.push(`${at}typecheck: only for typescript projects`);
     else typecheck = spec.typecheck;
+  }
+  let depsDir: string | undefined;
+  if ("deps_dir" in spec) {
+    if (typeof spec.deps_dir !== "string" || !/^\/[\w.@+/-]+$/.test(spec.deps_dir) ||
+      /^\/src(?:\/|$)/.test(spec.deps_dir)) {
+      problems.push(`${at}deps_dir: must be an absolute path in the image outside /src, such as /opt/deps`);
+    } else if (adapter.id !== "typescript") problems.push(`${at}deps_dir: only for typescript projects`);
+    else depsDir = spec.deps_dir.replace(/\/+$/, "");
   }
   const env = strMap(spec.env, `${at}env`, problems);
   problems.push(...secretNames(env, `${at}env`, allow));
@@ -358,7 +373,7 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
   const knownFailing = strList(spec.known_failing, `${at}known_failing`, problems);
   return { raw: fileRaw, name, language: adapter.id, runner, image: image as string, workdir, install,
     testCommand: command, services: own, env, notes, knownFailing, testsDir, owns, uses, installRoot,
-    ...(typecheck === undefined ? {} : { typecheck }) };
+    ...(typecheck === undefined ? {} : { typecheck }), ...(depsDir === undefined ? {} : { depsDir }) };
 }
 
 export function parseReviewFile(text: string): ReviewFile {
@@ -371,6 +386,7 @@ export function parseReviewFile(text: string): ReviewFile {
   }
   const allow = new Set(strList(raw.allow_env_names, "allow_env_names", problems));
   parsePins(raw[SECRET_KEY], problems);
+  parseSandbox(raw[SANDBOX_KEY], problems);
   if (!("projects" in raw)) {
     const unknown = Object.keys(raw).filter((k) => !KEYS.has(k)).sort();
     if (unknown.length) problems.push(`unknown keys: ${unknown.join(", ")}`);
@@ -425,6 +441,15 @@ export function parseReviewConfig(text: string): ReviewConfig {
 
 export const fileDigest = (f: ReviewFile) => digest(f.projects[0]!);
 export const isFileApproved = (f: ReviewFile) => isApproved(f.projects[0]!);
+
+/** The baseline hash review.yaml's stamp holds (`approved.baseline`); null when it holds none. */
+export function stampedBaseline(f: ReviewFile): string | null {
+  const a = f.raw.approved;
+  return isMap(a) && typeof a.baseline === "string" ? a.baseline : null;
+}
+
+/** The file is proven, and so is `.arnx/baseline.json` as it is now (none, when the stamp holds no hash). */
+export const isProven = (repo: string, f: ReviewFile) => isFileApproved(f) && stampedBaseline(f) === baselineDigest(repo);
 
 function hash(value: unknown): string {
   return createHash("sha256").update(pyJson(value, { sortKeys: true, floatNumbers: true })).digest("hex");
@@ -508,6 +533,69 @@ export const subshellTargets = (command: string) => {
   return at.quote === "" && at.depth > 0;
 };
 
+/** The simple command that gets the last {targets} (cut at ;, &, | and newlines outside quotes and parentheses),
+ * when it does not call the runner itself outside quotes (`sh -c 'npx vitest run "$@"' _ {targets}`, `echo
+ * {targets}`): arnx's report options follow {targets}, so they would go to that command. null: the runner gets them. */
+export function targetsGoTo(command: string, runs: RegExp): string | null {
+  const end = command.lastIndexOf("{targets}");
+  if (end < 0) return null;
+  // Redirects to another descriptor (2>&1, &>) cut nothing.
+  const text = command.replace(/\d?>&\d?-?|&>>?/g, (r) => " ".repeat(r.length));
+  const bare = [...text]; // the command outside quotes and parentheses; the rest blanked
+  const cuts: number[] = [];
+  let quote = "", depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    const outside = quote === "" && depth === 0;
+    if (quote === "'") {
+      if (c === "'") quote = "";
+    } else if (c === "\\") {
+      bare[i] = " ";
+      if (i + 1 < bare.length) bare[i + 1] = " ";
+      i++;
+      continue;
+    } else if (quote === "\"") {
+      if (c === "\"") quote = "";
+    } else if (c === "'" || c === "\"") quote = c;
+    else if (c === "(") depth++;
+    else if (c === ")" && depth > 0) depth--;
+    else if (outside && /[;&|\n]/.test(c)) cuts.push(i);
+    if (!outside || quote !== "" || depth > 0) bare[i] = " ";
+  }
+  const from = Math.max(-1, ...cuts.filter((i) => i < end)) + 1;
+  const to = Math.min(text.length, ...cuts.filter((i) => i > end));
+  return runs.test(bare.slice(from, to).join("")) ? null : command.slice(from, to).trim();
+}
+
+/** Why arnx's report options would not reach the runner in this test command (they follow {targets}): one problem,
+ * the first that applies. A TypeScript command that links node_modules is told of deps_dir, which does it instead. */
+function reportProblems(command: string, adapter: Adapter, runner: string): string[] {
+  const link = adapter.id === "typescript" && command.includes("node_modules")
+    ? "; to link node_modules, set deps_dir instead" : "";
+  const after = afterTargets(command);
+  if (after !== null) {
+    return [`test_command: \`${after}\` comes after {targets}: arnx adds the runner's report options at the end, so ` +
+      "they would go to that command and no report is written. End test_command with the runner's own options"];
+  }
+  if (quotedTargets(command)) {
+    return ["test_command: {targets} is inside quotes: arnx adds the runner's report options at the end, after the " +
+      "closing quote, so no report is written. Leave the runner and {targets} outside the quotes (make build && " +
+      `<runner> {targets})${link}`];
+  }
+  if (subshellTargets(command)) {
+    return ["test_command: {targets} is inside parentheses: the report options arnx adds at the end would follow the " +
+      `\`)\`, so no report is written. Leave the runner and {targets} outside them (cd app && <runner> {targets})${link}`];
+  }
+  const to = targetsGoTo(command, adapter.runs(runner));
+  if (to !== null) {
+    const shown = to.length > 60 ? `${to.slice(0, 57)}...` : to;
+    return [`test_command: {targets} goes to \`${shown}\`, not to ${adapter.words(runner).runner}: arnx adds the ` +
+      "runner's report options after {targets}, so no report would be written. Call the runner itself with {targets} " +
+      `(make build && <runner> {targets})${link}`];
+  }
+  return [];
+}
+
 /** Why a test_command that writes is refused, naming what writes. A setup approved before the rule fails here on any
  * command after an upgrade, so it says how to fix it. */
 const writes = (part: string) => `test_command: must not delete or write files (rm, mv, cp, sed -i, tee, > file): ` +
@@ -518,7 +606,7 @@ export function loadReviewFile(repo: string, { requireApproved = true } = {}): R
   const path = reviewConfigPath(repo);
   if (!existsSync(path)) throw new SetupRequired("no .arnx/review.yaml; run `arnx setup`");
   const f = parseReviewFile(readFileSync(path, "utf8"));
-  if (requireApproved && !isFileApproved(f)) {
+  if (requireApproved && !isProven(repo, f)) {
     throw new SetupRequired(".arnx/review.yaml is not proven, or changed since its proof; run `arnx approve` to prove " +
       "it");
   }
@@ -531,6 +619,9 @@ export function loadReviewConfig(repo: string, { requireApproved = true } = {}):
   return f.projects[0]!;
 }
 
+/** A review.yaml with its anchors, aliases and merge keys (`<<: *base`) written out in full. */
+export const plainReviewYaml = (text: string): string => toYaml(parseYaml(text) as Raw);
+
 function toYaml(raw: Raw): string {
   const doc = new Document(raw, { version: "1.1", customTags: pyyamlTags });
   visit(doc, {
@@ -542,13 +633,16 @@ function toYaml(raw: Raw): string {
 }
 
 /** The file with an approval stamp. Floats keep a fraction so they read back as floats and the hash holds. A file
- * with projects also records each project's digest. */
-export function stampFile(f: ReviewFile, by: string, at: string): string {
+ * with projects also records each project's digest. `baseline`: the hash of `.arnx/baseline.json` (baselineDigest),
+ * null when there is none. */
+export function stampFile(f: ReviewFile, by: string, at: string, baseline: string | null = null): string {
   const approved: Raw = { by, at, sha256: fileDigest(f) };
   if (!f.legacy) approved.projects = Object.fromEntries(f.projects.map((p) => [p.name, projectDigest(f, p.name)]));
+  if (baseline) approved.baseline = baseline;
   return toYaml({ ...without(f.raw, "approved"), approved });
 }
 
-export function stamp(cfg: ReviewConfig, by: string, at: string): string {
-  return toYaml({ ...without(cfg.raw, "approved"), approved: { by, at, sha256: digest(cfg) } });
+export function stamp(cfg: ReviewConfig, by: string, at: string, baseline: string | null = null): string {
+  return toYaml({ ...without(cfg.raw, "approved"),
+    approved: { by, at, sha256: digest(cfg), ...(baseline ? { baseline } : {}) } });
 }

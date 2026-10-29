@@ -71,8 +71,10 @@ test("approve --yes --json: each project's suite, proven or not", async () => {
     const ok = new Cli({ cwd: repo, approveSessions: suite("passed") });
     expect(await ok.run("approve", "--yes", "--json", "--quiet")).toBe(0);
     expect(json(ok)).toEqual({ schema_version: 1, command: "approve", result: "ok", exit_code: 0, approved: true,
-      projects: [{ name: "pay", ok: true, summary: "1 passed", accepted_failing: 0, unexpected: [] },
-        { name: "feed", ok: true, summary: "1 passed", accepted_failing: 0, unexpected: [] }],
+      projects: [{ name: "pay", ok: true, summary: "1 passed", accepted_failing: 0, unexpected: [],
+        baseline_failing: 0, left_baseline: [], flaky: [] },
+        { name: "feed", ok: true, summary: "1 passed", accepted_failing: 0, unexpected: [],
+        baseline_failing: 0, left_baseline: [], flaky: [] }],
       next: ["arnx review"] });
     expect(ok.stderr).toContain("✓ Environment proven");
     const bad = new Cli({ cwd: repo, approveSessions: suite("failed") });
@@ -81,7 +83,7 @@ test("approve --yes --json: each project's suite, proven or not", async () => {
     expect(o).toMatchObject({ result: "fail", exit_code: 2, approved: false, next: ["arnx approve"] });
     expect((o.projects as { name: string; ok: boolean; unexpected: string[] }[]).map((p) => [p.name, p.ok,
       p.unexpected])).toEqual([["pay", false, ["tests/test_a.py::test_a"]], ["feed", false, ["tests/test_a.py::test_a"]]]);
-    expect(o.detail).toContain("pay: 1 failed; failing outside known_failing");
+    expect(o.detail).toContain("pay: 1 failed; failing outside the baseline");
   } finally {
     sandboxOptions.docker = saved;
   }

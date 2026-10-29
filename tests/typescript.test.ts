@@ -134,7 +134,7 @@ test("node:test results come from arnx's reporter, with the file of every test",
 
 test("setup hints say dependencies under /src are hidden at test time", () => {
   expect(ts.setupHints).toContain("mounted over /src");
-  expect(ts.setupHints).toContain("NODE_PATH");
+  expect(ts.setupHints).toContain("set deps_dir");
 });
 
 test("node reporter: a file that defines no tests is not a passing test", () => {

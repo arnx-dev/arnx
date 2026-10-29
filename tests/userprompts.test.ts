@@ -156,7 +156,7 @@ test("arnx prompts --json: every key, overridden or not, with its placeholders",
   expect(await cli.run("prompts", "--json")).toBe(0);
   const json = JSON.parse(cli.stdout) as { prompts: { key: string; overridden: boolean; default_changed: boolean;
     placeholders: string[] }[]; cloud: boolean; file: string };
-  expect(json.prompts).toHaveLength(27);
+  expect(json.prompts).toHaveLength(28);
   expect(json.prompts.find((p) => p.key === "rank.system")).toEqual({ key: "rank.system", overridden: true,
     default_changed: true, placeholders: [] });
   expect(json.prompts.find((p) => p.key === "hunt.task")).toEqual({ key: "hunt.task", overridden: false,

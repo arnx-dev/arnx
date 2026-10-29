@@ -1,6 +1,6 @@
 // Tool-use loop. The model sees only the snapshot: it can list, read and search it, write test files under one
 // directory, and run the configured test command on those files. No shell. Spend is counted per call and the loop
-// stops before a call once the budget is spent (it can overshoot by at most one call).
+// stops before a call once the budget is spent (it can overshoot by at most one call), or once its time is up.
 import { spend } from "./spend";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync,
   writeFileSync } from "node:fs";
@@ -8,7 +8,7 @@ import { basename, dirname, join, posix, relative, resolve, sep } from "node:pat
 import { Worker } from "node:worker_threads";
 import { python } from "./adapters/python";
 import type { Adapter } from "./adapters/types";
-import { ModelError } from "./errors";
+import { ModelError, NoCredits } from "./errors";
 import { clip, emitModelCall, emitTurn } from "./events";
 import { recordCall } from "./outage";
 import { type AgentModel, addUsage, type Block, costUsd, type Message, NO_USAGE, type Tool, type Usage } from "./llm";
@@ -516,6 +516,8 @@ export interface ToolCall { id: string; name: string; input: Record<string, unkn
  * file each turn is logged to; without it nothing is written. */
 export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | "call">, o: { system: string;
   user: string; budgetUsd: number; prices: Prices; transcript?: string; maxTurns?: number;
+  /** No call starts once `now()` reaches it (stop "time"). */
+  deadline?: { at: number; now: () => number };
   onTurn?: (turn: number, tools: string[], costUsd: number, text: string, calls: ToolCall[]) => void;
   onTool?: (name: string, input: Record<string, unknown>) => void;
   /** Called when the model ends its turn: a message continues the conversation (within budget), null ends it. */
@@ -531,9 +533,14 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
     if (transcript) appendFileSync(transcript, JSON.stringify(line) + "\n");
   };
   if (transcript) mkdirSync(dirname(transcript), { recursive: true });
+  const timeUp = () => !!o.deadline && o.deadline.now() >= o.deadline.at;
   for (turn = 1; turn <= (o.maxTurns ?? 60); turn++) {
     if (cost >= o.budgetUsd) {
       stop = "budget";
+      break;
+    }
+    if (timeUp()) {
+      stop = "time";
       break;
     }
     const started = performance.now();
@@ -557,6 +564,7 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
         unknown_usage: e.unknownCalls, timed_out: e.timedOut, turn });
       log({ turn, stop_reason: "api_error", error: e.message, timed_out: e.timedOut, attempts: e.attempts,
         secs: Math.round((performance.now() - started) / 100) / 10 });
+      if (e instanceof NoCredits) throw e;
       break;
     }
     // A model with no price costs nothing here: its reply counts as billed with unknown usage.
@@ -602,7 +610,7 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
       }
       [final, stop] = [text, "end_turn"];
       o.onFinal?.(text, turn);
-      const next = cost < o.budgetUsd ? await o.followUp?.(text) ?? null : null;
+      const next = cost < o.budgetUsd && !timeUp() ? await o.followUp?.(text) ?? null : null;
       if (next === null) break;
       earlier.push(text);
       messages.push({ role: "user", content: next });

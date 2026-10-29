@@ -6,6 +6,7 @@ import { join, posix } from "node:path";
 import type { AdapterId } from "./adapters/types";
 import { workingTreeFiles } from "./change";
 import { loadReviewFile, reviewConfigPath } from "./config";
+import { type Facts, readFacts } from "./facts";
 import { loadIgnore } from "./ignore";
 import { notableOthers, onlyOtherLanguages, type OtherLanguage, surveyLanguages, type LanguageSurvey } from "./languages";
 
@@ -16,6 +17,8 @@ export interface Candidate {
   runner: string | null;
   packageManager: string | null;
   evidence: string[];
+  /** Test files under root that no deeper candidate of the same language holds. */
+  ownTests?: number;
 }
 
 export interface Detection {
@@ -27,6 +30,10 @@ export interface Detection {
   languages: Record<string, number>;
   /** Languages arnx does not review that the repository has enough of to name (languages.ts). */
   others?: OtherLanguage[];
+  /** What the files settle about each candidate (versions, managers, CI, services), for the draft. */
+  facts?: Facts;
+  /** Python, JavaScript/TypeScript and Rust source files, by language, for the draft. */
+  sources?: Record<string, string[]>;
 }
 
 const EXT_LANG: Record<string, string> = { py: "python", js: "typescript", jsx: "typescript", mjs: "typescript",
@@ -77,6 +84,19 @@ function jsRunner(pkg: Record<string, unknown>): string | null {
   return null;
 }
 
+/** The runner most of these test files import (node:test, bun:test, vitest), when one is imported by at least half
+ * of them; jest's globals need no import, so jest is never told this way. */
+export function testImports(texts: string[]): string | null {
+  const counts: Record<string, number> = {};
+  for (const t of texts) {
+    const m = /\bfrom\s+["'](node:test|bun:test|vitest)["']|require\(\s*["'](node:test|bun:test|vitest)["']\s*\)/.exec(t);
+    const runner = { "node:test": "node", "bun:test": "bun", vitest: "vitest" }[m?.[1] ?? m?.[2] ?? ""];
+    if (runner) counts[runner] = (counts[runner] ?? 0) + 1;
+  }
+  const [best, n] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0] ?? [null, 0];
+  return best && n * 2 >= texts.length ? best : null;
+}
+
 /** Whether a JavaScript/TypeScript project at `root` can be type checked: it has a tsconfig.json, and typescript is
  * among the dependencies of its package.json or of one above it (a workspace root). `read` gives a file's text
  * (relative to the repository root), "" when there is none. */
@@ -107,13 +127,16 @@ export function detect(repo: string, files?: string[]): Detection {
   const paths = all.filter((p) => !p.split("/").includes("node_modules"));
   const set = new Set(paths);
   const languages: Record<string, number> = {};
+  const sources: Record<string, string[]> = { python: [], typescript: [], rust: [] };
   for (const p of paths) {
     const lang = EXT_LANG[posix.extname(p).slice(1)];
     if (lang) languages[lang] = (languages[lang] ?? 0) + 1;
+    if (lang && lang in sources) sources[lang]!.push(p);
   }
-  const testsUnder = (root: string) =>
+  const testFiles = (root: string) =>
     paths.filter((p) => (root === "." || p.startsWith(root + "/")) &&
-      (TEST_FILE.test(p) || (p.endsWith(".rs") && p.includes("src/") && RUST_TEST.test(read(repo, p))))).length;
+      (TEST_FILE.test(p) || (p.endsWith(".rs") && p.includes("src/") && RUST_TEST.test(read(repo, p)))));
+  const testsUnder = (root: string) => testFiles(root).length;
   const lockIn = (dir: string) => {
     for (const d of ancestors(dir)) {
       for (const [file, manager] of LOCKS) if (set.has(d === "." ? file : `${d}/${file}`)) return manager;
@@ -121,6 +144,7 @@ export function detect(repo: string, files?: string[]): Detection {
     return null;
   };
   const candidates: Candidate[] = [];
+  const ownFiles = new Map<Candidate, string[]>();
   const workspaces = new Set<string>();
   for (const p of paths) {
     const name = posix.basename(p);
@@ -153,7 +177,15 @@ export function detect(repo: string, files?: string[]): Detection {
     }
   }
   for (const c of candidates) {
-    const n = testsUnder(c.root);
+    const files = testFiles(c.root);
+    const deeper = candidates.filter((o) => o.language === c.language && o.root !== c.root &&
+      (c.root === "." || o.root.startsWith(c.root + "/")));
+    const ext = c.language === "rust" ? /\.rs$/ : c.language === "python" ? /\.py$/ : /\.[cm]?[jt]sx?$/;
+    const own = files.filter((p) => ext.test(p) && !deeper.some((o) => p.startsWith(o.root + "/")));
+    c.ownTests = own.length;
+    ownFiles.set(c, own);
+    if (c.language === "typescript") c.runner = testImports(own.slice(0, 30).map((p) => read(repo, p))) ?? c.runner;
+    const n = files.length;
     c.evidence.push(`${n} test file${n === 1 ? "" : "s"}`);
     if (workspaces.has(c.root)) c.evidence.push("workspace root");
     if (c.language === "typescript" && typeCheckable((rel) => (set.has(rel) ? read(repo, rel) : ""), c.root)) {
@@ -171,7 +203,7 @@ export function detect(repo: string, files?: string[]): Detection {
     }
   }
   return { candidates, workspaces: [...workspaces].sort(), ci, compose, services: [...services].sort(), languages,
-    others: notableOthers(surveyLanguages(paths)) };
+    others: notableOthers(surveyLanguages(paths)), facts: readFacts(repo, paths, candidates, ownFiles), sources };
 }
 
 /** The detection as hints for the setup agent. */
@@ -200,6 +232,17 @@ export function describeDetection(d: Detection): string {
   if (d.ci.length) lines.push(`CI files: ${d.ci.join(", ")}`);
   if (d.compose.length) lines.push(`Compose files: ${d.compose.join(", ")}`);
   if (d.services.length) lines.push(`Service images mentioned: ${d.services.join(", ")}`);
+  const facts = d.facts;
+  if (facts) {
+    const clip = (t: string) => (t.length > 120 ? `${t.slice(0, 119)}…` : t);
+    const tests = [...new Set(facts.jobs.flatMap((j) => j.test.map((t) => `${clip(t)} (${j.id})`)))];
+    if (tests.length) lines.push(`CI test commands: ${list(tests, 6)}`);
+    const maybe = facts.projects.filter((p) => p.maybeServices.length)
+      .map((p) => `${p.root}: ${p.maybeServices.map((s) => `${s.value} (${s.from})`).join(", ")}`);
+    if (maybe.length) lines.push(`Services the code may use, left out of the draft: ${list(maybe, 6)}`);
+    const env = facts.projects.filter((p) => p.envNames.length).map((p) => `${p.root}: ${list(p.envNames, 12)}`);
+    if (env.length) lines.push(`Example env files name: ${list(env, 6)}`);
+  }
   const langs = Object.entries(d.languages).sort((a, b) => b[1] - a[1]).map(([l, n]) => `${l} ${n}`);
   if (langs.length) lines.push(`Source files by language: ${langs.join(", ")}`);
   if (d.others?.length) {

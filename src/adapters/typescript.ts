@@ -5,12 +5,14 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { endOnce, shQuote } from "../util";
 import { junitCases, MESSAGE_LIMIT } from "./junit";
-import { type Adapter, DEFAULT_ACCEPTED_DIR, type TestResult, type Words } from "./types";
+import { type Adapter, DEFAULT_ACCEPTED_DIR, type Listing, type TestResult, type Words } from "./types";
 
 const RUNNERS = ["vitest", "jest", "node", "bun"];
 const RUNNER_WORDS: Record<string, string> = { vitest: "vitest", jest: "jest", node: "node:test", bun: "bun test" };
 const RUNS: Record<string, RegExp> = { vitest: /\bvitest\b/, jest: /\bjest\b/, node: /\bnode\b.*\s--test\b/,
   bun: /\bbun\s+test\b/ };
+/** The line a runner prints once it has written its report, with the file. */
+const SAYS: Record<string, RegExp> = { vitest: /JUNIT report written to (.+)/g, jest: /Test results written to: (.+)/g };
 const SOURCE = /\.(?:c|m)?[jt]sx?$/;
 const TEST_FILE = /\.(?:test|spec)\.(?:c|m)?[jt]sx?$/;
 const SUPPORT = /^arnx-helpers\.(?:c|m)?[jt]sx?$/;
@@ -23,8 +25,19 @@ const NODE_REPORTER_PATH = "/src/.arnx-run/arnx-node-reporter.mjs";
 const NODE_REPORTER = `// Written by arnx into a throwaway copy of the repository.
 export default async function* reporter(source) {
   const stacks = new Map();
+  const stderr = new Map();
+  // stderr events name the file relative to the working directory, test events by its absolute path.
+  const stderrOf = (file) => {
+    for (const [k, v] of stderr) if (file === k || file.endsWith("/" + k)) return v;
+    return "";
+  };
   for await (const event of source) {
     const d = event.data ?? {};
+    // What a file wrote to stderr: where node puts the error of a file that fails while loading.
+    if (event.type === "test:stderr") {
+      stderr.set(d.file, (stderr.get(d.file) ?? "") + String(d.message ?? ""));
+      continue;
+    }
     if (event.type === "test:start") {
       const stack = stacks.get(d.file) ?? [];
       stack.length = d.nesting;
@@ -44,7 +57,13 @@ export default async function* reporter(source) {
     const loadFailure = event.type === "test:fail" && d.nesting === 0 && error?.failureType === "testCodeFailure"
       && String(d.file ?? "").endsWith(d.name);
     const outcome = loadFailure ? "error" : event.type === "test:fail" ? "failed" : d.skip || d.todo ? "skipped" : "passed";
-    const message = error ? String(error.cause?.message ?? error.message ?? error) : "";
+    let message = error ? String(error.cause?.message ?? error.message ?? error) : "";
+    // node says only "test failed" for such a file: its error line, then what it wrote to stderr.
+    const err = loadFailure ? stderrOf(String(d.file ?? "")).trim() : "";
+    if (err) {
+      const line = err.split("\\n").map((l) => l.trim()).find((l) => /^[\\w.]*(?:Error|Exception)\\b/.test(l));
+      message = (line ? line + "\\n" : "") + err.slice(-2000);
+    }
     yield JSON.stringify({ name, file: d.file ?? null, outcome, message }) + "\\n";
   }
 }
@@ -118,6 +137,40 @@ function parseJunitJs(text: string, root: string): TestResult[] | null {
     const name = [...describes, attrs.name ?? ""].join(" > ");
     return { testId: `${file || attrs.classname || ""}::${name}`, fileAttr: file, name, outcome, message };
   });
+}
+
+/** vitest 2 and later list a run's tests (`vitest list`, as JSON in a file), jest its test files (--listTests); node:test
+ * and bun test have no list form. vitest's must come from a test_command that says `vitest run`. */
+function listCommand(testCommand: string, targets: string[], listPath: string, runner: string): string | null {
+  const t = targets.map(shQuote).join(" ");
+  if (runner === "jest") return `${testCommand.replaceAll("{targets}", t)} --listTests --json`;
+  if (runner !== "vitest" || !/\bvitest\s+run\b/.test(testCommand)) return null;
+  return `${testCommand.replace(/\bvitest\s+run\b/, "vitest list").replaceAll("{targets}", t)} --json=${shQuote(listPath)}`;
+}
+
+// vitest 1 has no list command and no --json option; jest names an option it does not know this way.
+const UNKNOWN_OPTION = /\bUnknown option\b|\bUnrecognized CLI Parameter\b/i;
+
+/** vitest's list (its file: one entry per test, with its file) or jest's (a JSON array of file paths on one line). An
+ * exit by a signal (137: out of memory) or an option the runner does not know says nothing about the tests. */
+function parseList(output: string, listed: string | null, exitCode: number | null, runner: string, root: string)
+  : Listing | null {
+  if (exitCode === null || exitCode > 128 || UNKNOWN_OPTION.test(output)) return null;
+  if (exitCode !== 0) return { tests: null, files: [], broken: [], failed: true };
+  const json = runner === "vitest" ? listed
+    : output.split("\n").map((l) => l.trim()).find((l) => l.startsWith("[") && l.endsWith("]")) ?? null;
+  let entries: unknown;
+  try {
+    entries = JSON.parse(json ?? "");
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(entries)) return null;
+  const paths = entries.map((e) => runner === "vitest" ? (e as { file?: unknown } | null)?.file : e)
+    .filter((f): f is string => typeof f === "string");
+  if (paths.length !== entries.length) return null;
+  return { tests: runner === "vitest" ? entries.length : null, files: [...new Set(paths.map((f) => projectPath(f, root)))],
+    broken: [], failed: false };
 }
 
 const escapeRx = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -285,6 +338,13 @@ export const typescript: Adapter = {
     if (!rx || !rx.test(command)) return [`test_command: must run ${RUNNER_WORDS[runner] ?? runner} (the runner set for this project)`];
     return [];
   },
+  runs: (runner) => RUNS[runner] ?? /$^/,
+  // vitest names the file it wrote, which the project's configuration can choose over arnx's (see runTests); jest
+  // names it relative to where it ran. node and bun say nothing.
+  reportSaid: (output, runner) => {
+    const said = SAYS[runner];
+    return said ? [...output.matchAll(said)].at(-1)?.[1]?.trim() ?? null : undefined;
+  },
   command: (testCommand, targets, reportPath, runner) => {
     const t = targets.map(shQuote).join(" ");
     const r = shQuote(reportPath);
@@ -303,6 +363,8 @@ export const typescript: Adapter = {
   },
   parseReport: (text, runner, root) =>
     runner === "jest" ? parseJest(text, root) : runner === "node" ? parseNode(text, root) : parseJunitJs(text, root),
+  listCommand,
+  parseList,
   reportSetup: (snapshot, runner) => {
     if (runner !== "node") return;
     mkdirSync(join(snapshot, ".arnx-run"), { recursive: true });
@@ -323,11 +385,13 @@ export const typescript: Adapter = {
       "{targets} (npx jest {targets}, npx vitest run {targets}, node --test {targets}, bun test {targets}).",
     "- Tests run with the repository mounted over /src, which hides anything install wrote under /src (such as " +
       "node_modules). Install dependencies outside /src (for example copy package.json and the lockfile to " +
-      "/opt/deps and install there) and point the tests at them: link node_modules to /opt/deps/node_modules in " +
-      "test_command, or set NODE_PATH.",
+      "/opt/deps and install there, or copy the whole workspace to /opt/app) and set deps_dir to that directory: " +
+      "before every run arnx links each node_modules under it into the same place under /src. Do not link them " +
+      "in test_command, and never wrap it in sh -c: arnx adds its report options after {targets}, so the runner " +
+      "must get them.",
     "- When a project has a tsconfig.json and typescript among its dependencies (its package.json or the workspace " +
       "root's), add typecheck: the project's type check as one command, such as npx tsc --noEmit -p tsconfig.json " +
-      "(with the same node_modules link as test_command). Keep it out of test_command: arnx runs it once per review " +
+      "(deps_dir links node_modules for it too). Keep it out of test_command: arnx runs it once per review " +
       "without its generated tests and reports type errors apart from the tests. Leave it out for projects without " +
       "typescript.",
     "- A workspace is usually one project per package that has tests; when they install from one lockfile at the " +

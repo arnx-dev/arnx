@@ -104,10 +104,12 @@ export interface HuntRecord {
 /** One answered question, turned into tests. */
 export interface AnswerInput extends RoundBase { cfg: ReviewConfig; question: string; answer: string; diff: string }
 
-/** The setup agent's round: its tools are try_project and propose besides the read tools. */
+/** The setup agent's round: its tools are try_project, exec and propose besides the read tools. */
 export interface SetupInput extends RoundBase {
   /** What detect.ts found, as text. */
   hints: string;
+  /** The review.yaml draft.ts wrote from the detection's facts, for a setup from scratch ("" or absent: none). */
+  draft?: string;
   /** Files left out of the snapshot as secret-looking, described ("" when none). */
   withheld: string;
   /** Re-prove only this project of the current review.yaml. */
@@ -121,6 +123,8 @@ export interface SetupInput extends RoundBase {
   detection?: Detection;
   tree?: string;
   withheldFiles?: Withheld[];
+  /** Setup's time limit: no model call starts once `now()` reaches `at` (stop "time"). */
+  deadline?: { at: number; now: () => number };
 }
 
 export interface RoundInputs { review: ReviewInput; answer: AnswerInput; setup: SetupInput }

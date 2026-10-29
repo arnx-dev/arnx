@@ -285,11 +285,12 @@ Read the repository's manifests, CI configuration, compose files, test configura
 whose tests run on their own (a package, a service, a crate) and describe each as a project in a review.yaml. Prove \
 each project with try_project: it builds the project's Docker image (network allowed while installing), starts the \
 services it lists, and runs its existing suite with no internet apart from those services. Revise until every \
-project's suite runs, then submit the whole file with propose. propose checks that no file is owned by two projects \
-and that every file is owned, used, or listed under uncovered, and runs any project changed since it was proven: \
-there is no need to try every project again after editing another one.
+project's suite runs, then submit the whole file with propose. propose checks that no file is owned by two projects. \
+It runs each project changed since it was proven, so there is no need to try every project again after editing \
+another one. Source files outside every project come back to you once, by folder: put those a project tests under \
+its owns or uses, and arnx lists the rest under uncovered.
 
-$hints
+$hints$draft
 
 The YAML has these keys:
 version: 1
@@ -306,31 +307,55 @@ projects:
     test_command: <a command that runs the runner directly, with the placeholder {targets}>
     services: [<names from services above that this project's tests need>]
     env: {<NAME>: <value>}   # the only variables tests see; services are reachable with their name as host
-    owns: [<paths whose changes this project tests; default: its root>]
+    owns: [<paths whose changes this project tests; default: its root, usually right>]
     uses: [<paths it depends on but does not own, such as a shared library directory>]
     notes: [<short facts a test writer needs: how to point the code at the database, what must be stubbed>]
-    known_failing: [<test files that fail for reasons the environment cannot fix, such as needing the internet>]
-    tests_dir: <optional: where arnx writes its tests, relative to root; set it only when try_project says the \
-default is not picked up>
-uncovered: [{path: <path pattern>, reason: <why no project tests it: no tests, unsupported language, \
-infrastructure>}]
+    tests_dir: <optional: where arnx writes its tests, relative to root; arnx sets it from the runner's \
+configuration (vitest include, jest roots and testMatch, pytest testpaths), so set it only when try_project says \
+its folder is not picked up>
+uncovered: [{path: <path pattern>, reason: <why no project tests it: no tests, scripts, unsupported language, \
+infrastructure>}]   # source files only: leave docs, data and configuration out
 
 Paths in owns, uses and uncovered work like .gitignore: a trailing / names a directory, a leading / anchors to the \
 repository root, * stays in one directory and ** crosses directories.
 
 Rules:
 - Never put real secrets in env. A variable whose name contains KEY, TOKEN, SECRET, PASSWORD or CREDENTIAL is \
-refused unless listed in allow_env_names, which is only for throwaway values.
-- Propose one project per unit that is tested on its own; put shared code under uses of every project that imports \
+refused, unless its value is arnx:generated or its name is in allow_env_names (throwaway values only).
+- When the tests need a secret value but no real one, write arnx:generated. arnx sets 64 hex digits \
+(arnx:generated:base64: 32 bytes in URL-safe base64, such as a Fernet key), the same in every variable and service \
+that uses it.
+- Propose one project per unit that is tested on its own. Put shared code under uses of every project that imports \
 it.
-- List a test file in known_failing only when it fails for a reason the environment cannot fix, and say why in \
-notes.
-- try_project also places a one-line test in the project's tests_dir and checks the runner runs it. When it does \
-not (jest roots, vitest include or a testMatch that leaves the folder out), set tests_dir to a new, empty subfolder \
-inside a folder the configuration includes (for example __tests__/unit/arnx_generated), never to a folder that \
-holds the project's own tests; do not change the project's own configuration.
-- Record untested or unsupported paths under uncovered with a reason instead of leaving them out.
+- Tests that fail on the current code are recorded one by one as failing today. Leave them in the suite: do not \
+exclude tests in test_command. Fix only what the environment causes. Failures that look like the environment come \
+back to you once; trying the project again unchanged records them with their cause.
+- try_project also places a one-line test in the project's tests_dir and checks that the runner runs it. When it \
+does not, set tests_dir to a new, empty subfolder inside a folder the configuration includes (for example \
+__tests__/unit/arnx_generated). Never use a folder that holds the project's own tests, and do not change the \
+project's own configuration.
+- Once try_project has built a project's image, look around in it with exec (versions, files, a single test). Do \
+not put probes in test_command: each try_project runs the whole suite.
+- Do not set up tests that run in a browser (Playwright, Cypress, Storybook, vitest browser mode). arnx lists them \
+under uncovered as browser tests.
+- A web UI app (react-dom, next, vue, svelte, @angular/core, solid-js, preact, nuxt, @sveltejs/kit, astro or \
+electron among its dependencies) gets one try at its node or jsdom unit tests. If that try fails, arnx lists it \
+under uncovered as web UI. Do not try it again; go on with the rest.
+- Do not set up a project whose tests need three or more services (databases, caches, object stores, queues): \
+it does not run within setup's time. The draft lists it under uncovered, naming them; keep it there and go on with \
+the rest. try_project refuses it while it lists three or more.
 - Stop when propose accepts the file. Then reply with a short summary of what you chose and why."""
+
+# Fills $draft in setup.task when the detector could write a draft (nothing otherwise).
+draft = """
+
+
+A draft review.yaml, written from the repository's files without a model, is below. Start from it instead of \
+writing one: correct what is wrong, add what is missing (owns, uses, notes) and drop projects that are not \
+units. Values marked `# unsure:` are guesses the files did not settle; check those first. Try its projects early: \
+a run shows what is wrong faster than reading.
+<draft>
+$yaml</draft>"""
 
 # The fix prompt: what `arnx accept` writes to fix-prompt.md for your coding agent. arnx sends it to no model, so it
 # is not part of PROMPT_VERSION, and it is built on this machine also with arnx cloud.

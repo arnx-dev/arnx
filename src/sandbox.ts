@@ -11,7 +11,7 @@ import { adapterFor, getAdapter, LANGUAGES } from "./adapters";
 import type { CopyOnly } from "./baked";
 import { digest, type ReviewConfig } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
-import { globRegex } from "./secrets";
+import { envValue, globRegex } from "./secrets";
 import { pyJson, randomHex, shQuote, sleep } from "./util";
 
 /** The repository the running command works on (set by the command): environment images are labelled with it, so
@@ -54,6 +54,48 @@ export const NETWORK_TROUBLE = /Read timed out|ReadTimeoutError|Connection (?:re
 export const networkRetry = { waitSeconds: 20 };
 const stepLog = (line: Record<string, unknown>) => dockerSteps.log?.({ at: new Date().toISOString(), ...line });
 export const BUILD_TIMEOUT = 1800;
+
+/** The running command's time limit (setup's `setup_minutes`, its proof included): `at` on the `now` clock (ms), null
+ * when there is none. Set by the command for its Docker steps (withTimeLimit); `floorSeconds` is mutable for tests. */
+export interface TimeLimit { at: number; now: () => number; minutes: number }
+export const timeLimit: { current: TimeLimit | null; floorSeconds: number } = { current: null, floorSeconds: 60 };
+
+/** A Docker step that would start with too little of the command's time left. */
+export class OutOfTime extends ArnxError {
+  override name = "OutOfTime";
+  constructor(readonly minutes: number) {
+    super(`setup reached its ${minutes}-minute limit`);
+  }
+}
+
+/** Runs `fn` with each Docker step bounded by `limit` (none: as it is). */
+export async function withTimeLimit<T>(limit: TimeLimit | null | undefined, fn: () => Promise<T>): Promise<T> {
+  if (!limit) return fn();
+  const saved = timeLimit.current;
+  timeLimit.current = limit;
+  try {
+    return await fn();
+  } finally {
+    timeLimit.current = saved;
+  }
+}
+
+/** Seconds a Docker step may take: its own timeout, or the time left when that is less. With less than the floor
+ * left the step does not start (OutOfTime): it could not finish. */
+export function stepTimeout(own: number): number {
+  const limit = timeLimit.current;
+  if (!limit) return own;
+  const left = Math.floor((limit.at - limit.now()) / 1000);
+  if (left < timeLimit.floorSeconds) throw new OutOfTime(limit.minutes);
+  return Math.min(own, left);
+}
+
+/** Throws OutOfTime when no Docker step could start now. */
+export const requireTime = (): void => void stepTimeout(Infinity);
+
+/** Whether `limit` leaves too little time for a Docker step (a step cut short at it ends with less than that). */
+export const timeIsUp = (limit: TimeLimit | null | undefined): boolean =>
+  !!limit && limit.at - limit.now() < timeLimit.floorSeconds * 1000;
 export const READY_TIMEOUT = 90;
 export const OUTPUT_LIMIT = 200_000;
 export const REPORT_DIR = ".arnx-run";
@@ -67,6 +109,9 @@ export interface Runner {
   run(command: string, timeout: number): RunResult;
   /** Set when the image holds a copy of the code that runs reach (baked.ts): where, and the files only it holds. */
   copies?(output: string): CopyOnly;
+  /** Set when sandbox-only files are placed for each run (withSandboxFiles): a report's text with what it quotes of
+   * them taken out, for a report the runner wrote outside arnx's own report folder. */
+  clean?(report: string): string;
 }
 /** Runs `body` with a ready session for the config's environment and tears it down afterwards. `envFrom`: the
  * snapshot whose manifests pick the image, when it is not `snap` (the before/after check runs the code before the
@@ -138,6 +183,18 @@ export function requireDocker(): void {
 }
 
 const workdirIn = (root: string, workdir: string) => posix.normalize(posix.join(root, workdir));
+
+/** What a run does first for a project with deps_dir: link each node_modules under it into the same place under the
+ * install root, since the code mounted over /src hides what install wrote there. A link already there is replaced, a
+ * real folder left alone; a deps_dir the image lacks is said in the run's output. */
+export function depsLink(cfg: Pick<ReviewConfig, "depsDir" | "installRoot">): string {
+  if (!cfg.depsDir) return "";
+  const dir = shQuote(cfg.depsDir);
+  const root = shQuote(workdirIn("/src", cfg.installRoot));
+  return `if [ -d ${dir} ]; then (cd ${dir} && find . -name .git -prune -o -name node_modules -prune -type d -print) | ` +
+    `while read -r d; do t=${root}/"\${d#./}"; [ -d "$t" ] && [ ! -L "$t" ] || ln -sfn ${dir}/"\${d#./}" "$t" ` +
+    `2>/dev/null; done; else echo "arnx: deps_dir ${cfg.depsDir} is not in the image" >&2; fi; `;
+}
 
 /** Copies every file that can key an image (any language's manifests, at any depth) from `snapshot` to `dest`:
  * keys computed there stay as the snapshot was before runs wrote into it (cargo writes a missing Cargo.lock). */
@@ -220,10 +277,13 @@ export function dockerfile(cfg: ReviewConfig, { cache = false, mark }: { cache?:
   return lines.join("\n") + "\n";
 }
 
+/** The tag of the environment image with key `key` (envKey). */
+export const envTag = (key: string) => `arnx-env:${key}`;
+
 /** `mark`: the image is made from the code under test (baked.ts); its build is marked with its tag. */
 export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: string, key?: string,
                                 { mark = false }: { mark?: boolean } = {}): Promise<string> {
-  const tag = `arnx-env:${key ?? envKey(cfg, snapshot)}`;
+  const tag = envTag(key ?? envKey(cfg, snapshot));
   const t0 = performance.now();
   if (docker(["image", "inspect", tag]).status === 0) {
     stepLog({ step: "image", project: cfg.name, tag, built: false, secs: secsSince(t0) });
@@ -232,7 +292,8 @@ export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: st
   dockerSteps.say?.(`${cfg.name}: building its test image (minutes on a first build)`);
   const text = dockerfile(cfg, { cache: buildkit(), ...(mark ? { mark: tag } : {}) });
   const labels = envLabels(cfg);
-  let r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", snapshot], { timeout: BUILD_TIMEOUT, stdin: text });
+  let r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", snapshot], { timeout: stepTimeout(BUILD_TIMEOUT),
+    stdin: text });
   stepLog({ step: "image", project: cfg.name, tag, built: true, ok: r.status === 0, secs: secsSince(t0) });
   mkdirSync(dirname(logPath), { recursive: true });
   writeFileSync(logPath, r.stdout + r.stderr);
@@ -242,7 +303,8 @@ export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: st
     dockerSteps.say?.(`${cfg.name}: the package index did not answer; trying again in ${networkRetry.waitSeconds}s`);
     await sleep(networkRetry.waitSeconds * 1000);
     const t1 = performance.now();
-    r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", snapshot], { timeout: BUILD_TIMEOUT, stdin: text });
+    r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", snapshot], { timeout: stepTimeout(BUILD_TIMEOUT),
+      stdin: text });
     stepLog({ step: "image", project: cfg.name, tag, built: true, ok: r.status === 0, retry: "network", secs: secsSince(t1) });
     writeFileSync(logPath, r.stdout + r.stderr);
   }
@@ -268,7 +330,7 @@ export function runArgv(o: { image: string; name: string; network: string; snaps
     "-v", `${o.snapshot}:/src`, "-w", workdirIn("/src", o.workdir), "-e", "HOME=/tmp"];
   for (const m of o.mounts ?? []) argv.push("-v", m);
   for (const e of o.runEnv) argv.push("-e", e);
-  for (const k of Object.keys(o.env).sort()) argv.push("-e", `${k}=${o.env[k]}`);
+  for (const k of Object.keys(o.env).sort()) argv.push("-e", `${k}=${envValue(o.env[k]!)}`);
   return [...argv, o.image, "sh", "-c", o.command];
 }
 
@@ -361,8 +423,8 @@ export class Session implements Runner {
           const name = `arnx-${this.id}-${svc.name}`;
           const args = ["run", "-d", "--rm", "--name", name, "--network", this.network, "--network-alias", svc.name,
             "--cpus", "1", "--memory", "1g"];
-          for (const k of Object.keys(svc.env).sort()) args.push("-e", `${k}=${svc.env[k]}`);
-          r = docker([...args, svc.image], { timeout: 900 });
+          for (const k of Object.keys(svc.env).sort()) args.push("-e", `${k}=${envValue(svc.env[k]!)}`);
+          r = docker([...args, svc.image], { timeout: stepTimeout(900) });
           if (r.status !== 0) throw new ArnxError(`service ${svc.name} did not start: ${r.stderr.trim().slice(0, 300)}`);
           this.started.push(name);
           if (svc.ready) await this.waitReady(name, svc.name, svc.ready);
@@ -397,17 +459,30 @@ export class Session implements Runner {
   }
 
   run(command: string, timeout: number): RunResult {
-    const keep = adapterFor(this.cfg).keepBuild;
+    return this.runIn(command, timeout, adapterFor(this.cfg).keepBuild?.emptied ?? null, "run");
+  }
+
+  /** One command of setup's exec tool: in the session's shared container whatever the language, so a build or a cache
+   * one command leaves outside /src is there for the next (an image with an entrypoint: a new container each time). */
+  exec(command: string, timeout: number): RunResult {
+    return this.runIn(command, timeout, adapterFor(this.cfg).keepBuild?.emptied ?? [], "exec");
+  }
+
+  /** `emptied`: null runs the command in a new container; otherwise in the shared one, these directories emptied
+   * first. */
+  private runIn(command: string, timeout: number, emptied: string[] | null, step: "run" | "exec"): RunResult {
+    timeout = stepTimeout(timeout);
+    command = depsLink(this.cfg) + command;
     // A closed session (an interrupt) starts no container that nothing would remove.
-    if (!keep || this.closed || !this.mayShare()) {
-      const name = `arnx-${this.id}-run-${randomHex(3)}`;
-      return this.spawnRun(this.argv(name, command), command, timeout, () => docker(["kill", name]));
+    if (!emptied || this.closed || !this.mayShare()) {
+      const name = `arnx-${this.id}-${step}-${randomHex(3)}`;
+      return this.spawnRun(this.argv(name, command), command, timeout, step, () => docker(["kill", name]));
     }
-    let r = this.keptRun(command, timeout, keep.emptied);
+    let r = this.keptRun(command, timeout, emptied, step);
     // A container that went away (Docker restarted, removed by hand) is started again once; its build starts over.
     if (r.exitCode !== 0 && !r.timedOut && GONE.test(r.output.trim())) {
       this.dropBox();
-      r = this.keptRun(command, timeout, keep.emptied);
+      r = this.keptRun(command, timeout, emptied, step);
     }
     return r;
   }
@@ -438,9 +513,9 @@ export class Session implements Runner {
   }
 
   /** One run in the session's shared container (started on first use, with every limit a run has). */
-  private keptRun(command: string, timeout: number, emptied: string[]): RunResult {
+  private keptRun(command: string, timeout: number, emptied: string[], step: "run" | "exec"): RunResult {
     if (!this.box) {
-      const name = `arnx-${this.id}-build-${randomHex(3)}`;
+      const name = `arnx-${this.id}-${step === "run" ? "build" : "exec"}-${randomHex(3)}`;
       const [, run, ...rest] = this.argv(name, KEEPALIVE);
       // Named before it starts: a start Docker answers too late can still have made it, and close removes it.
       [this.box, this.lastRun] = [name, 0];
@@ -475,7 +550,7 @@ export class Session implements Runner {
     const wrapped = `rm -rf ${empty} 2>/dev/null; ${touch}sh -c ${shQuote(command)}; s=$?; kill -9 -1 2>/dev/null; ` +
       "exit $s";
     this.lastRun = Date.now();
-    return this.spawnRun([sandboxOptions.docker, "exec", box, "sh", "-c", wrapped], command, timeout, () => {
+    return this.spawnRun([sandboxOptions.docker, "exec", box, "sh", "-c", wrapped], command, timeout, step, () => {
       // Killing docker exec leaves the run going inside: its processes go, the container and its build stay. A
       // container Docker cannot reach in time goes too: the run counts as timed out either way.
       try {
@@ -499,13 +574,14 @@ export class Session implements Runner {
     }
   }
 
-  private spawnRun(argv: string[], command: string, timeout: number, onTimeout: () => void): RunResult {
+  private spawnRun(argv: string[], command: string, timeout: number, step: "run" | "exec", onTimeout: () => void)
+    : RunResult {
     const [bin, ...args] = argv;
     const started = performance.now();
     const r = spawnSync(bin!, args, { encoding: "utf8", timeout: timeout * 1000, killSignal: "SIGKILL",
       maxBuffer: MAX_BUFFER });
     const seconds = (performance.now() - started) / 1000;
-    stepLog({ step: "run", project: this.cfg.name, secs: Math.round(seconds * 10) / 10,
+    stepLog({ step, project: this.cfg.name, secs: Math.round(seconds * 10) / 10,
       timed_out: (r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT", exit: r.status,
       command: command.slice(0, 160) });
     const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
@@ -518,3 +594,15 @@ export class Session implements Runner {
       seconds };
   }
 }
+
+/** What setup's exec tool runs its commands in (Session.exec), closed at the end of setup. */
+export interface ExecRunner { exec(command: string, timeout: number): RunResult; close(): void }
+/** A started ExecRunner on `image` with `cfg`'s services and environment, `src` mounted at /src; null when the image
+ * is not there: exec builds no image. */
+export type ExecFactory = (image: string, cfg: ReviewConfig, src: string) => Promise<ExecRunner | null>;
+
+export const dockerExec: ExecFactory = async (image, cfg, src) => {
+  requireDocker();
+  if (docker(["image", "inspect", image]).status !== 0) return null;
+  return new Session(image, cfg, src).start();
+};

@@ -18,6 +18,8 @@ test_command: python -m pytest -q {targets}
 known_failing: [tests/test_net.py]
 notes: [tests/test_net.py calls a public API]
 `;
+// What setup keeps of a proposal: known_failing is taken out (failing tests are recorded one by one).
+const PROPOSED = YAML.replace("known_failing: [tests/test_net.py]\n", "");
 const tmp = useTmp();
 const t = (file: string, outcome: string): TestResult => ({ testId: `${file}::t`, fileAttr: file, name: "t", outcome,
   message: "" });
@@ -51,7 +53,7 @@ test("test_setup_keeps_the_last_config_that_ran", async () => {
   ]);
   const r = await runSetup(gitRepo(tmp()), defaultSettings(), model, { outDir: `${tmp()}/setup`,
     sessionFactory: fakeFactory(passing) });
-  expect([r.ok, r.yamlText, r.stop]).toEqual([true, YAML, "end_turn"]);
+  expect([r.ok, r.yamlText, r.stop]).toEqual([true, PROPOSED, "end_turn"]);
   expect(r.summary).toContain("1 passed");
   expect(model.calls[0]!.tools).toContain("try_project");
   expect(model.calls[0]!.tools).toContain("propose");
@@ -157,7 +159,7 @@ test("try_project tells the setup agent that its test_command ignores {targets}"
     "not run only {targets}");
   expect(lastToolResult(model, 1)).toContain("integ_tests/test_ui.py");
   expect(lastToolResult(model, 2)).toContain("runs: 2 passed");
-  expect([r.ok, r.yamlText]).toEqual([true, YAML]);
+  expect([r.ok, r.yamlText]).toEqual([true, PROPOSED]);
 });
 
 test("tests_dir may not be a folder that already holds the project's own tests", async () => {
@@ -236,25 +238,48 @@ test("a retry with the same environment reruns only the files that failed, then 
   const commands: string[] = [];
   const script = (command: string): [string | null, string, boolean] => {
     commands.push(command);
-    const fixed = commands.filter((c) => c.includes("suite.xml")).length > 1; // the second try fixes test_b
+    const fixed = commands.filter((c) => c.includes("suite.xml")).length > 1; // the second try gets test_b running
     return [junitXml([["tests/test_a.py", "test_a", "passed", ""],
-      ["tests/test_b.py", "test_b", fixed ? "passed" : "failed", "x"]]), "", false];
+      ["tests/test_b.py", "test_b", fixed ? "passed" : "failed", "x"], ["tests/test_c.py", "test_c", "failed", "x"]]),
+    "", false];
   };
-  // only the files set aside change: the environment is the same
-  const withKnown = YAML.replace("known_failing: [tests/test_net.py]", "known_failing: [tests/test_net.py, tests/test_x.py]")
-    .replace("notes: [tests/test_net.py calls a public API]", "notes: [tests/test_net.py and tests/test_x.py call a public API]");
+  // only the notes change: the environment is the same
+  const noted = PROPOSED.replace("notes: [tests/test_net.py calls a public API]", "notes: [test_b needs a fixture]");
   const model = new ScriptedAgent([
-    [tool("try_project", { yaml: YAML })], // fails on test_b
-    [tool("try_project", { yaml: withKnown })], // same environment: only test_b runs, then the whole suite
-    [tool("propose", { yaml: withKnown })], [text("done")]]);
+    [tool("try_project", { yaml: PROPOSED })], // most of the suite fails: back to the agent
+    [tool("try_project", { yaml: noted })], // same environment: only the failing files run, then the whole suite
+    [tool("propose", { yaml: noted })], [text("done")]]);
   const r = await runSetup(gitRepo(tmp()), defaultSettings(), model, { outDir: `${tmp()}/setup`,
     sessionFactory: fakeFactory(script) });
   expect(r.ok).toBe(true);
+  expect(lastToolResult(model, 1)).toContain("Most of the suite fails (2 failing, 1 passing)");
+  // The same environment tried again: its run stands, and its failing tests are recorded without running again.
+  expect(commands.filter((c) => c.includes("suite.xml"))).toHaveLength(1);
+  expect(r.projects[0]!.failed!.map((t) => t.id)).toEqual(["tests/test_b.py::test_b", "tests/test_c.py::test_c"]);
+});
+
+test("a try whose suite does not run reruns only its failing files in the same environment, then the whole suite", async () => {
+  const commands: string[] = [];
+  const script = (command: string): [string | null, string, boolean] => {
+    commands.push(command);
+    const fixed = commands.filter((c) => c.includes("suite.xml")).length > 1; // the second try gets test_a running
+    return [junitXml([["tests/test_a.py", "test_a", fixed ? "passed" : "failed", "x"],
+      ["tests/test_b.py", "test_b", "failed", "x"]]), "", false];
+  };
+  const noted = PROPOSED.replace("notes: [tests/test_net.py calls a public API]", "notes: [test_a needs a fixture]");
+  const model = new ScriptedAgent([
+    [tool("try_project", { yaml: PROPOSED })], // no test passed: the suite does not run yet
+    [tool("try_project", { yaml: noted })], // same environment: only the failing files run, then the whole suite
+    [tool("propose", { yaml: noted })], [text("done")]]);
+  const r = await runSetup(gitRepo(tmp()), defaultSettings(), model, { outDir: `${tmp()}/setup`,
+    sessionFactory: fakeFactory(script) });
+  expect(lastToolResult(model, 1)).toContain("no test passed");
   const suites = commands.filter((c) => c.includes("suite.xml"));
   expect(suites).toHaveLength(3);
-  expect(suites[1]).toContain("tests/test_b.py");
-  expect(suites[1]).not.toContain("tests/test_a.py");
-  expect(suites[2]).not.toContain("tests/test_b.py"); // the proving run names no files: the whole suite
+  expect(suites[1]).toContain("tests/test_a.py");
+  expect(suites[2]).not.toContain("tests/test_a.py"); // the proving run names no files: the whole suite
+  expect(r.ok).toBe(true);
+  expect(r.projects[0]!.failed!.map((t) => t.id)).toEqual(["tests/test_b.py::test_b"]);
 });
 
 test("a failing suite tells the agent which files pass without the rest of the suite, and why tests fail", async () => {

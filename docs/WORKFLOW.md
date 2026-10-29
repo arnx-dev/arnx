@@ -21,15 +21,30 @@ more later: it tries every uncovered entry again, so fix what its reason names f
 one lockfile at the root) share one environment image when they have the same `image`, `install` and
 `install_root` (the directory the install runs in); otherwise each project builds its own.
 
+A backend whose tests need three or more services (databases, caches, object stores, queues: what its CI job or
+compose file starts) does not run within setup's time, so setup does not try it: it lists it under `uncovered`
+("needs postgres, redis and minio; setup does not start three or more services: set it up by hand, or with fewer").
+Write its project in `.arnx/review.yaml` yourself, then `arnx approve`; with fewer services setup tries it.
+
 A project with no tests of its own (common in apps a coding agent built) is fine: setup checks its environment with
 arnx's own one-line test instead of a suite, and says so in the table (`no tests of its own; arnx's one-line test
 runs`). Reviews then run only the tests arnx writes. A `test_command` that deletes or writes files (`rm`, `mv`, `cp`,
 `sed -i`, `tee`, `> file`) is refused: every run must see the repository as it is.
 
-Before it starts, setup says what it will do and gives a rough time and cost estimate. While it runs, it shows on
+arnx adds the runner's report options after `{targets}`, so `test_command` must call the runner itself with `{targets}` (`cd app && npx vitest run {targets}`); one wrapped in `sh -c '...'` or that hands `{targets}` to another command is refused before anything runs. A TypeScript project that installs outside `/src` (the code is mounted there and hides what install wrote) sets `deps_dir` (such as `/opt/deps`): before every run arnx links each `node_modules` under it into the same place under the install root.
+
+Before it starts, setup says what it will do and gives a rough time and cost estimate. It stops at `setup_usd`
+(default $3.00) or `setup_minutes` (default 40, the proof included) under `[budget]` in `.arnx/config.toml`. Out of
+time with some projects proven, it keeps those (setup's own runs are their proof) and lists the others under
+`uncovered` ("setup reached its time limit"), for `arnx setup --add` to try again; with none proven, `arnx setup
+--project NAME` goes on with the project it was on. While it runs, it shows on
 stderr each model reply, each file it reads and each suite it runs (`--quiet` turns this off). It then shows one
-line per project, runs every suite once more and stamps `.arnx/review.yaml` with a hash (the proof); nothing is asked.
-It ends with what is worth a look, only what applies: test files set aside as known failing, tests skipped for want
+line per project and stamps `.arnx/review.yaml` with a hash (the proof); nothing is asked. Setup's own run of each
+suite is the proof; a suite runs again only when its project's part of the file or the code changed since that run.
+It ends with what is worth a look, only what applies: first the tests recorded as failing on the environment (a
+variable's value, a missing package or library, a host that does not resolve, a refused connection), one line per
+cause with how many and what to fix (`connection-refused: db:5432 (2 tests in api): nothing listens there; add the
+service, or fix its host and port in env`); then how many tests fail today (the baseline), tests skipped for want
 of a service or variable, commands that ignore their own errors (`|| true`), install lines that download from outside
 the package registries (`curl`, `wget`, `git clone`), files allowed although they look like secrets, and what no
 project tests. The same list, with who ran the proof (the git user), is in `.arnx/setup/approval.md`. Open
@@ -38,13 +53,28 @@ project tests. The same list, with who ran the proof (the git user), is in `.arn
 A `.arnx/review.yaml` changed since its proof (edited by hand, in a pull request, or by `arnx allow-secret`) is
 noticed and proven again before the next `review`, `check` or `accept` uses it. First it says what changed since the
 last proof, per project: `test_command` (old → new), `install`, files added to or removed from `known_failing`, `env`,
-`services`, `owns`, `uses`, any other key by name, and projects added or removed. It compares with the copy the last
+`services`, `owns`, `uses`, any other key by name, projects added or removed, and tests added to or gone from the
+baseline. It compares with the copy the last
 proof kept in `.arnx/setup/proven-review.yaml` (a local file; without it, as after a proof by an older arnx or in a
 fresh clone, it says there is no copy to compare), stamp or not; a file whose stamp holds but whose content is not
 that copy's (a stamp recomputed by hand) counts as changed too. With `--json`, the command's object says so in
 `reproved`. Then the suites run and the file is stamped again, followed by what
 is worth a look; the changes go into `.arnx/setup/approval.md` too. When a suite fails there, the command stops and
 names the failing tests (exit 3). `arnx approve` runs the same proof on its own, saying the same.
+
+### The baseline
+
+Setup records each test your suite fails today in `.arnx/baseline.json`, one entry per test with the first line of
+its failure; commit it with `.arnx/review.yaml`. A proof passes while every failing test is in it, so the passing
+tests next to a failing one keep counting. A baseline test that passes again leaves it at the next proof. A test
+failing outside it runs once more, and one that passes then does not fail the proof. A proof never adds to the
+baseline: `arnx setup --baseline` records it again from the suites as they run now (no model, Docker only) and says
+what changed. Failures that look like the environment (a module, system library, program or service missing, a
+variable not set, a host that does not resolve, a test file that does not load, or most of the suite failing) go back
+to the setup agent once; what it cannot fix in the sandbox is recorded with its cause. A test file that does not load
+hides every test in it, so it is recorded as one (`"load": true`) and listed apart under Worth a look. Its hash is part of the stamp, so a hand edit is proven again like one of `review.yaml`. A
+`review.yaml` from before 0.1.5 with `known_failing` keeps working; `arnx setup --baseline` replaces it with the
+failing tests in those files.
 
 ### Rust crates
 

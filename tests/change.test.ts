@@ -177,11 +177,14 @@ test("test_snapshot_worktree_scrubs", () => {
   symlinkSync("/etc/hostname", join(repo, "link"));
   writeFileSync(join(repo, "app.py"), "changed = True\n");
   const dest = join(tmp(), "snap");
-  const removedFiles = snapshot(repo, null, dest, [], { untracked: true });
+  const removedFiles = snapshot(repo, null, dest, [], { untracked: true, standIns: false });
   expect(readFileSync(join(dest, "app.py"), "utf8")).toBe("changed = True\n");
   expect(existsSync(join(dest, ".env")) || existsSync(join(dest, ".git")) || existsSync(join(dest, "link")))
     .toBe(false);
   expect(removedFiles).toEqual([{ path: "conf.py", line: 1, label: "a private key" }]);
+  // With stand-ins (the default), a private key header with no body anywhere is a placeholder: kept as it is.
+  expect(snapshot(repo, null, join(tmp(), "kept"), [], { untracked: true })).toEqual([]);
+  expect(readFileSync(join(tmp(), "kept", "conf.py"), "utf8")).toBe(`K = '${PRIVATE_KEY}'\n`);
 });
 
 const FIXTURE = `AWS = '${AWS_KEY}'\n`;
@@ -192,17 +195,18 @@ test("a source file with a key-shaped string is withheld, unless allowed with ev
   writeFileSync(join(repo, "src", "detect.py"), "PATTERNS = ['AKIA']\n" + FIXTURE);
   const allow = [{ path: "src/detect.py", matches: secretPins(FIXTURE) }];
   runGit(repo, "add", "src/detect.py");
-  expect(snapshot(repo, null, join(tmp(), "s1"))).toEqual([{ path: "src/detect.py", line: 2, label: "AKIA…" }]);
+  const off = { standIns: false };
+  expect(snapshot(repo, null, join(tmp(), "s1"), [], off)).toEqual([{ path: "src/detect.py", line: 2, label: "AKIA…" }]);
   expect(existsSync(join(tmp(), "s1", "src", "detect.py"))).toBe(false);
-  expect(snapshot(repo, null, join(tmp(), "s2"), allow)).toEqual([]);
+  expect(snapshot(repo, null, join(tmp(), "s2"), allow, off)).toEqual([]);
   expect(readFileSync(join(tmp(), "s2", "src", "detect.py"), "utf8")).toContain(AWS_KEY);
   // The pin is per path: the same text elsewhere is withheld.
   writeFileSync(join(repo, "other.py"), FIXTURE);
   runGit(repo, "add", "other.py");
-  expect(snapshot(repo, null, join(tmp(), "s3"), allow).map((w) => w.path)).toEqual(["other.py"]);
+  expect(snapshot(repo, null, join(tmp(), "s3"), allow, off).map((w) => w.path)).toEqual(["other.py"]);
   // A new key-shaped string in the allowed file withholds it again.
   writeFileSync(join(repo, "src", "detect.py"), FIXTURE + "T = 'ghp_" + "b".repeat(36) + "'\n");
-  expect(snapshot(repo, null, join(tmp(), "s4"), allow)).toEqual([
+  expect(snapshot(repo, null, join(tmp(), "s4"), allow, off)).toEqual([
     { path: "other.py", line: 1, label: "AKIA…" }, { path: "src/detect.py", line: 2, label: "ghp_…" }]);
 });
 

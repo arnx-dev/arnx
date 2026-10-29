@@ -165,7 +165,7 @@ export class LocalBrain implements Brain {
   /** The setup agent: it proves projects with try_project and submits the file with propose. */
   private async setup(x: SetupInput, tools: Promise<RoundTools>): Promise<RoundResult> {
     const t = await tools;
-    let user = this.p.setupTask(x.hints);
+    let user = this.p.setupTask(x.hints, x.draft ?? "");
     if (x.withheld) {
       user += `\n\nThese files are left out of the copy you see and of the sandbox, because they hold text that looks ` +
         `like a key: ${x.withheld}. Code that needs them cannot build or run here; do not recreate ` +
@@ -178,12 +178,13 @@ export class LocalBrain implements Brain {
       user += "\n\nThe current review.yaml is below. Cover what is listed under uncovered where a project can test it; " +
         "keep every existing project exactly as it is. Try every entry under uncovered again, whatever its reason " +
         "says: the user may have fixed the cause since setup wrote it, so the reason may be stale. Remove an entry " +
-        "once a project owns or uses its files, and update the reason of one that still cannot be tested." +
+        "once a project owns or uses its files, and update the reason of one that still cannot be tested. Browser tests " +
+        "are the exception: arnx never sets them up." +
         `\n<review.yaml>\n${x.current}</review.yaml>`;
     }
     let last = 0, unasked: { text: string; turn: number } | null = null;
     const agent = await runAgent(this.m.agentModel, t, { system: this.p.setupSystem(), user, budgetUsd: x.budgetUsd,
-      prices: this.m.prices, transcript: transcriptOf(x),
+      prices: this.m.prices, transcript: transcriptOf(x), ...(x.deadline ? { deadline: x.deadline } : {}),
       onTurn: (turn, names, cost, said, calls) => {
         last = turn;
         t.onTurn?.(turn, names, cost, said);

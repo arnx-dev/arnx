@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isFileApproved, parseReviewFile, reviewConfigPath } from "../src/config";
-import { dockerSteps, type Runner, type SessionFactory } from "../src/sandbox";
+import { BUILD_TIMEOUT, dockerSteps, type Runner, type SessionFactory, stepTimeout } from "../src/sandbox";
 import { Cli } from "./helpers/cli";
 import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
@@ -94,7 +94,7 @@ test("interactive: one reading milestone, the build in the suite line, a short r
     "Proposal rejected: 2 files unaccounted for (pricing.py, tests/test_pricing.py). Retrying...",
     "shop: running its suite (try 2)",
     "shop: ✓ 1 passed",
-    "shop: ✓ 1 passed",
+    "shop: ✓ setup's run stands: 1 passed",
   ]);
   // One clock from setup's start to the proof's last line.
   const t = stamps(cli.err);
@@ -137,17 +137,36 @@ test("--yes: what is worth a look comes after the proof and is recorded in appro
   expect(readFileSync(reviewConfigPath(repo), "utf8")).not.toContain("Warnings");
 });
 
-test("a suite that runs while the current code fails tests: that failure, the cost, the attempt and Next; the " +
-  "unproven attempt does not stop the next setup", async () => {
+test("a suite that runs while the current code fails tests: setup records those tests as failing today, and the " +
+  "proof stamps the baseline with review.yaml", async () => {
   const repo = await shop();
-  const model = new ScriptedAgent([[tool("try_project", { yaml: GOOD })], [text("Tests fail on the current code.")]]);
-  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: suites([PASS, FAIL]) });
+  const model = new ScriptedAgent([[tool("try_project", { yaml: GOOD })], [tool("propose", { yaml: GOOD })],
+    [text("One test fails on the current code.")]]);
+  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: suites([PASS, FAIL]),
+    approveSessions: suites([PASS, FAIL]) });
+  expect(await cli.run("setup", "--yes")).toBe(0);
+  expect(cli.stdout).toContain("✓ Environment proven\n\nWorth a look:\n  ! shop: 1 test fails today, recorded in " +
+    ".arnx/baseline.json\n");
+  const base = JSON.parse(readFileSync(join(repo, ".arnx", "baseline.json"), "utf8"));
+  expect(base).toEqual({ version: 1, projects: { shop: [{ id: "tests/test_pricing.py::test_discount",
+    file: "tests/test_pricing.py", first: "assert 90 == 81" }] } });
+  const file = parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8"));
+  expect((file.raw.approved as Record<string, unknown>).baseline).toBe(createHash("sha256")
+    .update(readFileSync(join(repo, ".arnx", "baseline.json"))).digest("hex"));
+  expect(readFileSync(join(repo, ".arnx", "setup", "proven-baseline.json"), "utf8"))
+    .toBe(readFileSync(join(repo, ".arnx", "baseline.json"), "utf8"));
+  // A hand edit of the baseline is a change like one of review.yaml: proved again before the next command.
+  writeFileSync(join(repo, ".arnx", "baseline.json"), JSON.stringify({ version: 1, projects: {} }));
+  const after = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS, FAIL]) });
+  expect(await after.run("approve", "--yes")).toBe(2);
+  expect(after.stdout + after.stderr).toContain("failing outside the baseline");
+});
+
+test("a setup that never proves leaves its attempt unproven, and the next setup runs again", async () => {
+  const repo = await shop();
+  const model = new ScriptedAgent([[tool("try_project", { yaml: GOOD })], [text("No report.")]]);
+  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: suites(null) });
   expect(await cli.run("setup", "--yes")).toBe(2);
-  const tail = cli.out.slice(-3);
-  expect(tail[0]).toBe("Setup got your suite running, but 1 test fails on the current code: " +
-    "tests/test_pricing.py::test_discount.");
-  expect(tail[1]).toMatch(/^Cost \$\d+\.\d\d · last attempt: \.arnx\/review\.yaml \(not proven\) · logs: \.arnx\/setup\/$/);
-  expect(tail[2]).toBe("Next: fix .arnx/review.yaml, then arnx approve");
   expect(readFileSync(reviewConfigPath(repo), "utf8")).toBe(GOOD);
   expect(existsSync(join(repo, ".arnx", "review.draft.yaml"))).toBe(false);
   // Never proven, so setup runs again rather than saying it exists; with no attempt at all, --force is next.
@@ -165,12 +184,37 @@ test("an environment that never runs: that failure, told apart from failing test
   const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: suites(null) });
   expect(await cli.run("setup", "--yes")).toBe(2);
   expect(cli.out.slice(-3)).toEqual([
-    "Setup could not build a working environment: shop: the suite produced no report (timed out, or the runner " +
-      "could not start).",
+    "Setup could not build a working environment: shop: the suite produced no report (exit 0; pytest never said it " +
+      "wrote one, so it stopped first or missed arnx's report option); last lines: out.",
     cli.out.at(-2)!,
     "Next: fix .arnx/review.yaml, then arnx approve",
   ]);
   expect(cli.out.at(-2)).toMatch(/^Cost \$\d+\.\d\d · last attempt: \.arnx\/review\.yaml \(not proven\) · logs: /);
+});
+
+test("only web UI apps whose one try failed: setup stops with exit 2, nothing to fix", async () => {
+  const repo = initRepo(join(tmp(), "site"));
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ dependencies: { "react-dom": "18.3.1" } }));
+  mkdirSync(join(repo, "src"), { recursive: true });
+  writeFileSync(join(repo, "src", "app.test.tsx"), "test('a', () => {});\n");
+  commit(repo, "site");
+  const init = new Cli({ cwd: repo, env: ENV });
+  expect(await init.run("init")).toBe(0);
+  expect(await init.run("consent", "--yes")).toBe(0);
+  const site = "version: 1\nprojects:\n  site:\n    root: .\n    language: typescript\n    runner: vitest\n" +
+    "    image: node:22-slim\n    test_command: npx vitest run {targets}\n";
+  const model = new ScriptedAgent([[tool("try_project", { yaml: site })], [tool("propose", { yaml: site })],
+    [text("unreachable")]]);
+  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: suites(null) });
+  expect(await cli.run("setup", "--yes")).toBe(2);
+  expect(cli.out.slice(-2)).toEqual(["Setup stopped: only web UI here, which arnx does not set up.", cli.out.at(-1)!]);
+  expect(cli.out.at(-1)).toMatch(/^Cost \$\d+\.\d\d · logs: \.arnx\/setup\/$/);
+  expect(existsSync(reviewConfigPath(repo))).toBe(false);
+  const json = new Cli({ cwd: repo, env: ENV, setupModel: new ScriptedAgent([[tool("try_project", { yaml: site })],
+    [text("done")]]), setupSessions: suites(null) });
+  expect(await json.run("setup", "--yes", "--json")).toBe(2);
+  expect(JSON.parse(json.stdout)).toMatchObject({ result: "fail", exit_code: 2, review_yaml: null,
+    failure: { kind: "environment", reason: "only web UI here, which arnx does not set up" }, next: [] });
 });
 
 test("a proven file is kept: setup says it is set up; changed by hand, the next review proves it again", async () => {
@@ -224,17 +268,114 @@ test("setup --json: the object; proven with or without --yes", async () => {
       accepted_failing: 0, unexpected: [] }],
     files: { projects: [{ name: "shop", owned: 3, used: 0 }], not_tested: [], untracked_left_out: ["notes.md"] },
     warnings: ["shop: 1 command(s) ignore their own errors (|| true)"], review_yaml: ".arnx/review.yaml",
-    approval_record: ".arnx/setup/approval.md", cost_usd: 0, seconds: 0, failure: null, next: ["arnx review"] });
+    approval_record: ".arnx/setup/approval.md", cost_usd: 0, seconds: 0, stop: "end_turn", uncovered_projects: [],
+    failure: null,
+    next: ["arnx review"] });
   expect(cli.stderr).toContain("✓ Environment proven\n\nWorth a look:\n  ! shop: 1 command(s) ignore their own errors (|| true)");
 });
 
-test("setup --json on a failure: kind, reason and the failing tests", async () => {
+test("setup --json on a failure: kind and reason", async () => {
   const repo = await shop();
-  const model = new ScriptedAgent([[tool("try_project", { yaml: GOOD })], [text("Tests fail.")]]);
-  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: suites([PASS, FAIL]) });
+  const model = new ScriptedAgent([[tool("try_project", { yaml: GOOD })], [text("No report.")]]);
+  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: suites(null) });
   expect(await cli.run("setup", "--yes", "--json")).toBe(2);
   expect(JSON.parse(cli.stdout)).toMatchObject({ result: "fail", exit_code: 2, approved: false,
-    review_yaml: ".arnx/review.yaml", files: null,
-    projects: [{ name: "shop", ok: false, unexpected: ["tests/test_pricing.py::test_discount"] }],
-    failure: { kind: "tests", failing: ["tests/test_pricing.py::test_discount"] }, next: ["arnx approve"] });
+    review_yaml: ".arnx/review.yaml", files: null, failure: { kind: "environment", failing: [] },
+    next: ["arnx approve"] });
 });
+
+test("setup stops at its time limit: one line says so, and the project it was on goes on with --project", async () => {
+  const repo = await shop();
+  const path = join(repo, ".arnx", "config.toml");
+  writeFileSync(path, readFileSync(path, "utf8").replace("setup_minutes = 40", "setup_minutes = 15"));
+  for (const json of [false, true]) {
+    // Each suite run takes 20 minutes and writes no report.
+    let ms = 0;
+    const slow: SessionFactory = async <T>(_cfg: { name: string }, snap: string, _log: string,
+                                           body: (r: Runner) => Promise<T>) => {
+      ms += 20 * 60_000;
+      return body(new FakeSession(snap, () => [null, "out", false]));
+    };
+    const model = new ScriptedAgent([[tool("try_project", { yaml: GOOD })], [text("never asked")]]);
+    const cli = new Cli({ cwd: repo, env: ENV, now: () => ms, setupModel: model, setupSessions: slow });
+    expect(await cli.run("setup", ...(json ? ["--json"] : []))).toBe(2);
+    expect(model.calls).toHaveLength(1);
+    if (json) {
+      expect(JSON.parse(cli.stdout)).toMatchObject({ result: "fail", stop: "time", review_yaml: ".arnx/review.yaml",
+        failure: { kind: "time", failing: [] }, next: ["arnx setup --project shop"] });
+    } else {
+      expect(cli.stdout).toContain("Setup reached its 15-minute limit while on shop; to give it longer, raise " +
+        "setup_minutes under [budget].\n");
+      expect(cli.stdout).toContain("\nNext: arnx setup --project shop");
+    }
+  }
+});
+
+test("the proof after setup counts inside the limit: past it, the proof stops and arnx approve runs it again", async () => {
+  // Setup takes 10 of its 15 minutes and the code changes meanwhile: its run does not stand, the proof runs the suite.
+  for (const [cut, json] of [[true, false], [false, true]] as const) {
+    const repo = await shop();
+    const path = join(repo, ".arnx", "config.toml");
+    writeFileSync(path, readFileSync(path, "utf8").replace("setup_minutes = 40", "setup_minutes = 15"));
+    let ms = 0;
+    const setupRun: SessionFactory = async <T>(_cfg: { name: string }, snap: string, _log: string,
+                                               body: (r: Runner) => Promise<T>) => {
+      ms += 10 * 60_000;
+      writeFileSync(join(repo, "pricing.py"), "def total(xs):\n    return sum(xs) + 0\n");
+      return body(new FakeSession(snap, () => [junitXml([PASS]), "out", false]));
+    };
+    // The proof's run: cut short at the limit, or not started with too little time left (as a Docker step is not).
+    const proofRun: SessionFactory = async <T>(_cfg: { name: string }, snap: string, _log: string,
+                                               body: (r: Runner) => Promise<T>) => {
+      if (!cut) stepTimeout(BUILD_TIMEOUT);
+      ms += 5 * 60_000;
+      return body(new FakeSession(snap, () => [null, "out", true]));
+    };
+    const model = new ScriptedAgent([[tool("try_project", { yaml: GOOD })], [tool("propose", { yaml: GOOD })],
+      [text("One project.")]]);
+    const cli = new Cli({ cwd: repo, env: ENV, now: () => ms, setupModel: model, setupSessions: setupRun,
+      approveSessions: proofRun });
+    expect(await cli.run("setup", "--yes", ...(json ? ["--json"] : []))).toBe(2);
+    if (json) {
+      expect(JSON.parse(cli.stdout)).toMatchObject({ result: "fail", approved: false, stop: "time",
+        failure: { kind: "time", reason: "✗ setup reached its 15-minute limit", failing: [] }, next: ["arnx approve"] });
+    } else {
+      expect(cli.stdout).toContain("Not proven:\n✗ setup reached its 15-minute limit\n");
+      expect(cli.stdout).toEndWith("\nNext: arnx approve");
+    }
+  }
+});
+
+test("setup --project after a proven setup: that project is proven again and joins the others' earlier proof",
+  async () => {
+    const repo = initRepo(join(tmp(), "two"));
+    for (const d of ["api", "web"]) {
+      mkdirSync(join(repo, d, "tests"), { recursive: true });
+      writeFileSync(join(repo, d, "app.py"), "x = 1\n");
+      writeFileSync(join(repo, d, "tests", "test_x.py"), "def test_x():\n    assert True\n");
+    }
+    commit(repo, "two");
+    expect(await new Cli({ cwd: repo, env: ENV }).run("init")).toBe(0);
+    expect(await new Cli({ cwd: repo, env: ENV }).run("consent", "--yes")).toBe(0);
+    const two = "version: 1\nprojects:\n" + ["api", "web"].map((d) => `  ${d}:\n    root: ${d}\n    language: python\n` +
+      "    image: python:3.12\n    test_command: python -m pytest -q {targets}\n").join("");
+    const ran: string[] = [];
+    const pass = (): SessionFactory => async <T>(cfg: { name: string }, snap: string, _l: string,
+      body: (r: Runner) => Promise<T>) => {
+      ran.push(cfg.name);
+      return body(new FakeSession(snap, () => [junitXml([[`${cfg.name}/tests/test_x.py`, "test_x", "passed", ""]]),
+        "out", false]));
+    };
+    const all = new ScriptedAgent([[tool("try_project", { yaml: two, project: "api" })],
+      [tool("try_project", { yaml: two, project: "web" })], [tool("propose", { yaml: two })], [text("done")]]);
+    let cli = new Cli({ cwd: repo, env: ENV, setupModel: all, setupSessions: pass(), approveSessions: pass() });
+    expect(await cli.run("setup", "--yes")).toBe(0);
+    ran.length = 0;
+    const one = new ScriptedAgent([[tool("try_project", { yaml: two, project: "web" })], [tool("propose", { yaml: two })],
+      [text("done")]]);
+    cli = new Cli({ cwd: repo, env: ENV, setupModel: one, setupSessions: pass(), approveSessions: pass() });
+    expect(await cli.run("setup", "--project", "web", "--yes")).toBe(0);
+    expect(cli.stdout).toContain("✓ Environment proven");
+    expect(ran).toEqual(["web"]);
+    expect(isFileApproved(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")))).toBe(true);
+  });

@@ -1,15 +1,20 @@
-// A file the snapshot leaves out (secret-looking, or matched by .arnxignore) that the tests need: setup stops at the
-// first run that names it, and says how to let it in, instead of the agent working around a file it cannot have.
+// A file the snapshot leaves out that the tests need. One .arnxignore leaves out goes into the sandbox (never to the
+// model) and the project runs again; one only a user can let in (a private key) stops setup at the first run that
+// names it, saying how to let it in, instead of the agent working around a file it cannot have.
 import { expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { toolErrorText } from "../src/agent";
 import type { Brain, RoundTools } from "../src/brain";
+import { sandboxDir } from "../src/change";
+import { parseReviewFile, sandboxOnlyOf } from "../src/config";
+import type { SessionFactory } from "../src/sandbox";
 import { missingLeftOut } from "../src/diagnose";
 import { NO_USAGE } from "../src/llm";
 import { defaultSettings } from "../src/settings";
 import { runSetup } from "../src/setup";
 import { Cli } from "./helpers/cli";
+import { AWS_KEY, PRIVATE_KEY_BLOCK } from "./helpers/fakekeys";
 import { fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
@@ -17,8 +22,8 @@ import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
 const ENV = { ANTHROPIC_API_KEY: "a" };
-// Built at run time, so a scan of this file finds no key.
-const FIXTURE = `AWS = '${"AKIA"}IOSFODNN7EXAMPLE'\n`;
+// A private key with its body: no stand-in can keep it out. Built at run time, so a scan of this file finds no key.
+const FIXTURE = `KEY = """${PRIVATE_KEY_BLOCK}"""\n`;
 const YAML = "version: 1\nprojects:\n  shop:\n    root: .\n    language: python\n    image: python:3.12\n" +
   "    install: [pip install pytest]\n    test_command: python -m pytest -q {targets}\n";
 
@@ -98,16 +103,77 @@ test("a later try or proposal is refused once setup has stopped", async () => {
   expect(answers.map((a) => a.split(":")[0])).toEqual(["stopped", "stopped", "stopped"]);
 });
 
-test("a data file .arnxignore leaves out: setup stops and says to let it back in", async () => {
+const MISSING_CSV = "FileNotFoundError: [Errno 2] No such file or directory: '/src/fees.csv'";
+
+/** A fake sandbox whose suite passes once `rel` is among the snapshot's sandbox-only files (the real session places
+ * them for each run); `seen` records whether the snapshot itself, which the agent reads, ever held it. */
+function needingBeside(rel: string, seen: boolean[]): SessionFactory {
+  const pass = junitXml([["test_shop.py", "test_shop", "passed", ""]]);
+  return (cfg, snap, log, body) => {
+    seen.push(existsSync(join(snap, rel)));
+    const there = existsSync(join(sandboxDir(snap), rel));
+    return fakeFactory(() => there ? [pass, "1 passed", false]
+      : [junitXml([["test_shop.py", "test_shop", "error", MISSING_CSV]]), MISSING_CSV, false])(cfg, snap, log, body);
+  };
+}
+
+test("a data file .arnxignore leaves out that the tests need goes into the sandbox, and setup goes on", async () => {
   const repo = shop("fees.csv", "country,fee\n");
   writeFileSync(join(repo, ".arnxignore"), "*.csv\n");
   commit(repo, "ignore");
-  const model = new ScriptedAgent([[tool("try_project", { yaml: YAML })], [text("done")]]);
+  const model = new ScriptedAgent([[tool("try_project", { yaml: YAML })], [tool("propose", { yaml: YAML })],
+    [text("done")]]);
+  const said: string[] = [];
+  const seen: boolean[] = [];
   const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "setup"),
-    sessionFactory: needing("FileNotFoundError: [Errno 2] No such file or directory: '/src/fees.csv'") });
-  expect([r.ok, r.needed]).toEqual([false, [{ path: "fees.csv", secret: false }]]);
-  expect(r.problem).toBe("shop: the tests need fees.csv, which .arnxignore leaves out");
+    sessionFactory: needingBeside("fees.csv", seen), progress: (l) => said.push(l) });
+  expect([r.ok, r.needed, r.sandboxed]).toEqual([true, undefined, ["fees.csv"]]);
+  expect(said).toContain("shop: the tests need fees.csv, which .arnxignore leaves out: copied into the sandbox, not " +
+    "sent to the model");
+  // The agent's copy never held it; the accepted file names it, so reviews put it in the sandbox too.
+  expect(seen.some(Boolean)).toBe(false);
+  expect(sandboxOnlyOf(parseReviewFile(r.yamlText!).raw)).toEqual(["fees.csv"]);
 });
+
+test("the agent may not write sandbox_only: setup adds it", async () => {
+  const repo = shop("fees.csv", "country,fee\n");
+  const model = new ScriptedAgent([[tool("try_project", { yaml: `${YAML}sandbox_only: [fees.csv]\n` })],
+    [text("done")]]);
+  await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "setup"), sessionFactory: needing("x") });
+  expect(JSON.stringify(model.calls[1]!.messages.at(-1)!.content)).toContain("invalid: remove sandbox_only");
+});
+
+test("a file .arnxignore leaves out that holds a private key still stops setup: no stand-in keeps the key out",
+  async () => {
+    const repo = shop("fees.csv", `fee,${PRIVATE_KEY_BLOCK.replaceAll("\n", " ")}\n`);
+    writeFileSync(join(repo, ".arnxignore"), "*.csv\n");
+    commit(repo, "ignore");
+    const model = new ScriptedAgent([[tool("try_project", { yaml: YAML })], [text("done")]]);
+    const seen: boolean[] = [];
+    const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "setup"),
+      sessionFactory: needingBeside("fees.csv", seen) });
+    expect([r.ok, r.stop, r.needed]).toEqual([false, "stopped", [{ path: "fees.csv", secret: true }]]);
+    expect(r.problem).toBe("shop: the tests need fees.csv, which arnx left out as secret-looking (not sent, not in " +
+      "the sandbox)");
+  });
+
+test("a file with a key in code is kept with a stand-in: the tests and the agent see it, never the real key",
+  async () => {
+    const repo = shop("detect.py", `AWS = '${AWS_KEY}'\n`);
+    const texts: string[] = [];
+    const inner = needing("ModuleNotFoundError: No module named 'detect'");
+    const model = new ScriptedAgent([[tool("try_project", { yaml: YAML })], [text("done")]]);
+    const said: string[] = [];
+    const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "setup"),
+      progress: (l) => said.push(l), sessionFactory: (cfg, snap, log, body) => {
+        texts.push(readFileSync(join(snap, "detect.py"), "utf8"));
+        return inner(cfg, snap, log, body);
+      } });
+    expect([r.stop, r.needed, r.withheld, r.standIns]).toEqual(["end_turn", undefined, [], ["detect.py"]]);
+    expect(texts[0]).not.toContain(AWS_KEY);
+    expect(texts[0]).toMatch(/^AWS = 'AKIA[0-9A-Z]{16}'\n$/);
+    expect(said).toContain("stand-ins for key-shaped text, the real values kept here: detect.py");
+  });
 
 test("arnx setup says it stopped and names the command that lets the file in", async () => {
   const repo = shop("detect.py", FIXTURE);

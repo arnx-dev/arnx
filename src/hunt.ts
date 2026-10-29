@@ -8,7 +8,7 @@ import { changedDefinitions, CONTEXT_LIMIT, contextPack } from "./context";
 import { sliceDiff } from "./change";
 import { adapterFor } from "./adapters";
 import { changedSources } from "./untested";
-import { ModelError } from "./errors";
+import { survivable } from "./errors";
 import { withRole } from "./events";
 import { type JsonModel, type ModelUse, newUse, tally } from "./llm";
 import { DEFAULT_PROMPTS, HUNT_SCHEMA, MAX_SUSPECTS, type Prompts, RANK_SCHEMA, type Scope, type Suspect }
@@ -72,7 +72,7 @@ export async function secondHunt(root: string | null, cfg: ReviewConfig, o: { mo
     tally(use, cost, usage, unknown);
     return { suspects: parseSuspects(reply, o.model.ref.replace(/^[a-z]+:/, "")), use };
   } catch (e) {
-    if (!(e instanceof ModelError)) throw e;
+    if (!survivable(e)) throw e;
     if (e.costUsd > 0 || e.usage) tally(use, e.costUsd, e.usage, e.unknownCalls);
     else use.unknownCalls += e.unknownCalls;
     say(`second hunter failed: ${e.message.slice(0, 300)}`);
@@ -143,7 +143,7 @@ export async function partHunts(root: string | null, cfg: ReviewConfig, o: { mod
       tally(use, cost, usage, unknown);
       lists[index] = parseSuspects(reply, by);
     } catch (e) {
-      if (!(e instanceof ModelError)) throw e;
+      if (!survivable(e)) throw e;
       if (e.costUsd > 0 || e.usage) tally(use, e.costUsd, e.usage, e.unknownCalls);
       else use.unknownCalls += e.unknownCalls;
       o.progress?.(`${cfg.name}: a part hunter failed: ${e.message.slice(0, 200)}`);
@@ -180,7 +180,7 @@ export async function rankSuspects(lists: Suspect[][], o: { model: JsonModel | n
     const ranked = [...new Set([...order, ...all])];
     return ranked.slice(0, max).map((s, i) => ({ ...s, id: `S${i + 1}` }));
   } catch (e) {
-    if (!(e instanceof ModelError)) throw e;
+    if (!survivable(e)) throw e;
     if (e.costUsd > 0 || e.usage) tally(o.use, e.costUsd, e.usage, e.unknownCalls);
     o.progress?.(`ranking failed (${e.message.slice(0, 120)}); suspects taken in turn`);
     return all.slice(0, max);

@@ -56,7 +56,7 @@ throwaway copy.
 |---|---|---|---|---|---|
 | `init` | Write the harness, each role on it when its key is set (else commented, Claude standing in), the known providers and `telemetry = false`; write `.arnxignore` (data, dumps, images; fixtures kept) when absent. Asks nothing, checks nothing (doctor does; the first send asks the consent). Again: keeps what is there, creates what is missing, exit 0. `--force` rewrites the config, keeping the consents, `telemetry`, `[cloud]` and the user's provider tables | env keys, tracked and untracked files (not git-ignored) | `.arnx/config.toml`, `.arnx/.gitignore`, `.arnxignore` (only if absent) | no | no |
 | `doctor` | Say what is missing: Configuration, Models, Keys (or arnx cloud's Login and Credits), Docker (✗), then Consent and Environment (· when not done yet); coverage, JEV, the telemetry state and, with Docker running, the unused environment images `env prune` would remove (one line each, never a check); then "Ready for review." or "Not ready for review." and a Next line (the fix, or the flow's next command). setup and review run the same checks first and stop on a ✗ with its line | everything | nothing | no | checks it runs |
-| `setup` | doctor's checks, then the consent to send code (asked once; `--yes` gives it); an agent reads the repo and proposes a test environment, proving each proposal by running the existing suite (arnx's probe test for a project with no tests of its own); then runs approve's proof without asking (`--yes` gives only the consent) and ends with "Worth a look" (`worthALook` in `setupview.ts`: only what applies) and doctor's line on unused images, when there are any. `--project NAME` redoes one project, `--add` covers more; a proven file is set up again only with `--force` | the repo (snapshot) | `.arnx/review.yaml`, `.arnx/setup/` logs and `approval.md` | reviewer model | yes |
+| `setup` | doctor's checks, then the consent to send code (asked once; `--yes` gives it); an agent reads the repo and proposes a test environment, proving each proposal by running the existing suite (arnx's probe test for a project with no tests of its own); then runs approve's proof without asking (`--yes` gives only the consent): a project whose part of review.yaml, environment and code (`snapshotDigest`) are what setup's last whole-suite run of it had takes that run as its proof (`SetupRun`), the others run again; it ends with "Worth a look" (`worthALook` in `setupview.ts`: only what applies, baseline tests failing on the environment first, by cause, with what to fix: `environmentLines`) and doctor's line on unused images, when there are any. `--project NAME` redoes one project, `--add` covers more; a proven file is set up again only with `--force` | the repo (snapshot) | `.arnx/review.yaml`, `.arnx/setup/` logs and `approval.md` | setup model (default: Claude Sonnet with a Claude reviewer, else the reviewer) | yes |
 | `approve` | The proof, asked nothing: run every suite once more (accepted tests still red, matching their pins, do not block it: "N accepted tests still fail"), stamp the file with a hash (the `approved:` key, its old name; `by` is the git user: arnx does not tell a coding agent from its user), record the proof and its warnings. `review`, `check` and `accept` run it themselves first when review.yaml changed since its proof (`reprove` in `cli.ts`; a failing proof stops them, exit 3). Both say first what changed since the last proof (`describeChanges` in `setupview.ts`, against the copy each proof keeps in `.arnx/setup/proven-review.yaml`, stamp or not; `proofState`: a stamp that holds over content other than the copy's is no proof; no copy: said, and the proof goes on), record it, and put it in the command's JSON (`reproved`); after a passing proof, "Worth a look" and the unused images line | `.arnx/review.yaml`, `.arnx/accepted-tests.json` | the stamp in `.arnx/review.yaml`, `.arnx/setup/approval.md`, `.arnx/setup/proven-review.yaml` | no | yes |
 | `review` | Write tests for the current change, run them 3 times, turn stable failures into findings, have a second model challenge each one | the change, the code, the approved environment | `.arnx/reviews/<id>/` | reviewer + challenger | yes |
 | `next` | Say where the repository is in the flow and the one command to run now (`next.ts`); with arnx cloud, the login or a top-up first | `.arnx/`, the change | nothing | no | no |
@@ -234,7 +234,10 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
 - `model.call` (`llm.ts`, `agent.ts`, `jev.ts`): one model call: role, provider, model, tokens, cost, latency, `ok`,
   `attempts` (requests sent; for an OpenAI background call, creates sent, polls not counted), `unknown_usage`,
   `timed_out`, and on a failed call the provider caused, `fault` (`unavailable`: 5xx, 429 or no connection on every
-  attempt; `auth`: 401 or 403). The same outcomes, kept in memory by `outage.ts`, become review.json's
+  attempt; `auth`: 401 or 403). A key with no credits left (`NoCredits`, `noCredits` in `llm.ts`: OpenAI's
+  `insufficient_quota` or `credit_balance_exhausted`, in an error or a background response that failed; Anthropic's
+  `billing_error` or "credit balance is too low") is never retried and no step goes on without it (`survivable`): the
+  command stops with one line naming the provider, exit 2. The same outcomes, kept in memory by `outage.ts`, become review.json's
   `provider_failures` and the sentence after the review's status. A review with an `unavailable` failure of the
   reviewer or the judging (`cutByOutage`, not once accepted) resumes like an interrupted one: `--resume` tests again
   the project rounds a failed call stopped (their verdicts dropped), keeps the others and judges again. Its status
@@ -266,9 +269,12 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
 - `challenge.verdict` (`challenge.ts`, `reviewer.ts`): the second model's verdict on a finding (also when resumed);
   `timed_out` when the call ran out of time.
 - `suspect.outcome`, `report.done` (`reviewer.ts`): what became of each suspect; the report's totals.
-- `setup.started`, `setup.attempt`, `setup.completed` (`setup.ts`): the setup agent's attempts and result;
-  `setup.withheld`: files left out of its snapshot as secret-looking, and `blanked`, files kept with comment lines
-  blanked (only when there are some); `setup.paths_check`:
+- `setup.started` (with `minutes`, the time limit), `setup.attempt`, `setup.completed` (with `stop`; `time` at the
+  limit, and `uncovered_projects` when it kept the projects proven by then) (`setup.ts`): the setup agent's attempts and result;
+  `setup.withheld`: files left out of its snapshot as secret-looking, `blanked`, files kept with comment lines
+  blanked, and `stand_ins`, files kept with stand-ins (only when there are some); `setup.sandbox_only`: files
+  `.arnxignore` leaves out that a run needed, copied into the sandbox before the project runs again; `setup.exec`: each exec command (`n`, project, `secs`, `exit`, `timed_out`,
+  `bytes` of output; `ran: false` and `refused` when exec refused it); `setup.paths_check`:
   the map's paths (uses entries wider than meant), with each hint's project and kind; `setup.uses_check`
   (`context = "precise"` only): the map against the code, with the projects indexed and each hint's project and kind.
 - `context.index` (`indexer.ts`, `context = "precise"` only): one project's code index: `ok`, `secs`, `files`, and
@@ -348,17 +354,50 @@ never reach the network.
 project named `main`, with the format, hash and prompts of the first version. Every module that runs tests takes one
 project as a `ReviewConfig`. `route.ts` sends each changed file to the projects that own or use it; `reviewer.ts`
 runs one test round per routed project (at most `max_projects`, budget split evenly) and reports untested paths.
-`detect.ts` finds candidate projects without a model; `setup.ts` lets the agent prove each project (`try_project`:
+`detect.ts` finds candidate projects without a model, `facts.ts` reads what the files settle about each (versions,
+package managers, workspace, CI jobs, services) and `draft.ts` writes a first review.yaml from those facts, values
+it is unsure of marked `# unsure:`, which the agent edits (a project, not at the root, whose facts name
+`MANY_SERVICES` (3) or more services goes under uncovered instead, and try_project refuses it while it lists that
+many: such backends ran out of setup's time; the most a proven project ran with was three, its files naming two);
+`setup.ts` lets the agent prove each project (`try_project`:
 the whole file, or after one a project's settings alone by name, which replace them in the last whole file)
 and accepts the file only when every project ran and every committed source file is owned, used or listed as
 uncovered (`propose`, `coverageMap`). Both count the files a working-tree snapshot holds (`workingTreeFiles`: tracked,
 and untracked unless git ignores them), and the counts name the untracked ones; an untracked file never refuses a
 proposal (not unexplained, not an overlap), so a scratch file cannot block setup. With no commits yet no file counts
 as untracked: every file is the repository's, and the change a review looks at.
+Before an environment's first whole-suite run, `try_project` looks first (`precheck.ts`, in the same session): the
+runner lists the tests (adapter `listCommand`: pytest `--collect-only`, `vitest list`, jest `--listTests`,
+`cargo nextest list`; node:test and bun have none), arnx's one-line test must be among what it lists from tests_dir,
+and the three smallest listed files run. No tests, files that do not load, a runner that does not start, a sample
+with no report or no test passing: each goes back to the agent with the output, and the same environment tried
+again runs the whole suite. A listing it cannot read for sure changes nothing.
+Setup's `exec` tool (`setupexec.ts`; never offered to reviews) runs one command in the image a project's last
+try_project used (the one its image step in `docker.jsonl` names, a rebuild for the code included), as its tests run
+(the test user, no internet, its services, deps_dir's links, the same limits), in one container kept between commands
+(`Session.exec`, the kept box), removed while a try_project runs, at the end of setup and on an interrupt; /src is a
+copy of the snapshot reset before each command (`Mirror`), with the sandbox-only files a run has (`placeSandbox`);
+what the agent gets of the output has their quotes taken out (`stripSandbox`), `exec-<n>.log` keeps it whole. It builds no image and nothing it does is kept: 120 s per command
+by default (at most 900), 80 commands or 60 minutes per setup, output cut to its first 2,000 and last 10,000
+characters (all of it in `exec-<n>.log`).
+Setup stops at `[budget] setup_minutes` (default 40, its proof included; `TimeLimit` in `sandbox.ts`) as at
+`setup_usd`: no model call starts past it (stop `time`), and each Docker step (build, suite, list step, exec, index)
+gets the time left when that is less than its own timeout, none when under a minute is left (`stepTimeout`).
+At the limit with no file accepted, the projects of the last whole file proven as they stand there are kept
+(`keepProven`): the others go under `uncovered` (`TIME_LEFT_OUT`, their source paths as `webUiPaths` finds them), the
+file is accepted as propose would accept it (approved projects as approved, no overlaps, what no project covers
+listed), and the proof takes setup's runs (`setAside` in the result, `uncovered_projects` in --json and
+`setup.completed`). With none proven it fails as before.
 A round clears every file with the adapter's writable names from tests_dir, so a tests_dir holding the project's own
 such files (Python's test_*.py, conftest.py, __init__.py; not those under the folders `accept` keeps tests in) is
 refused by `try_project`, `propose`, `approve` and `review` (`ownTestsInWriteDir`). Rust's writable names are arnx's own
 (`arnx_generated_*.rs`), so a crate's tests in `tests/` never count.
+A project the agent gives no tests_dir gets one from its runner's own configuration when the default folder lies
+outside it (`testsdir.ts`: vitest include and projects, jest roots, testMatch and testRegex, pytest testpaths; set in
+the file by `withTestsDirs`, said once to the agent): a new `arnx_generated` folder beside most of the project's own
+tests. Configuration in JavaScript is read only where it is literal; otherwise the default stays and the probe decides.
+An accepted test changed since `arnx accept` does not stop setup or the proof right after it (said once); `arnx
+approve` on its own and `arnx check` still refuse it.
 
 ## Language adapters
 
@@ -427,6 +466,8 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 |---|---|
 | `route.ts` | Which projects review a change; what no project covers |
 | `detect.ts` | Layout found without a model: candidate projects, runners, workspaces, services |
+| `facts.ts` | What the files settle per candidate without a model: Node/Python/Rust/Bun versions, package manager and install root, CI jobs (GitHub Actions; GitLab best effort), compose and CI services, Dockerfile base images, example env names |
+| `draft.ts` | The review.yaml draft setup's agent starts from, written from the facts; unsettled values marked `# unsure:` |
 | `languages.ts` | Languages found without a model (extensions, manifests, vendored folders left out): a repository written only in languages arnx does not review fails doctor's `Languages` check, so setup and review stop before any model call; in a mixed one their files count as uncovered on their own |
 | `cli.ts` | Argument parsing, prompts, printing, exit codes; all I/O is injectable for tests |
 | `main.ts` | Entry point for both builds; SIGINT and SIGTERM go to `interrupt.ts` |

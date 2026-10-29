@@ -19,6 +19,8 @@ export type Prices = Record<string, Price>;
 export const PROVIDER_KEYS: Record<string, readonly string[]> = Object.fromEntries(Object.keys(PRESETS)
   .map((name) => [name, envNames(resolveProvider(name)!)]));
 export const REVIEWER = "anthropic:claude-sonnet-5-5";
+/** Setup's model when the reviewer is a Claude model and `setup` is unset. */
+export const SETUP = "anthropic:claude-sonnet-5-5";
 export const OPENAI_CHALLENGER = "openai:gpt-5.5-2026-04-23";
 
 export interface ModelRef { provider: string; model: string }
@@ -65,6 +67,11 @@ export interface Settings {
   /** Anonymous usage counts after setup, review, accept and check (`telemetry`, default off: opt-in). */
   telemetry: boolean;
   reviewer: ModelRef;
+  /** The model that sets up the test environment (`setup`, default: SETUP with a Claude reviewer, else the
+   * reviewer). */
+  setup?: ModelRef;
+  /** Setup's own effort (`setup_effort`, default: `effort`). */
+  setupEffort?: Tier;
   challenger: ModelRef;
   /** The model that hunts each part of a big change (default: the reviewer). */
   hunter?: ModelRef;
@@ -83,6 +90,8 @@ export interface Settings {
   effort: string;
   reviewBudgetUsd: number;
   setupBudgetUsd: number;
+  /** Setup stops here, its proof included (`[budget] setup_minutes`, default 40). */
+  setupMinutes: number;
   answerBudgetUsd: number;
   runs: number;
   maxQuestions: number;
@@ -93,6 +102,9 @@ export interface Settings {
   /** Reviews (and setup) send untracked files too (`[review] untracked`, default off: tracked changes only; the
    * --untracked and --no-untracked flags win). */
   untracked: boolean;
+  /** A file holding key-shaped text in code goes to the model and the sandbox with a stand-in for each such string,
+   * the real values kept here (`[review] stand_ins`, default on); off, the file is left out. */
+  standIns: boolean;
   /** With the before/after check on, at most this many tests that passed in every run (per project, by test id) run
    * on the code before the change too, to show the change fixes what they check (`[review] fix_proof_max`, default
    * 20; 0 turns it off). */
@@ -121,8 +133,8 @@ export function settingsPath(repo: string): string {
 
 function withDefaults(consentAt: string | null, reviewer: ModelRef, challenger: ModelRef): Settings {
   return { consentAt, telemetry: false, reviewer, challenger, effort: "medium", reviewBudgetUsd: 3.0,
-    setupBudgetUsd: 3.0, answerBudgetUsd: 0.5, runs: 3, maxQuestions: 5, maxProjects: 4, beforeCheck: true, untracked: false,
-    fixProofMax: 20, acceptedTestsDir: "tests/arnx", context: "names", jev: false, prices: {} };
+    setupBudgetUsd: 3.0, setupMinutes: 40, answerBudgetUsd: 0.5, runs: 3, maxQuestions: 5, maxProjects: 4,
+    beforeCheck: true, untracked: false, standIns: true, fixProofMax: 20, acceptedTestsDir: "tests/arnx", context: "names", jev: false, prices: {} };
 }
 
 export const HAIKU = "anthropic:claude-haiku-5-5";
@@ -172,6 +184,7 @@ export function defaultSettings(env: Env = {}): Settings {
   const has = (ref: string) => keysOf(ref).every((k) => !!env[k]);
   const challenger = has(HARNESS.challenger) ? HARNESS.challenger : REVIEWER;
   const s = withDefaults(null, parseModelRef(HARNESS.reviewer), parseModelRef(challenger));
+  s.setup = parseModelRef(SETUP);
   s.hunter = parseModelRef(HARNESS.hunter);
   s.answerModel = parseModelRef(HARNESS.answerModel);
   if (has(HARNESS.secondHunter)) s.secondHunter = parseModelRef(HARNESS.secondHunter);
@@ -231,6 +244,11 @@ export function loadSettings(repo: string): Settings {
     throw new ArnxError(".arnx/config.toml: second_hunter_effort needs second_hunter");
   }
   const ownEffort = typeof rawEffort === "string" ? rawEffort.trim() : undefined;
+  const setupEffort = models.setup_effort;
+  if (setupEffort !== undefined && !TIERS.includes(setupEffort as Tier)) {
+    throw new ArnxError(`.arnx/config.toml: models.setup_effort: ${JSON.stringify(setupEffort)}; write ` +
+      TIERS.map((x) => JSON.stringify(x)).join(", "));
+  }
   if (review.before_check !== undefined && typeof review.before_check !== "boolean") {
     throw new ArnxError(".arnx/config.toml: review.before_check: write true or false");
   }
@@ -241,9 +259,14 @@ export function loadSettings(repo: string): Settings {
   if (review.untracked !== undefined && typeof review.untracked !== "boolean") {
     throw new ArnxError(".arnx/config.toml: review.untracked: write true or false");
   }
+  if (review.stand_ins !== undefined && typeof review.stand_ins !== "boolean") {
+    throw new ArnxError(".arnx/config.toml: review.stand_ins: write true or false");
+  }
   if (review.context !== undefined && review.context !== "names" && review.context !== "precise") {
     throw new ArnxError(".arnx/config.toml: review.context: write \"names\" or \"precise\"");
   }
+  const setupMinutes = float(budget.setup_minutes ?? 40);
+  if (!(setupMinutes > 0)) throw new ArnxError(".arnx/config.toml: budget.setup_minutes: write a number above 0");
   if (setup.jev !== undefined && typeof setup.jev !== "boolean") {
     throw new ArnxError(".arnx/config.toml: setup.jev: write true or false");
   }
@@ -252,6 +275,8 @@ export function loadSettings(repo: string): Settings {
     telemetry: telemetrySetting(data.telemetry),
     ...(typeof data.cloud_consent_at === "string" ? { cloudConsentAt: data.cloud_consent_at } : {}),
     reviewer: parseRef(str(models.reviewer, REVIEWER)),
+    ...(models.setup !== undefined ? { setup: parseRef(String(models.setup)) } : {}),
+    ...(setupEffort !== undefined ? { setupEffort: setupEffort as Tier } : {}),
     challenger: parseRef(str(models.challenger, REVIEWER)),
     ...(models.hunter !== undefined ? { hunter: parseRef(String(models.hunter)) } : {}),
     ...(models.openai_tier !== undefined ? { openaiTier: String(models.openai_tier) } : {}),
@@ -264,6 +289,7 @@ export function loadSettings(repo: string): Settings {
     effort: str(models.effort, "medium"),
     reviewBudgetUsd: float(budget.review_usd ?? 3.0),
     setupBudgetUsd: float(budget.setup_usd ?? 3.0),
+    setupMinutes,
     answerBudgetUsd: float(budget.answer_usd ?? 0.5),
     runs: Math.trunc(float(review.runs ?? 3)),
     maxQuestions: Math.trunc(float(review.max_questions ?? 5)),
@@ -271,6 +297,7 @@ export function loadSettings(repo: string): Settings {
     beforeCheck: review.before_check !== false,
     fixProofMax: fixProofMax === undefined ? 20 : Number(fixProofMax),
     untracked: review.untracked === true,
+    standIns: review.stand_ins !== false,
     acceptedTestsDir: str(review.accepted_tests_dir, "tests/arnx"),
     context: review.context === "precise" ? "precise" : "names",
     jev: setup.jev === true,
@@ -345,6 +372,16 @@ export function untrackedSetting(repo: string): boolean {
   }
 }
 
+/** `[review] stand_ins` from .arnx/config.toml; on when there is no config yet or it cannot be read. */
+export function standInsSetting(repo: string): boolean {
+  try {
+    return !existsSync(settingsPath(repo)) || loadSettings(repo).standIns;
+  } catch (e) {
+    if (e instanceof ArnxError) return true;
+    throw e;
+  }
+}
+
 /** Writes .arnx/config.toml. With `known` (init), the harness's lines for roles that are not on it, and the providers
  * arnx knows after the user's own. */
 export function writeSettings(repo: string, s: Settings, opts: { known?: boolean } = {}): void {
@@ -365,6 +402,10 @@ export function writeSettings(repo: string, s: Settings, opts: { known?: boolean
       ? [`${`# ${key} = ${q(HARNESS[role])}`.padEnd(45)} # harness; needs ${keysOf(HARNESS[role]).join(", ")}`] : [];
   lines.push("", "[models]",
     model("reviewer", q(refString(s.reviewer)), "reviews the change, writes and runs the tests"),
+    s.setup ? model("setup", q(refString(s.setup)), "sets up the test environment")
+      : `${`# setup = ${q(SETUP)}`.padEnd(45)} # sets up the test environment; default: ` +
+        (s.reviewer.provider === "anthropic" ? "this" : "reviewer"),
+    ...(s.setupEffort ? [model("setup_effort", q(s.setupEffort), "setup's own effort")] : []),
     ...ref("hunter", s.hunter, "looks at each part of a big change"),
     ...ref("second_hunter", s.secondHunter, "a second look, from another vendor"),
     ...harness("second_hunter", "secondHunter", s.secondHunter),
@@ -380,6 +421,7 @@ export function writeSettings(repo: string, s: Settings, opts: { known?: boolean
     "", `${"[budget]".padEnd(19)} # the most a run may spend, in USD; it stops there`,
     `review_usd = ${pyFloat(s.reviewBudgetUsd)}`, `setup_usd = ${pyFloat(s.setupBudgetUsd)}`,
     `answer_usd = ${pyFloat(s.answerBudgetUsd)}`,
+    setting(`setup_minutes = ${s.setupMinutes}`, "minutes setup may take, its proof included"),
     "", "[review]", setting(`runs = ${s.runs}`, `each test runs ${s.runs} times; a finding fails every time`),
     setting(`max_questions = ${s.maxQuestions}`, "questions you are asked, at most"),
     ...(s.maxProjects !== 4 ? [setting(`max_projects = ${s.maxProjects}`, "projects one review covers, at most")] : []),
@@ -387,6 +429,7 @@ export function writeSettings(repo: string, s: Settings, opts: { known?: boolean
     ...(s.fixProofMax !== 20 ? [setting(`fix_proof_max = ${s.fixProofMax}`,
       "passing tests per project rerun there to prove a fix (0: off)")] : []),
     ...(s.untracked ? [setting("untracked = true", "send untracked files too")] : []),
+    ...(!s.standIns ? [setting("stand_ins = false", "leave out files with key-shaped text, no stand-ins")] : []),
     setting(`accepted_tests_dir = ${q(s.acceptedTestsDir)}`, "path accepted tests run from; kept in .arnx/tests/"),
     ...(s.context !== "names" ? [setting(`context = ${q(s.context)}`, "follow symbols with a code index")] : []),
     ...(s.jev ? ["", "[setup]", commented("jev = true", "experimental: ask JEV (needs JEV_API_KEY)")] : []),
@@ -500,26 +543,38 @@ export function recordConsent(repo: string, key: "consent_at" | "cloud_consent_a
   writeFileSync(path, lines.join("\n"));
 }
 
-/** Every model these settings call, whatever its role. */
+/** Every model a review, an answer or a check calls (setup's own model is checked by setup: setupRef). */
 export const modelRefs = (s: Settings): ModelRef[] =>
   [s.reviewer, s.challenger, s.challengerFallback, s.secondHunter, s.hunter, s.answerModel]
     .filter((r): r is ModelRef => r != null);
+
+/** The model setup runs on: `setup`; else Claude Sonnet with a Claude reviewer (it proved most setups, fastest),
+ * the reviewer with any other. */
+export const setupRef = (s: Settings): ModelRef =>
+  s.setup ?? (s.reviewer.provider === "anthropic" ? parseModelRef(SETUP) : s.reviewer);
+
+/** The settings setup's agent runs on: setup's model and `setup_effort` in the reviewer's and `effort`'s place. When
+ * both are the reviewer's, the settings as they are. */
+export const setupSettings = (s: Settings): Settings =>
+  refString(setupRef(s)) !== refString(s.reviewer) || s.setupEffort
+    ? { ...s, reviewer: setupRef(s), effort: s.setupEffort ?? s.effort } : s;
 
 /** The provider a ref names under these settings (a preset, the user's table, or both merged). */
 export function providerOfRef(s: Pick<Settings, "providers"> | null | undefined, ref: ModelRef): Provider | undefined {
   return resolveProvider(ref.provider, s?.providers);
 }
 
-/** The variables the models in these settings read their keys (and base URLs) from, each once. */
-export function keyNames(s: Settings): string[] {
-  return [...new Set(modelRefs(s).flatMap((r) => {
+/** The variables the models in these settings read their keys (and base URLs) from, each once; with `refs`, only
+ * those models'. */
+export function keyNames(s: Settings, refs: ModelRef[] = modelRefs(s)): string[] {
+  return [...new Set(refs.flatMap((r) => {
     const p = providerOfRef(s, r);
     return p ? envNames(p) : [];
   }))];
 }
 
-export function missingKeys(s: Settings, env: Env): string[] {
-  return keyNames(s).filter((k) => !env[k]);
+export function missingKeys(s: Settings, env: Env, refs?: ModelRef[]): string[] {
+  return keyNames(s, refs).filter((k) => !env[k]);
 }
 
 /** How messages name a built-in provider (from PRESETS). */

@@ -1,6 +1,6 @@
 // A second model, from another vendor when keys allow, marks each finding confirmed or disputed. Nothing is
 // deleted: a disputed finding stays in the report with the reason.
-import { ModelError } from "./errors";
+import { survivable } from "./errors";
 import { clip, emit, hypId, withRole } from "./events";
 import { type JsonModel, type ModelUse, newUse, tally, type Trace } from "./llm";
 import type { Say } from "./progress";
@@ -77,7 +77,7 @@ export async function challenge(findings: Finding[], o: { model: JsonModel; diff
       trace({ finding: f.id, outcome: "ok", secs: secs(), cost_usd: cost });
       timeouts = 0; // two timeouts in a row, not two in all
     } catch (e) {
-      if (!(e instanceof ModelError)) throw e;
+      if (!survivable(e)) throw e;
       if (e.costUsd > 0 || e.usage) tally(use, e.costUsd, e.usage, e.unknownCalls);
       else use.unknownCalls += e.unknownCalls;
       [f.verdict, f.reason] = [null, `not challenged: ${e.message}`];

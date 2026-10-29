@@ -3,11 +3,17 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, filesAt, git, leftOutUntracked, resolveChange, someNames, untrackedLine } from "./change";
-import { fileDigest, isFileApproved, parseReviewFile, readSecretPins, type ReviewFile, secretPinsOf } from "./config";
+import { type Baseline, BASELINE_FILE, type BaselineTest, describeBaselineChanges, parseBaseline, readBaseline } from "./baseline";
+import { fileDigest, isProven, parseReviewFile, readSecretPins, type ReviewFile, sandboxOnlyOf, secretPinsOf }
+  from "./config";
 import { detect } from "./detect";
 import { ArnxError } from "./errors";
 import { refString, type Settings, untrackedSetting } from "./settings";
-import { coverageMap, type ProjectProof, unexplainedFailing } from "./setup";
+import { BROWSER_TESTS, WEB_UI } from "./browser";
+import { matcher } from "./ignore";
+import { type Coverage, coverageFiles, coverageMap, NO_TESTS, type ProjectProof, SCRIPTS, unexplainedFailing }
+  from "./setup";
+import { SOURCE } from "./untested";
 
 // Rough minutes and USD per project, for the estimate shown before setup starts.
 const MIN_PER_PROJECT = [1, 3];
@@ -16,6 +22,8 @@ const USD_PER_PROJECT = [0.03, 0.1];
 export const REVIEW_FILE = ".arnx/review.yaml";
 /** A copy of review.yaml as its last proof stamped it (a local file): what a changed file is compared with. */
 export const PROVEN_COPY = ".arnx/setup/proven-review.yaml";
+/** The baseline the last proof on this machine held, kept next to PROVEN_COPY. */
+export const PROVEN_BASELINE = ".arnx/setup/proven-baseline.json";
 
 /** Shown before setup starts: the steps, what is sent, and a rough estimate from the layout found without a model.
  * `untracked`: the agent reads untracked files too (--untracked; default `[review] untracked`). */
@@ -25,8 +33,11 @@ export function setupPreview(repo: string, s: Settings, untracked = s.untracked)
   const minutes = MIN_PER_PROJECT.map((m) => m * n + 1);
   // Said before anything runs: with no tests of its own, a project is checked with arnx's tests, not a suite.
   const bare = found.length > 0 && found.every((c) => c.language !== "rust" && /^0 test files/.test(c.evidence[0] ?? ""));
-  return `Setup${s.cloud?.models ? " with arnx cloud" : ""}: finding how to run your tests in Docker (about ` +
-    `${minutes[0]}–${minutes[1]} min, stops at $${s.setupBudgetUsd.toFixed(2)}).` +
+  // Never more than setup's time limit, at which it stops.
+  const capped = minutes[1]! > s.setupMinutes;
+  const time = capped ? `up to ${s.setupMinutes} min` : `about ${minutes[0]}–${minutes[1]} min`;
+  return `Setup${s.cloud?.models ? " with arnx cloud" : ""}: finding how to run your tests in Docker (${time}, ` +
+    `stops at ${capped ? "" : `${s.setupMinutes} min or `}$${s.setupBudgetUsd.toFixed(2)}).` +
     (bare ? " No tests of your own were found: arnx checks the environment with its own one-line test." : "");
 }
 
@@ -67,6 +78,7 @@ export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = []): s
   for (const p of file.projects) {
     const proof = proofs.find((x) => x.name === p.name);
     if (proof?.skips.length) out.push(`${p.name}: tests skipped because ${proof.skips.join("; ")}`);
+    if (proof?.gap) out.push(`${p.name}: ${proof.gap}; test_command leaves them out`);
     if (p.knownFailing.length) {
       const silent = unexplainedFailing(p);
       out.push(`${p.name}: ${p.knownFailing.length} test file(s) set aside as known failing` +
@@ -89,6 +101,12 @@ export function approvalWarnings(file: ReviewFile, proofs: ProjectProof[] = []):
     checks.push(`${allowed.map((p) => p.path).join(", ")}: allowed although secret-looking; sent to the model and the ` +
       "sandbox");
   }
+  const sandbox = sandboxOnlyOf(file.raw);
+  if (sandbox.length) {
+    checks.push(`${sandbox.join(", ")}: left out by .arnxignore, but the tests need ` +
+      `${sandbox.length === 1 ? "it" : "them"}; copied into the sandbox, never sent to the model (sandbox_only in ` +
+      "review.yaml)");
+  }
   return checks;
 }
 
@@ -108,8 +126,9 @@ export function filesSummary(file: ReviewFile, repo: string, untracked = false):
  * files a project owns says nothing about whether its tests cover them. */
 export function filesLine(f: FilesSummary): string {
   const left = f.untrackedLeftOut;
+  const n = f.notTested.length;
   return `  Files: ${f.projects.map((p) => `${p.name} owns ${p.owned}, uses ${p.used}`).join("; ")} · not tested: ` +
-    `${f.notTested.length ? f.notTested.join(", ") : "none"}` +
+    `${!n ? "none" : n > 3 ? `${n} paths` : f.notTested.join(", ")}` +
     (left.length ? ` · ${left.length} untracked left out (${left.slice(0, 3).join(", ")}${left.length > 3 ? ", …" : ""})`
       : "");
 }
@@ -125,17 +144,120 @@ export function approvalScreen(file: ReviewFile, repo: string, o: { proofs?: Pro
 }
 
 /** The lines of "Worth a look" after a proof, only what applies: the warnings, then what no project tests (a change
- * there is reported as not tested) and source files no project mentions. */
+ * there is reported as not tested), one line per kind (the whole list is in the approval record), and source files
+ * no project mentions. */
 export function worthALook(file: ReviewFile, repo: string, o: { proofs?: ProjectProof[]; untracked?: boolean })
   : string[] {
-  const lines = approvalWarnings(file, o.proofs);
+  const base = currentBaseline(repo) ?? new Map();
+  const lines = [...environmentLines(file, base), ...baselineLines(file, base), ...approvalWarnings(file, o.proofs)];
   if (!file.legacy) {
     const map = coverageMap(repo, file, !!o.untracked);
-    lines.push(...map.uncovered.map((u) => `not tested: ${u.path} (${u.files} file${u.files === 1 ? "" : "s"}` +
-      `${u.untracked ? `, ${u.untracked} untracked` : ""}): ${u.reason}`));
+    lines.push(...notTestedLines(map, repo, !!o.untracked));
     if (map.unexplained.length) lines.push(`${map.unexplained.length} source files no project mentions`);
   }
   return lines;
+}
+
+/** The kinds of reason the end screen groups uncovered entries by: an entry whose reason starts with one of them. */
+const KINDS = [BROWSER_TESTS, WEB_UI, SCRIPTS, NO_TESTS, "unsupported language", "infrastructure"];
+
+/** What no project tests, one line per kind of reason: "not tested (web UI): web/ (12 files)". Entries holding no
+ * source file are docs and data; languages arnx does not review are one kind. */
+export function notTestedLines(map: Coverage, repo: string, untracked: boolean): string[] {
+  const sources = coverageFiles(repo, untracked).files.filter((p) => SOURCE.test(p));
+  const kinds = new Map<string, { paths: string[]; files: number }>();
+  for (const u of map.uncovered) {
+    const reason = u.reason.trim().toLowerCase();
+    const kind = /arnx does not review it yet$/.test(u.reason) ? "unsupported language"
+      : !sources.some(matcher(u.path)) ? "docs and data"
+      : KINDS.find((k) => reason.startsWith(k.toLowerCase())) ?? u.reason;
+    const k = kinds.get(kind) ?? { paths: [], files: 0 };
+    k.paths.push(u.path);
+    k.files += u.files;
+    kinds.set(kind, k);
+  }
+  return [...kinds].map(([kind, k]) => `not tested (${kind}): ${k.paths.length > 2 ? `${k.paths.length} paths`
+    : k.paths.join(", ")} (${k.files} file${k.files === 1 ? "" : "s"})`);
+}
+
+/** Every uncovered entry, for the approval record: "path (n files): reason". */
+export function notTestedRecord(file: ReviewFile, repo: string, untracked: boolean): string[] {
+  if (file.legacy) return [];
+  return coverageMap(repo, file, untracked).uncovered.map((u) => `${u.path} (${u.files} file${u.files === 1 ? "" : "s"}` +
+    `${u.untracked ? `, ${u.untracked} untracked` : ""}): ${u.reason}`);
+}
+
+/** The causes of a baseline test that are the environment's, not the code's, and what to fix for each. */
+const ENV_FIX: Record<string, string> = {
+  "missing-package": "add it to install",
+  "import-path": "the import does not resolve in the sandbox; check root and install",
+  "missing-library": "install the system library in install",
+  "missing-program": "install the program in install",
+  "missing-variable": "set it under env",
+  "env-value": "the value env gives does not work; set one that does",
+  "unresolved-host": "add a service by that name, or point env at one",
+  "connection-refused": "nothing listens there; add the service, or fix its host and port in env",
+};
+const environmental = (t: BaselineTest) => !t.flaky && !!t.cause && t.cause.split(":")[0]! in ENV_FIX;
+
+/** Baseline tests that fail on the environment (the agent could not fix it in the sandbox), one line per cause, most
+ * first, with what to fix: "connection-refused: db:5432 (2 tests in shop): nothing listens there; …". */
+export function environmentLines(file: ReviewFile, base: Baseline): string[] {
+  const groups = new Map<string, { tests: number; files: Set<string>; projects: string[] }>();
+  for (const p of file.projects) {
+    for (const t of (base.get(p.name) ?? []).filter(environmental)) {
+      const g = groups.get(t.cause!) ?? { tests: 0, files: new Set<string>(), projects: [] };
+      if (t.load) g.files.add(t.file);
+      else g.tests += 1;
+      if (!g.projects.includes(p.name)) g.projects.push(p.name);
+      groups.set(t.cause!, g);
+    }
+  }
+  const size = (g: { tests: number; files: Set<string> }) => g.tests + g.files.size;
+  return [...groups].sort((a, b) => size(b[1]) - size(a[1])).map(([cause, g]) => {
+    const n = [g.tests ? `${g.tests} test${g.tests === 1 ? "" : "s"}` : "",
+      g.files.size ? `${g.files.size} test file${g.files.size === 1 ? "" : "s"} that do${g.files.size === 1 ? "es" : ""} ` +
+        "not load" : ""].filter(Boolean).join(", ");
+    return `${cause} (${n} in ${g.projects.join(", ")}): ${ENV_FIX[cause.split(":")[0]!]}`;
+  });
+}
+
+/** The causes other than the environment's (environmentLines) and flaky tests among `tests`, most first: "1 flaky;
+ * 1 order-dependent". */
+function causes(tests: BaselineTest[]): string[] {
+  const groups = new Map<string, number>();
+  for (const t of tests) {
+    const k = t.flaky ? "flaky" : t.cause === "does-not-load" || environmental(t) ? undefined : t.cause;
+    if (k) groups.set(k, (groups.get(k) ?? 0) + 1);
+  }
+  const why = [...groups].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`);
+  if (groups.size > 3) why.push("…");
+  return why;
+}
+
+/** One line per project with tests in the baseline: how many fail today, and the causes and flaky tests among them
+ * (the rest fail on the code as it is); and one for the test files that do not load, which hide all their tests. */
+export function baselineLines(file: ReviewFile, base: Baseline): string[] {
+  const out: string[] = [];
+  for (const p of file.projects) {
+    const all = base.get(p.name) ?? [];
+    const tests = all.filter((t) => !t.load);
+    const loads = all.filter((t) => t.load);
+    if (tests.length) {
+      const why = causes(tests);
+      out.push(`${p.name}: ${tests.length} test${tests.length === 1 ? " fails" : "s fail"} today, recorded in ` +
+        `${BASELINE_FILE}${why.length ? ` (${why.join("; ")})` : ""}`);
+    }
+    if (loads.length) {
+      const files = [...new Set(loads.map((t) => t.file))].sort();
+      const why = causes(loads);
+      const some = files.slice(0, 3).join(", ") + (files.length > 3 ? `, and ${files.length - 3} more` : "");
+      out.push(`${p.name}: ${files.length} test file${files.length === 1 ? " does" : "s do"} not load, so none of ` +
+        `${files.length === 1 ? "its" : "their"} tests run: ${some}${why.length ? ` (${why.join("; ")})` : ""}; ` +
+        `recorded in ${BASELINE_FILE}`);
+    }
+  }
+  return out;
 }
 
 /** After the proof: the next command, and what it would review in this repository right now (what would be sent:
@@ -167,16 +289,44 @@ function provenCopy(repo: string): ReviewFile | null {
   }
 }
 
-/** Where review.yaml stands against its last proof on this machine. `proven`: its stamp holds and it holds what the
- * proof's copy holds (or there is no copy: a proof by an older arnx, a fresh clone). Otherwise `changes`: what changed
- * since the copy, stamp or not (null without a copy). `stamped`: it carries a stamp, current or not. */
+/** The baseline the last proof on this machine held: empty when that proof held none (a copy of review.yaml and no
+ * baseline copy), null when there is no copy at all or it does not read. */
+function provenBaseline(repo: string): Baseline | null {
+  const path = join(repo, PROVEN_BASELINE);
+  if (!existsSync(path)) return existsSync(join(repo, PROVEN_COPY)) ? new Map() : null;
+  try {
+    return parseBaseline(readFileSync(path, "utf8"));
+  } catch (e) {
+    if (e instanceof ArnxError) return null;
+    throw e;
+  }
+}
+
+/** The baseline as it is now; null when it does not read (then nothing is proven). */
+function currentBaseline(repo: string): Baseline | null {
+  try {
+    return readBaseline(repo);
+  } catch (e) {
+    if (e instanceof ArnxError) return null;
+    throw e;
+  }
+}
+
+/** Where review.yaml stands against its last proof on this machine. `proven`: its stamp holds (over review.yaml and
+ * the baseline) and they hold what the proof's copies hold (or there is no copy: a proof by an older arnx, a fresh
+ * clone). Otherwise `changes`: what changed since the copies, stamp or not (null without a copy). `stamped`: it
+ * carries a stamp, current or not. */
 export function proofState(repo: string, file: ReviewFile): { proven: boolean; stamped: boolean;
   changes: string[] | null } {
   const copy = provenCopy(repo);
+  const oldBase = provenBaseline(repo);
+  const base = currentBaseline(repo);
+  const baseChanges = oldBase && base ? describeBaselineChanges(oldBase, base) : [];
   // A stamp that holds over content this machine did not prove (recomputed by hand) is no proof.
-  const proven = isFileApproved(file) && (!copy || fileDigest(copy) === fileDigest(file));
+  const proven = base !== null && isProven(repo, file) && (!copy || fileDigest(copy) === fileDigest(file)) &&
+    !baseChanges.length;
   const stamped = typeof file.raw.approved === "object" && file.raw.approved !== null;
-  return { proven, stamped, changes: !proven && copy ? describeChanges(copy, file) : null };
+  return { proven, stamped, changes: !proven && copy ? [...describeChanges(copy, file), ...baseChanges] : null };
 }
 
 type Raw = Record<string, unknown>;
@@ -219,7 +369,7 @@ export function describeChanges(old: ReviewFile, now: ReviewFile): string[] {
   }
   if (!now.legacy) {
     // Services are told per project, where they are used.
-    const keys = ["version", "allow_env_names", "uncovered", "allow_secret_looking"]
+    const keys = ["version", "allow_env_names", "uncovered", "allow_secret_looking", "sandbox_only"]
       .filter((k) => !same(old.raw[k], now.raw[k]));
     if (keys.length) out.push(`${keys.join(", ")} changed`);
   }

@@ -152,8 +152,8 @@ More: [docs/WORKFLOW.md](docs/WORKFLOW.md#coding-agents).
 | Tests | your Docker | your Docker |
 | Sent | the diff, files the agent reads, its tests and their output, to your providers | the same, to arnx cloud, which passes them to its model providers |
 
-Secret files, files with key-shaped text (in a source file's comment: only those lines) and paths in `.arnxignore`
-are never sent; untracked files only with `--untracked`. Sending code needs your consent, once per repository and
+Secret files, values that look like secrets (sent and tested as fakes of the same shape; a file is left out only when
+no fake can keep a key out) and paths in `.arnxignore` are never sent; untracked files only with `--untracked`. Sending code needs your consent, once per repository and
 destination. Switch with `arnx cloud on` / `off`. Details: [docs/MODELS.md](docs/MODELS.md), [docs/CLOUD.md](docs/CLOUD.md), [docs/SAFETY.md](docs/SAFETY.md).
 
 ## Safety and data
@@ -183,8 +183,9 @@ broke and how long setup took.
 - Changes up to 200 KB per review; review a long branch in parts with `--range A..B`.
 - Python, JavaScript/TypeScript and Rust only (`arnx init` and `arnx doctor` say so for a repository in another
   language, before anything is sent). No Windows build: use WSL 2.
-- Setup marks test files it cannot run as `known_failing`, with a reason that is a model's judgement: setup lists
-  them under "Worth a look"; read those entries in `.arnx/review.yaml`.
+- Setup records the tests your suite fails today, one by one, in `.arnx/baseline.json`, and later proofs do not
+  count them. A failure that looks like the environment (a missing service, package or variable) goes back to the
+  setup agent first; what it cannot fix in the sandbox is recorded with its cause, listed under "Worth a look".
 - Model replies vary: two reviews of the same change can report different findings.
 
 ## Try it, and tell us

@@ -74,20 +74,21 @@ test("setup tells the agent and the developer why tests were skipped, and keeps 
   expect(shown).toContain("skipped because");
 });
 
-test("propose refuses known_failing files that no note explains", async () => {
-  const silent = COVERED.replace("    uses: [services/shared/]\n  feed:",
-    "    uses: [services/shared/]\n    known_failing: [tests/test_live.py]\n  feed:");
-  const explained = silent.replace("    known_failing:", "    notes: [tests/test_live.py calls a live API]\n    known_failing:");
-  const m = new ScriptedAgent([
-    [tool("try_project", { yaml: silent, project: "pay" })], [tool("try_project", { yaml: silent, project: "feed" })],
-    [tool("propose", { yaml: silent })],
-    [tool("try_project", { yaml: explained, project: "pay" })], [tool("propose", { yaml: explained })], [text("ok")],
-  ]);
-  const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: skipping });
-  expect(result(m, 3)).toContain("known_failing without a reason in notes: pay: tests/test_live.py");
-  expect([r.ok, r.yamlText]).toEqual([true, explained]);
-  expect(unexplainedFailing(parseReviewFile(explained).projects[0]!)).toEqual([]);
-});
+test("setup takes known_failing out of a proposal and tells the agent once: failing tests are recorded one by one",
+  async () => {
+    const listed = COVERED.replace("    uses: [services/shared/]\n  feed:",
+      "    uses: [services/shared/]\n    known_failing: [tests/test_live.py]\n  feed:");
+    const m = new ScriptedAgent([
+      [tool("try_project", { yaml: listed, project: "pay" })], [tool("try_project", { yaml: listed, project: "feed" })],
+      [tool("propose", { yaml: listed })], [text("ok")],
+    ]);
+    const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: skipping });
+    expect(result(m, 1)).toStartWith("(known_failing is not used: arnx records each failing test itself, so it was " +
+      "taken out of the file.)\nthe suite of pay runs:");
+    expect(r.ok).toBe(true);
+    expect(r.yamlText).not.toContain("known_failing");
+    expect(parseReviewFile(r.yamlText!).projects.every((p) => !p.knownFailing.length)).toBe(true);
+  });
 
 test("an uncovered reason split by a comma is refused, not read as a shorter reason", () => {
   const bad = COVERED.replace("reason: Terraform; no adapter}", "reason: infrastructure (compose, other) only}");
@@ -110,8 +111,9 @@ test("the setup screen names the file, one line per project; what is worth a loo
   const screen = approvalScreen(file, repo, { proofs });
   expect(screen.startsWith("  project")).toBe(true);
   expect(screen).not.toContain("! ");
-  expect(worthALook(file, repo, { proofs }).filter((l) => l.startsWith("not tested: "))).toEqual([
-    expect.stringMatching(/^not tested: \/app\.py \(/), "not tested: infra/ (1 file): Terraform; no adapter"]);
+  // One line per kind of reason: an entry holding no source file is docs and data.
+  expect(worthALook(file, repo, { proofs }).filter((l) => l.startsWith("not tested"))).toEqual([
+    "not tested (legacy script, no tests): /app.py (1 file)", "not tested (docs and data): infra/ (1 file)"]);
   expect(screen).not.toMatch(/setup agent's notes|The full file/);
   // No project has services: no services column.
   const plain = { ...file, projects: file.projects.map((p) => ({ ...p, services: [] })) };
@@ -123,7 +125,7 @@ test("the preview says what setup does and gives an estimate before anything is 
   writeFileSync(join(repo, "services/pay/requirements.txt"), "pytest\n");
   commit(repo, "manifest");
   expect(setupPreview(repo, defaultSettings())).toMatch(
-    /^Setup: finding how to run your tests in Docker \(about \d+–\d+ min, stops at \$3\.00\)\.$/);
+    /^Setup: finding how to run your tests in Docker \(about \d+–\d+ min, stops at 40 min or \$3\.00\)\.$/);
 });
 
 test("the next step says which change a review would test now", () => {

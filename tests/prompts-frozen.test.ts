@@ -1,5 +1,9 @@
 // The default prompts live in src/prompts.toml; every prompt built from them is byte for byte what arnx 0.1.2 built
-// from the templates in code (tests/fixtures/prompts-0.1.2.json), and PROMPT_VERSION keeps 0.1.2's value.
+// from the templates in code (tests/fixtures/prompts-0.1.2.json), except the setup task, which 0.1.5 changed
+// (tests/fixtures/prompts-0.1.5.json), and so PROMPT_VERSION: setup records failing tests one by one, sets tests_dir
+// from the runner's configuration, places the map's leftovers itself, leaves browser tests and failed web UI apps
+// out, takes arnx:generated values, offers exec, starts from a draft review.yaml when the detector wrote one
+// (setup.draft), and leaves projects that need three or more services under uncovered.
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -8,18 +12,21 @@ import { DEFAULTS, NEEDED, PLACEHOLDERS, placeholdersIn, PROMPT_KEYS, PROMPT_VER
 import { parseOverrides, tomlText } from "../src/userprompts";
 import { promptCases } from "./helpers/promptcases";
 
-const FROZEN = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompts-0.1.2.json"), "utf8")) as
-  Record<string, { sha256: string; text?: string }>;
+type Frozen = Record<string, { sha256: string; text?: string }>;
+const FROZEN = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompts-0.1.2.json"), "utf8")) as Frozen;
+const CHANGED = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompts-0.1.5.json"), "utf8")) as Frozen;
 
-test("PROMPT_VERSION keeps 0.1.2's value", () => {
-  expect(PROMPT_VERSION).toBe("9e0a877404fd");
+test("PROMPT_VERSION has 0.1.5's value: the setup task changed, no review prompt did", () => {
+  expect(PROMPT_VERSION).toBe("a4e3a1e0de4f");
+  expect(Object.keys(CHANGED)).toEqual(["setupTask", "setupTask/draft", "PROMPT_VERSION"]);
 });
 
-test("every built prompt is byte-equal to 0.1.2's", () => {
+test("every built prompt is byte-equal to 0.1.2's, the setup task to 0.1.5's", () => {
   const cases = promptCases();
-  expect(Object.keys(cases)).toEqual(Object.keys(FROZEN));
+  expect(Object.keys(cases).filter((k) => !(k in FROZEN))).toEqual(["setupTask/draft"]);
+  expect(Object.keys(FROZEN).filter((k) => !(k in cases))).toEqual([]);
   for (const [name, text] of Object.entries(cases)) {
-    const want = FROZEN[name]!;
+    const want = CHANGED[name] ?? FROZEN[name]!;
     if (want.text !== undefined) expect(`${name}: ${text}`).toBe(`${name}: ${want.text}`);
     expect(`${name}: ${createHash("sha256").update(text).digest("hex")}`).toBe(`${name}: ${want.sha256}`);
   }
@@ -30,7 +37,7 @@ test("src/prompts.toml holds every key, each using exactly the placeholders the 
   const steps = [...toml.matchAll(/^\[([a-z]+)\]$/gm)].map((m) => m[1]);
   expect(steps).toEqual(["review", "hunt", "prove", "rank", "questions", "challenge", "answer", "explain", "setup",
     "fix"]);
-  expect(PROMPT_KEYS).toHaveLength(27);
+  expect(PROMPT_KEYS).toHaveLength(28);
   for (const key of PROMPT_KEYS) {
     expect([key, ...placeholdersIn(DEFAULTS[key])].sort()).toEqual([key, ...PLACEHOLDERS[key]].sort());
     for (const p of NEEDED[key] ?? []) expect(PLACEHOLDERS[key] as readonly string[]).toContain(p);
