@@ -57,9 +57,13 @@ test("unset, setup runs on Sonnet with a Claude reviewer, else on the reviewer; 
   expect([refString(model.reviewer), model.effort]).toEqual([HAIKU, "medium"]);
   const effort = setupSettings({ ...s, setupEffort: "low" });
   expect([refString(effort.reviewer), effort.effort]).toEqual(["anthropic:claude-sonnet-5-5", "low"]);
-  // The keys a command checks include setup's model.
+  // Setup checks its own model's key; the other commands only the keys of the models they call.
   const openai = { ...s, setup: parseModelRef("openai:gpt-5.5-2026-04-23") };
-  expect(missingKeys(openai, { ANTHROPIC_API_KEY: "a" })).toEqual(["OPENAI_API_KEY"]);
+  const claude = { ...defaultSettings(), reviewer: parseModelRef("openai:gpt-5.5-2026-04-23"),
+    challenger: parseModelRef("openai:gpt-5.5-2026-04-23"), hunter: undefined, answerModel: undefined,
+    secondHunter: undefined, challengerFallback: undefined, setup: parseModelRef("anthropic:claude-sonnet-5-5") };
+  expect(missingKeys(claude, { OPENAI_API_KEY: "o" })).toEqual([]);
+  expect(missingKeys(claude, { OPENAI_API_KEY: "o" }, [setupRef(claude)])).toEqual(["ANTHROPIC_API_KEY"]);
   expect(missingKeys(openai, { ANTHROPIC_API_KEY: "a" }, [setupRef(openai)])).toEqual(["OPENAI_API_KEY"]);
   expect(missingKeys(openai, { OPENAI_API_KEY: "o" }, [setupRef(openai)])).toEqual([]);
 });

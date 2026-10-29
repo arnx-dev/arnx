@@ -691,7 +691,7 @@ class Commands {
       ...cloudOn && all.some((o) => isModelKey(o.key)) ? [CLOUD_PROMPTS] : []].join("; ");
     const promptNotes = overrideWarnings(overrides);
     // The provider tables a role uses, under Models (a table no role names is not shown).
-    const used = new Set(s ? modelRefs(s).map((r) => r.provider) : []);
+    const used = new Set(s ? [...modelRefs(s), setupRef(s)].map((r) => r.provider) : []);
     const unused = settings && !cloudModels(settings) ? unusedKeysNote(repo, this.d.env) : null;
     const providers = settings ? providerLines(settings, this.d.env).filter((l) => used.has(l.split(/[ :]/)[1]!)) : [];
     // Setup's own model or effort, when it is not the reviewer's (on your own keys only).

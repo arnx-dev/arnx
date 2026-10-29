@@ -543,9 +543,9 @@ export function recordConsent(repo: string, key: "consent_at" | "cloud_consent_a
   writeFileSync(path, lines.join("\n"));
 }
 
-/** Every model these settings call, whatever its role. */
+/** Every model a review, an answer or a check calls (setup's own model is checked by setup: setupRef). */
 export const modelRefs = (s: Settings): ModelRef[] =>
-  [s.reviewer, setupRef(s), s.challenger, s.challengerFallback, s.secondHunter, s.hunter, s.answerModel]
+  [s.reviewer, s.challenger, s.challengerFallback, s.secondHunter, s.hunter, s.answerModel]
     .filter((r): r is ModelRef => r != null);
 
 /** The model setup runs on: `setup`; else Claude Sonnet with a Claude reviewer (it proved most setups, fastest),
