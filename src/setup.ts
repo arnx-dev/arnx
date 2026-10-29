@@ -470,6 +470,9 @@ export interface ProjectProof { name: string; summary: string; skips: string[]; 
 export interface SetupRun { name: string; digest: string; env: string; snapshot: string; untracked: boolean;
   summary: string; after: string; skips: string[]; counts: SuiteCounts }
 
+/** The reason under uncovered of a project setup had not proven when it reached its time limit. */
+export const TIME_LEFT_OUT = "setup reached its time limit";
+
 /** Why setup stops when its only projects are web UI apps whose one try failed (SetupResult stop WEB_UI_STOP). */
 export const ONLY_WEB_UI = "only web UI here, which arnx does not set up";
 export const WEB_UI_STOP = "web-ui";
@@ -503,6 +506,9 @@ export interface SetupResult {
   needed?: NeededFile[];
   /** The project setup was on when its time ran out (stop "time"), unless it had been proven. */
   running?: string;
+  /** At the time limit with no file accepted, setup accepted the projects proven by then: the others, listed under
+   * uncovered (TIME_LEFT_OUT) for `arnx setup --add`. Absent otherwise. */
+  setAside?: string[];
   /** The run that proved each project setup proved (kept ones have none), in file order. */
   runs: SetupRun[];
 }
@@ -1382,6 +1388,50 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       return `the suite of ${name} runs: ${summary}.${recorded}${bare}${red}${skipped}${typed} When every project runs, submit the ` +
         "file with propose.";
     };
+    // arnx's own uncovered entries: browser suites, and the paths of the web UI apps in `drop`.
+    const derivedOf = (f: ReviewFile, drop: string[]) => [
+      ...browser.map((b) => ({ path: b.path, reason: `${BROWSER_TESTS} (${b.tool})` })),
+      ...drop.flatMap((name) => webUiPaths(f, name, mapFiles).map((path) => ({ path, reason: WEB_UI })))];
+    // At the time limit with no file accepted: the projects of the last whole file proven as they stand there are
+    // kept, the others listed under uncovered (TIME_LEFT_OUT), and that file is accepted. Approved projects must be
+    // as approved. Returns the projects set aside; null (nothing accepted) when no project of this setup is proven or
+    // the file does not hold together without them.
+    const keepProven = (): string[] | null => {
+      if (!state.lastFile) return null;
+      let f: ReviewFile;
+      try {
+        f = parseReviewFile(withOurs(state.lastFile));
+      } catch (e) {
+        if (!(e instanceof ArnxError)) throw e;
+        return null;
+      }
+      if (f.legacy || [...keep].some(([name, d]) => !f.projects.some((p) => p.name === name) ||
+        projectDigest(f, name) !== d)) return null;
+      const fresh = f.projects.filter((p) => !keep.has(p.name)).map((p) => p.name);
+      const proven = fresh.filter((name) => state.proven.get(name) === projectDigest(f, name));
+      if (!proven.length) return null;
+      const web = fresh.filter((name) => state.webUi.has(name));
+      const aside = fresh.filter((name) => !proven.includes(name) && !web.includes(name));
+      let yaml = withUncovered(state.lastFile, [...derivedOf(f, web), ...aside.flatMap((name) =>
+        webUiPaths(f, name, mapFiles).map((path) => ({ path, reason: TIME_LEFT_OUT })))], [...web, ...aside]);
+      let map: Coverage;
+      try {
+        f = parseReviewFile(withOurs(yaml));
+        map = coverageMap(repo, f, untracked);
+        if (map.groups.length) {
+          yaml = withUncovered(yaml, map.groups.map(({ path, reason }) => ({ path, reason })));
+          f = parseReviewFile(withOurs(yaml));
+          map = coverageMap(repo, f, untracked);
+        }
+      } catch (e) {
+        if (!(e instanceof ArnxError)) throw e;
+        return null;
+      }
+      if (map.overlaps.length || map.unexplained.length) return null;
+      state.accepted = withOurs(yaml);
+      state.final = f;
+      return aside;
+    };
     const propose = async (args: Record<string, unknown>): Promise<string> => {
       if (state.needed) throw stopped();
       const parsed = parse(args);
@@ -1394,9 +1444,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         throw new StopRound(`stopped: ${ONLY_WEB_UI}: ${drop.join(", ")} did not run on ${drop.length === 1 ? "its" :
           "their"} one try, and there is no other project. Setup ends here.`);
       }
-      const derived = [...browser.map((b) => ({ path: b.path, reason: `${BROWSER_TESTS} (${b.tool})` })),
-        ...drop.flatMap((name) => webUiPaths(parsed.f, name, mapFiles).map((path) => ({ path, reason: WEB_UI })))];
-      let yaml = withUncovered(parsed.yaml, derived, drop);
+      let yaml = withUncovered(parsed.yaml, derivedOf(parsed.f, drop), drop);
       let f: ReviewFile;
       try {
         f = yaml === parsed.yaml ? parsed.f : parseReviewFile(withOurs(yaml));
@@ -1545,6 +1593,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     Promise.resolve(tools)));
     logUsage(repo, "setup", [agentUse(brain.label ? `${brain.label}/setup` : refString(setupRef(settings)), result)],
       new Date());
+    // A run cut short at the limit, then the agent's last word: out of time all the same.
+    const late = state.outOfTime || result.stop === "time" || (state.accepted === null && timeIsUp(limit));
+    const aside = late && state.accepted === null && !state.needed ? keepProven() : null;
     const projects = (state.final?.projects ?? []).map((p) => state.proofs.get(p.name) ??
       { name: p.name, summary: keep.has(p.name) ? "approved earlier" : "not run", skips: [] });
     // Every project of the last file a web UI app whose one try failed: nothing here arnx sets up.
@@ -1554,21 +1605,21 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     } catch (e) {
       if (!(e instanceof ArnxError)) throw e;
     }
-    // A run cut short at the limit, then the agent's last word: out of time all the same.
-    const late = state.outOfTime || result.stop === "time" || (state.accepted === null && timeIsUp(limit));
     const webOnly = state.accepted === null && !state.needed && !late && last.length > 0 &&
       last.every((n) => state.webUi.has(n));
     if (webOnly) state.problem = ONLY_WEB_UI;
     const stop = state.needed ? "stopped" : late ? "time" : webOnly ? WEB_UI_STOP : result.stop;
-    const running = stop === "time" && state.current && !state.proven.has(state.current) ? state.current : null;
+    const running = stop === "time" && !state.accepted && state.current && !state.proven.has(state.current)
+      ? state.current : null;
     emit("setup.completed", { ok: state.accepted !== null, stop, cost_usd: result.costUsd,
-      attempts: state.attempts, projects: projects.map((p) => p.name), summary: clip(state.summary, 500) });
+      attempts: state.attempts, projects: projects.map((p) => p.name), summary: clip(state.summary, 500),
+      ...(aside ? { uncovered_projects: aside } : {}) });
     return { ok: state.accepted !== null, yamlText: state.accepted ?? state.lastTried, summary: state.summary,
       costUsd: result.costUsd, stop, notes: result.finalText, projects, withheld,
       blanked, standIns, sandboxed: [...sandbox].sort(),
       failing: state.accepted !== null ? [] : state.failing, failingProject: state.accepted !== null ? null
         : state.failingProject, problem: state.problem, ...(state.needed ? { needed: state.needed } : {}),
-      ...(running ? { running } : {}),
+      ...(running ? { running } : {}), ...(aside ? { setAside: aside } : {}),
       runs: (state.final?.projects ?? []).flatMap((p) => state.runs.get(p.name) ?? []) };
   } finally {
     exec?.close();

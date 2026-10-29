@@ -963,8 +963,12 @@ class Commands {
         ...(r.outOfTime ? { stop: "time" as const } : {}), failure: { kind, reason: r.detail, failing } }));
       return finish(r.code, false);
     }
-    this.provenEnd(repo, proposed, r.projects, { proofs: result.projects, untracked });
-    this.emit("ok", 0, json({ approved: true, record: r.record, approval: r.projects, next: ["arnx review"] }));
+    // At its time limit setup kept the projects it had proven; the others wait under uncovered for `--add`.
+    const aside = result.setAside?.length ? result.setAside : null;
+    this.provenEnd(repo, proposed, r.projects, { proofs: result.projects, untracked,
+      ...(aside ? { timeUp: { minutes: s.setupMinutes, aside } } : {}) });
+    this.emit("ok", 0, json({ approved: true, record: r.record, approval: r.projects,
+      next: aside ? ["arnx setup --add"] : ["arnx review"] }));
     return finish(0, true);
   }
 
@@ -987,14 +991,18 @@ class Commands {
 
   /** The end of setup and approve: the proof, what is worth a look (only what applies), the next step. */
   private provenEnd(repo: string, file: ReviewFile, projects: ApprovedProject[],
-                    o: { proofs?: ProjectProof[]; untracked?: boolean }): void {
+                    o: { proofs?: ProjectProof[]; untracked?: boolean;
+                      timeUp?: { minutes: number; aside: string[] } }): void {
     this.d.out("✓ Environment proven");
     const red = projects.reduce((k, p) => k + p.accepted_failing, 0);
     if (red) this.d.out(stillRed(red));
     this.sayWorthALook(repo, file, o);
     const old = this.oldImages(repo);
     if (old.length) this.d.out(oldImagesLine(old));
-    this.d.out(nextStep(repo));
+    if (o.timeUp) {
+      this.d.out(timeUpLine(file, o.timeUp.minutes, o.timeUp.aside));
+      this.d.out("Next: arnx setup --add");
+    } else this.d.out(nextStep(repo));
   }
 
   /** This repository's images `arnx env prune` would remove; none when Docker does not answer. */
@@ -1813,6 +1821,12 @@ export function neededSteps(needed: NeededFile[]): string[] {
     ...ignored.length ? [`add ${ignored.join(" ")} to .arnxignore`] : []];
 }
 
+/** Setup at its time limit, keeping the projects it had proven: which it kept, which went under uncovered. */
+export function timeUpLine(file: ReviewFile, minutes: number, aside: string[]): string {
+  return `Setup reached its ${minutes}-minute limit: kept ${file.projects.map((p) => p.name).join(", ")} (proven); ` +
+    `${aside.join(", ")} ${aside.length === 1 ? "is" : "are"} listed under uncovered.`;
+}
+
 export function setupFailure(r: SetupResult, budgetUsd: number, minutes: number)
   : { text: string; json: { kind: "environment" | "tests" | "time"; reason: string; failing: string[] } } {
   if (r.stop === "time") {
@@ -1869,7 +1883,7 @@ function setupJson(o: { file: ReviewFile | null; result: SetupResult; approved: 
     files: o.files && { projects: o.files.projects, not_tested: o.files.notTested,
       untracked_left_out: o.files.untrackedLeftOut },
     warnings: o.warnings, review_yaml: o.reviewYaml, approval_record: o.record, cost_usd: r.costUsd,
-    seconds: o.seconds, stop: r.stop, failure: o.failure, next: o.next };
+    seconds: o.seconds, stop: r.stop, uncovered_projects: r.setAside ?? [], failure: o.failure, next: o.next };
 }
 
 /** One project's suite in `approve --json` (skills/arnx/references/json.md). */

@@ -2,17 +2,19 @@
 // steps bounded by the time left (and not started with too little), setup's result and events, and the preview.
 import { expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import type { Runner } from "../src/sandbox";
 import { join } from "node:path";
 import { runAgent, Workspace } from "../src/agent";
 import { setupFailure } from "../src/cli";
-import { parseReviewConfig } from "../src/config";
+import { parseReviewConfig, parseReviewFile } from "../src/config";
 import { PRICES } from "../src/llm";
 import { ensureEnv, OutOfTime, sandboxOptions, Session, stepTimeout, timeLimit, withTimeLimit } from "../src/sandbox";
 import { defaultSettings, loadSettings } from "../src/settings";
-import { runSetup } from "../src/setup";
+import { runSetup, TIME_LEFT_OUT } from "../src/setup";
 import { setupPreview } from "../src/setupview";
-import { fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
-import { gitRepo } from "./helpers/gitutil";
+import { Cli } from "./helpers/cli";
+import { FakeSession, fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
+import { commit, gitRepo, initRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
 import { CFG } from "./helpers/yaml";
@@ -177,6 +179,100 @@ test("a run cut short at the limit, then the agent's last word: setup stops for 
   const r = await runSetup(gitRepo(tmp()), defaultSettings(), model, { outDir: join(tmp(), ".arnx", "setup"),
     sessionFactory: factory, timeLimit: { at: 10 * MIN, now: () => ms, minutes: 10 } });
   expect([r.ok, r.stop]).toEqual([false, "time"]);
+});
+
+// --- At the limit, the projects proven by then are kept ----------------------------------------------------------------
+
+const TWO = `version: 1
+projects:
+  api:
+    root: api
+    language: python
+    image: python:3.12-slim
+    install: [pip install pytest]
+    test_command: python -m pytest -q {targets}
+  web:
+    root: web
+    language: python
+    image: python:3.12-slim
+    install: [pip install pytest]
+    test_command: python -m pytest -q {targets}
+`;
+
+/** Two Python projects, api and web, each with a test. */
+function twoProjects(): string {
+  const repo = initRepo(join(tmp(), "two"));
+  for (const name of ["api", "web"]) {
+    mkdirSync(join(repo, name, "tests"), { recursive: true });
+    writeFileSync(join(repo, name, `${name}.py`), "def f():\n    return 1\n");
+    writeFileSync(join(repo, name, "tests", `test_${name}.py`), "def test_f():\n    assert True\n");
+  }
+  commit(repo, "two");
+  return repo;
+}
+
+/** api's suite passes at once; web's runs eleven minutes and fails. */
+const apiThenSlowWeb = (clock: { ms: number }) =>
+  async <T>(cfg: { name: string }, snap: string, _log: string, body: (r: Runner) => Promise<T>) =>
+    body(new FakeSession(snap, () => {
+      if (cfg.name === "api") return [junitXml([["api/tests/test_api.py", "test_f", "passed", ""]]), "1 passed", false];
+      clock.ms += 11 * MIN;
+      return [junitXml([["web/tests/test_web.py", "test_f", "failed", "boom"]]), "1 failed", false];
+    }));
+
+test("at the limit with no file accepted, the projects proven so far are kept, the others listed under uncovered",
+  async () => {
+  const clock = { ms: 0 };
+  const repo = twoProjects();
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("try_project", { yaml: TWO, project: "web" })], [text("done")]]);
+  const outDir = join(repo, ".arnx", "setup");
+  const r = await runSetup(repo, defaultSettings(), model, { outDir, sessionFactory: apiThenSlowWeb(clock),
+    timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+  expect([r.ok, r.stop, r.setAside, r.running]).toEqual([true, "time", ["web"], undefined]);
+  const f = parseReviewFile(r.yamlText!);
+  expect(f.projects.map((p) => p.name)).toEqual(["api"]);
+  expect(f.uncovered).toEqual([{ path: "/web/", reason: TIME_LEFT_OUT }]);
+  expect([r.projects.map((p) => p.name), r.runs.map((x) => x.name)]).toEqual([["api"], ["api"]]);
+  expect(eventsOf(outDir).at(-1)).toMatchObject({ type: "setup.completed",
+    data: { ok: true, stop: "time", projects: ["api"], uncovered_projects: ["web"] } });
+});
+
+test("at the limit with nothing proven, setup fails as before", async () => {
+  const clock = { ms: 0 };
+  const repo = twoProjects();
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "web" })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"),
+    sessionFactory: apiThenSlowWeb(clock), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+  expect([r.ok, r.stop, r.setAside, r.running]).toEqual([false, "time", undefined, "web"]);
+});
+
+test("setup at its limit writes the proven projects, proves them from its own runs and names --add", async () => {
+  const clock = { ms: 0 };
+  const repo = twoProjects();
+  const env = { ANTHROPIC_API_KEY: "a" };
+  expect(await new Cli({ cwd: repo, env }).run("init")).toBe(0);
+  writeFileSync(join(repo, ".arnx", "config.toml"), readFileSync(join(repo, ".arnx", "config.toml"), "utf8")
+    .replace("setup_minutes = 40", "setup_minutes = 10"));
+  const script = () => new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("try_project", { yaml: TWO, project: "web" })], [text("done")]]);
+  const proofs: string[] = [];
+  const cli = new Cli({ cwd: repo, env, now: () => clock.ms, setupModel: script(),
+    setupSessions: apiThenSlowWeb(clock),
+    approveSessions: async (cfg, snap, _log, body) => {
+      proofs.push(cfg.name);
+      return body(new FakeSession(snap, () => [null, "", false]));
+    } });
+  expect(await cli.run("setup", "--yes", "--json")).toBe(0);
+  expect(proofs).toEqual([]); // api's run stands
+  const out = JSON.parse(cli.stdout);
+  expect([out.result, out.stop, out.approved, out.uncovered_projects, out.next])
+    .toEqual(["ok", "time", true, ["web"], ["arnx setup --add"]]);
+  expect(out.projects.map((p: { name: string }) => p.name)).toEqual(["api"]);
+  expect(cli.stderr).toContain("Setup reached its 10-minute limit: kept api (proven); web is listed under " +
+    "uncovered.\nNext: arnx setup --add");
+  expect(parseReviewFile(readFileSync(join(repo, ".arnx", "review.yaml"), "utf8")).uncovered)
+    .toEqual([{ path: "/web/", reason: TIME_LEFT_OUT }]);
 });
 
 test("the preview never promises more than the limit", () => {

@@ -268,7 +268,8 @@ test("setup --json: the object; proven with or without --yes", async () => {
       accepted_failing: 0, unexpected: [] }],
     files: { projects: [{ name: "shop", owned: 3, used: 0 }], not_tested: [], untracked_left_out: ["notes.md"] },
     warnings: ["shop: 1 command(s) ignore their own errors (|| true)"], review_yaml: ".arnx/review.yaml",
-    approval_record: ".arnx/setup/approval.md", cost_usd: 0, seconds: 0, stop: "end_turn", failure: null,
+    approval_record: ".arnx/setup/approval.md", cost_usd: 0, seconds: 0, stop: "end_turn", uncovered_projects: [],
+    failure: null,
     next: ["arnx review"] });
   expect(cli.stderr).toContain("✓ Environment proven\n\nWorth a look:\n  ! shop: 1 command(s) ignore their own errors (|| true)");
 });

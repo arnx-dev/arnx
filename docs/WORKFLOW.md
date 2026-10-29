@@ -29,8 +29,10 @@ runs`). Reviews then run only the tests arnx writes. A `test_command` that delet
 arnx adds the runner's report options after `{targets}`, so `test_command` must call the runner itself with `{targets}` (`cd app && npx vitest run {targets}`); one wrapped in `sh -c '...'` or that hands `{targets}` to another command is refused before anything runs. A TypeScript project that installs outside `/src` (the code is mounted there and hides what install wrote) sets `deps_dir` (such as `/opt/deps`): before every run arnx links each `node_modules` under it into the same place under the install root.
 
 Before it starts, setup says what it will do and gives a rough time and cost estimate. It stops at `setup_usd`
-(default $3.00) or `setup_minutes` (default 40, the proof included) under `[budget]` in `.arnx/config.toml`; out of
-time, `arnx setup --project NAME` goes on with the project it was on. While it runs, it shows on
+(default $3.00) or `setup_minutes` (default 40, the proof included) under `[budget]` in `.arnx/config.toml`. Out of
+time with some projects proven, it keeps those (setup's own runs are their proof) and lists the others under
+`uncovered` ("setup reached its time limit"), for `arnx setup --add` to try again; with none proven, `arnx setup
+--project NAME` goes on with the project it was on. While it runs, it shows on
 stderr each model reply, each file it reads and each suite it runs (`--quiet` turns this off). It then shows one
 line per project and stamps `.arnx/review.yaml` with a hash (the proof); nothing is asked. Setup's own run of each
 suite is the proof; a suite runs again only when its project's part of the file or the code changed since that run.
