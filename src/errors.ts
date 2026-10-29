@@ -53,6 +53,18 @@ export class ModelError extends ArnxError {
   fault?: ProviderFault;
 }
 
+/** The provider refused the call for billing: the key has no credits left. No retry or other model fixes it, so
+ * every command stops at once (exit 2) with this one line; `provider` is how messages name it ("OpenAI"). */
+export class NoCredits extends ModelError {
+  override name = "NoCredits";
+  constructor(readonly provider: string) {
+    super(`${provider} has no credits left on this key: add credits, then run again.`);
+  }
+}
+
+/** A failed call a step may go on without: any ModelError but NoCredits, which stops the command. */
+export const survivable = (e: unknown): e is ModelError => e instanceof ModelError && !(e instanceof NoCredits);
+
 /** The provider's side of a failed call: "auth" when it refused the key (HTTP 401 or 403), "unavailable" when every
  * attempt was answered 5xx or 429 or found no connection. `detail` is that status or network error ("HTTP 503"),
  * never a response body. Timeouts and unreadable replies are neither. */

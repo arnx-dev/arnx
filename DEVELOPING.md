@@ -234,7 +234,10 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
 - `model.call` (`llm.ts`, `agent.ts`, `jev.ts`): one model call: role, provider, model, tokens, cost, latency, `ok`,
   `attempts` (requests sent; for an OpenAI background call, creates sent, polls not counted), `unknown_usage`,
   `timed_out`, and on a failed call the provider caused, `fault` (`unavailable`: 5xx, 429 or no connection on every
-  attempt; `auth`: 401 or 403). The same outcomes, kept in memory by `outage.ts`, become review.json's
+  attempt; `auth`: 401 or 403). A key with no credits left (`NoCredits`, `noCredits` in `llm.ts`: OpenAI's
+  `insufficient_quota` or `credit_balance_exhausted`, in an error or a background response that failed; Anthropic's
+  `billing_error` or "credit balance is too low") is never retried and no step goes on without it (`survivable`): the
+  command stops with one line naming the provider, exit 2. The same outcomes, kept in memory by `outage.ts`, become review.json's
   `provider_failures` and the sentence after the review's status. A review with an `unavailable` failure of the
   reviewer or the judging (`cutByOutage`, not once accepted) resumes like an interrupted one: `--resume` tests again
   the project rounds a failed call stopped (their verdicts dropped), keeps the others and judges again. Its status

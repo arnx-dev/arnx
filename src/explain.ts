@@ -1,7 +1,7 @@
 // After the challenge, one call to the second model groups findings that share a cause, explains each group in plain
 // language (input, actual, expected, why it matters) and rates its severity, which orders the report. Report only:
 // findings, verdicts and exit codes do not change, and a failed call leaves the report as a list of findings.
-import { ModelError } from "./errors";
+import { survivable } from "./errors";
 import { withRole } from "./events";
 import { type JsonModel, type ModelUse, tally, type Trace } from "./llm";
 import type { Say } from "./progress";
@@ -34,7 +34,7 @@ export async function explain(findings: Finding[], o: { model: JsonModel; diff: 
     data = reply;
     o.trace?.({ step: "explain", outcome: "ok", secs: secs(), cost_usd: cost });
   } catch (e) {
-    if (!(e instanceof ModelError)) throw e;
+    if (!survivable(e)) throw e;
     o.trace?.({ step: "explain", outcome: "error", secs: secs(), error: e.message });
     if (e.costUsd > 0 || e.usage) tally(o.use, e.costUsd, e.usage, e.unknownCalls);
     else o.use.unknownCalls += e.unknownCalls;

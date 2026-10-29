@@ -1,7 +1,7 @@
 // Questions that ask the same thing in other words (from one reviewer's follow-ups, or from reviewers of different
 // projects) are merged into one before the second opinion, which links findings to questions by id. One call; the
 // first wording is kept. A failed call keeps every question.
-import { ModelError } from "./errors";
+import { survivable } from "./errors";
 import { withRole } from "./events";
 import { type JsonModel, type ModelUse, tally } from "./llm";
 import { DEFAULT_PROMPTS, MERGE_SCHEMA, type Prompts } from "./prompts";
@@ -22,7 +22,7 @@ export async function mergeQuestions(questions: string[], o: { model: JsonModel 
     tally(o.use, cost, usage, unknown);
     reply = data;
   } catch (e) {
-    if (!(e instanceof ModelError)) throw e;
+    if (!survivable(e)) throw e;
     if (e.costUsd > 0 || e.usage) tally(o.use, e.costUsd, e.usage, e.unknownCalls);
     o.progress?.(`merging repeated questions failed (${e.message.slice(0, 120)}); every question kept`);
     return unchanged;

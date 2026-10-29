@@ -65,6 +65,9 @@ stored responses, so it does not work for an OpenAI organization with Zero Data 
 `openai_transport = "stream"` there. `openai_tier = "fast"` together with background mode is not verified yet.
 Interrupting arnx (Ctrl-C or SIGTERM) cancels the background responses still running.
 
+A key with no credits left stops any command at once, with one line: "OpenAI has no credits left on this key: add
+credits, then run again." (exit 2).
+
 Output is coloured on a terminal; NO_COLOR turns it off.
 
 ## Make it yours

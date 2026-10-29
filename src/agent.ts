@@ -8,7 +8,7 @@ import { basename, dirname, join, posix, relative, resolve, sep } from "node:pat
 import { Worker } from "node:worker_threads";
 import { python } from "./adapters/python";
 import type { Adapter } from "./adapters/types";
-import { ModelError } from "./errors";
+import { ModelError, NoCredits } from "./errors";
 import { clip, emitModelCall, emitTurn } from "./events";
 import { recordCall } from "./outage";
 import { type AgentModel, addUsage, type Block, costUsd, type Message, NO_USAGE, type Tool, type Usage } from "./llm";
@@ -564,6 +564,7 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
         unknown_usage: e.unknownCalls, timed_out: e.timedOut, turn });
       log({ turn, stop_reason: "api_error", error: e.message, timed_out: e.timedOut, attempts: e.attempts,
         secs: Math.round((performance.now() - started) / 100) / 10 });
+      if (e instanceof NoCredits) throw e;
       break;
     }
     // A model with no price costs nothing here: its reply counts as billed with unknown usage.

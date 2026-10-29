@@ -3,13 +3,13 @@
 // or written anywhere.
 import Anthropic from "@anthropic-ai/sdk";
 import { spend } from "./spend";
-import { ModelError, type ProviderFault, SetupRequired } from "./errors";
+import { ModelError, NoCredits, type ProviderFault, SetupRequired, survivable } from "./errors";
 import { type Env, type ModelRef, type Prices, providerOfRef, refString, type Settings } from "./settings";
 import { sleep } from "./util";
 import { clip, emitModelCall, providerOf } from "./events";
 import { recordCall } from "./outage";
 import { withProviderSlot } from "./provider";
-import { ANTHROPIC_URL, envNames, OPENAI_URL, type Provider, RIVER_URL } from "./providers";
+import { ANTHROPIC_URL, envNames, OPENAI_URL, PRESETS, type Provider, RIVER_URL } from "./providers";
 
 export { OPENAI_URL, RIVER_URL };
 
@@ -49,6 +49,13 @@ const isDown = (status: number) => status >= 500 || status === 429;
 /** A refused key, which no retry fixes. */
 const authFault = (status: number): ProviderFault | undefined =>
   status === 401 || status === 403 ? { kind: "auth", detail: `HTTP ${status}` } : undefined;
+/** How providers say a key has no credits left: OpenAI's error codes (an HTTP 429, or a background response that
+ * failed), Anthropic's billing error and its 400 "Your credit balance is too low". */
+const NO_CREDITS = /\b(insufficient_quota|credit_balance_exhausted|billing_error)\b|credit balance is too low/i;
+/** NoCredits for `provider` (as model refs name it) when `text`, an error body or message, says so. */
+export function noCredits(provider: string, text: string): NoCredits | null {
+  return NO_CREDITS.test(text) ? new NoCredits(PRESETS[provider]?.label ?? provider) : null;
+}
 /** A request that found no connection (DNS, refused, reset), named by the runtime's error code when it has one. */
 function noConnection(e: unknown): string {
   const code = (e as { code?: unknown } | null)?.code;
@@ -357,6 +364,9 @@ export class AnthropicAgent implements AgentModel {
           : timeout === "attempt" ? `no reply: attempt timeout after ${this.attemptLimit}s`
           : e instanceof Anthropic.APIError && e.status ? `HTTP ${e.status}: ${e.message.slice(0, 200)}` : errorName(e);
         record(timeout === "total" ? "late" : timeout ? "stalled" : "error", reason);
+        const broke = !timeout && e instanceof Anthropic.APIError ? noCredits(this.provider, `${e.type ?? ""} ${e.message}`)
+          : null;
+        if (broke) throw broke;
         // The request was taken and streamed before it failed: the provider may bill it.
         if (first !== null || firstByte !== null) billed.unknown++;
         // An APIError by its status or type; any other SDK error (a dropped or truncated stream) is the transport's.
@@ -603,6 +613,8 @@ export class ResponsesJson implements JsonModel {
       try {
         const data = this.background ? await this.backgroundAttempt(payload, deadline, attempt, diagnostics)
           : await this.attempt(payload, deadline, diagnostics);
+        const broke = data.status === "failed" ? noCredits(providerOf(this.ref), JSON.stringify(data.error ?? "")) : null;
+        if (broke) throw broke;
         traced("ok");
         return [data, unknown, attempt];
       } catch (e) {
@@ -661,6 +673,8 @@ export class ResponsesJson implements JsonModel {
       if (r.status !== 200) {
         const body = await r.text().catch(() => "");
         const message = `HTTP ${r.status}: ${body.slice(0, 200)}`;
+        const broke = noCredits(providerOf(this.ref), body);
+        if (broke) throw broke;
         if (RETRY_STATUS.has(r.status)) {
           const e = new Retryable(message);
           e.retryAfter = retryAfter(r.headers);
@@ -727,6 +741,8 @@ export class ResponsesJson implements JsonModel {
         if (r.status !== 200) {
           const body = await r.text().catch(() => "");
           const message = `HTTP ${r.status}: ${body.slice(0, 200)}`;
+          const broke = noCredits(providerOf(this.ref), body);
+          if (broke) throw broke;
           if (RETRY_STATUS.has(r.status)) {
             throw Object.assign(new Retryable(message), { retryAfter: retryAfter(r.headers),
               ...(isDown(r.status) ? { down: `HTTP ${r.status}` } : {}) });
@@ -975,7 +991,7 @@ function parseEvent(ref: string, line: string): Record<string, unknown> | null {
   if (["response.completed", "response.incomplete", "response.failed"].includes(String(event.type))) {
     return isObject(event.response) ? event.response : {};
   }
-  if (event.type === "error") throw new ModelError(`${ref}: ${String(event.message ?? JSON.stringify(event)).slice(0, 200)}`);
+  if (event.type === "error") throw noCredits(providerOf(ref), data) ?? new ModelError(`${ref}: ${String(event.message ?? JSON.stringify(event)).slice(0, 200)}`);
   return null;
 }
 
@@ -1090,7 +1106,7 @@ export class FallbackJson implements JsonModel {
         this.lastModel = m.ref;
         return [reply[0], reply[1], reply[2], reply[3], m.ref];
       } catch (e) {
-        if (!(e instanceof ModelError)) throw e;
+        if (!survivable(e)) throw e;
         if (e.costUsd > 0 || e.usage) tally(this.uses[i]!, e.costUsd, e.usage, e.unknownCalls);
         else this.uses[i]!.unknownCalls += e.unknownCalls;
         if (i === models.length - 1) throw e;
