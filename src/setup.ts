@@ -1220,11 +1220,14 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       doc.setIn(["projects", args.project], block.contents);
       return { yaml: String(doc), project: args.project };
     };
-    // A quick setup sets up only the projects a changed file reaches (owned, or used); the approved ones it keeps
-    // stay as they are.
+    // A quick setup sets up only the projects that own a changed file, and the ones using a changed file no project
+    // owns. A project that only uses an owned file waits: it is set up when a change reaches its own files. The
+    // approved ones it keeps stay as they are.
     const touched = (f: ReviewFile): Set<string> => {
       const r = route(f, o.quick!.files, Number.MAX_SAFE_INTEGER);
-      return new Set([...r.routed.map((x) => x.project.name), ...r.checkOnly.map((x) => x.project.name)]);
+      const all = [...r.routed, ...r.checkOnly.map((c) => ({ ...c, owned: [] as string[] }))];
+      const owned = new Set(all.flatMap((x) => x.owned));
+      return new Set(all.filter((x) => x.owned.length || x.used.some((u) => !owned.has(u))).map((x) => x.project.name));
     };
     const untouched = (f: ReviewFile): ReviewConfig[] => o.quick && !f.legacy
       ? f.projects.filter((p) => !keep.has(p.name) && p.workdir !== "." && !touched(f).has(p.name)) : [];

@@ -334,3 +334,25 @@ test("in a quick setup the agent's file keeps only the projects the change touch
   expect(f.uncovered).toContainEqual({ path: "/web/", reason: NOT_SET_UP });
   expect(sessions.flatMap((s) => s.commands).some((c) => c.includes("vitest"))).toBe(false);
 });
+
+test("a project that only uses a changed file waits in a quick setup; only the file's owner is set up", async () => {
+  const repo = twoProjects();
+  let listings = 0;
+  const answer = runner("svc");
+  const both = "version: 1\nprojects:\n  svc:\n    root: svc\n    language: python\n    image: python:3.12\n" +
+    "    install: [pip install pytest]\n    test_command: python -m pytest {targets}\n  web:\n" +
+    "    root: web\n    language: typescript\n    image: node:22\n    install: [npm install]\n" +
+    "    test_command: npx vitest run {targets}\n    uses: [svc/]\n";
+  const model = new ScriptedAgent([[tool("propose", { yaml: both })], [text("done")]]);
+  const sessions: Session[] = [];
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory((c) => c.includes("--collect-only") && !c.includes("arnx_probe") && listings++ === 0
+      ? { exit: 4, output: "ERROR: usage: unrecognized arguments: --cov" } : answer(c), sessions),
+    quick: { files: ["svc/app.py"] } });
+  expect(model.calls.length).toBeGreaterThan(0);
+  expect(r.ok).toBe(true);
+  const f = parseReviewFile(r.yamlText!);
+  expect(f.projects.map((p) => p.name)).toEqual(["svc"]);
+  expect(f.uncovered).toContainEqual({ path: "/web/", reason: NOT_SET_UP });
+  expect(sessions.flatMap((s) => s.commands).some((c) => c.includes("vitest"))).toBe(false);
+});
