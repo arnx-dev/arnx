@@ -21,7 +21,8 @@ import {
   type ReviewFile, sandboxOnlyOf, sandboxYaml, secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampFile,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
-import { draftYaml, quickDraft } from "./draft";
+import { draftYaml, NOT_SET_UP, quickDraft } from "./draft";
+import { route } from "./route";
 import { MANY_SERVICES, manyServices, manyServicesReason } from "./facts";
 import { classify, describeHints, diagnose, firstErrors, firstLine, type Hint, missingLeftOut, npxDownload, npxText,
   loadFailure, passingApart, unexplainedFiles } from "./diagnose";
@@ -1219,6 +1220,14 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       doc.setIn(["projects", args.project], block.contents);
       return { yaml: String(doc), project: args.project };
     };
+    // A quick setup sets up only the projects a changed file reaches (owned, or used); the approved ones it keeps
+    // stay as they are.
+    const touched = (f: ReviewFile): Set<string> => {
+      const r = route(f, o.quick!.files, Number.MAX_SAFE_INTEGER);
+      return new Set([...r.routed.map((x) => x.project.name), ...r.checkOnly.map((x) => x.project.name)]);
+    };
+    const untouched = (f: ReviewFile): ReviewConfig[] => o.quick && !f.legacy
+      ? f.projects.filter((p) => !keep.has(p.name) && p.workdir !== "." && !touched(f).has(p.name)) : [];
     const tryProject = async (input: Record<string, unknown>): Promise<string> => {
       if (state.needed) throw stopped();
       const n = ++state.attempts;
@@ -1230,6 +1239,11 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const name = typeof args.project === "string" ? args.project : f.projects.length === 1 ? f.projects[0]!.name : "";
       const cfg = f.projects.find((p) => p.name === name);
       if (!cfg) return `invalid: name the project to try; projects: ${f.projects.map((p) => p.name).join(", ")}`;
+      if (untouched(f).includes(cfg)) {
+        return `refused: this setup is for a first review, and no file the change touches is in ${name}. Do not try ` +
+          `it: set up only ${[...touched(f)].join(", ") || "the projects that own a changed file"}. propose takes ` +
+          `${name} out of the file and lists /${cfg.workdir}/ under uncovered as "${NOT_SET_UP}".`;
+      }
       // A project whose files say its tests need MANY_SERVICES or more is not tried while it lists that many.
       const facts = detection.facts?.projects.find((p) => p.root === cfg.workdir && p.language === cfg.language);
       const many = facts && cfg.services.length >= MANY_SERVICES ? manyServices(facts) : null;
@@ -1504,7 +1518,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         throw new StopRound(`stopped: ${ONLY_WEB_UI}: ${drop.join(", ")} did not run on ${drop.length === 1 ? "its" :
           "their"} one try, and there is no other project. Setup ends here.`);
       }
-      let yaml = withUncovered(parsed.yaml, derivedOf(parsed.f, drop), drop);
+      // A quick setup leaves for later the projects no changed file reaches.
+      const later = untouched(parsed.f).filter((p) => !drop.includes(p.name));
+      let yaml = withUncovered(parsed.yaml, [...derivedOf(parsed.f, drop),
+        ...later.map((p) => ({ path: `/${p.workdir}/`, reason: NOT_SET_UP }))], [...drop, ...later.map((p) => p.name)]);
       let f: ReviewFile;
       try {
         f = yaml === parsed.yaml ? parsed.f : parseReviewFile(withOurs(yaml));

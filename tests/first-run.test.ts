@@ -310,3 +310,27 @@ test("a quick look over many test files is not taken for a test_command that lea
   expect(r.ok).toBe(true);
   expect(r.runs[0]!.summary).toStartWith("quick look: 25 tests listed, 3 small files ran");
 });
+
+test("in a quick setup the agent's file keeps only the projects the change touches; the others wait, never tried",
+  async () => {
+  const repo = twoProjects();
+  let listings = 0;
+  const answer = runner("svc");
+  const flaky = (command: string): Answer => command.includes("--collect-only") && !command.includes("arnx_probe") &&
+    listings++ === 0 ? { exit: 4, output: "ERROR: usage: unrecognized arguments: --cov" } : answer(command);
+  const both = "version: 1\nprojects:\n  svc:\n    root: svc\n    language: python\n    image: python:3.12\n" +
+    "    install: [pip install pytest pytest-cov]\n    test_command: python -m pytest {targets}\n  web:\n" +
+    "    root: web\n    language: typescript\n    image: node:22\n    install: [npm install]\n" +
+    "    test_command: npx vitest run {targets}\n";
+  const model = new ScriptedAgent([[tool("try_project", { yaml: both, project: "web" })],
+    [tool("propose", { yaml: both })], [text("done")]]);
+  const sessions: Session[] = [];
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(flaky, sessions), quick: { files: ["svc/app.py"] } });
+  expect(JSON.stringify(model.calls[1]!.messages.at(-1))).toContain("refused: this setup is for a first review");
+  expect(r.ok).toBe(true);
+  const f = parseReviewFile(r.yamlText!);
+  expect(f.projects.map((p) => p.name)).toEqual(["svc"]);
+  expect(f.uncovered).toContainEqual({ path: "/web/", reason: NOT_SET_UP });
+  expect(sessions.flatMap((s) => s.commands).some((c) => c.includes("vitest"))).toBe(false);
+});
