@@ -1,7 +1,7 @@
 // Setup's look before a try runs the whole suite, which can take half an hour: the runner lists the tests (seconds,
 // none runs), then a few small test files run. No tests, files that do not load, a runner that does not start: each
 // goes back to the setup agent at once, with the runner's output. The whole suite still runs once before a project
-// counts as proven.
+// counts as proven, except in a quick setup (a first review's), where the sample's run is the project's proof.
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
@@ -103,21 +103,35 @@ export function sampleProblem(sample: string[], result: RunResult, results: Test
 /** The look before the whole suite, in the session it then runs in: the listing, arnx's one-line test among what the
  * runner lists from tests_dir, a few small files. Null when nothing it saw stops the try. */
 export function precheck(session: Runner, snap: string, cfg: ReviewConfig, acceptedTestsDir?: string): Early | null {
+  return look(session, snap, cfg, acceptedTestsDir).early;
+}
+
+/** What the look saw: what stops the try (null when nothing does), how many tests and files the runner listed, and
+ * the sample's run when one ran and nothing stopped it (a quick setup takes it for the suite's run). */
+export interface Look { early: Early | null; tests: number; files: number;
+  sample: { files: string[]; run: RunResult; results: TestResult[] } | null }
+
+/** precheck, with what it listed and the sample's run. */
+export function look(session: Runner, snap: string, cfg: ReviewConfig, acceptedTestsDir?: string): Look {
+  const none: Look = { early: null, tests: 0, files: 0, sample: null };
   const listed = listTests(session, snap, cfg, []);
-  if (!listed) return null;
+  if (!listed) return none;
   const { listing, result } = listed;
+  const counts = { tests: listing.tests ?? listing.files.length, files: listing.files.length };
   const why = listingProblem(listing, result.exitCode);
-  if (why) return { summary: why + AGAIN, output: result.output, hints: "" };
-  if (!listing.files.length) return null;
+  if (why) return { ...none, ...counts, early: { summary: why + AGAIN, output: result.output, hints: "" } };
+  if (!listing.files.length) return { ...none, ...counts };
   const probe = probeListed(session, snap, cfg);
-  if (probe && !probe.seen) return { summary: probeText(cfg) + AGAIN, output: probe.output, hints: "" };
+  if (probe && !probe.seen) {
+    return { ...none, ...counts, early: { summary: probeText(cfg) + AGAIN, output: probe.output, hints: "" } };
+  }
   const sample = sampleOf(listing, cfg, snap, acceptedTestsDir);
-  if (!sample.length) return null;
+  if (!sample.length) return { ...none, ...counts };
   const [run, results] = runTests(session, snap, cfg, sample, "sample.xml", SAMPLE_TIMEOUT);
   const stop = sampleProblem(sample, run, results);
-  if (!stop) return null;
-  return { summary: stop + AGAIN, output: run.output,
-    hints: [describeHints(diagnose(results, cfg, snap), cfg), firstErrors(results, cfg)].filter(Boolean).join("\n") };
+  if (!stop) return { ...none, ...counts, sample: { files: sample, run, results: results ?? [] } };
+  return { ...none, ...counts, early: { summary: stop + AGAIN, output: run.output,
+    hints: [describeHints(diagnose(results, cfg, snap), cfg), firstErrors(results, cfg)].filter(Boolean).join("\n") } };
 }
 
 // ---- The one-line test, listed: what runSuite's probe tells after the whole suite, told before it. ----

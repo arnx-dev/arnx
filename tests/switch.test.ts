@@ -168,7 +168,8 @@ test("models flipped by hand: at a terminal it asks once; no sends nothing, yes 
   const c = cloud = fakeCloud();
   const home = tmp();
   writeCredentials({ HOME: home }, { url: c.url, token: TOKEN });
-  // No review.yaml: a review that goes on past the consent stops there, before arnx cloud is called.
+  // No review.yaml and nothing arnx can set up: a review that goes on past the consent stops at its first run's
+  // setup, before arnx cloud is called.
   const env = { HOME: home, ARNX_CLOUD_URL: c.url };
   const { repo, before } = await flipped(env);
   const asked: string[] = [];
@@ -178,15 +179,15 @@ test("models flipped by hand: at a terminal it asks once; no sends nothing, yes 
   expect(no.stderr).toBe("arnx: consent declined; nothing sent");
   expect(readFileSync(settingsPath(repo), "utf8")).toBe(before);
   const yes = new Cli({ cwd: repo, env, interactive: true, ask: async () => "y" });
-  expect(await yes.run("review")).toBe(3);
-  expect(yes.stdout).toBe(DOCKER_LINE);
-  expect(yes.stderr).toContain("review.yaml"); // it went on past the consent
+  expect(await yes.run("review")).toBe(0);
+  expect(yes.stdout).toStartWith(DOCKER_LINE);
+  expect(yes.stdout).toContain("Nothing here arnx can test"); // it went on past the consent
   const after = readFileSync(settingsPath(repo), "utf8");
   expect(after.split("\n")[0]).toMatch(STAMP); // first: there is no consent_at
   expect(without(after, "cloud_consent_at")).toBe(before); // nothing else changed
   // Asked once: the next run does not ask again.
   const again = new Cli({ cwd: repo, env, interactive: true, ask: async () => { throw new Error("asked again"); } });
-  expect(await again.run("review")).toBe(3);
+  expect(await again.run("review")).toBe(0);
   expect(again.stdout).not.toContain(DOCKER_LINE);
   expect(c.seen).toHaveLength(0);
 });
@@ -262,7 +263,7 @@ test("next with arnx models and no cloud consent: no consent step (the first sen
   const cli = new Cli({ cwd: repo, env });
   await cli.run("next");
   expect(cli.stdout).not.toContain("arnx consent");
-  expect(cli.stdout).toContain("arnx setup");
+  expect(cli.stdout).toContain("arnx review");
 });
 
 test("arnx cloud on asks the cloud consent once and turns [cloud] models on; off turns it off; nothing else changes",
@@ -278,14 +279,14 @@ test("arnx cloud on asks the cloud consent once and turns [cloud] models on; off
   expect(await cli.run("cloud", "on")).toBe(0);
   // A new repository: setup calls models, so the login comes first.
   expect(cli.stdout).toBe(`${DOCKER_LINE}\n✓ arnx cloud on: its models run the reviews, not your keys\n` +
-    "Next: arnx login\nThen: arnx setup");
+    "Next: arnx login\nThen: arnx review");
   const on = loadSettings(repo);
   expect([on.cloud?.models, Boolean(on.cloudConsentAt)]).toEqual([true, true]);
   expect(readFileSync(path, "utf8")).toMatch(/^models = true +# true: arnx models/m);
   // Asked once: a second `on` asks nothing.
   const again = new Cli({ cwd: repo, ask: async () => { throw new Error("asked again"); } });
   expect(await again.run("cloud", "on")).toBe(0);
-  expect(again.stdout).toBe("arnx cloud is already on.\nNext: arnx login\nThen: arnx setup");
+  expect(again.stdout).toBe("arnx cloud is already on.\nNext: arnx login\nThen: arnx review");
   const off = new Cli({ cwd: repo });
   expect(await off.run("cloud", "off")).toBe(0);
   expect(off.stdout).toBe("✓ arnx cloud off: your own model providers run the reviews\n" +
@@ -293,7 +294,7 @@ test("arnx cloud on asks the cloud consent once and turns [cloud] models on; off
   // With the keys set: the flow's next step.
   const keyed = new Cli({ cwd: repo, env: { ANTHROPIC_API_KEY: "a" } });
   expect(await keyed.run("cloud", "off")).toBe(0);
-  expect(keyed.stdout).toBe("✓ arnx cloud off: your own model providers run the reviews\nNext: arnx setup");
+  expect(keyed.stdout).toBe("✓ arnx cloud off: your own model providers run the reviews\nNext: arnx review");
   expect(loadSettings(repo).cloud?.models).toBe(false);
   expect(await off.run("cloud", "maybe")).toBe(2);
 });
@@ -336,5 +337,5 @@ test("cloud on, logged in, in a new repository: the flow's next step, no login",
   writeCredentials({ HOME: home }, { url: "http://127.0.0.1:9", token: TOKEN });
   const cli = new Cli({ cwd: repo, env });
   expect(await cli.run("cloud", "on", "--yes")).toBe(0);
-  expect(cli.stdout).toEndWith("✓ arnx cloud on: its models run the reviews, not your keys\nNext: arnx setup");
+  expect(cli.stdout).toEndWith("✓ arnx cloud on: its models run the reviews, not your keys\nNext: arnx review");
 });

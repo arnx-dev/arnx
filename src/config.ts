@@ -634,12 +634,22 @@ function toYaml(raw: Raw): string {
 
 /** The file with an approval stamp. Floats keep a fraction so they read back as floats and the hash holds. A file
  * with projects also records each project's digest. `baseline`: the hash of `.arnx/baseline.json` (baselineDigest),
- * null when there is none. */
-export function stampFile(f: ReviewFile, by: string, at: string, baseline: string | null = null): string {
+ * null when there is none. `quick`: the projects proven by a quick look (a first review's setup), not by their
+ * whole suite. */
+export function stampFile(f: ReviewFile, by: string, at: string, baseline: string | null = null,
+                          quick: string[] = []): string {
   const approved: Raw = { by, at, sha256: fileDigest(f) };
   if (!f.legacy) approved.projects = Object.fromEntries(f.projects.map((p) => [p.name, projectDigest(f, p.name)]));
   if (baseline) approved.baseline = baseline;
+  const names = quick.filter((n) => f.projects.some((p) => p.name === n)).sort();
+  if (names.length) approved.quick = names;
   return toYaml({ ...without(f.raw, "approved"), approved });
+}
+
+/** The projects the stamp says a quick look proved (stampFile `quick`). */
+export function stampedQuick(f: ReviewFile): string[] {
+  const a = f.raw.approved;
+  return isMap(a) && Array.isArray(a.quick) ? a.quick.filter((n): n is string => typeof n === "string") : [];
 }
 
 export function stamp(cfg: ReviewConfig, by: string, at: string, baseline: string | null = null): string {

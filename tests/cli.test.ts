@@ -44,7 +44,7 @@ test("init only writes the files: no consent, no key line; doctor and setup name
     "  .arnx/config.toml  created (models, budgets: edit to change)",
     "  .arnxignore        created",
     "",
-    "Next: arnx setup",
+    "Next: arnx review",
     "Optional: arnx skill install (coding agents)",
   ].join("\n"));
   expect(readFileSync(join(repo, ".arnx", "config.toml"), "utf8")).toMatch(
@@ -72,7 +72,7 @@ test("init again changes nothing and names the flow's next step; a deleted .arnx
   const again = new Cli({ cwd: repo });
   expect(await again.run("init")).toBe(0);
   expect(again.stdout).toBe(["✓ arnx is already initialized", "  .arnx/config.toml  kept", "  .arnxignore        kept",
-    "", "Next: arnx setup", "Optional: arnx skill install (coding agents)"].join("\n"));
+    "", "Next: arnx review", "Optional: arnx skill install (coding agents)"].join("\n"));
   expect(readFileSync(settingsPath(repo), "utf8")).toBe(config);
   rmSync(join(repo, ".arnxignore"));
   const back = new Cli({ cwd: repo });

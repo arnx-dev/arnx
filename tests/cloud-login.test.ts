@@ -200,7 +200,7 @@ test("credits: what reviews in progress reserve, apart; a debt pauses new review
     "New arnx cloud reviews are paused until you top up.\nTop up: https://arnx.dev/credits");
 });
 
-test("init --cloud: config gets [cloud]; next is login, then setup", async () => {
+test("init --cloud: config gets [cloud]; next is login, then review", async () => {
   const c = start();
   const repo = gitRepo(tmp());
   const env = { HOME: tmp(), ARNX_CLOUD_URL: c.url };
@@ -209,7 +209,7 @@ test("init --cloud: config gets [cloud]; next is login, then setup", async () =>
   expect(cli.stdout).not.toContain(sendQuestion("arnx cloud"));
   expect(cli.stdout).not.toContain("API_KEY");
   expect(cli.stdout).toStartWith("✓ arnx initialized for arnx cloud\n");
-  expect(cli.stdout).toMatch(/\nNext: arnx login\nThen: arnx setup\nOptional: arnx skill install \(coding agents\)$/);
+  expect(cli.stdout).toMatch(/\nNext: arnx login\nThen: arnx review\nOptional: arnx skill install \(coding agents\)$/);
   expect(loadSettings(repo).cloud).toEqual({ models: true, tests: false, effort: "medium" });
   expect(c.seen).toHaveLength(0);
 });
@@ -256,7 +256,7 @@ test("next with arnx models: log in first, then top up", async () => {
   cli.out = [];
   await cli.run("next");
   expect(cli.stdout).toContain("arnx login");
-  expect(cli.stdout).toContain("Next:  arnx login\nThen:  arnx setup");
+  expect(cli.stdout).toContain("Next:  arnx login\nThen:  arnx review");
   writeCredentials({ HOME: home }, { url: c.url, token: TOKEN });
   cli.out = [];
   await cli.run("next");

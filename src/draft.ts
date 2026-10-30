@@ -3,7 +3,7 @@
 // setup decides from the runs (tests_dir) and from the coverage (owns beyond the root, uses, uncovered), except that a
 // project whose tests need MANY_SERVICES or more goes under uncovered instead.
 import { posix } from "node:path";
-import { Document, isMap, isScalar, isSeq, type Node } from "yaml";
+import { Document, isMap, isScalar, isSeq, type Node, parseDocument } from "yaml";
 import type { Candidate, Detection } from "./detect";
 import { manyServices, manyServicesReason, type ProjectFacts, type ServiceFact } from "./facts";
 
@@ -123,7 +123,96 @@ export function draftReview(d: Detection): { doc: Raw; marks: Mark[] } | null {
 /** The draft as review.yaml text with its `# unsure` comments; "" when there is nothing to propose. */
 export function draftYaml(d: Detection): string {
   const draft = draftReview(d);
-  if (!draft) return "";
+  return draft ? draftText(draft) : "";
+}
+
+/** Said of a project a quick setup left for later: the first review whose change touches it sets it up. */
+export const NOT_SET_UP = "not set up yet: the first review whose change touches it sets it up";
+
+/** Whether `path` (relative to the repository root) is under `root`. */
+const holds = (root: string, path: string) => root === "." || path.startsWith(root + "/");
+
+/** The drafted project that owns `path`: the deepest root holding it; null when none does. */
+function ownerOf(projects: Raw, path: string): string | null {
+  let best: string | null = null;
+  let depth = -1;
+  for (const [name, p] of Object.entries(projects)) {
+    const root = String((p as Raw).root);
+    const d = root === "." ? 0 : root.split("/").length;
+    if (holds(root, path) && d > depth) [best, depth] = [name, d];
+  }
+  return best;
+}
+
+/** A quick setup's draft, for a first review: the drafted projects that own one of the `changed` files, the other
+ * drafted projects listed under uncovered as NOT_SET_UP (a root project left out is not listed: setup's coverage map
+ * lists its files). With `existing` (review.yaml as it is), its projects stay as they are, each chosen project joins
+ * them (a project whose root it already has is not drafted again), and the NOT_SET_UP entry of each chosen project
+ * goes. Null when no drafted project owns a changed file. */
+export function quickDraft(d: Detection, changed: string[], existing = ""): { yaml: string; names: string[] } | null {
+  const draft = draftReview(d);
+  if (!draft) return null;
+  const projects = (draft.doc.projects ?? {}) as Raw;
+  const have = existing ? parseRoots(existing) : new Set<string>();
+  for (const [name, p] of Object.entries(projects)) if (have.has(String((p as Raw).root))) delete projects[name];
+  const chosen = [...new Set(changed.map((f) => ownerOf(projects, f)).filter((n): n is string => n !== null))];
+  if (!chosen.length) return null;
+  const later = Object.keys(projects).filter((n) => !chosen.includes(n));
+  const aside = later.map((n) => String((projects[n] as Raw).root)).filter((r) => r !== ".")
+    .map((r) => ({ path: `/${r}/`, reason: NOT_SET_UP }));
+  for (const n of later) delete projects[n];
+  // Services only the projects left for later use go with them.
+  const used = new Set(Object.values(projects).flatMap((p) => ((p as Raw).services ?? []) as string[]));
+  const services = draft.doc.services as Raw | undefined;
+  if (services) {
+    for (const n of Object.keys(services)) if (!used.has(n)) delete services[n];
+    if (!Object.keys(services).length) delete draft.doc.services;
+  }
+  draft.marks = draft.marks.filter((m) => m.path[0] === "projects" ? chosen.includes(String(m.path[1]))
+    : m.path[0] === "services" ? used.has(String(m.path[1])) : true);
+  if (!existing) {
+    if (aside.length) draft.doc.uncovered = [...((draft.doc.uncovered ?? []) as Raw[]), ...aside];
+    return { yaml: draftText(draft), names: chosen };
+  }
+  // Joined to the file as it is, its stamp left out (arnx stamps after the proof): names it has already get a suffix.
+  const doc = parseDocument(existing);
+  doc.delete("approved");
+  const taken = new Set(Object.keys((doc.toJS() as { projects?: Raw } | null)?.projects ?? {}));
+  const names: string[] = [];
+  for (const n of chosen) {
+    let name = n;
+    for (let k = 2; taken.has(name); k++) name = `${n}-${k}`;
+    taken.add(name);
+    names.push(name);
+    doc.setIn(["projects", name], doc.createNode(projects[n]));
+  }
+  for (const [n, svc] of Object.entries(services ?? {})) {
+    if (!doc.hasIn(["services", n])) doc.setIn(["services", n], doc.createNode(svc));
+  }
+  const allow = (draft.doc.allow_env_names ?? []) as string[];
+  if (allow.length) {
+    const had = ((doc.toJS() as { allow_env_names?: string[] } | null)?.allow_env_names ?? []);
+    doc.set("allow_env_names", doc.createNode([...new Set([...had, ...allow])].sort()));
+  }
+  const roots = new Set(chosen.map((n) => `/${String((projects[n] as Raw).root)}/`));
+  const unc = doc.get("uncovered");
+  if (isSeq(unc)) {
+    unc.items = unc.items.filter((it) => {
+      const u = isMap(it) ? it.toJSON() as Raw : null;
+      return !(u && u.reason === NOT_SET_UP && roots.has(String(u.path)));
+    });
+    if (!unc.items.length) doc.delete("uncovered");
+  }
+  return { yaml: doc.toString({ lineWidth: 0 }), names };
+}
+
+/** The project roots a review.yaml has. */
+function parseRoots(text: string): Set<string> {
+  const raw = parseDocument(text).toJS() as { projects?: Record<string, { root?: unknown }> } | null;
+  return new Set(Object.values(raw?.projects ?? {}).map((p) => String(p?.root ?? ".")));
+}
+
+function draftText(draft: { doc: Raw; marks: Mark[] }): string {
   const doc = new Document(draft.doc);
   for (const m of draft.marks) {
     const node = doc.getIn(m.path, true) as Node | undefined;

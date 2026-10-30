@@ -27,9 +27,9 @@ test("init --json: created, then already-initialized; one object on stdout, the 
   expect(cli.out).toHaveLength(1);
   expect(json(cli)).toEqual({ schema_version: 1, command: "init", result: "ok", exit_code: 0, state: "created",
     files: [{ path: ".arnx/config.toml", action: "created" }, { path: ".arnxignore", action: "created" }],
-    cloud: false, next: ["arnx setup"], skill_installed: false });
+    cloud: false, next: ["arnx review"], skill_installed: false });
   expect(cli.stderr).toStartWith("✓ arnx initialized\n");
-  expect(cli.stderr).toContain("Next: arnx setup");
+  expect(cli.stderr).toContain("Next: arnx review");
   const again = new Cli({ cwd: repo });
   expect(await again.run("init", "--json")).toBe(0);
   expect(json(again)).toMatchObject({ state: "already-initialized",
@@ -39,11 +39,11 @@ test("init --json: created, then already-initialized; one object on stdout, the 
   expect(json(force)).toMatchObject({ state: "replaced", files: [{ action: "replaced" }, { action: "kept" }] });
 });
 
-test("init --cloud --json: login first, then setup", async () => {
+test("init --cloud --json: login first, then review", async () => {
   const repo = gitRepo(tmp());
   const cli = new Cli({ cwd: repo, env: { HOME: tmp(), ARNX_CLOUD_URL: "http://127.0.0.1:9" } });
   expect(await cli.run("init", "--cloud", "--json")).toBe(0);
-  expect(json(cli)).toMatchObject({ state: "created", cloud: true, next: ["arnx login", "arnx setup"] });
+  expect(json(cli)).toMatchObject({ state: "created", cloud: true, next: ["arnx login", "arnx review"] });
 });
 
 test("doctor --json not ready: every check, a ✗ means no next command", async () => {
@@ -67,7 +67,7 @@ test("doctor --json not ready: every check, a ✗ means no next command", async 
   // Nothing failing, steps still to do: not ready, and the next command named.
   const pending = new Cli({ cwd: repo, env: { ANTHROPIC_API_KEY: "a" } });
   expect(await pending.run("doctor", "--json")).toBe(3);
-  expect(json(pending)).toMatchObject({ result: "not-ready", ready: false, next: "arnx setup" });
+  expect(json(pending)).toMatchObject({ result: "not-ready", ready: false, next: "arnx review" });
 });
 
 test("doctor --json ready: coverage per project, JEV and telemetry", async () => {
@@ -129,11 +129,11 @@ test("cloud on|off --json: the models after the change, the next commands, the m
   const on = new Cli({ cwd: repo, env });
   expect(await on.run("cloud", "on", "--yes", "--json")).toBe(0);
   expect(json(on)).toMatchObject({ command: "cloud", result: "ok", models: true, already_on: false, logged_in: false,
-    next: ["arnx login", "arnx setup"] });
+    next: ["arnx login", "arnx review"] });
   writeCredentials({ HOME: home }, { url: c.url, token: TOKEN });
   const again = new Cli({ cwd: repo, env });
   await again.run("cloud", "on", "--json");
-  expect(json(again)).toMatchObject({ models: true, already_on: true, logged_in: true, next: ["arnx setup"] });
+  expect(json(again)).toMatchObject({ models: true, already_on: true, logged_in: true, next: ["arnx review"] });
   const off = new Cli({ cwd: repo, env });
   expect(await off.run("cloud", "off", "--json")).toBe(0);
   expect(json(off)).toMatchObject({ models: false, next: ["arnx doctor"], missing_keys: ["ANTHROPIC_API_KEY"] });

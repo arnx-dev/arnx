@@ -79,14 +79,17 @@ directly. Other providers and models: [docs/MODELS.md](docs/MODELS.md).
 
 Then, in both cases:
 
-    arnx setup                          # asks before sending code, finds how your tests run, proves it by running
-                                        # your suite in Docker, then lists what is worth a look
     # ... let your agent change something ...
     arnx review                         # writes tests for the change and runs them: 2 issues confirmed (4 findings)
+                                        # the first one sets up, in a few minutes, only the projects the change touches
     arnx triage                         # mark real / intended / noise / rewrite, answer questions
     arnx accept                         # tests of real issues are kept in .arnx/tests/ (never in your own suite)
     arnx prompt                         # the fix prompt for your coding agent
     arnx check                          # runs the accepted tests; green means they pass now
+
+The first review asks before sending code, and proves each project it sets up with a quick look (the test listing,
+arnx's one-line test, a few small test files); a later change in another project sets that one up then.
+`arnx setup` instead sets up the whole repository and runs every suite in Docker.
 
 Commit `.arnx/config.toml` and `.arnx/review.yaml`: teammates, other branches and CI reuse the proven environment.
 Lost? `arnx next` says where you are in this flow and the command to run now; `arnx doctor` says what is missing.
