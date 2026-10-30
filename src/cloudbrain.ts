@@ -266,7 +266,7 @@ export class CloudBrain implements Brain {
         parts: lists.filter((l) => /^part-\d+$/.test(l.source)).map((l) => l.list), second: of("second") ?? null,
         tested }, null, 2) + "\n");
     }
-    this.sayer(project, x.progress)(`${tested.length} suspect${tested.length === 1 ? "" : "s"} to test`);
+    this.sayer(project, x.progress)(`checking ${tested.length} thing${tested.length === 1 ? "" : "s"} in this change`);
   }
 
   /** The second hunter's list, arrived after the tests started: kept in hunt.json, not tested. */

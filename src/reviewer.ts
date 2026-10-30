@@ -28,7 +28,7 @@ import { CONTEXT_LIMIT, contextPack } from "./context";
 import type { Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
 import { type AgentReport, type Checked, type Finding, type FixProof, parseReports, type ProjectStat, type Review,
-  save, type SuspectOutcome, type Untested, adjudicate, exitCode, sameCause } from "./report";
+  save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause } from "./report";
 import { dockerSteps, type SessionFactory } from "./sandbox";
 import type { TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
@@ -594,11 +594,18 @@ export async function runReview(repo: string, o: { settings: Settings;
         verdicts[`${f.project}::${f.testId}`] = { verdict: f.verdict, reason: f.reason, dependsOn: f.dependsOn ?? null,
           judge: f.judge ?? null, model: label ? `${label}/challenge` : f.judge ?? challengerRef, cost };
         writeFileSync(verdictsFile, JSON.stringify(verdicts) + "\n");
+        // Shown as it is proven: its test failed on every run, not before the change, and the second opinion agrees.
+        // A suspect is proven by just this (adjudicate), so nothing shown here is taken back.
+        if (f.verdict === "confirmed" && !f.dependsOn) {
+          o.progress?.(`✓ proven: ${clip(f.explanation || firstLine(f.message), 140)} (${f.id}, failing test ` +
+            `${f.file ?? f.testId})`);
+        }
       } });
     const [groups, judged] = [j.groups, j.uses];
     const second = huntSecond;
     adjudicate(suspects, findings);
     sameCause(suspects, groups, findings);
+    if (suspects.length) o.progress?.(checkedLine(suspects));
     for (const x of suspects) {
       emit("suspect.outcome", { project: x.project, hyp_id: hypId(x.project, x.id), outcome: x.outcome, tests: x.tests,
         findings: x.findings, ...x.reason ? { reason: clip(x.reason) } : {} });
@@ -679,4 +686,16 @@ export async function runReview(repo: string, o: { settings: Settings;
     await finish?.("failed").catch(() => null);
     throw e;
   }));
+}
+
+/** What came of the things a review checked, said once they are judged: proven, waiting on an answer, failing the same
+ * way before the change, and the rest dropped (a test that passed, did not run, or the second opinion disputed). */
+export function checkedLine(sus: SuspectOutcome[]): string {
+  const n = (...o: SuspectOutcome["outcome"][]) => sus.filter((x) => o.includes(x.outcome)).length;
+  const proven = n("proven", "same cause");
+  const answer = n("pending answer");
+  const before = n("pre-existing");
+  const dropped = sus.length - proven - answer - before;
+  return [`Checked ${sus.length}: ${proven} proven`, ...answer ? [`${answer} need${answer === 1 ? "s" : ""} your answer`]
+    : [], ...before ? [`${before} failing before this change too`] : [], `${dropped} dropped`].join(", ");
 }

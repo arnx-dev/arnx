@@ -290,7 +290,7 @@ export class LocalBrain implements Brain {
         tested: hunted };
       state.record = record;
       if (x.outDir) writeFileSync(join(x.outDir, "hunt.json"), JSON.stringify(record, null, 2) + "\n");
-      x.progress?.(`${cfg.name}: ${hunted.length} suspect${hunted.length === 1 ? "" : "s"} to test`);
+      x.progress?.(`${cfg.name}: checking ${hunted.length} thing${hunted.length === 1 ? "" : "s"} in this change`);
       return { message: prompts.proveTask(cfg, hunted, x.maxQuestions),
         spent: (theirs?.use.costUsd ?? 0) + (split?.use.costUsd ?? 0) + rankUse.costUsd };
     };
