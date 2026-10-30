@@ -160,6 +160,11 @@ export function quickDraft(d: Detection, changed: string[], existing = ""): { ya
   const later = Object.keys(projects).filter((n) => !chosen.includes(n));
   const aside = later.map((n) => String((projects[n] as Raw).root)).filter((r) => r !== ".")
     .map((r) => ({ path: `/${r}/`, reason: NOT_SET_UP }));
+  // A root project would own every file (owns defaults to **), those of the other projects too: it owns what they
+  // leave, so a change in a project set up later reaches that one, not the root's environment.
+  const top = chosen.find((n) => String((projects[n] as Raw).root) === ".");
+  const others = Object.values(projects).map((p) => String((p as Raw).root)).filter((r) => r !== ".");
+  if (top && others.length) (projects[top] as Raw).owns = ["**", ...others.map((r) => `!/${r}/`)];
   for (const n of later) delete projects[n];
   // Services only the projects left for later use go with them.
   const used = new Set(Object.values(projects).flatMap((p) => ((p as Raw).services ?? []) as string[]));

@@ -16,8 +16,9 @@ import type { AdapterId, TestResult } from "./adapters/types";
 import { addToSandbox, type Blanked, describeBlanked, filesAt, hasCommits, snapshot, snapshotDigest, someNames,
   takeSnapshot, type Withheld, workingTreeFiles } from "./change";
 import {
-  loadReviewFile, parseReviewFile, plainReviewYaml, projectDigest, readSecretPins, type ReviewConfig, reviewConfigPath,
-  type ReviewFile, sandboxOnlyOf, sandboxYaml, secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampedQuick, stampFile,
+  loadReviewFile, parseReviewFile, plainReviewYaml, projectDigest, readSecretPins, restDigest, type ReviewConfig,
+  reviewConfigPath,
+  type ReviewFile, sandboxOnlyOf, sandboxYaml, secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampFile,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
 import { draftYaml, quickDraft } from "./draft";
@@ -321,6 +322,11 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
         counts.flaky = flaky;
         counts.left = counts.left.filter((id) => !flaky.includes(id));
       }
+    }
+    // A quick look ran a few files: baseline tests outside them did not run, so they have not left it.
+    if (sample) {
+      const ran = new Set((all ?? []).map((t) => testKey(t.testId)));
+      counts.left = counts.left.filter((id) => ran.has(testKey(id)));
     }
     const fetched = all === null ? npxDownload(result.output) : null;
     const summary = fetched ? `the suite produced no report: ${npxText(fetched)}`
@@ -1774,11 +1780,13 @@ export function proofBefore(repo: string): ProofBefore | null {
 export async function approveFile(repo: string, o: { by: string; at: string; project?: string;
   sessionFactory?: SessionFactory; progress?: Say; untracked?: boolean; localPins?: string | null;
   afterSetup?: SetupRun[]; before?: ProofBefore;
-  /** The projects a quick look proves (runSuite `quick`); default: those the stamp names (stampedQuick). */
+  /** The projects a quick look proves (runSuite `quick`); the others run their whole suite. Never read from the file
+   * itself: a stamp can be written by hand. */
   quick?: string[];
-  /** The last proof: each project's digest and the baseline it had. A project whose part of the file and baseline
-   * entries are what they were then, and that setup did not just run, keeps that proof and does not run again. */
-  unchanged?: { projects: Record<string, string>; baseline: Baseline } })
+  /** The last proof: each project's digest, the rest of the file (restDigest) and the baseline it had. A project
+   * whose part of the file and baseline entries are what they were then, with the rest of the file unchanged, no
+   * accepted test changed, and that setup did not just run, keeps that proof and does not run again. */
+  unchanged?: { projects: Record<string, string>; rest: string; baseline: Baseline } })
   : Promise<[boolean, string, ApprovedSuite[]]> {
   const say = o.progress ?? (() => {});
   const f = loadReviewFile(repo, { requireApproved: false });
@@ -1815,7 +1823,7 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
   const pins = acceptedPins(repo, o.localPins ?? null);
   // Right after setup, which said so, an accepted test changed since accept does not stop the proof.
   const trusted = o.afterSetup ? { ...pins, changed: [] } : pins;
-  const quick = new Set(o.quick ?? stampedQuick(f));
+  const quick = new Set(o.quick ?? []);
   const tmp = tempDir("arnx-approve-");
   try {
     const snap = join(tmp, "repo");
@@ -1831,7 +1839,8 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
       const output = posix.join(".arnx", "run", f.legacy ? "approve.log" : `approve-${cfg.name}.log`);
       const mine = base.get(cfg.name) ?? [];
       const was = o.unchanged;
-      if (was && !f.legacy && was.projects[cfg.name] === projectDigest(f, cfg.name) &&
+      if (was && !f.legacy && was.rest === restDigest(f) && !pins.changed.length &&
+          was.projects[cfg.name] === projectDigest(f, cfg.name) &&
           sameTests(mine, was.baseline.get(cfg.name)) && !o.afterSetup?.some((r) => r.name === cfg.name)) {
         say(`${cfg.name}: ✓ unchanged since its proof`);
         suites.push({ name: cfg.name, ok: true, summary: "unchanged since its proof", acceptedFailing: 0,

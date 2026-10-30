@@ -455,6 +455,12 @@ function hash(value: unknown): string {
   return createHash("sha256").update(pyJson(value, { sortKeys: true, floatNumbers: true })).digest("hex");
 }
 
+/** Hash of the file outside its projects (what is not theirs alone: sandbox_only, allowed names, …), its stamp and
+ * uncovered list left out: a project unchanged since its proof keeps it only while this is unchanged too. */
+export function restDigest(f: ReviewFile): string {
+  return hash(without(without(without(f.raw, "approved"), "projects"), "uncovered"));
+}
+
 /** Hash of one project's settings and the services it lists: `approve --project` reruns only what changed. */
 export function projectDigest(f: ReviewFile, name: string): string {
   const project = f.projects.find((p) => p.name === name);

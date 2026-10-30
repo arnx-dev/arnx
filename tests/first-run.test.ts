@@ -3,7 +3,7 @@
 // small files) instead of its whole suite. The projects left for later wait under uncovered until a change touches
 // them; a later proof runs only the projects that changed since the last one.
 import { expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { writeBaseline } from "../src/baseline";
 import { filesAt } from "../src/change";
@@ -173,12 +173,13 @@ test("the proof stamps the projects a quick look proved; proved again, they get 
   expect(ok).toBe(true);
   const stamped = parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8"));
   expect(stampedQuick(stamped)).toEqual(["svc"]);
-  // The file changes: the proof runs again, as a quick look, and keeps the project's level.
+  // The file changes: the proof runs again, as a quick look (the CLI passes the list from the proven copy), and
+  // keeps the project's level.
   const text = readFileSync(reviewConfigPath(repo), "utf8").replace("pip install pytest hypothesis",
     "pip install pytest hypothesis requests");
   writeFileSync(reviewConfigPath(repo), text);
   const sessions: Session[] = [];
-  const [again, , suites] = await approveFile(repo, { by: "Dev", at: "2026-10-30",
+  const [again, , suites] = await approveFile(repo, { by: "Dev", at: "2026-10-30", quick: ["svc"],
     sessionFactory: factory(runner("svc"), sessions) });
   expect(again).toBe(true);
   expect(suites[0]!.summary).toStartWith("quick look:");
@@ -197,9 +198,9 @@ test("a proof after a change to one project runs only that project; the others k
   mkdirSync(dirname(reviewConfigPath(repo)), { recursive: true });
   writeFileSync(reviewConfigPath(repo), yaml);
   const last = parseReviewFile(yaml);
-  const { projectDigest } = await import("../src/config");
+  const { projectDigest, restDigest } = await import("../src/config");
   const unchanged = { projects: Object.fromEntries(last.projects.map((p) => [p.name, projectDigest(last, p.name)])),
-    baseline: new Map() };
+    rest: restDigest(last), baseline: new Map() };
   writeFileSync(reviewConfigPath(repo), yaml.replace("install: [pip install pytest]\n    test_command: python -m pytest {targets}\n    owns: [svc/app.py]",
     "install: [pip install pytest requests]\n    test_command: python -m pytest {targets}\n    owns: [svc/app.py]"));
   const lines: string[] = [];
@@ -218,4 +219,69 @@ test("the review's last progress line says what came of the things it checked", 
   expect(checkedLine([s("proven"), s("not reproduced"), s("not tested")])).toBe("Checked 3: 1 proven, 2 dropped");
   expect(checkedLine([s("proven"), s("same cause"), s("pending answer"), s("pre-existing"), s("disputed")]))
     .toBe("Checked 5: 2 proven, 1 needs your answer, 1 failing before this change too, 1 dropped");
+});
+
+test("a root project in the quick draft owns what the other drafted projects leave", () => {
+  const repo = twoProjects();
+  writeFileSync(join(repo, "pyproject.toml"), "[project]\nname = \"top\"\nversion = \"0.1\"\n");
+  mkdirSync(join(repo, "tests"), { recursive: true });
+  writeFileSync(join(repo, "tests/test_top.py"), "def test_x():\n    pass\n");
+  writeFileSync(join(repo, "top.py"), "X = 1\n");
+  commit(repo, "root project");
+  const q = quickDraft(detected(repo), ["top.py"])!;
+  const f = parseReviewFile(q.yaml);
+  const top = f.projects.find((p) => p.workdir === ".")!;
+  expect(top.owns).toEqual(["**", "!/svc/", "!/web/"]);
+  expect(f.uncovered.map((u) => u.path).sort()).toEqual(["/svc/", "/web/"]);
+});
+
+test("the projects a quick look proves come from the caller, never from the file's own stamp", async () => {
+  const repo = twoProjects();
+  const r = await runSetup(repo, defaultSettings(), new ScriptedAgent([]), { outDir: join(tmp(), "s"),
+    sessionFactory: factory(runner("svc"), []), quick: { files: ["svc/app.py"] } });
+  writeFileSync(reviewConfigPath(repo), r.yamlText!);
+  writeBaseline(repo, new Map());
+  expect((await approveFile(repo, { by: "Dev", at: "2026-10-30", afterSetup: r.runs, quick: ["svc"] }))[0]).toBe(true);
+  // The file changes; its stamp still names svc. Without the caller's list, svc runs its whole suite.
+  const text = readFileSync(reviewConfigPath(repo), "utf8").replace("pip install pytest hypothesis",
+    "pip install pytest hypothesis requests");
+  writeFileSync(reviewConfigPath(repo), text);
+  expect(text).toContain("quick:");
+  const [ok, , suites] = await approveFile(repo, { by: "Dev", at: "2026-10-30",
+    sessionFactory: factory(runner("svc"), []) });
+  expect(ok).toBe(true);
+  expect(suites[0]!.summary).not.toStartWith("quick look");
+  expect(stampedQuick(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")))).toEqual([]);
+});
+
+test("a change outside the projects (sandbox_only) proves every project again", async () => {
+  const repo = twoProjects();
+  const yaml = "version: 1\nprojects:\n  a:\n    root: svc\n    language: python\n    image: python:3.12\n" +
+    "    install: [pip install pytest]\n    test_command: python -m pytest {targets}\n";
+  mkdirSync(dirname(reviewConfigPath(repo)), { recursive: true });
+  writeFileSync(reviewConfigPath(repo), yaml);
+  const { projectDigest, restDigest } = await import("../src/config");
+  const last = parseReviewFile(yaml);
+  const unchanged = { projects: { a: projectDigest(last, "a") }, rest: restDigest(last), baseline: new Map() };
+  writeFileSync(reviewConfigPath(repo), `${yaml}sandbox_only: [svc/app.py]\n`);
+  const sessions: Session[] = [];
+  const [, , suites] = await approveFile(repo, { by: "Dev", at: "2026-10-30", unchanged,
+    sessionFactory: factory(runner("svc"), sessions) });
+  expect(suites[0]!.reused).toBeUndefined();
+  expect(sessions).toHaveLength(1);
+});
+
+test("a quick look leaves in the baseline the tests it did not run", async () => {
+  const { runSuite } = await import("../src/setup");
+  const repo = twoProjects();
+  const cfg = parseReviewFile("version: 1\nprojects:\n  svc:\n    root: svc\n    language: python\n" +
+    "    image: python:3.12\n    install: [pip install pytest]\n    test_command: python -m pytest {targets}\n")
+    .projects[0]!;
+  const snap = join(tmp(), "snap");
+  cpSync(repo, snap, { recursive: true });
+  const baseline = [{ id: "svc/tests/test_e.py::test_x", file: "svc/tests/test_e.py", first: "assert 1 == 2" }];
+  const [ok, , , , , , counts] = await runSuite(cfg, snap, join(tmp(), "log"), { precheck: true, quick: true,
+    baseline, sessionFactory: factory(runner("svc"), []) });
+  expect(ok).toBe(true);
+  expect(counts.left).toEqual([]);
 });
