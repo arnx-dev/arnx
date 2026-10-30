@@ -285,3 +285,28 @@ test("a quick look leaves in the baseline the tests it did not run", async () =>
   expect(ok).toBe(true);
   expect(counts.left).toEqual([]);
 });
+
+test("a quick look over many test files is not taken for a test_command that leaves most of them out", async () => {
+  const r0 = gitRepo(tmp());
+  const many = Array.from({ length: 25 }, (_, i) => `tests/test_${String(i).padStart(2, "0")}.py`);
+  writeFileSync(join(r0, "pyproject.toml"), "[project]\nname = \"big\"\nversion = \"0.1\"\n");
+  writeFileSync(join(r0, "app.py"), "X = 1\n");
+  mkdirSync(join(r0, "tests"), { recursive: true });
+  many.forEach((f, i) => writeFileSync(join(r0, f), "def test_x():\n    pass\n" + "#\n".repeat(i)));
+  commit(r0, "big");
+  const answer = (command: string): Answer => {
+    const probe = /(\S*test_arnx_probe\.py)/.exec(command)?.[1];
+    if (command.includes("--collect-only")) {
+      return { output: probe ? `${probe}::test_arnx_probe`
+        : many.map((f) => `${f}::test_x`).join("\n") + `\n\n${many.length} tests collected in 0.01s` };
+    }
+    const ran = probe ? [probe] : many.filter((f) => command.includes(f));
+    return { xml: passed(ran), output: `${ran.length} passed` };
+  };
+  const model = new ScriptedAgent([]);
+  const r = await runSetup(r0, defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(answer, []), quick: { files: ["app.py"] } });
+  expect(model.calls).toHaveLength(0);
+  expect(r.ok).toBe(true);
+  expect(r.runs[0]!.summary).toStartWith("quick look: 25 tests listed, 3 small files ran");
+});

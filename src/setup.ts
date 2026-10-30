@@ -65,7 +65,9 @@ export interface SuiteCounts { acceptedFailing: number; unexpected: string[]; ba
   /** Every test the run reported. */
   all: TestResult[];
   /** What the failures point to (diagnose, the run apart, JEV), when the suite's failures were looked at. */
-  hints?: Hint[] }
+  hints?: Hint[];
+  /** A quick look's run: the test files the runner listed, all of which the whole suite would run. */
+  listed?: string[] }
 
 const noCounts = (): SuiteCounts => ({ acceptedFailing: 0, unexpected: [], baselineFailing: 0, left: [], flaky: [],
   failed: [], passed: 0, all: [] });
@@ -269,12 +271,14 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     // A project with no tests of its own has nothing to list: its run below is quick.
     let sample: { files: string[]; run: RunResult; results: TestResult[] } | null = null;
     let listed = "";
+    let listedFiles: string[] = [];
     if (precheck && !targets.length && (cfg.language === "rust" || hasOwnTests(cfg, snap))) {
       const seen = look(session, snap, cfg, acceptedTestsDir);
       const early = seen.early;
       if (early) return [false, early.summary, tailOf(early.output), [], [], early.hints, none] as Out;
       if (quick && seen.sample) {
         sample = seen.sample;
+        listedFiles = seen.listed;
         listed = `quick look: ${plural(seen.tests, "test")} listed, ${plural(sample.files.length, "small file")} ran: `;
       }
     }
@@ -327,6 +331,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     if (sample) {
       const ran = new Set((all ?? []).map((t) => testKey(t.testId)));
       counts.left = counts.left.filter((id) => ran.has(testKey(id)));
+      counts.listed = listedFiles;
     }
     const fetched = all === null ? npxDownload(result.output) : null;
     const summary = fetched ? `the suite produced no report: ${npxText(fetched)}`
@@ -1388,7 +1393,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       // Tests test_command leaves out never run, and nothing else would say so: they go back to the agent once.
       const nested = f.projects.map((p) => p.workdir).filter((w) => w && w !== "." && w !== cfg.workdir);
       const uncovered = matcher(f.uncovered.map((u) => u.path).join("\n"));
-      const gap = ok ? coverageGap(cfg, snap, counts.all, state.mostRan.get(name), accepted,
+      // A quick look ran a few files: what the whole suite would run is what the runner listed.
+      const gap = ok ? coverageGap(cfg, snap, counts.listed ? counts.listed.map((f) => ({ fileAttr: f }) as TestResult)
+        : counts.all, counts.listed ? undefined : state.mostRan.get(name), accepted,
         (r) => nested.some((w) => r === w || r.startsWith(`${w}/`)) || uncovered(r)) : null;
       if (gap && !shown.has("gap")) {
         hold("gap");

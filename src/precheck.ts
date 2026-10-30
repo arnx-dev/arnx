@@ -109,15 +109,17 @@ export function precheck(session: Runner, snap: string, cfg: ReviewConfig, accep
 /** What the look saw: what stops the try (null when nothing does), how many tests and files the runner listed, and
  * the sample's run when one ran and nothing stopped it (a quick setup takes it for the suite's run). */
 export interface Look { early: Early | null; tests: number; files: number;
+  /** The test files the runner listed (relative to the project root). */
+  listed: string[];
   sample: { files: string[]; run: RunResult; results: TestResult[] } | null }
 
 /** precheck, with what it listed and the sample's run. */
 export function look(session: Runner, snap: string, cfg: ReviewConfig, acceptedTestsDir?: string): Look {
-  const none: Look = { early: null, tests: 0, files: 0, sample: null };
+  const none: Look = { early: null, tests: 0, files: 0, listed: [], sample: null };
   const listed = listTests(session, snap, cfg, []);
   if (!listed) return none;
   const { listing, result } = listed;
-  const counts = { tests: listing.tests ?? listing.files.length, files: listing.files.length };
+  const counts = { tests: listing.tests ?? listing.files.length, files: listing.files.length, listed: listing.files };
   const why = listingProblem(listing, result.exitCode);
   if (why) return { ...none, ...counts, early: { summary: why + AGAIN, output: result.output, hints: "" } };
   if (!listing.files.length) return { ...none, ...counts };
