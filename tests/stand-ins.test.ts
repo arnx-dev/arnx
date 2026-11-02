@@ -387,3 +387,15 @@ test("a value that is a name in code is never replaced: a replacement everywhere
   }
   expect(suspects("x.py", `token = "shop_at_u_9xQ2kLm7Pz"\n`, [])).toEqual(["shop_at_u_9xQ2kLm7Pz"]);
 });
+
+test("a number literal's stand-in stays a number literal of its base, so the code around it still parses", () => {
+  // A secret name's value is replaced wherever it occurs, also where the code uses it as a number.
+  const r = standIn('const m = { token: "0x06000001" };\nconst n = 0x06000001 + 1;\n' +
+    'const b = { secret: "0b1011011101n" };\nconst big = 0b1011011101n;\n', [])!;
+  expect(r.count).toBeGreaterThanOrEqual(4);
+  const hex = /const n = (\S+) \+ 1;/.exec(r.text)![1]!;
+  expect(hex).toMatch(/^0x[0-9a-f]{8}$/);
+  expect(hex).not.toBe("0x06000001");
+  expect(r.text).toContain(`token: "${hex}"`);
+  expect(/const big = (\S+);/.exec(r.text)![1]).toMatch(/^0b[01]{10}n$/);
+});
