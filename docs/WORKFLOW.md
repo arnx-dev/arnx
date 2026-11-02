@@ -3,10 +3,14 @@
 The flow, what each step writes, and what its results mean. Start with the [README](../README.md); models are in
 [MODELS.md](MODELS.md), arnx cloud in [CLOUD.md](CLOUD.md), boundaries and data in [SAFETY.md](SAFETY.md).
 
-    arnx init → arnx setup → arnx review → arnx triage → arnx accept → arnx prompt → arnx check
+    arnx init → arnx review → arnx triage → arnx accept → arnx prompt → arnx check
 
 Commit `.arnx/config.toml` and `.arnx/review.yaml`: the next branch, a teammate's clone and CI reuse the proven
 environment without running setup again.
+
+The first `arnx review` sets up only the projects the change touches, in a few minutes (it stops at 10), with a
+quick look as their proof: the test listing, arnx's one-line test and a few small test files. A later change in
+another project sets that one up then. `arnx setup` sets up the whole repository and runs every suite.
 
 Lost? `arnx next` says where the repository is in this flow and the command to run now. `arnx doctor` says what is
 missing (keys, Docker, configuration); setup and review run the same checks first.

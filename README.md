@@ -116,7 +116,8 @@ More in [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
 ## The workflow
 
-1. **setup** reads the repository, proposes one project per unit whose tests run on their own, and checks each by
+1. **setup** (the first review's, for the projects the change touches, or `arnx setup`, for all) reads the
+   repository, proposes one project per unit whose tests run on their own, and checks each by
    running its suite in Docker (no tests yet? arnx's own one-line test checks it instead). Nothing to approve: it
    ends with what is worth a look (test files set aside, what is not tested, allowed secret-looking files, downloads
    from outside the package registries). A changed `.arnx/review.yaml` is proven again before the next review.

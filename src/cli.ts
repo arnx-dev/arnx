@@ -103,9 +103,9 @@ Tests every change your coding agent makes.
 
   next                                  the command to run now
 
-Prepare, once per repository
+Prepare, once per repository (the first review sets up what it needs)
   init [--cloud] [--force]              write .arnx/config.toml and .arnxignore
-  setup [--untracked] [--yes] [--force] find how your tests run in Docker and prove it
+  setup [--untracked] [--yes] [--force] set up the whole repository: every project, every suite
         [--project NAME | --add]        prove one project again, or cover what no project covers
         [--baseline]                    record the tests failing today again (no model)
   approve [--project NAME]              run the suites in .arnx/review.yaml again and stamp it
