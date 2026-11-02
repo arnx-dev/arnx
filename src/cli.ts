@@ -72,6 +72,8 @@ import { versionLine } from "./version";
 export const sendQuestion = (to: string) => `Send your change and the files arnx reads to ${to}?`;
 /** Said once the consent is given: what does not leave the machine. */
 export const DOCKER_LINE = "(Tests run in Docker on this machine.)";
+/** The most minutes a review waits for the quick setup of what its change touches; `arnx setup` takes longer. */
+export const QUICK_MINUTES = 10;
 /** Where a key for a built-in provider is made. */
 const KEY_PAGES: Record<string, string> = {
   ANTHROPIC_API_KEY: "https://console.anthropic.com/settings/keys",
@@ -888,8 +890,10 @@ class Commands {
     const report = (result: string, code: number, fields: Record<string, unknown> = {}) => {
       if (!(quick && add)) this.emit(result, code, fields);
     };
+    // A review waits on a quick setup: it stops at QUICK_MINUTES, and `arnx setup` takes the rest.
+    const cap = quick ? Math.min(s.setupMinutes, QUICK_MINUTES) : s.setupMinutes;
     this.d.out(quick ? `${add ? "Setting up" : "First run: setting up"} just enough to test ${quick.what} (about ` +
-      `2–5 min, stops at ${s.setupMinutes} min).` : setupPreview(repo, s, untracked));
+      `2–5 min, stops at ${cap} min).` : setupPreview(repo, s, untracked));
     const outDir = join(repo, ".arnx", "setup");
     // JEV is asked only when the config turns it on and its key is set (the key alone does nothing).
     const jev = jevKey(s, this.d.env);
@@ -902,7 +906,7 @@ class Commands {
     const failureModel = jev ? jevModel(jev, join(outDir, "jev.jsonl")) : undefined;
     const started = this.clock();
     // One limit for setup and its proof, on the clock its progress shows.
-    const limit: TimeLimit = { at: started + s.setupMinutes * 60_000, now: () => this.clock(), minutes: s.setupMinutes };
+    const limit: TimeLimit = { at: started + cap * 60_000, now: () => this.clock(), minutes: cap };
     const cloud = await this.cloudBrain(repo, s, mode);
     if (cloud) this.cloudPrompts(repo);
     const unpriced = !cloud && this.unpriced(s, [setupRef(s)]);
@@ -938,7 +942,7 @@ class Commands {
     }
     if (!result.ok && result.stop === WEB_UI_STOP) {
       // Nothing to fix and nothing to run next: setup has nothing here to set up.
-      const failure = setupFailure(result, s.setupBudgetUsd, s.setupMinutes);
+      const failure = setupFailure(result, s.setupBudgetUsd, cap, !!quick);
       this.d.out(failure.text);
       this.d.out(`${cost} · logs: .arnx/setup/`);
       report("fail", 2, setupJson({ file: tryParse(result.yamlText), result, approved: false, auto: false,
@@ -947,7 +951,7 @@ class Commands {
     }
     if (!result.ok) {
       const saved = result.yamlText ? this.saveAttempt(repo, result.yamlText) : null;
-      const failure = setupFailure(result, s.setupBudgetUsd, s.setupMinutes);
+      const failure = setupFailure(result, s.setupBudgetUsd, cap, !!quick);
       this.d.out(failure.text);
       this.d.out(`${cost} · last attempt: ${saved ? `${saved} (not proven)` : "none"} · logs: .arnx/setup/`);
       // Files the tests need and the snapshot left out: only letting them in helps, then the same setup again.
@@ -955,7 +959,7 @@ class Commands {
       const letIn = neededSteps(result.needed ?? []);
       // Out of time: the project it was on goes on by itself (from the attempt in review.yaml), or the same setup runs
       // again (with more time).
-      const goOn = result.stop !== "time" ? null
+      const goOn = result.stop !== "time" ? null : quick ? "arnx setup"
         : result.running && saved === REVIEW_FILE ? `arnx setup --project ${result.running}` : again;
       const next = letIn.length ? `${letIn.join("; ")}, then ${again}` : goOn ? goOn : !saved ? "arnx setup --force"
         : saved === REVIEW_FILE ? `fix ${REVIEW_FILE}, then arnx approve`
@@ -1014,7 +1018,7 @@ class Commands {
       return finish(0, true);
     }
     this.provenEnd(repo, proposed, r.projects, { proofs: result.projects, untracked,
-      ...(aside ? { timeUp: { minutes: s.setupMinutes, aside } } : {}) });
+      ...(aside ? { timeUp: { minutes: cap, aside } } : {}) });
     report("ok", 0, json({ approved: true, record: r.record, approval: r.projects,
       next: aside ? ["arnx setup --add"] : ["arnx review"] }));
     return finish(0, true);
@@ -1972,11 +1976,13 @@ export function timeUpLine(file: ReviewFile, minutes: number, aside: string[]): 
     `${aside.join(", ")} ${aside.length === 1 ? "is" : "are"} listed under uncovered.`;
 }
 
-export function setupFailure(r: SetupResult, budgetUsd: number, minutes: number)
+export function setupFailure(r: SetupResult, budgetUsd: number, minutes: number, quick = false)
   : { text: string; json: { kind: "environment" | "tests" | "time"; reason: string; failing: string[] } } {
   if (r.stop === "time") {
     const on = r.running ? ` while on ${r.running}` : "";
-    return { text: `Setup reached its ${minutes}-minute limit${on}; to give it longer, raise setup_minutes under [budget].`,
+    return { text: quick ? `Could not set this up within ${minutes} min${on}; \`arnx setup\` takes longer to set ` +
+      "up the whole repository."
+      : `Setup reached its ${minutes}-minute limit${on}; to give it longer, raise setup_minutes under [budget].`,
       json: { kind: "time", reason: `reached the ${minutes}-minute limit (last: ${r.problem || r.summary})`,
         failing: [] } };
   }

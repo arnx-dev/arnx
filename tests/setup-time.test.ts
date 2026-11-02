@@ -282,3 +282,27 @@ test("the preview never promises more than the limit", () => {
   expect(setupPreview(repo, { ...defaultSettings(), setupMinutes: 3 })).toBe("Setup: finding how to run your " +
     "tests in Docker (up to 3 min, stops at $3.00).");
 });
+
+test("a first review's quick setup stops at 10 minutes, whatever setup_minutes says, and points to arnx setup",
+  async () => {
+  const clock = { ms: 0 };
+  const repo = twoProjects();
+  const env = { ANTHROPIC_API_KEY: "a" };
+  writeFileSync(join(repo, "api", "pyproject.toml"), "[project]\nname = \"api\"\nversion = \"0.1\"\n");
+  expect(await new Cli({ cwd: repo, env }).run("init")).toBe(0);
+  commit(repo, "init");
+  writeFileSync(join(repo, "api", "api.py"), "def f():\n    return 2\n");
+  commit(repo, "api change");
+  const slow = async <T>(_cfg: { name: string }, snap: string, _log: string, body: (r: Runner) => Promise<T>) =>
+    body(new FakeSession(snap, () => {
+      clock.ms += 11 * MIN;
+      return [null, "", true];
+    }));
+  const cli = new Cli({ cwd: repo, env, now: () => clock.ms, setupModel: new ScriptedAgent([[text("done")]]),
+    setupSessions: slow });
+  expect(await cli.run("consent", "--yes")).toBe(0);
+  expect(await cli.run("review")).toBe(2);
+  expect(cli.stdout).toContain("stops at 10 min).");
+  expect(cli.stdout).toContain("Could not set this up within 10 min while on api; `arnx setup` takes longer");
+  expect(cli.stdout.trimEnd()).toEndWith("Next: arnx setup");
+});
