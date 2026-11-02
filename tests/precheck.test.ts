@@ -183,9 +183,11 @@ test("pytest's listing: node ids, counts per file, files that do not load, and t
 
 test("vitest and jest list; node and bun have no list form", () => {
   const vitest = (c: string) => typescript.listCommand!(c, ["a.test.ts"], "/src/.arnx-run/list.json", "vitest");
+  // When a file defines no suite here, the whole list fails: the files-only list names the files then.
   expect(vitest("ln -sfn /opt/deps/node_modules node_modules && npx vitest run --project unit {targets}")).toBe(
-    "ln -sfn /opt/deps/node_modules node_modules && npx vitest list --project unit a.test.ts " +
-    "--json=/src/.arnx-run/list.json");
+    "{ ln -sfn /opt/deps/node_modules node_modules && npx vitest list --project unit a.test.ts " +
+    "--json=/src/.arnx-run/list.json; } || { ln -sfn /opt/deps/node_modules node_modules && npx vitest list " +
+    "--filesOnly --project unit a.test.ts --json=/src/.arnx-run/list.json; }");
   expect(vitest("npx vitest --run {targets}")).toBeNull();
   expect(typescript.listCommand!("npx jest {targets}", [], "/x", "jest")).toBe("npx jest  --listTests --json");
   expect(typescript.listCommand!("node --test {targets}", [], "/x", "node")).toBeNull();
@@ -194,6 +196,8 @@ test("vitest and jest list; node and bun have no list form", () => {
   const entries = JSON.stringify([{ name: "g > a", file: "/src/web/src/a.test.ts" }, { name: "b", file: "/src/web/src/a.test.ts" }]);
   expect(parse("", entries, 0, "vitest", "web")).toEqual({ tests: 2, files: ["src/a.test.ts"], broken: [], failed: false });
   expect(parse("", "[]", 0, "vitest", ".")!.tests).toBe(0);
+  expect(parse("Error: No test suite found in file /src/b.test.ts", JSON.stringify([{ file: "/src/a.test.ts" }]), 0,
+    "vitest", ".")).toEqual({ tests: null, files: ["a.test.ts"], broken: [], failed: false });
   expect(parse("", null, 0, "vitest", ".")).toBeNull();
   expect(parse("CACError: Unknown option `--json`", null, 1, "vitest", ".")).toBeNull(); // vitest 1
   expect(parse("Error: Failed to load url ./x.js", null, 1, "vitest", ".")!.failed).toBe(true);
