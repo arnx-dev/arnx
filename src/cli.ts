@@ -51,7 +51,8 @@ import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSetting
   modelsSetting, recordCloudModels, recordConsent, type Settings, settingsPath, untrackedSetting, withModels,
   writeSettings }
   from "./settings";
-import { type ModelRef, providerLines, refString, setupRef, setupSettings, unusedKeysNote } from "./settings";
+import { type ModelRef, providerLines, providerName, refString, setupRef, setupSettings, unusedKeysNote }
+  from "./settings";
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, type ProjectProof,
@@ -92,8 +93,10 @@ const callsModels = (command: string) => /^arnx (setup|review|accept)\b/.test(co
 /** Where a command stops for a missing arnx cloud login (exit 3). */
 const notLoggedIn = (url: string) => new SetupRequired(`not logged in to arnx cloud (${url}). Next: arnx login`);
 
-/** Where code goes with the user's own keys: the model they set in .arnx/config.toml, whichever vendor it is. */
-const YOUR_PROVIDER = "your model provider";
+/** Said once, on the first send with the user's own keys: where the code goes. Their keys and their config chose
+ * those providers, so nothing is asked; arnx cloud, a party they did not pick by a key, asks. */
+export const ownKeysLine = (providers: string[]) =>
+  `Sends your change and the files arnx reads to ${providers.join(", ")}, with your keys. ${DOCKER_LINE}`;
 /** A path as one shell word: as is when it is plain, else single-quoted. */
 const shellWord = (p: string) => /^[\w@%+=:,./-]+$/.test(p) ? p : `'${p.replace(/'/g, "'\\''")}'`;
 export const GITIGNORE = "reviews/\nrun/\nsetup/\nusage.jsonl\nprecision.jsonl\n";
@@ -112,7 +115,7 @@ Prepare, once per repository (the first review sets up what it needs)
   doctor                                check config, keys, Docker and the environment
   cloud on|off [--yes]                  arnx cloud's models instead of your keys, or back
   login | logout | credits              arnx cloud: sign this machine in or out; the balance
-  consent [--cloud] [--yes]             agree now to send code (otherwise asked on the first send)
+  consent --cloud [--yes]               agree now to send code to arnx cloud (otherwise asked first)
   allow-secret [--remove] PATH...       send files whose key-like text is a test fixture; --remove undoes it
   skill install [--user] [--force]      the arnx skill for coding agents
   prompts [copy KEY]                    the prompts; copy one to .arnx/prompts.toml to edit it
@@ -447,34 +450,41 @@ class Commands {
   async consent(a: Args): Promise<number> {
     const repo = this.repo();
     const file = loadSettings(repo); // a file to record it in, and one that reads
-    const cloud = !!a.values.cloud;
-    const to = cloud ? "arnx cloud" : YOUR_PROVIDER;
-    if (!await this.agreeToSend(to, a.values.yes as boolean)) {
+    if (!a.values.cloud) {
+      this.d.out("Your own keys need no consent: code goes only to the providers whose keys you set.");
+      this.emit("ok", 0, { recorded: null });
+      return 0;
+    }
+    if (!await this.agreeToSend("arnx cloud", a.values.yes as boolean)) {
       throw new SetupRequired("consent declined; nothing written");
     }
-    const key = cloud ? "cloud_consent_at" : "consent_at";
     const at = isoSeconds(new Date());
-    recordConsent(repo, key, at);
-    this.d.out(`✓ Consent recorded: code may go to ${to}`);
-    this.emit("ok", 0, { recorded: key, at, to });
+    recordConsent(repo, "cloud_consent_at", at);
+    this.d.out("✓ Consent recorded: code may go to arnx cloud");
+    this.emit("ok", 0, { recorded: "cloud_consent_at", at, to: "arnx cloud" });
     return 0;
   }
 
-  /** Before code first goes to a model: the consent for where it goes (your model provider, or arnx cloud), asked at a
-   * terminal or given by --yes, and recorded once. Without either, or when it is declined, nothing is sent (exit 3).
-   * The settings come back with it recorded. */
+  /** Before code first goes to a model. arnx cloud: its consent, asked at a terminal or given by --yes, and recorded
+   * once; without either, or when it is declined, nothing is sent (exit 3). Own keys: where the code goes, said once
+   * (recorded as consent_at), nothing asked. The settings come back with it recorded. */
   private async agreed(repo: string, s: Settings, mode: ModelsMode, yes?: boolean): Promise<Settings> {
     const cloud = cloudModels(s);
     if (cloud ? s.cloudConsentAt : s.consentAt) return s;
-    const to = cloud ? "arnx cloud" : YOUR_PROVIDER;
-    if (!yes && !this.d.interactive) {
-      throw new SetupRequired(`${cloud ? `arnx models is on (${modelsSetting(mode)}), and ` : ""}sending code to ${to} ` +
-        `has not been agreed to; nothing sent: run \`arnx consent${cloud ? " --cloud" : ""}\``);
-    }
-    if (!await this.agreeToSend(to, yes)) throw new SetupRequired("consent declined; nothing sent");
     const at = isoSeconds(new Date());
-    recordConsent(repo, cloud ? "cloud_consent_at" : "consent_at", at);
-    return cloud ? { ...s, cloudConsentAt: at } : { ...s, consentAt: at };
+    if (!cloud) {
+      const providers = [...new Set([...modelRefs(s), setupRef(s)].map((r) => providerName(s, r.provider)))];
+      this.d.out(ownKeysLine(providers));
+      recordConsent(repo, "consent_at", at);
+      return { ...s, consentAt: at };
+    }
+    if (!yes && !this.d.interactive) {
+      throw new SetupRequired(`arnx models is on (${modelsSetting(mode)}), and sending code to arnx cloud ` +
+        "has not been agreed to; nothing sent: run `arnx consent --cloud`");
+    }
+    if (!await this.agreeToSend("arnx cloud", yes)) throw new SetupRequired("consent declined; nothing sent");
+    recordConsent(repo, "cloud_consent_at", at);
+    return { ...s, cloudConsentAt: at };
   }
 
   async skill(a: Args): Promise<number> {
@@ -648,10 +658,11 @@ class Commands {
     const repo = this.repo();
     const { checks, file: settings, s, mode } = await this.prerequisites(repo, a);
     if (s) {
-      const cloud = cloudModels(s);
-      const at = cloud ? s.cloudConsentAt : s.consentAt;
-      checks.push([at ? true : null, "Consent", `${at ? `given ${at.slice(0, 10)}` : "pending"}` +
-        `${cloud ? " (arnx cloud)" : ""}`]);
+      // Own keys need no consent: only arnx cloud's is a step.
+      if (cloudModels(s)) {
+        const at = s.cloudConsentAt;
+        checks.push([at ? true : null, "Consent", `${at ? `given ${at.slice(0, 10)}` : "pending"} (arnx cloud)`]);
+      }
     }
     let file: ReviewFile | null = null;
     // A review.yaml from before 0.1.5 sets aside whole files: said once, under the Environment line.

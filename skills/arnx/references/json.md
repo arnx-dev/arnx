@@ -4,8 +4,8 @@ Every arnx command takes `--json`. Then:
 
 - stdout carries exactly one JSON object, pretty-printed, and nothing else;
 - every line meant for a person (progress, summaries, `✓`/`✗` lines, errors) goes to stderr;
-- nothing is asked: a command that would ask (`cloud on`, `consent`) needs `--yes`, and a missing
-  consent to send code stops the command with an `error` object;
+- nothing is asked: a command that would ask (`cloud on`, `consent --cloud`) needs `--yes`, and a missing
+  arnx cloud consent stops the command with an `error` object (own keys need none);
 - the process exit code is the object's `exit_code`.
 
 `arnx check --json` and `arnx check --review --json` keep their own fields: [check-json.md](check-json.md).
@@ -95,9 +95,9 @@ Every other field is the command's own, in snake_case. Paths are relative to the
 
 | Field | Type | Meaning |
 |---|---|---|
-| `recorded` | string | The line written to `.arnx/config.toml`: `consent_at`, or `cloud_consent_at` with `--cloud`. |
-| `at` | string | When (ISO 8601). |
-| `to` | string | Where code goes from now on: `your model provider` or `arnx cloud`. |
+| `recorded` | string or null | `cloud_consent_at`, the line written to `.arnx/config.toml` with `--cloud`; null without it (own keys need no consent). |
+| `at` | string | With `--cloud`: when (ISO 8601). |
+| `to` | string | With `--cloud`: `arnx cloud`. |
 
 | `result` | Exit | When |
 |---|---|---|
@@ -154,8 +154,8 @@ The code to enter and the page to open are on stderr while it waits.
 
 `arnx setup` finds how each project's tests run in Docker, writes `.arnx/review.yaml` and
 stamps it (the proof; nobody is asked): setup's own suite runs stand, and a suite runs again only when the file or the
-code changed since. With `--json` the consent to send code needs `--yes` when none is recorded
-(else `error`, exit 3, nothing sent). What is worth a look is in `warnings` and in `.arnx/setup/approval.md`.
+code changed since. With `--json` and arnx cloud, its consent needs `--yes` when none is
+recorded (else `error`, exit 3, nothing sent). What is worth a look is in `warnings` and in `.arnx/setup/approval.md`.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -345,8 +345,8 @@ answers as `review.md` holds them now (latest review, or the id given).
 
 ### accept
 
-`arnx accept [id] --json` (no id: the latest review). Nothing is asked: answers that need the consent to send code
-stop it with an `error` object (`arnx consent` first, or `--no-answers`).
+`arnx accept [id] --json` (no id: the latest review). Nothing is asked: with arnx cloud, answers that need its consent
+stop it with an `error` object (`arnx consent --cloud` first, or `--no-answers`).
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -386,7 +386,7 @@ the owner answered that question and the answer's round kept a test.
 | `result` | When |
 |---|---|
 | `ok` | Exit 0: the marks were recorded and the tests kept (also when nothing was marked real). Accepted tests that fail do not change it: they fail until the fix. |
-| `error` | Exit 2 or 3: no review, a review already accepted (without `--again`), answers without the consent to send code, … |
+| `error` | Exit 2 or 3: no review, a review already accepted (without `--again`), answers without the arnx cloud consent, … |
 
 `arnx accept --keep-edits --json`:
 

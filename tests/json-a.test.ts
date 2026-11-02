@@ -59,7 +59,6 @@ test("doctor --json not ready: every check, a ✗ means no next command", async 
     { name: "models", ok: true, detail: "BYOM" },
     { name: "keys", ok: false, detail: expect.stringContaining("missing ANTHROPIC_API_KEY") },
     { name: "docker", ok: false, detail: "not running" },
-    { name: "consent", ok: null, detail: "pending" },
     { name: "environment", ok: null, detail: "not configured" },
   ]);
   expect(o).not.toHaveProperty("coverage");
@@ -114,9 +113,9 @@ test("consent --json: which consent, when, to whom; declined without --yes is an
   expect(o.at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d/);
   const plain = new Cli({ cwd: repo });
   await plain.run("consent", "--yes", "--json");
-  expect(json(plain)).toMatchObject({ recorded: "consent_at", to: "your model provider" });
+  expect(json(plain)).toMatchObject({ result: "ok", recorded: null }); // own keys need none
   const no = new Cli({ cwd: repo });
-  expect(await no.run("consent", "--json")).toBe(3);
+  expect(await no.run("consent", "--cloud", "--json")).toBe(3);
   expect(json(no)).toMatchObject({ result: "error", error: "consent declined; nothing written" });
 });
 

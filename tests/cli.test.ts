@@ -6,7 +6,7 @@ import { precisionOf } from "../src/accept";
 import { parseReviewFile, stampFile } from "../src/config";
 import { save } from "../src/report";
 import { loadSettings, settingsPath } from "../src/settings";
-import { commandHelp } from "../src/cli";
+import { commandHelp, ownKeysLine } from "../src/cli";
 import { VERSION } from "../src/version";
 import { Cli } from "./helpers/cli";
 import { commit, gitRepo } from "./helpers/gitutil";
@@ -54,7 +54,8 @@ test("init only writes the files: no consent, no key line; doctor and setup name
   const missing = "✗ Keys: missing ANTHROPIC_API_KEY: export it (https://console.anthropic.com/settings/keys), " +
     "or `arnx cloud on`";
   expect(cli.stdout).toContain(missing);
-  expect(cli.stdout).toContain("· Consent: pending\n· Environment: not configured\n");
+  expect(cli.stdout).toContain("· Environment: not configured\n");
+  expect(cli.stdout).not.toContain("Consent"); // own keys need none
   expect(cli.stdout).toMatch(/\nNot ready for review\.\nNext: fix the ✗ line above$/);
   // setup runs the same checks first: the same line, and nothing asked, read or sent.
   const setup = new Cli({ cwd: repo, env: { OPENAI_API_KEY: "o" }, ask: async () => { throw new Error("asked"); } });
@@ -158,21 +159,20 @@ test("usage errors say which command and how to see its options; --help after a 
     "out; the balance\n\n--json prints one JSON object.");
 });
 
-test("the first send asks the consent: declined, nothing is sent; without a terminal, `arnx consent`", async () => {
+test("own keys: the first send asks nothing, even without a terminal, and says once where the code goes", async () => {
   const repo = gitRepo(tmp());
   const env = { ANTHROPIC_API_KEY: "a" };
   await new Cli({ cwd: repo, env }).run("init");
-  const declined = new Cli({ cwd: repo, env, interactive: true, ask: async () => "n" });
-  expect(await declined.run("setup")).toBe(3);
-  expect(declined.stdout).toBe("");
-  expect(declined.stderr).toBe("arnx: consent declined; nothing sent");
-  expect(loadSettings(repo).consentAt).toBeNull();
-  const script = new Cli({ cwd: repo, env });
-  expect(await script.run("review")).toBe(3);
-  expect(script.stderr).toBe("arnx: sending code to your model provider has not been agreed to; nothing sent: run " +
-    "`arnx consent`");
-  expect(await script.run("consent", "--yes")).toBe(0);
+  const first = new Cli({ cwd: repo, env, ask: async () => { throw new Error("asked"); } });
+  await first.run("setup");
+  expect(first.stdout).toContain(ownKeysLine(["Anthropic"]));
+  expect(first.stderr).not.toContain("consent");
   expect(loadSettings(repo).consentAt).toBeTruthy();
+  const again = new Cli({ cwd: repo, env });
+  await again.run("setup");
+  expect(again.stdout).not.toContain(ownKeysLine(["Anthropic"]));
+  expect(await again.run("consent")).toBe(0);
+  expect(again.stdout).toContain("Your own keys need no consent");
 });
 
 test("review accepts --quiet (no progress lines on stderr)", async () => {
@@ -231,7 +231,7 @@ test("test_accept_command", async () => {
     "  1 mark was pre-filled (not reviewed in triage)\n  kept: .arnx/tests/tests/arnx/r20261011_a1b2c3/test_y.py\n\n1 accepted test fails until the fix (not run: --no-check).");
 });
 
-test("test_accept_with_answers_requires_consent", async () => {
+test("accept with answers needs the model's key, not a consent", async () => {
   const repo = gitRepo(tmp());
   const cli = new Cli({ cwd: repo });
   await cli.run("init");
@@ -239,7 +239,8 @@ test("test_accept_with_answers_requires_consent", async () => {
   writeFileSync(config, readFileSync(config, "utf8").split("\n").filter((l) => !l.startsWith("consent_at")).join("\n"));
   save(bare({ questions: ["Q?"] }), join(repo, ".arnx", "reviews", RID), "d");
   expect(await cli.run("accept")).toBe(3);
-  expect(cli.stderr).toContain("consent");
+  expect(cli.stderr).toContain("missing ANTHROPIC_API_KEY");
+  expect(cli.stderr).not.toContain("consent");
 });
 
 test("usage errors exit 2", async () => {
@@ -261,7 +262,7 @@ test("doctor shows each project and the coverage map", async () => {
   await cli.run("consent", "--yes");
   writeFileSync(join(repo, ".arnx", "review.yaml"), stampFile(parseReviewFile(PROJECTS), "Dev", "2026-10-12"));
   expect(await cli.run("doctor")).toBe(0);
-  expect(cli.stdout).toMatch(/✓ Consent: given \d{4}-\d\d-\d\d\n/);
+  expect(cli.stdout).not.toContain("Consent"); // own keys need none
   expect(cli.stdout).toContain("\nReady for review.\nNext: arnx review");
   expect(cli.stdout).toContain("✓ Environment: proven (2 projects: pay, feed)");
   expect(cli.stdout).toContain("- pay: owns 1 files, uses 0");

@@ -210,17 +210,13 @@ test("arnx consent --cloud --yes records only cloud_consent_at; arnx consent rec
   // Again: the line is replaced, not added twice.
   expect(await cli.run("consent", "--cloud", "--yes")).toBe(0);
   expect(readFileSync(settingsPath(repo), "utf8").match(/^cloud_consent_at = /gm)).toHaveLength(1);
-  // consent_at: added first, before cloud_consent_at.
+  // Own keys need no consent: nothing asked, nothing written.
   const noConsent = readFileSync(settingsPath(repo), "utf8");
   const plain = new Cli({ cwd: repo });
   expect(await plain.run("consent", "--yes")).toBe(0);
-  expect(plain.stdout).toBe(`${sendQuestion("your model provider")} yes (--yes)\n${DOCKER_LINE}\n` +
-    "✓ Consent recorded: code may go to your model provider");
-  const text = readFileSync(settingsPath(repo), "utf8");
-  expect(text.split("\n")[0]).toMatch(/^consent_at = "/);
-  expect(text.split("\n")[1]).toMatch(STAMP);
-  expect(without(text, "consent_at")).toBe(noConsent);
-  expect(loadSettings(repo).consentAt).toBeTruthy();
+  expect(plain.stdout).toBe("Your own keys need no consent: code goes only to the providers whose keys you set.");
+  expect(readFileSync(settingsPath(repo), "utf8")).toBe(noConsent);
+  expect(loadSettings(repo).consentAt).toBeNull();
 });
 
 test("arnx consent: declined writes nothing; with no config it says to run init", async () => {

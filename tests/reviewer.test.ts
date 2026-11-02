@@ -8,7 +8,7 @@ import { closeOpen, closers } from "../src/interrupt";
 import { LocalBrain } from "../src/localbrain";
 import { exitCode } from "../src/report";
 import { newReviewId, runReview } from "../src/reviewer";
-import { defaultSettings } from "../src/settings";
+import { defaultSettings, type Settings } from "../src/settings";
 import { PRICES, type Reply } from "../src/llm";
 import type { SessionFactory } from "../src/sandbox";
 import { FakeJson, fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -75,8 +75,9 @@ test("test_hanging_tests_make_the_review_incomplete", async () => {
 });
 
 test("test_requires_consent_and_approval", async () => {
-  await expect(runReview(repo, { settings: defaultSettings(), agentModel: agent(), challenger: new FakeJson([]),
-    sessionFactory: fakeFactory(runs) })).rejects.toThrow(/run `arnx consent`/);
+  const cloud = { ...defaultSettings(), cloud: { ...defaultSettings().cloud, models: true } } as Settings;
+  await expect(runReview(repo, { settings: cloud, agentModel: agent(), challenger: new FakeJson([]),
+    sessionFactory: fakeFactory(runs) })).rejects.toThrow(/run `arnx consent --cloud`/);
   writeFileSync(reviewConfigPath(repo), YAML);
   const err = await runReview(repo, { settings: SETTINGS, agentModel: agent(), challenger: new FakeJson([]),
     sessionFactory: fakeFactory(runs) }).catch((e: unknown) => e);

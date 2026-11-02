@@ -40,10 +40,10 @@ The committed file is the team's default. To override it for yourself or for one
 `ARNX_MODELS=local` or `ARNX_MODELS=cloud`, or `--local` / `--cloud` on `review`, `setup`, `accept`, `doctor` and
 `next`. A flag beats the variable, which beats the file; `arnx doctor` says which models are in effect and why.
 
-Sending code needs your consent, once per repository and destination (your model provider, or arnx cloud). The first
-command that sends code (normally `arnx setup`) shows where it goes and asks; `arnx cloud on` asks when you switch.
-Without a terminal arnx stops with exit 3 and sends nothing: `arnx consent` (`--cloud` for arnx cloud, `--yes` in
-scripts) records it.
+With your own keys nothing is asked: the code goes only to the providers whose keys you set, and the first command
+that sends code says once which ones. Sending code to arnx cloud needs your consent, once per repository: the first
+command that sends code there asks, as does `arnx cloud on`. Without a terminal arnx stops with exit 3 and sends
+nothing: `arnx consent --cloud` (`--yes` in scripts) records it.
 
 Money:
 

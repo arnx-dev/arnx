@@ -30,7 +30,7 @@ This skill needs **arnx 0.1.0** or later. Older: upgrade with the same line (`np
 ## After installing: the user's steps
 
 - `arnx init`: writes `.arnx/config.toml` and `.arnxignore`. Only the user runs it.
-- `arnx setup`: checks keys and Docker as `arnx doctor` does, asks the user's consent to send code (the first time),
-  then an agent proposes the test environment and proves it by running the suites. Costs model calls; the user runs
+- `arnx setup`: checks keys and Docker as `arnx doctor` does (with arnx cloud, asks the consent to send code there
+  the first time), then an agent proposes the test environment and proves it by running the suites. Costs model calls; the user runs
   it.
 - `arnx skill install`: writes this skill to `.agents/skills/arnx/` (Codex and other Agent Skills agents) and `.claude/skills/arnx/` (Claude Code) in the repository (`--user`: the same folders under `~`).

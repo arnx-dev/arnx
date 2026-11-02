@@ -216,8 +216,8 @@ export async function runReview(repo: string, o: { settings: Settings;
   brain?: Brain })
   : Promise<{ review: Review; rdir: string }> {
   const s = o.settings;
-  if (!(cloudModels(s) ? s.cloudConsentAt : s.consentAt)) {
-    throw new SetupRequired("sending code to a model has not been agreed to; nothing sent: run `arnx consent`");
+  if (cloudModels(s) && !s.cloudConsentAt) {
+    throw new SetupRequired("sending code to arnx cloud has not been agreed to; nothing sent: run `arnx consent --cloud`");
   }
   const file = loadReviewFile(repo);
   const change = resolveChange(repo, o.range ?? null, secretPinsOf(file.raw),

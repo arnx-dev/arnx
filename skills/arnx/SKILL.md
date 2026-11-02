@@ -24,8 +24,7 @@ Never skip a step or change the order. Do not fix anything before the user has t
 2. `.arnx/config.toml` must exist. If not, tell the user to run `arnx init` themselves (it writes the config that
    names their models). Never run `arnx init`. Stop there.
 3. `arnx next` prints where the repository is in the flow and the command to run now (`arnx next --json`: the
-   `next` field). If it says `arnx setup`, `arnx login` or `arnx credits`, tell the user to run it (setup asks their
-   consent to send code and sets up the test environment) and stop.
+   `next` field). If it says `arnx setup`, `arnx login` or `arnx credits`, tell the user to run it and stop.
    `arnx doctor` (`--json`: each check, `ok: false` for a problem) says what is missing; tell the user.
 
 ## 2. Review the change, once
