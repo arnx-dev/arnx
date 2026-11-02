@@ -25,7 +25,7 @@ import { changeEditsAccepted } from "./check";
 import { baseName, funcOf, ownerFile } from "./outcomes";
 import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, resumes, withCalls } from "./outage";
 import { CONTEXT_LIMIT, contextPack } from "./context";
-import type { Suspect } from "./prompts";
+import { elsewhereNote, type Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
 import { type AgentReport, type Checked, type Finding, type FixProof, parseReports, type ProjectStat, type Review,
   save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause } from "./report";
@@ -371,9 +371,14 @@ export async function runReview(repo: string, o: { settings: Settings;
       writeDirs[cfg.name] = writeDir;
       // Each project gets the part of the change it owns or uses, so a big change is not cut short by other projects'.
       const diff = file.legacy ? change.diff : sliceDiff(change.diff, [...owned, ...used]) || change.diff;
-      diffs[cfg.name] = diff;
+      // The change's other files are named to the round and the second opinion: a part they cannot see is never
+      // taken for missing from the change.
+      const seen = new Set([...owned, ...used]);
+      const elsewhere = file.legacy || diff === change.diff ? [] : change.files.filter((f) => !seen.has(f));
+      const others = elsewhereNote(elsewhere);
+      diffs[cfg.name] = others ? `${diff}\n\n${others}\n` : diff;
       const outDir = file.legacy ? rdir : join(rdir, "projects", cfg.name);
-      const scope = file.legacy ? { owned: change.files, used: [] } : { owned, used };
+      const scope = file.legacy ? { owned: change.files, used: [] } : { owned, used, elsewhere };
       const projectBudget = s.reviewBudgetUsd * AGENT_SHARE / n;
       const opts = { brain, budgetUsd: projectBudget, writeDir, runs: s.runs, outDir,
         sessionFactory: o.sessionFactory ?? dockerSession, progress: o.progress, coverage: scope.owned,

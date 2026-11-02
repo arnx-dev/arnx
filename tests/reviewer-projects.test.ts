@@ -160,8 +160,11 @@ test("each project sees only its part of the change, and files no test names are
       challenger: new FakeJson([]), sessionFactory: passing });
     const feedTask = String(agent.calls[0]!.messages[0]!.content);
     expect(feedTask).toContain("services/feed/feed.py");
-    expect(feedTask).not.toContain("services/pay/pay.py");
-    expect(String(agent.calls[2]!.messages[0]!.content)).not.toContain("services/feed/feed.py");
+    // The other project's edit is not in feed's diff; its file is named, so feed never takes it for missing.
+    expect(feedTask).not.toContain("diff --git a/services/pay/pay.py");
+    expect(feedTask).toContain("also edits files not shown here (other projects, or parts not set up yet): " +
+      "`services/pay/pay.py`");
+    expect(String(agent.calls[2]!.messages[0]!.content)).not.toContain("diff --git a/services/feed/feed.py");
     expect(String(agent.calls[4]!.messages.at(-1)!.content))
       .toContain("These changed files have no test that refers to them yet: `services/pay/pay.py`");
     expect(String(agent.calls[4]!.messages.at(-1)!.content))
