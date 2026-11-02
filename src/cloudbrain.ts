@@ -215,7 +215,7 @@ export class CloudBrain implements Brain {
     const first = this.o.client.call<WireStep>("POST", path, { diff, context_pack: h?.context ?? "",
       changed_definitions: h?.changedDefinitions ?? (root ? changedDefinitions(root, diff, scope.owned) : ""),
       scope: { owns: cfg.owns, uses: cfg.uses, changed_owned: scope.owned, changed_used: scope.used,
-        changed_elsewhere: scope.elsewhere ?? [], scoped: x.scoped },
+        scoped: x.scoped },
       facts: projectFacts(cfg, x.envTests, x.dbNames), max_questions: x.maxQuestions,
       budget_micro_usd: micro(x.budgetUsd), hunt: !!h, ...(parts.length ? { parts } : {}) },
     { ...stream, idempotencyKey: randomUUID(), retries: 1 });
