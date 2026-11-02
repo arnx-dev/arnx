@@ -306,3 +306,12 @@ test("a first review's quick setup stops at 10 minutes, whatever setup_minutes s
   expect(cli.stdout).toContain("Could not set this up within 10 min while on api; `arnx setup` takes longer");
   expect(cli.stdout.trimEnd()).toEndWith("Next: arnx setup");
 });
+
+test("setup stopped by a refused key says so, not that the environment does not work", () => {
+  const r = { ok: false, stop: "api_error: claude-sonnet-5-5: HTTP 401: 401 {\"error\":\"invalid x-api-key\"} (1 attempts)",
+    problem: "", summary: "sync-server: the suite ran no tests", yamlText: "version: 1\n", failing: [] } as never;
+  const failure = setupFailure(r, 3, 40);
+  expect(failure.text).toBe("Setup stopped: the model provider refused the key (HTTP 401, claude-sonnet-5-5). " +
+    "Check the key, then run again.");
+  expect(failure.json.reason).toStartWith("setup's model call failed: claude-sonnet-5-5: HTTP 401");
+});

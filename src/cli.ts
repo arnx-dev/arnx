@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { clip } from "./events";
 import { repoLanguages } from "./detect";
 import { unsupportedText } from "./languages";
 // arnx command line. Exit codes: 0 no confirmed findings, 1 confirmed findings, 2 incomplete or failed, 3 setup
@@ -2000,6 +2001,15 @@ export function setupFailure(r: SetupResult, budgetUsd: number, minutes: number,
   }
   if (r.needed?.length || r.stop === WEB_UI_STOP) {
     return { text: `Setup stopped: ${r.problem}.`, json: { kind: "environment", reason: r.problem, failing: [] } };
+  }
+  // A model call that failed is why setup stopped, whatever the last try showed: a refused key names itself.
+  const call = /^api_error: (.*)$/s.exec(r.stop)?.[1];
+  if (call) {
+    const refused = /HTTP 40[13]\b/.test(call);
+    const reason = `setup's model call failed: ${clip(call, 200)}`;
+    return { text: refused ? `Setup stopped: the model provider refused the key (${/HTTP 40[13]/.exec(call)![0]}, ` +
+      `${call.split(":")[0]}). Check the key, then run again.` : `Setup stopped: ${reason}.`,
+    json: { kind: "environment", reason, failing: [] } };
   }
   const stop = r.stop === "budget" ? `the $${budgetUsd.toFixed(2)} budget ran out`
     : r.stop === "max_turns" ? "the agent ran out of turns" : r.stop === "refusal" ? "the model refused" : "";
