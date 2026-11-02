@@ -217,6 +217,8 @@ test("the review's last progress line says what came of the things it checked", 
   const { checkedLine } = await import("../src/reviewer");
   const s = (outcome: string) => ({ project: "svc", id: "S1", outcome }) as never;
   expect(checkedLine([s("proven"), s("not reproduced"), s("not tested")])).toBe("Checked 3: 1 proven, 2 dropped");
+  // One thing checked that proved two issues: the count matches the two "✓ proven" lines.
+  expect(checkedLine([s("proven"), s("disputed")], 2)).toBe("Checked 2: 1 proven (2 issues), 1 dropped");
   expect(checkedLine([s("proven"), s("same cause"), s("pending answer"), s("pre-existing"), s("disputed")]))
     .toBe("Checked 5: 2 proven, 1 needs your answer, 1 failing before this change too, 1 dropped");
 });

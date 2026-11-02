@@ -562,6 +562,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       ? JSON.parse(readFileSync(verdictsFile, "utf8")) : {};
     for (const k of Object.keys(verdicts)) if (redone.has(k.split("::")[0]!)) delete verdicts[k];
     const priorUses: ModelUse[] = [];
+    let shown = 0;
     const j = await brain.judge(challenged, questions, diffs, { diff: change.diff, sources,
       maxQuestions: s.maxQuestions, budgetLeft: left, trace, progress: o.progress, questionProjects,
       // Questions that ask the same thing became one: what referred to them is renumbered.
@@ -602,6 +603,7 @@ export async function runReview(repo: string, o: { settings: Settings;
         // Shown as it is proven: its test failed on every run, not before the change, and the second opinion agrees.
         // A suspect is proven by just this (adjudicate), so nothing shown here is taken back.
         if (f.verdict === "confirmed" && !f.dependsOn) {
+          shown++;
           o.progress?.(`✓ proven: ${clip(f.explanation || firstLine(f.message), 140)} (${f.id}, failing test ` +
             `${f.file ?? f.testId})`);
         }
@@ -610,7 +612,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     const second = huntSecond;
     adjudicate(suspects, findings);
     sameCause(suspects, groups, findings);
-    if (suspects.length) o.progress?.(checkedLine(suspects));
+    if (suspects.length) o.progress?.(checkedLine(suspects, shown));
     for (const x of suspects) {
       emit("suspect.outcome", { project: x.project, hyp_id: hypId(x.project, x.id), outcome: x.outcome, tests: x.tests,
         findings: x.findings, ...x.reason ? { reason: clip(x.reason) } : {} });
@@ -695,12 +697,14 @@ export async function runReview(repo: string, o: { settings: Settings;
 
 /** What came of the things a review checked, said once they are judged: proven, waiting on an answer, failing the same
  * way before the change, and the rest dropped (a test that passed, did not run, or the second opinion disputed). */
-export function checkedLine(sus: SuspectOutcome[]): string {
+export function checkedLine(sus: SuspectOutcome[], shown = 0): string {
   const n = (...o: SuspectOutcome["outcome"][]) => sus.filter((x) => o.includes(x.outcome)).length;
   const proven = n("proven", "same cause");
   const answer = n("pending answer");
   const before = n("pre-existing");
   const dropped = sus.length - proven - answer - before;
-  return [`Checked ${sus.length}: ${proven} proven`, ...answer ? [`${answer} need${answer === 1 ? "s" : ""} your answer`]
+  // One thing checked can prove more than one issue: the count matches the "✓ proven" lines shown.
+  const issues = shown > proven ? ` (${shown} issues)` : "";
+  return [`Checked ${sus.length}: ${proven} proven${issues}`, ...answer ? [`${answer} need${answer === 1 ? "s" : ""} your answer`]
     : [], ...before ? [`${before} failing before this change too`] : [], `${dropped} dropped`].join(", ");
 }
