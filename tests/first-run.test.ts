@@ -333,6 +333,7 @@ test("in a quick setup the agent's file keeps only the projects the change touch
   expect(f.projects.map((p) => p.name)).toEqual(["svc"]);
   expect(f.uncovered).toContainEqual({ path: "/web/", reason: NOT_SET_UP });
   expect(sessions.flatMap((s) => s.commands).some((c) => c.includes("vitest"))).toBe(false);
+  expect(r.waiting).toBeUndefined();
 });
 
 test("a project that only uses a changed file waits in a quick setup; only the file's owner is set up", async () => {
@@ -355,4 +356,6 @@ test("a project that only uses a changed file waits in a quick setup; only the f
   expect(f.projects.map((p) => p.name)).toEqual(["svc"]);
   expect(f.uncovered).toContainEqual({ path: "/web/", reason: NOT_SET_UP });
   expect(sessions.flatMap((s) => s.commands).some((c) => c.includes("vitest"))).toBe(false);
+  // Its tests do not run in the review: setup names it, so the review can say so.
+  expect(r.waiting).toEqual(["web"]);
 });

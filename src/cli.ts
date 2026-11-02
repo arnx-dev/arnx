@@ -1015,6 +1015,10 @@ class Commands {
       // The review goes on: what was set up, and where the rest is written down.
       this.d.out(`✓ Test environment ready: ${result.runs.map((x) => x.name).join(", ")} · details: ` +
         `${APPROVAL_RECORD}`);
+      if (result.waiting?.length) {
+        this.d.out(`Not set up yet, though ${result.waiting.length === 1 ? "it uses" : "they use"} what this change ` +
+          `edits: ${result.waiting.join(", ")}. Their tests do not run in this review; \`arnx setup\` sets them up.`);
+      }
       return finish(0, true);
     }
     this.provenEnd(repo, proposed, r.projects, { proofs: result.projects, untracked,

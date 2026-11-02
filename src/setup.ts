@@ -534,6 +534,8 @@ export interface SetupResult {
   /** At the time limit with no file accepted, setup accepted the projects proven by then: the others, listed under
    * uncovered (TIME_LEFT_OUT) for `arnx setup --add`. Absent otherwise. */
   setAside?: string[];
+  /** A quick setup's projects left for later though they use a file the change edits: not reviewed until set up. */
+  waiting?: string[];
   /** The run that proved each project setup proved (kept ones have none), in file order. */
   runs: SetupRun[];
 }
@@ -1079,6 +1081,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     tried: new Set<string>(), webUi: new Set<string>(),
     // Projects try_project refused for the services they need (MANY_SERVICES).
     tooMany: new Map<string, string[]>(),
+    waiting: [] as string[],
     // The environment of each project's last try, which exec runs in.
     lastTry: new Map<string, TriedEnv>() };
   const tmp = tempDir("arnx-setup-");
@@ -1523,6 +1526,11 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       }
       // A quick setup leaves for later the projects no changed file reaches.
       const later = untouched(parsed.f).filter((p) => !drop.includes(p.name));
+      if (o.quick) {
+        const users = route(parsed.f, o.quick.files, Number.MAX_SAFE_INTEGER);
+        const using = new Set([...users.routed, ...users.checkOnly].map((x) => x.project.name));
+        state.waiting = later.filter((p) => using.has(p.name)).map((p) => p.name);
+      }
       let yaml = withUncovered(parsed.yaml, [...derivedOf(parsed.f, drop),
         ...later.map((p) => ({ path: `/${p.workdir}/`, reason: NOT_SET_UP }))], [...drop, ...later.map((p) => p.name)]);
       let f: ReviewFile;
@@ -1738,6 +1746,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       failing: state.accepted !== null ? [] : state.failing, failingProject: state.accepted !== null ? null
         : state.failingProject, problem: state.problem, ...(state.needed ? { needed: state.needed } : {}),
       ...(running ? { running } : {}), ...(aside ? { setAside: aside } : {}),
+      ...(state.accepted !== null && state.waiting.length ? { waiting: state.waiting } : {}),
       runs: (state.final?.projects ?? []).flatMap((p) => state.runs.get(p.name) ?? []) };
   } finally {
     exec?.close();
