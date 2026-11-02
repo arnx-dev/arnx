@@ -79,14 +79,17 @@ directly. Other providers and models: [docs/MODELS.md](docs/MODELS.md).
 
 Then, in both cases:
 
-    arnx setup                          # asks before sending code, finds how your tests run, proves it by running
-                                        # your suite in Docker, then lists what is worth a look
     # ... let your agent change something ...
     arnx review                         # writes tests for the change and runs them: 2 issues confirmed (4 findings)
+                                        # the first one sets up, in a few minutes, only the projects the change touches
     arnx triage                         # mark real / intended / noise / rewrite, answer questions
     arnx accept                         # tests of real issues are kept in .arnx/tests/ (never in your own suite)
     arnx prompt                         # the fix prompt for your coding agent
     arnx check                          # runs the accepted tests; green means they pass now
+
+The first review asks before sending code, and proves each project it sets up with a quick look (the test listing,
+arnx's one-line test, a few small test files); a later change in another project sets that one up then.
+`arnx setup` instead sets up the whole repository and runs every suite in Docker.
 
 Commit `.arnx/config.toml` and `.arnx/review.yaml`: teammates, other branches and CI reuse the proven environment.
 Lost? `arnx next` says where you are in this flow and the command to run now; `arnx doctor` says what is missing.
@@ -113,7 +116,8 @@ More in [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
 ## The workflow
 
-1. **setup** reads the repository, proposes one project per unit whose tests run on their own, and checks each by
+1. **setup** (the first review's, for the projects the change touches, or `arnx setup`, for all) reads the
+   repository, proposes one project per unit whose tests run on their own, and checks each by
    running its suite in Docker (no tests yet? arnx's own one-line test checks it instead). Nothing to approve: it
    ends with what is worth a look (test files set aside, what is not tested, allowed secret-looking files, downloads
    from outside the package registries). A changed `.arnx/review.yaml` is proven again before the next review.
@@ -153,8 +157,8 @@ More: [docs/WORKFLOW.md](docs/WORKFLOW.md#coding-agents).
 | Sent | the diff, files the agent reads, its tests and their output, to your providers | the same, to arnx cloud, which passes them to its model providers |
 
 Secret files, values that look like secrets (sent and tested as fakes of the same shape; a file is left out only when
-no fake can keep a key out) and paths in `.arnxignore` are never sent; untracked files only with `--untracked`. Sending code needs your consent, once per repository and
-destination. Switch with `arnx cloud on` / `off`. Details: [docs/MODELS.md](docs/MODELS.md), [docs/CLOUD.md](docs/CLOUD.md), [docs/SAFETY.md](docs/SAFETY.md).
+no fake can keep a key out) and paths in `.arnxignore` are never sent; untracked files only with `--untracked`. With your own keys code goes only to the providers whose keys
+you set (said once, on the first send); arnx cloud asks your consent once per repository. Switch with `arnx cloud on` / `off`. Details: [docs/MODELS.md](docs/MODELS.md), [docs/CLOUD.md](docs/CLOUD.md), [docs/SAFETY.md](docs/SAFETY.md).
 
 ## Safety and data
 

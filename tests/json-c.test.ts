@@ -4,6 +4,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ACCEPTED_RECORD } from "../src/check";
+import { ownKeysLine } from "../src/cli";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { save } from "../src/report";
 import type { SessionFactory } from "../src/sandbox";
@@ -88,7 +89,8 @@ test("accept --json --no-check --no-answers: check is null, nothing kept leaves 
   expect(JSON.parse(again.stdout)).toMatchObject({ kept: [], dest: null, marks: { real: 0, noise: 1, unmarked: 1 } });
 });
 
-test("accept --json: errors are the error object (no reviews; answers without the consent are not asked)", async () => {
+test("accept --json: errors are the error object (no reviews); own keys turn answers into tests, nothing asked",
+  async () => {
   const repo = gitRepo(tmp());
   const cli = new Cli({ cwd: repo, ask: async () => { throw new Error("asked"); } });
   await cli.run("init");
@@ -98,8 +100,9 @@ test("accept --json: errors are the error object (no reviews; answers without th
     error: "no reviews yet; run `arnx review`" });
   const { cli: c2 } = await reviewed(true);
   const run = new Cli({ ...c2.deps, ask: async () => { throw new Error("asked"); } });
-  expect(await run.run("accept", "--json")).toBe(3);
-  expect(JSON.parse(run.stdout)).toMatchObject({ command: "accept", result: "error", exit_code: 3 });
+  expect(await run.run("accept", "--json")).toBe(0);
+  expect(JSON.parse(run.stdout)).toMatchObject({ command: "accept", exit_code: 0 });
+  expect(run.stderr).toContain(ownKeysLine(["Anthropic"])); // said once, on stderr: stdout is the JSON object
 });
 
 test("accept --keep-edits --json: what was recorded, and where", async () => {

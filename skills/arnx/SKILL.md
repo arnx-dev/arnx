@@ -8,11 +8,11 @@ description: Test a finished code change with arnx before handing it back. Use w
 arnx writes tests for a code change, runs each one 3 times in a Docker sandbox, and has a second model judge every
 failure. A **confirmed** finding is a test that failed in all 3 runs and was not disputed. The flow, in this order:
 
-    setup → review → triage → accept → check → prompt → fix → check → full suites → commit/push
+    review → triage → accept → check → prompt → fix → check → full suites → commit/push
 
-Yours: **review**, **check**, **prompt**, **fix**, **check**, **full suites**. The user's: **setup**, **triage**,
-**accept**, and whether to **commit/push**. Never skip a step or change the order. Do not fix anything
-before the user has triaged and accepted, even a finding that looks obvious.
+Yours: **review** (the first also sets up what the change touches, at most 10 min), **check**, **prompt**, **fix**,
+**check**, **full suites**. The user's: **triage**, **accept**, `arnx setup` (the whole repository), **commit/push**.
+Never skip a step or change the order. Do not fix anything before the user has triaged and accepted, even obvious ones.
 
 ## 1. Is arnx ready?
 
@@ -24,8 +24,7 @@ before the user has triaged and accepted, even a finding that looks obvious.
 2. `.arnx/config.toml` must exist. If not, tell the user to run `arnx init` themselves (it writes the config that
    names their models). Never run `arnx init`. Stop there.
 3. `arnx next` prints where the repository is in the flow and the command to run now (`arnx next --json`: the
-   `next` field). If it says `arnx setup`, `arnx login` or `arnx credits`, tell the user to run it (setup asks their
-   consent to send code and sets up the test environment) and stop.
+   `next` field). If it says `arnx setup`, `arnx login` or `arnx credits`, tell the user to run it and stop.
    `arnx doctor` (`--json`: each check, `ok: false` for a problem) says what is missing; tell the user.
 
 ## 2. Review the change, once

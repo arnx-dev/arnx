@@ -121,15 +121,29 @@ export const MAX_SUSPECTS = 8;
 export interface Suspect { id: string; file: string; line: number; claim: string; why: string; input: string;
   expected: string; actual: string; by: string }
 
-/** What a project's round covers: the changed files it owns and the ones it only uses. */
-export interface Scope { owned: string[]; used: string[] }
+/** What a project's round covers: the changed files it owns and the ones it only uses; `elsewhere`, the change's
+ * other files, which its diff leaves out. */
+export interface Scope { owned: string[]; used: string[]; elsewhere?: string[] }
+
+/** The most files of the change's other parts a prompt names. */
+const ELSEWHERE_MAX = 40;
+
+/** The change's files a project's diff leaves out, named so a round never takes them for absent. */
+export function elsewhereNote(files: readonly string[]): string {
+  if (!files.length) return "";
+  const named = files.slice(0, ELSEWHERE_MAX).map((x) => `\`${x}\``).join(", ");
+  return `This change also edits files not shown here (other projects, or parts not set up yet): ${named}` +
+    `${files.length > ELSEWHERE_MAX ? `, and ${files.length - ELSEWHERE_MAX} more` : ""}. Their edits are not in the ` +
+    "diff above: never conclude that something is missing from the change because the diff does not show it.";
+}
 
 function scopeText(cfg: ReviewConfig, scope: Scope | undefined): string {
   if (!scope) return "";
   const list = (xs: string[]) => xs.length ? xs.map((x) => `\`${x}\``).join(", ") : "none";
+  const others = elsewhereNote(scope.elsewhere ?? []);
   return `\nThis review covers the project \`${cfg.name}\` (root \`${cfg.workdir}\`). Files of this change it owns: ` +
     `${list(scope.owned)}. Files it only uses: ${list(scope.used)}. Test the behaviour this project gets from the ` +
-    "change.\n";
+    `change.${others ? ` ${others}` : ""}\n`;
 }
 
 /** The prompts built from one set of templates: arnx's defaults, or with a repository's overrides (`overridden`). */

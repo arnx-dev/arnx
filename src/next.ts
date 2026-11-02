@@ -29,8 +29,8 @@ function step(repo: string): Omit<Next, "phase"> & { phase?: string } {
     return { where: "not set up", command: "arnx init", why: "writes .arnx/config.toml and .arnxignore" };
   }
   if (!existsSync(reviewConfigPath(repo)) || isSeedFile(repo)) {
-    return { where: "no test environment yet", command: "arnx setup",
-      why: "finds how your tests run in Docker" };
+    return { where: "no test environment yet", command: "arnx review",
+      why: "sets up the projects your change touches, then tests the change" };
   }
   // A review.yaml changed since its proof needs no step of its own: the next review proves it again first.
   const base = join(repo, ".arnx", "reviews");

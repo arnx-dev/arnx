@@ -149,8 +149,12 @@ export function scanKeys(path: string, text: string, pins: readonly string[]): K
 function fake(original: string, made: Map<string, string>): string {
   const known = made.get(original);
   if (known !== undefined) return known;
-  // A token's own prefix stays too (`whsec_`, `sk_test_`): code may check it.
-  const prefix = PREFIX.exec(original)?.[0] ?? (/^(?:[a-z]{2,12}[_-]){1,3}(?=[^]{6})/.exec(original)?.[0] ?? "");
+  // A token's own prefix stays too (`whsec_`, `sk_test_`): code may check it. So does a number literal's (`0x`, `0b`,
+  // `0o`), whose digits stay in its base: the code around it still parses.
+  const radix = /^0([xXbBoO])(?=[0-9a-fA-F_]+n?$)/.exec(original);
+  const prefix = radix?.[0] ?? PREFIX.exec(original)?.[0] ??
+    (/^(?:[a-z]{2,12}[_-]){1,3}(?=[^]{6})/.exec(original)?.[0] ?? "");
+  const base = { b: 2, o: 8 }[radix?.[1]!.toLowerCase() ?? ""] ?? 10;
   const hex = /^[0-9a-fA-F-]+$/.test(original.slice(prefix.length));
   const seed = scryptSync(original, "arnx stand-in", 32, { N: 1024 });
   const bytes: number[] = [];
@@ -161,7 +165,12 @@ function fake(original: string, made: Map<string, string>): string {
   let out = prefix;
   for (let i = prefix.length; i < original.length; i++) {
     const c = original[i]!, b = bytes[i]!;
-    out += /[0-9]/.test(c) ? String.fromCharCode(48 + b % 10) : /[A-Z]/.test(c) ? String.fromCharCode(65 + b % letters)
+    // A BigInt literal's `n` stays.
+    if (radix && c === "n" && i === original.length - 1) {
+      out += c;
+      continue;
+    }
+    out += /[0-9]/.test(c) ? String.fromCharCode(48 + b % base) : /[A-Z]/.test(c) ? String.fromCharCode(65 + b % letters)
       : /[a-z]/.test(c) ? String.fromCharCode(97 + b % letters) : c;
   }
   made.set(original, out);

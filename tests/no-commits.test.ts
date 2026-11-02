@@ -93,7 +93,7 @@ test("next walks a repository with no commits to review; after setup it says wha
   const repo = fresh();
   expect(whatNext(repo).command).toBe("arnx init");
   writeSettings(repo, SETTINGS);
-  expect(whatNext(repo).command).toBe("arnx setup");
+  expect(whatNext(repo).command).toBe("arnx review");
   writeFileSync(reviewConfigPath(repo), YAML);
   expect(whatNext(repo).command).toBe("arnx review"); // the review proves it first
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(YAML), "Dev", "2026-10-20"));

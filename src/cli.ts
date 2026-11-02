@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { clip } from "./events";
 import { repoLanguages } from "./detect";
 import { unsupportedText } from "./languages";
 // arnx command line. Exit codes: 0 no confirmed findings, 1 confirmed findings, 2 incomplete or failed, 3 setup
@@ -25,12 +26,14 @@ import { type Account, byokHint, CloudClient, credentialsPath, deleteCredentials
   type Fetch, tokenFor, usd } from "./cloud";
 import { dockerSession, suffixReviewCopies } from "./testround";
 import type { SessionFactory } from "./sandbox";
-import { describeBlanked, git, repoRoot } from "./change";
+import { describe, describeBlanked, git, repoRoot, resolveChange } from "./change";
+import { NOT_SET_UP } from "./draft";
+import { route } from "./route";
 import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, readSecretPins, type ReviewFile,
-  reviewConfigPath, withoutSecretPins, withSecretPins } from "./config";
+  projectDigest, restDigest, reviewConfigPath, stampedBaseline, stampedQuick, withoutSecretPins, withSecretPins } from "./config";
 import { getAdapter } from "./adapters";
 import { ArnxError, internalError, SetupRequired } from "./errors";
-import { type Baseline, baselinePath, readBaseline, writeBaseline } from "./baseline";
+import { type Baseline, baselinePath, parseBaseline, readBaseline, writeBaseline } from "./baseline";
 import { FILE as IGNORE_FILE, initialIgnore } from "./ignore";
 import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter, unpricedModels,
   unpricedNote } from "./llm";
@@ -48,12 +51,13 @@ import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSetting
   modelsSetting, recordCloudModels, recordConsent, type Settings, settingsPath, untrackedSetting, withModels,
   writeSettings }
   from "./settings";
-import { type ModelRef, providerLines, refString, setupRef, setupSettings, unusedKeysNote } from "./settings";
+import { type ModelRef, providerLines, providerName, refString, setupRef, setupSettings, unusedKeysNote }
+  from "./settings";
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, type ProjectProof,
-  proofBefore, type ProofBefore, rerecordBaseline, runSetup, type SetupResult, type SetupRun, stillRed, WEB_UI_STOP,
-} from "./setup";
+  NOTHING_TO_TEST, proofBefore, type ProofBefore, rerecordBaseline, runSetup, type SetupResult, type SetupRun, stillRed,
+  WEB_UI_STOP } from "./setup";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, notTestedRecord, PROVEN_BASELINE,
   PROVEN_COPY, proofState, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
 import { isoSeconds } from "./util";
@@ -70,6 +74,8 @@ import { versionLine } from "./version";
 export const sendQuestion = (to: string) => `Send your change and the files arnx reads to ${to}?`;
 /** Said once the consent is given: what does not leave the machine. */
 export const DOCKER_LINE = "(Tests run in Docker on this machine.)";
+/** The most minutes a review waits for the quick setup of what its change touches; `arnx setup` takes longer. */
+export const QUICK_MINUTES = 10;
 /** Where a key for a built-in provider is made. */
 const KEY_PAGES: Record<string, string> = {
   ANTHROPIC_API_KEY: "https://console.anthropic.com/settings/keys",
@@ -87,8 +93,10 @@ const callsModels = (command: string) => /^arnx (setup|review|accept)\b/.test(co
 /** Where a command stops for a missing arnx cloud login (exit 3). */
 const notLoggedIn = (url: string) => new SetupRequired(`not logged in to arnx cloud (${url}). Next: arnx login`);
 
-/** Where code goes with the user's own keys: the model they set in .arnx/config.toml, whichever vendor it is. */
-const YOUR_PROVIDER = "your model provider";
+/** Said once, on the first send with the user's own keys: where the code goes. Their keys and their config chose
+ * those providers, so nothing is asked; arnx cloud, a party they did not pick by a key, asks. */
+export const ownKeysLine = (providers: string[]) =>
+  `Sends your change and the files arnx reads to ${providers.join(", ")}, with your keys. ${DOCKER_LINE}`;
 /** A path as one shell word: as is when it is plain, else single-quoted. */
 const shellWord = (p: string) => /^[\w@%+=:,./-]+$/.test(p) ? p : `'${p.replace(/'/g, "'\\''")}'`;
 export const GITIGNORE = "reviews/\nrun/\nsetup/\nusage.jsonl\nprecision.jsonl\n";
@@ -98,16 +106,16 @@ Tests every change your coding agent makes.
 
   next                                  the command to run now
 
-Prepare, once per repository
+Prepare, once per repository (the first review sets up what it needs)
   init [--cloud] [--force]              write .arnx/config.toml and .arnxignore
-  setup [--untracked] [--yes] [--force] find how your tests run in Docker and prove it
+  setup [--untracked] [--yes] [--force] set up the whole repository: every project, every suite
         [--project NAME | --add]        prove one project again, or cover what no project covers
         [--baseline]                    record the tests failing today again (no model)
   approve [--project NAME]              run the suites in .arnx/review.yaml again and stamp it
   doctor                                check config, keys, Docker and the environment
   cloud on|off [--yes]                  arnx cloud's models instead of your keys, or back
   login | logout | credits              arnx cloud: sign this machine in or out; the balance
-  consent [--cloud] [--yes]             agree now to send code (otherwise asked on the first send)
+  consent --cloud [--yes]               agree now to send code to arnx cloud (otherwise asked first)
   allow-secret [--remove] PATH...       send files whose key-like text is a test fixture; --remove undoes it
   skill install [--user] [--force]      the arnx skill for coding agents
   prompts [copy KEY]                    the prompts; copy one to .arnx/prompts.toml to edit it
@@ -442,34 +450,41 @@ class Commands {
   async consent(a: Args): Promise<number> {
     const repo = this.repo();
     const file = loadSettings(repo); // a file to record it in, and one that reads
-    const cloud = !!a.values.cloud;
-    const to = cloud ? "arnx cloud" : YOUR_PROVIDER;
-    if (!await this.agreeToSend(to, a.values.yes as boolean)) {
+    if (!a.values.cloud) {
+      this.d.out("Your own keys need no consent: code goes only to the providers whose keys you set.");
+      this.emit("ok", 0, { recorded: null });
+      return 0;
+    }
+    if (!await this.agreeToSend("arnx cloud", a.values.yes as boolean)) {
       throw new SetupRequired("consent declined; nothing written");
     }
-    const key = cloud ? "cloud_consent_at" : "consent_at";
     const at = isoSeconds(new Date());
-    recordConsent(repo, key, at);
-    this.d.out(`✓ Consent recorded: code may go to ${to}`);
-    this.emit("ok", 0, { recorded: key, at, to });
+    recordConsent(repo, "cloud_consent_at", at);
+    this.d.out("✓ Consent recorded: code may go to arnx cloud");
+    this.emit("ok", 0, { recorded: "cloud_consent_at", at, to: "arnx cloud" });
     return 0;
   }
 
-  /** Before code first goes to a model: the consent for where it goes (your model provider, or arnx cloud), asked at a
-   * terminal or given by --yes, and recorded once. Without either, or when it is declined, nothing is sent (exit 3).
-   * The settings come back with it recorded. */
+  /** Before code first goes to a model. arnx cloud: its consent, asked at a terminal or given by --yes, and recorded
+   * once; without either, or when it is declined, nothing is sent (exit 3). Own keys: where the code goes, said once
+   * (recorded as consent_at), nothing asked. The settings come back with it recorded. */
   private async agreed(repo: string, s: Settings, mode: ModelsMode, yes?: boolean): Promise<Settings> {
     const cloud = cloudModels(s);
     if (cloud ? s.cloudConsentAt : s.consentAt) return s;
-    const to = cloud ? "arnx cloud" : YOUR_PROVIDER;
-    if (!yes && !this.d.interactive) {
-      throw new SetupRequired(`${cloud ? `arnx models is on (${modelsSetting(mode)}), and ` : ""}sending code to ${to} ` +
-        `has not been agreed to; nothing sent: run \`arnx consent${cloud ? " --cloud" : ""}\``);
-    }
-    if (!await this.agreeToSend(to, yes)) throw new SetupRequired("consent declined; nothing sent");
     const at = isoSeconds(new Date());
-    recordConsent(repo, cloud ? "cloud_consent_at" : "consent_at", at);
-    return cloud ? { ...s, cloudConsentAt: at } : { ...s, consentAt: at };
+    if (!cloud) {
+      const providers = [...new Set([...modelRefs(s), setupRef(s)].map((r) => providerName(s, r.provider)))];
+      this.d.out(ownKeysLine(providers));
+      recordConsent(repo, "consent_at", at);
+      return { ...s, consentAt: at };
+    }
+    if (!yes && !this.d.interactive) {
+      throw new SetupRequired(`arnx models is on (${modelsSetting(mode)}), and sending code to arnx cloud ` +
+        "has not been agreed to; nothing sent: run `arnx consent --cloud`");
+    }
+    if (!await this.agreeToSend("arnx cloud", yes)) throw new SetupRequired("consent declined; nothing sent");
+    recordConsent(repo, "cloud_consent_at", at);
+    return { ...s, cloudConsentAt: at };
   }
 
   async skill(a: Args): Promise<number> {
@@ -643,10 +658,11 @@ class Commands {
     const repo = this.repo();
     const { checks, file: settings, s, mode } = await this.prerequisites(repo, a);
     if (s) {
-      const cloud = cloudModels(s);
-      const at = cloud ? s.cloudConsentAt : s.consentAt;
-      checks.push([at ? true : null, "Consent", `${at ? `given ${at.slice(0, 10)}` : "pending"}` +
-        `${cloud ? " (arnx cloud)" : ""}`]);
+      // Own keys need no consent: only arnx cloud's is a step.
+      if (cloudModels(s)) {
+        const at = s.cloudConsentAt;
+        checks.push([at ? true : null, "Consent", `${at ? `given ${at.slice(0, 10)}` : "pending"} (arnx cloud)`]);
+      }
     }
     let file: ReviewFile | null = null;
     // A review.yaml from before 0.1.5 sets aside whole files: said once, under the Environment line.
@@ -849,6 +865,12 @@ class Commands {
     } else if (!a.values.force) {
       // Only a file proven once is kept: a seed, or a failed setup's attempt (never proven), is set up again.
       const stamp = approvalStamp(repo);
+      const quick = stamp?.current ? stampedQuick(loadReviewFile(repo, { requireApproved: false })) : [];
+      if (quick.length) {
+        throw new ArnxError(`${REVIEW_FILE} is set up for the changes reviewed so far (${quick.join(", ")}: a quick ` +
+          "look, not the whole suite). Next: arnx review — or arnx setup --force to set up the whole repository and " +
+          "run every suite.");
+      }
       if (stamp?.current) {
         throw new ArnxError(`${REVIEW_FILE} is already set up (proven ${stamp.at} by ${stamp.by}). Next: arnx review ` +
           "— or arnx setup --force to start over (--project NAME redoes one project, --add covers more).");
@@ -858,6 +880,13 @@ class Commands {
           "proves it again. Next: arnx review — or arnx setup --force to start over.");
       }
     }
+    return this.setupFlow(repo, a, { project, add });
+  }
+
+  /** Setup from doctor's checks to the end screen. `quick`: a first review's setup (runSetup `quick`), for the files
+   * of `what`; the review goes on after it, so it says only what it set up and what stopped it. */
+  private async setupFlow(repo: string, a: Args, { project, add = false, quick }: { project?: string; add?: boolean;
+    quick?: { files: string[]; what: string } }): Promise<number> {
     // doctor's checks first: a missing key or a stopped Docker ends setup here, before it reads or spends anything.
     // Setup runs one model, so only its key is needed.
     const ready = await this.ready(repo, a, (s) => [setupRef(s)]);
@@ -865,7 +894,18 @@ class Commands {
     const { mode } = ready;
     const s = await this.agreed(repo, ready.s, mode, a.values.yes as boolean);
     const untracked = untrackedFlag(a) ?? s.untracked;
-    this.d.out(setupPreview(repo, s, untracked));
+    // The last proof, for an --add or a quick setup that joins the file: the projects it keeps are not run again.
+    const last = add || project ? lastProof(repo) : undefined;
+    const kept = add ? last : undefined;
+    const keptQuick = (last?.quick ?? []).filter((n) => n !== project);
+    // A quick setup that joins the file runs inside a review, which says the outcome: no JSON of its own.
+    const report = (result: string, code: number, fields: Record<string, unknown> = {}) => {
+      if (!(quick && add)) this.emit(result, code, fields);
+    };
+    // A review waits on a quick setup: it stops at QUICK_MINUTES, and `arnx setup` takes the rest.
+    const cap = quick ? Math.min(s.setupMinutes, QUICK_MINUTES) : s.setupMinutes;
+    this.d.out(quick ? `${add ? "Setting up" : "First run: setting up"} just enough to test ${quick.what} (about ` +
+      `2–5 min, stops at ${cap} min).` : setupPreview(repo, s, untracked));
     const outDir = join(repo, ".arnx", "setup");
     // JEV is asked only when the config turns it on and its key is set (the key alone does nothing).
     const jev = jevKey(s, this.d.env);
@@ -878,13 +918,14 @@ class Commands {
     const failureModel = jev ? jevModel(jev, join(outDir, "jev.jsonl")) : undefined;
     const started = this.clock();
     // One limit for setup and its proof, on the clock its progress shows.
-    const limit: TimeLimit = { at: started + s.setupMinutes * 60_000, now: () => this.clock(), minutes: s.setupMinutes };
+    const limit: TimeLimit = { at: started + cap * 60_000, now: () => this.clock(), minutes: cap };
     const cloud = await this.cloudBrain(repo, s, mode);
     if (cloud) this.cloudPrompts(repo);
     const unpriced = !cloud && this.unpriced(s, [setupRef(s)]);
     const result = await this.withProgress(a, (progress) => runSetup(repo, s,
       cloud ? null : this.d.setupModel ?? makeAgentModel(setupSettings(s), this.d.env), { outDir, project, add, progress,
         failureModel, untracked, localPins: localPinsPath(this.d.env, repo), timeLimit: limit,
+        ...(quick ? { quick: { files: quick.files } } : {}),
         ...(this.d.setupSessions ? { sessionFactory: this.d.setupSessions } : {}),
         ...(cloud ? { brain: cloud(progress) } : {}) }), { cost: true, since: started });
     if (result.withheld.length) {
@@ -903,18 +944,26 @@ class Commands {
     // With arnx cloud the figure is what it billed (its price), not the models' cost.
     const cost = cloud ? `Billed $${result.costUsd.toFixed(2)} by arnx cloud`
       : unpriced ? "Cost unknown" : `Cost $${result.costUsd.toFixed(2)}`;
+    if (!result.ok && result.stop === NOTHING_TO_TEST) {
+      this.d.out(`Nothing here arnx can test: no project it can set up owns a file ${quick?.what ?? "this change"} ` +
+        "touches.");
+      this.d.out("Next: arnx setup (sets up the whole repository)");
+      report("ok", 0, setupJson({ file: null, result, approved: false, auto: false, files: null, warnings: [],
+        reviewYaml: null, record: null, seconds: seconds(), failure: null, next: ["arnx setup"] }));
+      return finish(0, false);
+    }
     if (!result.ok && result.stop === WEB_UI_STOP) {
       // Nothing to fix and nothing to run next: setup has nothing here to set up.
-      const failure = setupFailure(result, s.setupBudgetUsd, s.setupMinutes);
+      const failure = setupFailure(result, s.setupBudgetUsd, cap, !!quick);
       this.d.out(failure.text);
       this.d.out(`${cost} · logs: .arnx/setup/`);
-      this.emit("fail", 2, setupJson({ file: tryParse(result.yamlText), result, approved: false, auto: false,
+      report("fail", 2, setupJson({ file: tryParse(result.yamlText), result, approved: false, auto: false,
         files: null, warnings: [], reviewYaml: null, record: null, seconds: seconds(), failure: failure.json, next: [] }));
       return finish(2, false);
     }
     if (!result.ok) {
       const saved = result.yamlText ? this.saveAttempt(repo, result.yamlText) : null;
-      const failure = setupFailure(result, s.setupBudgetUsd, s.setupMinutes);
+      const failure = setupFailure(result, s.setupBudgetUsd, cap, !!quick);
       this.d.out(failure.text);
       this.d.out(`${cost} · last attempt: ${saved ? `${saved} (not proven)` : "none"} · logs: .arnx/setup/`);
       // Files the tests need and the snapshot left out: only letting them in helps, then the same setup again.
@@ -922,13 +971,13 @@ class Commands {
       const letIn = neededSteps(result.needed ?? []);
       // Out of time: the project it was on goes on by itself (from the attempt in review.yaml), or the same setup runs
       // again (with more time).
-      const goOn = result.stop !== "time" ? null
+      const goOn = result.stop !== "time" ? null : quick ? "arnx setup"
         : result.running && saved === REVIEW_FILE ? `arnx setup --project ${result.running}` : again;
       const next = letIn.length ? `${letIn.join("; ")}, then ${again}` : goOn ? goOn : !saved ? "arnx setup --force"
         : saved === REVIEW_FILE ? `fix ${REVIEW_FILE}, then arnx approve`
         : `fix ${saved}, copy it to ${REVIEW_FILE}, then arnx approve`;
-      this.d.out(`Next: ${next}`);
-      this.emit("fail", 2, setupJson({ file: tryParse(result.yamlText), result, approved: false, auto: false,
+      if (!(quick && add)) this.d.out(`Next: ${next}`);
+      report("fail", 2, setupJson({ file: tryParse(result.yamlText), result, approved: false, auto: false,
         files: null, warnings: [], reviewYaml: saved, record: null, seconds: seconds(), failure: failure.json,
         next: letIn.length ? [...letIn, again] : goOn ? [goOn] : [saved ? "arnx approve" : "arnx setup --force"] }));
       return finish(2, false);
@@ -946,31 +995,47 @@ class Commands {
       failure?: Record<string, unknown> | null; next: string[]; stop?: "time" }) => setupJson({ file: proposed,
       result: o.stop ? { ...result, stop: o.stop } : result, approved: o.approved, auto: o.approved, files, warnings,
       reviewYaml: REVIEW_FILE, record: o.record ?? null, seconds: seconds(), failure: o.failure ?? null, next: o.next, approval: o.approval ?? [] });
-    this.d.out("");
-    this.d.out(approvalScreen(proposed, repo, { proofs: result.projects, untracked }));
-    this.d.out("");
+    if (!quick) {
+      this.d.out("");
+      this.d.out(approvalScreen(proposed, repo, { proofs: result.projects, untracked }));
+      this.d.out("");
+    }
     this.d.out(`Wrote ${REVIEW_FILE} (${minutes(this.clock() - started)}, ` +
       `${unpriced ? "cost unknown" : `$${result.costUsd.toFixed(2)}`})` +
       `${notes ? `; notes in ${relative(repo, notes)}` : ""}.`);
     // Nobody is asked: setup's runs stand for the projects unchanged since, the others run again, and the file is
     // stamped; what is worth a look comes at the end.
+    // Projects a quick look proved: those this setup ran in a quick setup, and those the last proof named.
+    const quickNames = [...keptQuick, ...quick ? result.runs.map((x) => x.name) : []];
     const r = await this.approveRun(repo, a, project, untracked, { warnings, since: started, afterSetup: result.runs,
-      limit, before });
+      limit, before, quick: quickNames, ...(kept ? { unchanged: kept } : {}) });
     if (r.code !== 0) {
       this.d.out(`Not proven:\n${r.detail}`);
       this.d.out(`${cost} · last attempt: ${REVIEW_FILE} (not proven) · logs: .arnx/run/`);
-      this.d.out(r.outOfTime ? "Next: arnx approve" : `Next: fix ${REVIEW_FILE}, then arnx approve`);
+      if (!(quick && add)) {
+        this.d.out(r.outOfTime ? "Next: arnx approve" : `Next: fix ${REVIEW_FILE}, then arnx approve`);
+      }
       const failing = r.outOfTime ? [] : r.projects.flatMap((p) => p.unexpected);
       const kind = r.outOfTime ? "time" : failing.length ? "tests" : "environment";
-      this.emit("fail", 2, json({ approved: false, approval: r.projects, next: ["arnx approve"],
+      report("fail", 2, json({ approved: false, approval: r.projects, next: ["arnx approve"],
         ...(r.outOfTime ? { stop: "time" as const } : {}), failure: { kind, reason: r.detail, failing } }));
       return finish(r.code, false);
     }
     // At its time limit setup kept the projects it had proven; the others wait under uncovered for `--add`.
     const aside = result.setAside?.length ? result.setAside : null;
+    if (quick) {
+      // The review goes on: what was set up, and where the rest is written down.
+      this.d.out(`✓ Test environment ready: ${result.runs.map((x) => x.name).join(", ")} · details: ` +
+        `${APPROVAL_RECORD}`);
+      if (result.waiting?.length) {
+        this.d.out(`Not set up yet, though ${result.waiting.length === 1 ? "it uses" : "they use"} what this change ` +
+          `edits: ${result.waiting.join(", ")}. Their tests do not run in this review; \`arnx setup\` sets them up.`);
+      }
+      return finish(0, true);
+    }
     this.provenEnd(repo, proposed, r.projects, { proofs: result.projects, untracked,
-      ...(aside ? { timeUp: { minutes: s.setupMinutes, aside } } : {}) });
-    this.emit("ok", 0, json({ approved: true, record: r.record, approval: r.projects,
+      ...(aside ? { timeUp: { minutes: cap, aside } } : {}) });
+    report("ok", 0, json({ approved: true, record: r.record, approval: r.projects,
       next: aside ? ["arnx setup --add"] : ["arnx review"] }));
     return finish(0, true);
   }
@@ -1051,7 +1116,9 @@ class Commands {
     const changes = this.sayChanges(st);
     this.reproved = { changes: st.changes, no_copy: st.changes === null };
     const why = changes === null ? "is not proven yet" : "changed since its proof";
-    const r = await this.approveRun(repo, a, undefined, untracked, { warnings: approvalWarnings(file), changes });
+    const last = lastProof(repo);
+    const r = await this.approveRun(repo, a, undefined, untracked, { warnings: approvalWarnings(file), changes,
+      quick: last?.quick ?? [], ...(last ? { unchanged: last } : {}) });
     if (r.code !== 0) {
       throw new SetupRequired(`${REVIEW_FILE} ${why}, and its suites fail:\n${r.detail}\nNext: fix ${REVIEW_FILE}, ` +
         `then ${command}`);
@@ -1111,7 +1178,8 @@ class Commands {
    * is copied to PROVEN_COPY, what the next change is compared with. Says nothing but progress. */
   private async approveRun(repo: string, a: Args, project: string | undefined, untracked: boolean | undefined,
                            o: { warnings: string[]; since?: number; changes?: string[] | "no-copy" | null;
-                             afterSetup?: SetupRun[]; limit?: TimeLimit; before?: ProofBefore })
+                             afterSetup?: SetupRun[]; limit?: TimeLimit; before?: ProofBefore; quick?: string[];
+                             unchanged?: { projects: Record<string, string>; rest: string; baseline: Baseline } })
     : Promise<{ code: number; projects: ApprovedProject[]; detail: string; record: string | null; outOfTime?: true }> {
     // Who ran the proof: the git user (a coding agent running arnx is not told apart from its user).
     const by = git(repo, ["config", "user.name"], [0, 1]).trim() || "unknown";
@@ -1120,6 +1188,7 @@ class Commands {
     try {
       proof = await this.withProgress(a, (progress) => withTimeLimit(o.limit, () =>
         approveFile(repo, { by, at, project, untracked, progress, afterSetup: o.afterSetup, before: o.before,
+          ...(o.quick ? { quick: o.quick } : {}), ...(o.unchanged ? { unchanged: o.unchanged } : {}),
           localPins: localPinsPath(this.d.env, repo),
           ...(this.d.approveSessions ? { sessionFactory: this.d.approveSessions } : {}) })),
       o.since !== undefined ? { since: o.since } : {});
@@ -1372,7 +1441,7 @@ class Commands {
     const st = proofState(repo, file);
     const changes = st.proven ? null : this.sayChanges(st);
     const r = await this.approveRun(repo, a, a.values.project as string | undefined, undefined,
-      { warnings: approvalWarnings(file), changes });
+      { warnings: approvalWarnings(file), changes, quick: lastProof(repo)?.quick ?? [] });
     if (r.code === 0) this.provenEnd(repo, file, r.projects, { untracked });
     else this.d.out(`Not proven:\n${r.detail}`);
     this.emit(r.code === 0 ? "ok" : "fail", r.code, { approved: r.code === 0, projects: r.projects,
@@ -1388,6 +1457,8 @@ class Commands {
     if (typeof ready === "number") return ready;
     const { mode } = ready;
     const s = await this.agreed(repo, ready.s, mode);
+    const first = await this.setUpFor(repo, a, untracked ?? s.untracked);
+    if (first !== null) return first;
     await this.reprove(repo, a, "arnx review", untracked);
     const cloud = await this.cloudBrain(repo, s, mode);
     if (cloud) {
@@ -1415,6 +1486,62 @@ class Commands {
       progress.stop();
     }
     return this.reviewed(repo, s, result);
+  }
+
+  /** What a review sets up before it runs: with no test environment yet, the projects its change touches, quickly (a
+   * first run); with one, a project its change touches that a first run left for later (NOT_SET_UP), unless setting
+   * that one up failed before. Null when the review goes on; otherwise its exit code. */
+  private async setUpFor(repo: string, a: Args, untracked: boolean): Promise<number | null> {
+    if (a.values.resume) return null;
+    const fresh = !existsSync(reviewConfigPath(repo)) || isSeedFile(repo);
+    let change;
+    try {
+      let pins: ReturnType<typeof readSecretPins> = [];
+      try {
+        pins = readSecretPins(repo);
+      } catch (e) {
+        if (!(e instanceof ArnxError)) throw e;
+      }
+      change = resolveChange(repo, (a.values.range as string | undefined) ?? null, pins, { untracked });
+    } catch (e) {
+      // What stops the change (nothing to review, too large, a secret) is the review's to say.
+      if (fresh && e instanceof ArnxError) throw e;
+      if (e instanceof ArnxError) return null;
+      throw e;
+    }
+    if (fresh) {
+      const code = await this.setupFlow(repo, a, { quick: { files: change.files, what: describe(change) } });
+      if (code !== 0) return code;
+      return approvalStamp(repo)?.current ? null : 0;
+    }
+    let file: ReviewFile;
+    try {
+      file = loadReviewFile(repo, { requireApproved: false });
+    } catch (e) {
+      if (e instanceof ArnxError) return null;
+      throw e;
+    }
+    const failed = quickFailed(repo);
+    const later = file.uncovered.filter((u) => u.reason === NOT_SET_UP && !failed.has(u.path));
+    const files = route(file, change.files, Number.MAX_SAFE_INTEGER).uncovered
+      .filter((u) => u.reason === NOT_SET_UP).map((u) => u.path)
+      .filter((f) => later.some((u) => f.startsWith(u.path.replace(/^\//, ""))));
+    if (!files.length) return null;
+    const parts = later.filter((u) => files.some((f) => f.startsWith(u.path.replace(/^\//, "")))).map((u) => u.path);
+    // A try that fails leaves review.yaml and the baseline as they were, so the rest is reviewed as before.
+    const kept = [reviewConfigPath(repo), baselinePath(repo)].map((path) =>
+      [path, existsSync(path) ? readFileSync(path) : null] as const);
+    const code = await this.setupFlow(repo, a, { add: true, quick: { files, what: parts.join(", ") } });
+    if (code !== 0) {
+      for (const [path, bytes] of kept) {
+        if (bytes) writeFileSync(path, bytes);
+        else rmSync(path, { force: true });
+      }
+      // Not tried again by later reviews (unless what stopped it was not this setup's): `arnx setup --add` does.
+      if (code === 2) quickFailed(repo, parts);
+      this.d.out(`Reviewing the rest; ${parts.join(", ")} stays not set up (arnx setup --add tries again).`);
+    }
+    return null;
   }
 
   /** A review whose judgement is arnx cloud's: no model is made here, no key is needed. */
@@ -1812,6 +1939,41 @@ class Commands {
 /** Where every approval is recorded, with its warnings (a local file, under .arnx/setup/). */
 export const APPROVAL_RECORD = ".arnx/setup/approval.md";
 
+/** The parts (uncovered paths) a review's quick setup could not set up, which later reviews leave alone; with `add`,
+ * those are recorded too. `arnx setup --add` ignores the record. */
+function quickFailed(repo: string, add: string[] = []): Set<string> {
+  const path = join(repo, ".arnx", "setup", "quick-failed.txt");
+  const had = existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean) : [];
+  const all = new Set([...had, ...add]);
+  if (add.length) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, [...all].sort().join("\n") + "\n");
+  }
+  return all;
+}
+
+/** The last proof of review.yaml on this machine, from the copy of the file it proved (PROVEN_COPY: a stamp in the
+ * file itself can be made by hand): each project's digest, the rest of the file (restDigest), the projects a quick
+ * look proved, and the baseline it proved (its copy, or none when it proved none). Undefined when there is no copy to
+ * go by. */
+function lastProof(repo: string)
+  : { projects: Record<string, string>; rest: string; baseline: Baseline; quick: string[] } | undefined {
+  try {
+    const proven = join(repo, PROVEN_COPY);
+    if (!existsSync(proven)) return undefined;
+    const f = parseReviewFile(readFileSync(proven, "utf8"));
+    if (f.legacy) return undefined;
+    const projects = Object.fromEntries(f.projects.map((p) => [p.name, projectDigest(f, p.name)]));
+    const copy = join(repo, PROVEN_BASELINE);
+    const baseline = existsSync(copy) ? parseBaseline(readFileSync(copy, "utf8"))
+      : stampedBaseline(f) === null ? new Map() : null;
+    return baseline ? { projects, rest: restDigest(f), baseline, quick: stampedQuick(f) } : undefined;
+  } catch (e) {
+    if (e instanceof ArnxError) return undefined;
+    throw e;
+  }
+}
+
 /** The ids shown of a failed suite's tests; the rest are counted. */
 const SHOWN_FAILING = 5;
 
@@ -1830,11 +1992,13 @@ export function timeUpLine(file: ReviewFile, minutes: number, aside: string[]): 
     `${aside.join(", ")} ${aside.length === 1 ? "is" : "are"} listed under uncovered.`;
 }
 
-export function setupFailure(r: SetupResult, budgetUsd: number, minutes: number)
+export function setupFailure(r: SetupResult, budgetUsd: number, minutes: number, quick = false)
   : { text: string; json: { kind: "environment" | "tests" | "time"; reason: string; failing: string[] } } {
   if (r.stop === "time") {
     const on = r.running ? ` while on ${r.running}` : "";
-    return { text: `Setup reached its ${minutes}-minute limit${on}; to give it longer, raise setup_minutes under [budget].`,
+    return { text: quick ? `Could not set this up within ${minutes} min${on}; \`arnx setup\` takes longer to set ` +
+      "up the whole repository."
+      : `Setup reached its ${minutes}-minute limit${on}; to give it longer, raise setup_minutes under [budget].`,
       json: { kind: "time", reason: `reached the ${minutes}-minute limit (last: ${r.problem || r.summary})`,
         failing: [] } };
   }
@@ -1848,6 +2012,15 @@ export function setupFailure(r: SetupResult, budgetUsd: number, minutes: number)
   }
   if (r.needed?.length || r.stop === WEB_UI_STOP) {
     return { text: `Setup stopped: ${r.problem}.`, json: { kind: "environment", reason: r.problem, failing: [] } };
+  }
+  // A model call that failed is why setup stopped, whatever the last try showed: a refused key names itself.
+  const call = /^api_error: (.*)$/s.exec(r.stop)?.[1];
+  if (call) {
+    const refused = /HTTP 40[13]\b/.test(call);
+    const reason = `setup's model call failed: ${clip(call, 200)}`;
+    return { text: refused ? `Setup stopped: the model provider refused the key (${/HTTP 40[13]/.exec(call)![0]}, ` +
+      `${call.split(":")[0]}). Check the key, then run again.` : `Setup stopped: ${reason}.`,
+    json: { kind: "environment", reason, failing: [] } };
   }
   const stop = r.stop === "budget" ? `the $${budgetUsd.toFixed(2)} budget ran out`
     : r.stop === "max_turns" ? "the agent ran out of turns" : r.stop === "refusal" ? "the model refused" : "";

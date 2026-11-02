@@ -102,13 +102,13 @@ test("init never asks about the skill; an Optional line names `arnx skill instal
     expect(await cli.run("init")).toBe(0);
     expect(asked).toEqual([]); // init asks nothing
     expect(existsSync(join(repo, CLAUDE_DIR))).toBe(false);
-    expect(cli.stdout).toMatch(/Next: arnx setup\nOptional: arnx skill install \(coding agents\)$/);
+    expect(cli.stdout).toMatch(/Next: arnx review\nOptional: arnx skill install \(coding agents\)$/);
   }
   const repo = gitRepo(join(tmp(), "has"));
   expect(await new Cli({ cwd: repo }).run("skill", "install")).toBe(0);
   const cli = new Cli({ cwd: repo });
   expect(await cli.run("init")).toBe(0);
-  expect(cli.stdout).toMatch(/Next: arnx setup$/);
+  expect(cli.stdout).toMatch(/Next: arnx review$/);
   // Only the older .claude copy: the command adds the other one.
   rmSync(join(repo, ".agents"), { recursive: true });
   const again = new Cli({ cwd: repo });

@@ -282,3 +282,36 @@ test("the preview never promises more than the limit", () => {
   expect(setupPreview(repo, { ...defaultSettings(), setupMinutes: 3 })).toBe("Setup: finding how to run your " +
     "tests in Docker (up to 3 min, stops at $3.00).");
 });
+
+test("a first review's quick setup stops at 10 minutes, whatever setup_minutes says, and points to arnx setup",
+  async () => {
+  const clock = { ms: 0 };
+  const repo = twoProjects();
+  const env = { ANTHROPIC_API_KEY: "a" };
+  writeFileSync(join(repo, "api", "pyproject.toml"), "[project]\nname = \"api\"\nversion = \"0.1\"\n");
+  expect(await new Cli({ cwd: repo, env }).run("init")).toBe(0);
+  commit(repo, "init");
+  writeFileSync(join(repo, "api", "api.py"), "def f():\n    return 2\n");
+  commit(repo, "api change");
+  const slow = async <T>(_cfg: { name: string }, snap: string, _log: string, body: (r: Runner) => Promise<T>) =>
+    body(new FakeSession(snap, () => {
+      clock.ms += 11 * MIN;
+      return [null, "", true];
+    }));
+  const cli = new Cli({ cwd: repo, env, now: () => clock.ms, setupModel: new ScriptedAgent([[text("done")]]),
+    setupSessions: slow });
+  expect(await cli.run("consent", "--yes")).toBe(0);
+  expect(await cli.run("review")).toBe(2);
+  expect(cli.stdout).toContain("stops at 10 min).");
+  expect(cli.stdout).toContain("Could not set this up within 10 min while on api; `arnx setup` takes longer");
+  expect(cli.stdout.trimEnd()).toEndWith("Next: arnx setup");
+});
+
+test("setup stopped by a refused key says so, not that the environment does not work", () => {
+  const r = { ok: false, stop: "api_error: claude-sonnet-5-5: HTTP 401: 401 {\"error\":\"invalid x-api-key\"} (1 attempts)",
+    problem: "", summary: "sync-server: the suite ran no tests", yamlText: "version: 1\n", failing: [] } as never;
+  const failure = setupFailure(r, 3, 40);
+  expect(failure.text).toBe("Setup stopped: the model provider refused the key (HTTP 401, claude-sonnet-5-5). " +
+    "Check the key, then run again.");
+  expect(failure.json.reason).toStartWith("setup's model call failed: claude-sonnet-5-5: HTTP 401");
+});

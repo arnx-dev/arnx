@@ -33,7 +33,7 @@ const suites = (cases: Case[], runs: string[] = [], seen: boolean[] = []): Sessi
     return body(new FakeSession(snap, () => [junitXml(cases), "out", false]));
   };
 
-/** A small Python repository, initialized and agreed to send. */
+/** A small Python repository, initialized, its first send already done (where the code goes said once). */
 async function shop(): Promise<string> {
   const repo = initRepo(join(tmp(), "shop"));
   writeFileSync(join(repo, "pyproject.toml"), "[project]\nname = \"shop\"\n");
@@ -43,7 +43,7 @@ async function shop(): Promise<string> {
   commit(repo, "shop");
   const cli = new Cli({ cwd: repo, env: ENV });
   expect(await cli.run("init")).toBe(0);
-  expect(await cli.run("consent", "--yes")).toBe(0);
+  writeSettings(repo, { ...loadSettings(repo), consentAt: "2026-10-20T00:00:00+00:00" });
   return repo;
 }
 
@@ -310,18 +310,11 @@ test("the automatic proof reads untracked files when the review does", async () 
   expect(seen).toEqual([true]);
 });
 
-test("check --review finds the review, and accept asks the consent, before any proof", async () => {
+test("check --review finds the review before any proof", async () => {
   const repo = await changed();
   const runs: string[] = [];
   const check = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS], runs) });
   expect(await check.run("check", "--review", "--quiet")).toBe(3);
   expect(check.stderr).toContain("no reviews yet");
-  const rdir = join(repo, ".arnx", "reviews", "20261026-abcdef");
-  mkdirSync(rdir, { recursive: true });
-  save({ ...sampleReview(), id: "20261026-abcdef" }, rdir, "d");
-  writeSettings(repo, { ...loadSettings(repo), consentAt: null });
-  const accept = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS], runs) });
-  expect(await accept.run("accept", "--quiet")).toBe(3);
-  expect(accept.stderr).toContain("arnx consent");
   expect(runs).toEqual([]);
 });

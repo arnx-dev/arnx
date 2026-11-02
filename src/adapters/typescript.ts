@@ -145,7 +145,10 @@ function listCommand(testCommand: string, targets: string[], listPath: string, r
   const t = targets.map(shQuote).join(" ");
   if (runner === "jest") return `${testCommand.replaceAll("{targets}", t)} --listTests --json`;
   if (runner !== "vitest" || !/\bvitest\s+run\b/.test(testCommand)) return null;
-  return `${testCommand.replace(/\bvitest\s+run\b/, "vitest list").replaceAll("{targets}", t)} --json=${shQuote(listPath)}`;
+  const list = (more: string) => `${testCommand.replace(/\bvitest\s+run\b/, `vitest list${more}`)
+    .replaceAll("{targets}", t)} --json=${shQuote(listPath)}`;
+  // A file that defines no suite here (one behind a condition) fails the whole list: its files are listed then.
+  return `{ ${list("")}; } || { ${list(" --filesOnly")}; }`;
 }
 
 // vitest 1 has no list command and no --json option; jest names an option it does not know this way.
@@ -169,7 +172,10 @@ function parseList(output: string, listed: string | null, exitCode: number | nul
   const paths = entries.map((e) => runner === "vitest" ? (e as { file?: unknown } | null)?.file : e)
     .filter((f): f is string => typeof f === "string");
   if (paths.length !== entries.length) return null;
-  return { tests: runner === "vitest" ? entries.length : null, files: [...new Set(paths.map((f) => projectPath(f, root)))],
+  // A files-only list names files, not tests.
+  const tests = runner === "vitest" && entries.every((e) => typeof (e as { name?: unknown }).name === "string")
+    ? entries.length : null;
+  return { tests, files: [...new Set(paths.map((f) => projectPath(f, root)))],
     broken: [], failed: false };
 }
 

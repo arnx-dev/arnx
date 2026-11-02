@@ -25,10 +25,10 @@ import { changeEditsAccepted } from "./check";
 import { baseName, funcOf, ownerFile } from "./outcomes";
 import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, resumes, withCalls } from "./outage";
 import { CONTEXT_LIMIT, contextPack } from "./context";
-import type { Suspect } from "./prompts";
+import { elsewhereNote, type Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
 import { type AgentReport, type Checked, type Finding, type FixProof, parseReports, type ProjectStat, type Review,
-  save, type SuspectOutcome, type Untested, adjudicate, exitCode, sameCause } from "./report";
+  save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause } from "./report";
 import { dockerSteps, type SessionFactory } from "./sandbox";
 import type { TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
@@ -216,8 +216,8 @@ export async function runReview(repo: string, o: { settings: Settings;
   brain?: Brain })
   : Promise<{ review: Review; rdir: string }> {
   const s = o.settings;
-  if (!(cloudModels(s) ? s.cloudConsentAt : s.consentAt)) {
-    throw new SetupRequired("sending code to a model has not been agreed to; nothing sent: run `arnx consent`");
+  if (cloudModels(s) && !s.cloudConsentAt) {
+    throw new SetupRequired("sending code to arnx cloud has not been agreed to; nothing sent: run `arnx consent --cloud`");
   }
   const file = loadReviewFile(repo);
   const change = resolveChange(repo, o.range ?? null, secretPinsOf(file.raw),
@@ -371,9 +371,14 @@ export async function runReview(repo: string, o: { settings: Settings;
       writeDirs[cfg.name] = writeDir;
       // Each project gets the part of the change it owns or uses, so a big change is not cut short by other projects'.
       const diff = file.legacy ? change.diff : sliceDiff(change.diff, [...owned, ...used]) || change.diff;
-      diffs[cfg.name] = diff;
+      // The change's other files are named to the round and the second opinion: a part they cannot see is never
+      // taken for missing from the change.
+      const seen = new Set([...owned, ...used]);
+      const elsewhere = file.legacy || diff === change.diff ? [] : change.files.filter((f) => !seen.has(f));
+      const others = elsewhereNote(elsewhere);
+      diffs[cfg.name] = others ? `${diff}\n\n${others}\n` : diff;
       const outDir = file.legacy ? rdir : join(rdir, "projects", cfg.name);
-      const scope = file.legacy ? { owned: change.files, used: [] } : { owned, used };
+      const scope = file.legacy ? { owned: change.files, used: [] } : { owned, used, elsewhere };
       const projectBudget = s.reviewBudgetUsd * AGENT_SHARE / n;
       const opts = { brain, budgetUsd: projectBudget, writeDir, runs: s.runs, outDir,
         sessionFactory: o.sessionFactory ?? dockerSession, progress: o.progress, coverage: scope.owned,
@@ -557,6 +562,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       ? JSON.parse(readFileSync(verdictsFile, "utf8")) : {};
     for (const k of Object.keys(verdicts)) if (redone.has(k.split("::")[0]!)) delete verdicts[k];
     const priorUses: ModelUse[] = [];
+    let shown = 0;
     const j = await brain.judge(challenged, questions, diffs, { diff: change.diff, sources,
       maxQuestions: s.maxQuestions, budgetLeft: left, trace, progress: o.progress, questionProjects,
       // Questions that ask the same thing became one: what referred to them is renumbered.
@@ -594,11 +600,19 @@ export async function runReview(repo: string, o: { settings: Settings;
         verdicts[`${f.project}::${f.testId}`] = { verdict: f.verdict, reason: f.reason, dependsOn: f.dependsOn ?? null,
           judge: f.judge ?? null, model: label ? `${label}/challenge` : f.judge ?? challengerRef, cost };
         writeFileSync(verdictsFile, JSON.stringify(verdicts) + "\n");
+        // Shown as it is proven: its test failed on every run, not before the change, and the second opinion agrees.
+        // A suspect is proven by just this (adjudicate), so nothing shown here is taken back.
+        if (f.verdict === "confirmed" && !f.dependsOn) {
+          shown++;
+          o.progress?.(`✓ proven: ${clip(f.explanation || firstLine(f.message), 140)} (${f.id}, failing test ` +
+            `${f.file ?? f.testId})`);
+        }
       } });
     const [groups, judged] = [j.groups, j.uses];
     const second = huntSecond;
     adjudicate(suspects, findings);
     sameCause(suspects, groups, findings);
+    if (suspects.length) o.progress?.(checkedLine(suspects, shown));
     for (const x of suspects) {
       emit("suspect.outcome", { project: x.project, hyp_id: hypId(x.project, x.id), outcome: x.outcome, tests: x.tests,
         findings: x.findings, ...x.reason ? { reason: clip(x.reason) } : {} });
@@ -679,4 +693,18 @@ export async function runReview(repo: string, o: { settings: Settings;
     await finish?.("failed").catch(() => null);
     throw e;
   }));
+}
+
+/** What came of the things a review checked, said once they are judged: proven, waiting on an answer, failing the same
+ * way before the change, and the rest dropped (a test that passed, did not run, or the second opinion disputed). */
+export function checkedLine(sus: SuspectOutcome[], shown = 0): string {
+  const n = (...o: SuspectOutcome["outcome"][]) => sus.filter((x) => o.includes(x.outcome)).length;
+  const proven = n("proven", "same cause");
+  const answer = n("pending answer");
+  const before = n("pre-existing");
+  const dropped = sus.length - proven - answer - before;
+  // One thing checked can prove more than one issue: the count matches the "✓ proven" lines shown.
+  const issues = shown > proven ? ` (${shown} issues)` : "";
+  return [`Checked ${sus.length}: ${proven} proven${issues}`, ...answer ? [`${answer} need${answer === 1 ? "s" : ""} your answer`]
+    : [], ...before ? [`${before} failing before this change too`] : [], `${dropped} dropped`].join(", ");
 }
