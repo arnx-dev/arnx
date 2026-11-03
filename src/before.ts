@@ -245,7 +245,8 @@ export function namesAdded(diff: string, isTest: (name: string) => boolean): Set
 export function fakedName(source: string, names: ReadonlySet<string>): string | null {
   for (const line of source.split("\n")) {
     if (!/setattr|patch|mock|spy|stub|fake/i.test(line)) continue;
-    const targets = [...line.matchAll(/["'`]([^"'`]+)["'`]/g)].flatMap((m) => m[1]!.split(/[./#:]/));
+    // A dotted or path target names its last part: the folders on the way are not what it fakes.
+    const targets = [...line.matchAll(/["'`]([^"'`]+)["'`]/g)].map((m) => m[1]!.split(/[./#:]/).at(-1)!);
     targets.push(...[...line.matchAll(/\.([A-Za-z_$][\w$]*)\s*=(?!=)/g)].map((m) => m[1]!));
     const hit = targets.find((t) => names.has(t));
     if (hit) return hit;
@@ -253,10 +254,14 @@ export function fakedName(source: string, names: ReadonlySet<string>): string | 
   return null;
 }
 
-/** As `textFix`, for a test that fakes something only the change uses: the code before the change never reaches the
- * fake, so its failure there comes from what the fake left out, not from a bug the change fixes. */
+/** A failure of the test's own check, not a crash in the code it runs. */
+const OWN_CHECK = /^(?:Error:\s*)?expect\(|^(?:E\s+)?assert\b|AssertionError/;
+
+/** As `textFix`, for a test that fakes something only the change uses: when the code before the change crashes, it
+ * never reached the fake, so the failure comes from what the fake left out, not from a bug the change fixes. Reaching
+ * the test's own check is a fix: the change adds what the test expects. */
 export function fakedFix(f: Fix, name: string): Fix {
-  return f.status !== "fixed" ? f : { ...f, status: "unknown", detail: "fails on the code before the change " +
+  return f.status !== "fixed" || OWN_CHECK.test(f.message ?? "") ? f : { ...f, status: "unknown", detail: "fails on the code before the change " +
     `(${plural(f.runs.length, "run")}), but it fakes \`${name}\`, which the change starts using: no proof of a fix` };
 }
 

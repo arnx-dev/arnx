@@ -49,8 +49,14 @@ test("using the name, or faking another, is no fake of it", () => {
   ]) expect([source, fakedName(source, names)]).toEqual([source, null]);
 });
 
+test("a module path is faked by its last part: a folder on the way is not what it fakes", () => {
+  const source = "jest.mock('../../../ui/components/ui/toast/toast', () => ({}));\n";
+  expect(fakedName(source, new Set(["ui", "components"]))).toBeNull();
+  expect(fakedName(source, new Set(["toast"]))).toBe("toast");
+});
+
 const fixed: Fix = { status: "fixed", detail: "fails on the code before the change (3 runs) and passes after: the " +
-  "change fixes this (IndexError)", runs: ["failed", "failed", "failed"], message: "IndexError" };
+  "change fixes this (IndexError)", runs: ["failed", "failed", "failed"], message: "IndexError: list index out of range" };
 
 test("a fix shown by such a test is no proof; any other outcome stands", () => {
   const f = fakedFix(fixed, "sample_one");
@@ -59,4 +65,12 @@ test("a fix shown by such a test is no proof; any other outcome stands", () => {
     "starts using: no proof of a fix");
   const same: Fix = { status: "unchanged", detail: "passes", runs: [] };
   expect(fakedFix(same, "sample_one")).toBe(same);
+});
+
+test("the old code reaching the test's own check is a fix: what the change adds is what the test expects", () => {
+  for (const message of ["Error: expect(jest.fn()).toHaveBeenCalledWith(...expected)\nExpected: x", "assert -1 == 5",
+    "AssertionError: assert 1 == 2", "AssertionError [ERR_ASSERTION]: no toast"]) {
+    const f = { ...fixed, message };
+    expect([message, fakedFix(f, "toast")]).toEqual([message, f]);
+  }
 });

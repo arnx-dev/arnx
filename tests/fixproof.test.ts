@@ -328,8 +328,15 @@ test("a test that fakes what only the change calls proves no fix: its failure th
   const model = new ScriptedAgent([
     Object.entries({ ...FILES, [faked]: source }).map(([path, content]) => tool("write_file", { path, content })),
     [text(REPORT)], [text(REPORT)]]);
+  // The old code never reaches the fake, and crashes on what it left out.
+  const crashes: SessionFactory = async (cfg, snap, log, body, envFrom, key) => snap.endsWith("/before")
+    ? body(new FakeSession(snap, (command) => [junitXml(["add", "zero", "neg", "flaky"]
+      .filter((n) => command.includes(`test_${n}.py`))
+      .map((n) => [`${G}/test_${n}.py`, `test_${n}`, n === "add" ? "failed" : "passed",
+        n === "add" ? "IndexError: list index out of range" : ""])), "", false]))
+    : sessions()(cfg, snap, log, body, envFrom, key);
   const { review: r } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
-    sessionFactory: sessions() });
+    sessionFactory: crashes });
   const add = r.fixProof!.find((x) => x.testId === id("add"))!;
   expect(add.beforeStatus).toBe("unknown");
   expect(add.beforeDetail).toContain("it fakes `helper`, which the change starts using");
