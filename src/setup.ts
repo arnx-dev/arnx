@@ -1448,7 +1448,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         "for (a service and env) unless it needs the internet." : "";
       if (!ok) {
         say(`${name}: ✗ does not run yet: ${gist(summary)}`);
-        if (uiApp) return webUi(gist(summary)); // web UI rule
+        // A UI app's one try is for a suite that will not run in a sandbox: one whose tests pass goes on like any other.
+        if (uiApp && !counts.passed) return webUi(gist(summary)); // web UI rule
         return `the suite of ${name} does not run yet: ${summary}${skipped}${hints ? `\n${hints}` : ""}\n${tail}`;
       }
       say(`${name}: ✓ ${summary}${counts.failed.length ? ` · ${counts.failed.length} failing today, recorded` : ""}` +

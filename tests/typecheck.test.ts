@@ -440,3 +440,22 @@ test("a project with no type check that routing passes over is named as having n
   expect(render(r)).toContain("No round of its own for `shared`: the change reaches it through a folder holding " +
     "other projects, and `api` reviewed those files.");
 });
+
+test("a web UI app whose tests run is no lost cause: a type check that cannot run goes back to the agent", async () => {
+  const repo = initRepo(join(tmp(), "ui"));
+  mkdirSync(join(repo, "src"), { recursive: true });
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ dependencies: { "react-dom": "18.3.1" }, devDependencies: { vitest: "2" } }));
+  writeFileSync(join(repo, "src/a.ts"), "export const a = 1;\n");
+  writeFileSync(join(repo, "src/own.test.ts"), "test('works', () => {});\n");
+  commit(repo, "app");
+  const yaml = (typecheck: string) => `version: 1\nprojects:\n  ui:\n    root: .\n    language: typescript\n    image: node:22\n` +
+    `    test_command: npx vitest run {targets}\n${typecheck}`;
+  const m = new ScriptedAgent([[tool("try_project", { yaml: yaml("    typecheck: missing-tsc\n"), project: "ui" })],
+    [tool("try_project", { yaml: yaml(""), project: "ui" })], [text("done")]]);
+  await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: sandbox() });
+  const said = (call: number) => (m.calls[call]!.messages.at(-1)!.content as Record<string, unknown>[])
+    .map((r) => String(r.content)).join("\n");
+  expect(said(1)).toContain("the type check (typecheck) failed without reporting");
+  expect(said(1)).not.toContain("web UI");
+  expect(said(2)).toContain("the suite of ui runs");
+});
