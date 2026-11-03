@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { CopyDiffers } from "../src/baked";
 import { type BeforeRun, judgeBefore } from "../src/before";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { EVENTS_FILE, type TraceEvent } from "../src/events";
@@ -363,4 +364,42 @@ test("runs that write a manifest into the change's snapshot (cargo's Cargo.lock)
   expect(review.findings.map((f) => f.before!.status)).toEqual(["regression", "pre-existing"]);
   expect(seen).toHaveLength(2);
   expect(seen[1]).toMatchObject({ key: headKey, filesAtStart: false });
+});
+
+/** As dockerSession on an image holding a copy of the code: code copied in after the session starts is refused, and
+ * code there from the start gets an image of its own. `started`: what the code before the change held at each start. */
+function bakedSessions(started: string[]): SessionFactory {
+  return async (cfg, snap, log, body, envFrom, key) => {
+    if (!snap.endsWith("/before")) return sessions(BEFORE)(cfg, snap, log, body, envFrom, key);
+    const app = join(snap, "app.py");
+    started.push(existsSync(app) ? readFileSync(app, "utf8") : "");
+    if (!existsSync(app)) {
+      return body({ run: () => {
+        throw new CopyDiffers("main: the tests run the image's own copy of the code at /opt/ws, which differs from this code in 1 file");
+      } });
+    }
+    expect(existsSync(join(snap, "tests/arnx_generated"))).toBe(false); // the image is made from the code alone
+    return sessions(BEFORE)(cfg, snap, log, body, envFrom, key);
+  };
+}
+
+test("a project whose image holds a copy of the code gets an image of the code before the change, and a verdict", async () => {
+  const started: string[] = [];
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent(), sessionFactory: bakedSessions(started),
+    challenger: new FakeJson([{ verdict: "confirmed", reason: "add subtracts." }]) });
+  expect(started).toEqual(["", "def add(a, b):\n    return a + b\n\ndef old():\n    return 0\n"]);
+  const [add, old] = review.findings;
+  expect([add!.func, add!.before!.status]).toEqual(["test_add", "regression"]);
+  expect([old!.func, old!.before!.status]).toEqual(["test_old", "pre-existing"]);
+});
+
+test("an image made from the code before the change has that code's dependencies: no doubt about them", async () => {
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a + b\n\ndef old():\n    return 0\n");
+  writeFileSync(join(repo, "requirements.txt"), "pytest\n");
+  commit(repo, "requirements");
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a - b\n\ndef old():\n    return 0\n");
+  writeFileSync(join(repo, "requirements.txt"), "pytest\nrequests\n");
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent(), sessionFactory: bakedSessions([]),
+    challenger: new FakeJson([{ verdict: "confirmed", reason: "add subtracts." }]) });
+  expect(review.findings[0]!.before!.status).toBe("regression");
 });
