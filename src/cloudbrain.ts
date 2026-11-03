@@ -117,6 +117,10 @@ interface Drive {
   deadline?: { at: number; now: () => number };
 }
 
+/** Steps arnx cloud streams that only repeat the line already shown when its agent starts. */
+const REPEATED = new Set(["hunting", "looking for defects", "the agent is taking its turn"]);
+export const cloudStepShown = (message: string) => !REPEATED.has(message);
+
 export class CloudBrain implements Brain {
   private tier: Tier;
   private harness: string | null = null;
@@ -207,7 +211,9 @@ export class CloudBrain implements Brain {
     const root = h?.root;
     const parts = (h?.parts ?? (root ? huntParts(root, cfg, diff, scope.owned, h!.searchDirs) : []))
       .map((p) => ({ files: p.files, context: p.context, changed_definitions: p.changedDefinitions }));
-    const stream: CallOptions = { stream: true, onProgress: (p) => say(p.message) };
+    const stream: CallOptions = { stream: true, onProgress: (p) => {
+      if (cloudStepShown(p.message)) say(p.message);
+    } };
     const path = `/v1/reviews/${id}/projects/${encodeURIComponent(cfg.name)}/agent`;
     say(h ? "arnx cloud is looking for defects" : "arnx cloud is writing tests");
     // A start that timed out or failed on the way (a network failure, 503) is sent once more with the same

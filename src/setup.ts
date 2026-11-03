@@ -1054,7 +1054,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
   const keep = new Map(existing ? existing.projects.filter((p) => p.name !== o.project)
     .map((p) => [p.name, projectDigest(existing, p.name)] as const) : []);
   const state = { accepted: null as string | null, lastTried: null as string | null, summary: "no project tried",
-    proven: new Map<string, string>(), attempts: 0, proofs: new Map<string, ProjectProof>(),
+    proven: new Map<string, string>(), attempts: 0, tries: new Map<string, number>(), proofs: new Map<string, ProjectProof>(),
     final: null as ReviewFile | null, lastFailing: new Map<string, { env: string; files: string[] }>(),
     failing: [] as string[], failingProject: null as string | null, problem: "", needed: null as NeededFile[] | null,
     usesChecked: false, pathsChecked: false, pathHints: [] as UsesHint[],
@@ -1250,6 +1250,12 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           `it: set up only ${[...touched(f)].join(", ") || "the projects that own a changed file"}. propose takes ` +
           `${name} out of the file and lists /${cfg.workdir}/ under uncovered as "${NOT_SET_UP}".`;
       }
+      // Answers of nothing make tests pass or fail for no reason, and a before/after check then proves nothing.
+      if (cfg.install.some((c) => /\bMagicMock\b/.test(c))) {
+        return "refused: install replaces code with MagicMock, which answers everything with nothing, so tests pass or " +
+          "fail for no reason. Use a stand-in that behaves like the service (a library made for it), or leave those " +
+          "tests failing: they are recorded.";
+      }
       // A project whose files say its tests need MANY_SERVICES or more is not tried while it lists that many.
       const facts = detection.facts?.projects.find((p) => p.root === cfg.workdir && p.language === cfg.language);
       const many = facts && cfg.services.length >= MANY_SERVICES ? manyServices(facts) : null;
@@ -1300,7 +1306,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       state.lastTry.set(name, { cfg, env: envDigest(cfg),
         image: before?.env === envDigest(cfg) ? before.image : envTag(keyOf(cfg)) });
       // One line as the run starts: the image build, when there is one, is said in the same line.
-      announce = { name, n };
+      // Only a try that runs counts: a refused one above leaves no gap in what the developer sees.
+      const tried = (state.tries.get(name) ?? 0) + 1;
+      state.tries.set(name, tried);
+      announce = { name, n: tried };
       let ok: boolean, summary: string, tail: string, skips: string[], failing: string[], hints: string,
         counts: SuiteCounts;
       // A retry with the same environment runs only the files that failed last time (minus any now set aside);

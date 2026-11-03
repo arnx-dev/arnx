@@ -905,7 +905,7 @@ class Commands {
     // A review waits on a quick setup: it stops at QUICK_MINUTES, and `arnx setup` takes the rest.
     const cap = quick ? Math.min(s.setupMinutes, QUICK_MINUTES) : s.setupMinutes;
     this.d.out(quick ? `${add ? "Setting up" : "First run: setting up"} just enough to test ${quick.what} (about ` +
-      `2–5 min, stops at ${cap} min).` : setupPreview(repo, s, untracked));
+      `2–6 min, stops at ${cap} min).` : setupPreview(repo, s, untracked));
     const outDir = join(repo, ".arnx", "setup");
     // JEV is asked only when the config turns it on and its key is set (the key alone does nothing).
     const jev = jevKey(s, this.d.env);

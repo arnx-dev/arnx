@@ -152,7 +152,8 @@ test("a scripted review through arnx cloud: the same findings and report as the 
   expect(c.seen.find((x) => x.path.endsWith("/finish"))!.body).toEqual({ stop: "completed", projects_reviewed: 1,
     tests_written: 2, passed: 1, findings: 1, flaky: 0, seconds: review.seconds });
   // Progress lines streamed by the brain reached the user, and so did the bill.
-  expect(said).toContain("main: hunting");
+  expect(said).toContain("main: reading the change");
+  expect(said).not.toContain("main: hunting");
   expect(said).toContain("merging questions");
   expect(said.some((m) => m.includes("billed $0.17 for this review"))).toBe(true);
   // The terminal names arnx cloud by its tier only: the harness version stays internal (review.json, events.jsonl).
@@ -401,4 +402,10 @@ test("a hold below the cap (the balance allows less) is said once; a full hold s
   const full: string[] = [];
   await brainFor(c, full).start(start(1));
   expect(full.some((m) => m.includes("caps this review"))).toBe(false);
+});
+
+test("the steps arnx cloud streams that say the same as the line before them are not shown", async () => {
+  const { cloudStepShown } = await import("../src/cloudbrain");
+  for (const m of ["hunting", "looking for defects", "the agent is taking its turn"]) expect(cloudStepShown(m)).toBe(false);
+  for (const m of ["writing tests", "checking 4 things in this change"]) expect(cloudStepShown(m)).toBe(true);
 });
