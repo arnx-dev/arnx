@@ -212,12 +212,14 @@ const multi = (r: Review) => r.projects.length > 1 || r.uncovered.length > 0 || 
 
 /** Findings the change may have caused: all but those that fail the same way before it. */
 export const active = (r: Review) => r.findings.filter((f) => !isPreExisting(f));
-export const confirmed = (r: Review) => active(r).filter((f) => f.verdict !== "disputed" && !f.dependsOn);
+export const confirmed = (r: Review) => active(r).filter((f) => f.verdict === "confirmed" && !f.dependsOn);
+/** Failing tests the second opinion gave no verdict on (its budget ran out, it did not answer). */
+export const notChecked = (r: Review) => active(r).filter((f) => f.verdict !== "confirmed" && f.verdict !== "disputed" && !f.dependsOn);
 /** Suspects the hunt named when the review wrote no test at all: "nothing found" would then say nothing. */
 const neverTested = (r: Review) => r.testsWritten === 0 ? (r.suspects ?? []).filter((s) => s.outcome === "not tested")
   : [];
 export const incomplete = (r: Review) => r.stop !== "end_turn" || r.missingRuns > 0 || neverTested(r).length > 0;
-export const exitCode = (r: Review) => (confirmed(r).length ? 1 : incomplete(r) ? 2 : 0);
+export const exitCode = (r: Review) => (confirmed(r).length || notChecked(r).length ? 1 : incomplete(r) ? 2 : 0);
 
 export interface Marks {
   findings: Record<string, string | null>;
@@ -228,7 +230,9 @@ export interface Marks {
   rewrites?: Record<string, string>;
 }
 
-const verdictOf = (f: Finding) => f.verdict ?? "not challenged";
+const verdictOf = (f: Finding) => f.verdict ?? "not checked";
+/** One test: its project and name, its cases' parameters left out (`test_x[a]`, `test_x[b]`). */
+export const sameTest = (f: Finding) => `${f.project}::${f.testId.replace(/\[.*\]$/, "")}`;
 /** `text` cut to `max` characters at a word, with an ellipsis ("The ba" read as a typo). */
 function shorten(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -380,6 +384,11 @@ function statusLines(r: Review): string[] {
     : `Complete: ${r.projects.length > 1 ? `${r.projects.length} projects tested${names}` : "the change was tested"}; ` +
       "every run reported its tests."];
   out.push(...(r.providerFailures ?? []).map(failureLine));
+  const unjudged = notChecked(r);
+  if (unjudged.length) {
+    out.push(`Not checked by the second opinion: ${unjudged.map((f) => f.id).join(", ")}. Their tests fail, but no second ` +
+      "model looked at them: read them before you mark them.");
+  }
   for (const u of (r.untested ?? []).filter((x) => x.files.length)) {
     const why = (f: string) => u.reasons?.[f] ? ` (reviewer: ${u.reasons[f]})` : "";
     out.push(`Not tested by arnx${multi(r) ? ` in \`${u.project}\`` : ""}: ` +
@@ -538,9 +547,9 @@ export function render(r: Review): string {
   const fixes = fixed(r);
   if (fixes.length) {
     const one = fixes.length === 1;
-    out.push("## The change fixes", "",
+    out.push("## Fails before the change, passes with it", "",
       `${one ? "This test fails" : `These ${fixes.length} tests fail`} on the code before the change in every run ` +
-      `and pass${one ? "es" : ""} on the change: the change fixes what ${one ? "it checks" : "they check"}.`, "");
+      `and pass${one ? "es" : ""} on the change: the change fixes or adds what ${one ? "it checks" : "they check"}.`, "");
     for (const x of fixes) {
       const what = (r.checked ?? []).find((c) => c.project === x.project && c.test === x.testId)?.expects ?? "";
       out.push(`- \`${x.testId}\`${what ? `: ${firstLine(what)}` : ""}${multi(r) ? ` (${x.project})` : ""}`);
@@ -832,17 +841,26 @@ export function parseMarks(md: string, findingIds: string[], o: { reasons?: bool
 }
 
 /** One row of the summary: a group of findings the change may have caused (or one finding alone). `mark` is ✗ for a
- * confirmed one, ? for one waiting on an answer, · otherwise; `state` the verdicts in words; `title` the problem;
+ * confirmed one, ! for one no second opinion saw, ? for one waiting on an answer, · otherwise; `state` the verdicts in words; `title` the problem;
  * `said` the ids as the summary shows them, each finding's state after it unless it is confirmed ("F3; F4 depends on
  * Q1"). */
-export interface SummaryRow { mark: "✗" | "?" | "·"; ids: string[]; projects: string[]; state: string;
+export interface SummaryRow { mark: "✗" | "!" | "?" | "·"; ids: string[]; projects: string[]; state: string;
   regression: boolean; title: string; said: string; severity?: Severity }
 
 /** The summary's rows, in its order (summary() and `arnx review --json` show the same). */
 export function summaryRows(r: Review): SummaryRow[] {
   const isConfirmed = new Set(confirmed(r).map((f) => f.id));
-  return groupsOf(r, active(r)).map(({ group, findings }) => {
-    const mark = findings.some((f) => isConfirmed.has(f.id)) ? "✗" : findings.some((f) => f.dependsOn) ? "?" : "·";
+  const unjudged = new Set(notChecked(r).map((f) => f.id));
+  // Cases of one test no one grouped (the grouping needs the second opinion) are one row.
+  const rows: ReturnType<typeof groupsOf> = [];
+  for (const row of groupsOf(r, active(r))) {
+    const same = !row.group && rows.find((x) => !x.group && sameTest(x.findings[0]!) === sameTest(row.findings[0]!));
+    if (same) same.findings.push(...row.findings);
+    else rows.push({ ...row, findings: [...row.findings] });
+  }
+  return rows.map(({ group, findings }) => {
+    const mark = findings.some((f) => isConfirmed.has(f.id)) ? "✗" : findings.some((f) => unjudged.has(f.id)) ? "!"
+      : findings.some((f) => f.dependsOn) ? "?" : "·";
     const states = findings.map((f) => f.dependsOn ? `depends on ${f.dependsOn}` : verdictOf(f));
     const counts = [...new Set(states)].map((st) => `${states.filter((x) => x === st).length} ${st}`);
     const f0 = findings[0]!;
@@ -883,7 +901,14 @@ export function summary(r: Review, reviewMd: string): string {
   const issues = summaryRows(r);
   if (issues.length) out.push(issuesLine(r, issues));
   const fixes = fixed(r).length;
-  if (fixes) out.push(`${plural(fixes, "test")} prove${fixes === 1 ? "s" : ""} the change fixes something.`);
+  if (fixes) out.push(`${plural(fixes, "test")} fail${fixes === 1 ? "s" : ""} before this change and pass${fixes === 1 ? "es" : ""} with it.`);
+  const open = notChecked(r);
+  if (open.length) {
+    // Only the budget is said here: a provider's failure has its own line, in its own words.
+    const budget = open.some((f) => f.reason.includes("review budget reached"));
+    out.push(`${plural(open.length, "finding")} ${open.length === 1 ? "was" : "were"} not checked by the second opinion` +
+      `${budget ? ": review budget reached" : ""}.`);
+  }
   const num = String(issues.length).length;
   const rows = issues.map((row, i) => {
     const where = multi(r) ? ` (${row.projects.join(", ")})` : "";
@@ -898,7 +923,10 @@ export function summary(r: Review, reviewMd: string): string {
     out.push(`${head}  ${title.padEnd(width)}  ${ids}`);
   });
   const already = r.findings.filter(isPreExisting);
-  if (already.length) out.push(`  Already failing before the change: ${already.map((f) => f.id).join(", ")}`);
+  if (already.length) {
+    out.push("  Already failing before the change:");
+    for (const f of already) out.push(`  · ${f.id}  ${shorten(f.explanation || firstLine(f.message), 100)}`);
+  }
   const needed = neededQuestions(r);
   const optional = r.questions.length - needed.size;
   r.questions.forEach((q, i) => {
@@ -944,7 +972,8 @@ export function yourCall(r: Review, rows: SummaryRow[] = summaryRows(r)): string
     return `${rows.length === 1 ? "The issue comes" : `All ${rows.length} issues come`} marked real: nothing to do ` +
       "unless you disagree.";
   }
-  const what = open.map(([row, n]) => `issue ${n} (${row.mark === "?" ? "waits on a question" : "disputed"})`);
+  const what = open.map(([row, n]) => `issue ${n} (${row.mark === "?" ? "waits on a question" : row.mark === "!" ? "not checked"
+    : "disputed"})`);
   return `Your call: ${[...what, ...needed].join(", ")}.`;
 }
 
@@ -960,7 +989,7 @@ export function nextSteps(r: Review, rows: SummaryRow[] = summaryRows(r)): strin
 /** The summary's count: issues (rows) by where they stand, the findings in them, and what the code before the change
  * settles when it says the same of every confirmed finding. */
 function issuesLine(r: Review, rows: SummaryRow[]): string {
-  const kinds = ([["✗", "confirmed"], ["?", "waiting on a question"], ["·", "disputed"]] as const)
+  const kinds = ([["✗", "confirmed"], ["!", "not checked"], ["?", "waiting on a question"], ["·", "disputed"]] as const)
     .map(([mark, word]) => [rows.filter((row) => row.mark === mark).length, word] as const).filter(([n]) => n);
   const counted = kinds.map(([n, word], i) => `${i ? n : plural(n, "issue")} ${word}`).join(", ");
   const findings = rows.reduce((a, row) => a + row.ids.length, 0);
@@ -995,9 +1024,10 @@ export const REVIEW_SCHEMA_VERSION = 1;
 
 /** Where a finding stands, in one word for whoever reads review.json: "confirmed" findings set exit code 1 and come
  * marked real; the others wait on an answer, were disputed by the second opinion, or failed before the change too. */
-export type FindingStatus = "confirmed" | "waiting-on-answer" | "disputed" | "pre-existing";
+export type FindingStatus = "confirmed" | "not-checked" | "waiting-on-answer" | "disputed" | "pre-existing";
 export const findingStatus = (f: Finding): FindingStatus => isPreExisting(f) ? "pre-existing"
-  : f.dependsOn ? "waiting-on-answer" : f.verdict === "disputed" ? "disputed" : "confirmed";
+  : f.dependsOn ? "waiting-on-answer" : f.verdict === "disputed" ? "disputed" : f.verdict === "confirmed" ? "confirmed"
+  : "not-checked";
 
 export function save(r: Review, rdir: string, diff: string): void {
   mkdirSync(rdir, { recursive: true });

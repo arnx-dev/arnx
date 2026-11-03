@@ -59,7 +59,7 @@ Also written, for arnx and people: `prompt_version`, `write_dir`, `write_dirs`, 
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | string | `F1`, `F2`, ...: the id in `review.md` and in your report. |
-| `status` | string | `confirmed`: failed in every run and not disputed; sets exit code 1; fix these. `disputed`: the second opinion disagrees. `waiting-on-answer`: the test assumes an answer to `depends_on`. `pre-existing`: fails the same way on the code before the change. Only `confirmed` is yours to fix. |
+| `status` | string | `confirmed`: failed in every run and not disputed; sets exit code 1; fix these. `not-checked`: failed in every run, but no second opinion saw it (its budget ran out, or it did not answer); sets exit code 1; read it before acting. `disputed`: the second opinion disagrees. `waiting-on-answer`: the test assumes an answer to `depends_on`. `pre-existing`: fails the same way on the code before the change. Only `confirmed` is yours to fix. |
 | `verdict` | string or null | The second opinion: `confirmed`, `disputed`, or null when it did not judge (budget, API error; counts as confirmed). |
 | `reason` | string | The second opinion's reason. |
 | `test_id` | string | The test, as the runner names it (`path::name`). |
@@ -112,7 +112,7 @@ by test id.
 | `test_id` | string | The passing test, as the runner names it. |
 | `project` | string | The project whose round wrote it. |
 | `file` | string or null | The generated test file, as for a finding. |
-| `before_status` | string | `fixed`: fails on the code before the change in every run and passes on the change: the change fixes what it checks (say so). `new-code`: what it tests does not exist before the change (new behaviour, not a fix). `unchanged`: passes before the change too. `unknown`: settles nothing (flaky, an error, a timeout, changed dependencies). |
+| `before_status` | string | `fixed`: fails on the code before the change in every run and passes on the change: the change fixes or adds what it checks. `new-code`: what it tests does not exist before the change (new behaviour, not a fix). `unchanged`: passes before the change too. `unknown`: settles nothing (flaky, an error, a timeout, changed dependencies). |
 | `before_runs` | array of strings | Its outcome in each run on the code before the change. |
 | `before_detail` | string | Why, in words, with the failure there when there was one. |
 | `as_text` | boolean | Optional, `true`: it fails there, but the test reads the code as text, so it is `unknown`, not a fix. |

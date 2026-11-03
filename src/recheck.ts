@@ -11,7 +11,7 @@ import { loadReviewFile, sandboxOnlyOf, secretPinsOf } from "./config";
 import { SetupRequired } from "./errors";
 import { asError, ownerFile, runTests, type TestResult } from "./outcomes";
 import type { Say } from "./progress";
-import { confirmed, type Finding, load, type Review } from "./report";
+import { confirmed, notChecked, type Finding, load, type Review } from "./report";
 import type { SessionFactory } from "./sandbox";
 import type { Settings } from "./settings";
 import { collect, dockerSession, readCopies, RUN_TIMEOUT } from "./testround";
@@ -47,7 +47,7 @@ function outcomeIn(run: TestResult[] | null, f: Finding): { outcome: string; mes
 export async function recheckReview(repo: string, rdir: string, settings: Settings, o: {
   sessionFactory?: SessionFactory; progress?: Say } = {}): Promise<ReviewRecheck> {
   const review: Review = load(rdir);
-  const todo = confirmed(review);
+  const todo = [...confirmed(review), ...notChecked(review)];
   const out: FindingRecheck[] = [];
   if (!todo.length) return { review: review.id, findings: out };
   const file = loadReviewFile(repo);

@@ -7,7 +7,7 @@ import { join, posix } from "node:path";
 import { adapterFor } from "./adapters";
 import { isPreExisting } from "./before";
 import type { Billed, Brain, Totals } from "./brain";
-import { inPool, oneVerdict, sameTest } from "./challenge";
+import { inPool, oneVerdict } from "./challenge";
 import { shallowKind } from "./shallow";
 import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, withRole } from "./events";
 import { added, type Change, describe, describeBlanked, EMPTY_TREE, filesAt, removed, resolveChange, sliceDiff,
@@ -28,7 +28,7 @@ import { CONTEXT_LIMIT, contextPack } from "./context";
 import { elsewhereNote, type Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
 import { type AgentReport, type Checked, type Finding, type FixProof, parseReports, type ProjectStat, type Review,
-  save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause } from "./report";
+  save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause, sameTest } from "./report";
 import { dockerSteps, type SessionFactory } from "./sandbox";
 import type { TypeCheck } from "./typecheck";
 import type { Say } from "./progress";

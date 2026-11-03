@@ -205,7 +205,7 @@ test("review.json carries schema_version, each finding's status and the exit cod
   expect(json.schema_version).toBe(1);
   expect(json.exit_code).toBe(1);
   expect(json.findings.map((x: { id: string; status: string }) => [x.id, x.status])).toEqual([["F1", "confirmed"],
-    ["F2", "disputed"], ["F3", "waiting-on-answer"], ["F4", "confirmed"], ["F5", "pre-existing"]]);
+    ["F2", "disputed"], ["F3", "waiting-on-answer"], ["F4", "not-checked"], ["F5", "pre-existing"]]);
   expect(load(tmp())).toEqual(r);
   save(sampleReview({ findings: [] }), tmp(), "");
   expect(JSON.parse(readFileSync(join(tmp(), "review.json"), "utf8")).exit_code).toBe(0);

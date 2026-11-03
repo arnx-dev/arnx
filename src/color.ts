@@ -25,6 +25,7 @@ export function colorLines(text: string, p: Paint): string {
   return text.split("\n").map((l) => {
     if (/^\s*✗/.test(l)) return l.replace("✗", p.red("✗"));
     if (/^\s*\?/.test(l)) return l.replace("?", p.yellow("?"));
+    if (/^\s*!/.test(l)) return l.replace("!", p.yellow("!"));
     if (/^\s*✓/.test(l)) return l.replace("✓", p.green("✓"));
     if (/^\s*·/.test(l)) return p.dim(l);
     if (/^(arnx review |Next:|Then:|All accepted tests pass)/.test(l)) return p.bold(l);

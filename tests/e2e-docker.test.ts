@@ -202,7 +202,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
       ["test_mul", "unchanged"], ["test_neg", "new-code"]]);
     expect(exitCode(review)).toBe(0);
     const md = readFileSync(join(rdir, "review.md"), "utf8");
-    expect(md).toContain("## The change fixes");
+    expect(md).toContain("## Fails before the change, passes with it");
     expect(md).toContain("- `tests/arnx_generated/test_calc.py::test_add`: add sums");
     console.log(`fix proof: ${review.timings!.fixProofSecs} s of a ${review.seconds} s review`);
   }, 900_000);

@@ -30,8 +30,7 @@ describe("judgeFix", () => {
   test("fails in every run before the change: fixed, with the earlier failure", () => {
     const f = judgeFix(passing, GEN, three(run(t("test_add", "failed", "assert -1 == 5\ntrace"))));
     expect(f.status).toBe("fixed");
-    expect(f.detail).toBe("fails on the code before the change (3 runs) and passes after: the change fixes this " +
-      "(assert -1 == 5)");
+    expect(f.detail).toBe("fails on the code before the change (3 runs) and passes after (assert -1 == 5)");
     expect(f.runs).toEqual(["failed", "failed", "failed"]);
     expect(f.message).toBe("assert -1 == 5\ntrace");
   });
@@ -154,7 +153,7 @@ test("a fix: fixed, unchanged, new code and flaky told apart; reported, and the 
     [id("neg"), "new-code"], [id("zero"), "unchanged"]]);
   expect(r.fixProof![0]).toEqual({ testId: id("add"), project: "main", file: `${G}/test_add.py`, beforeStatus: "fixed",
     beforeRuns: ["failed", "failed", "failed"], beforeDetail: "fails on the code before the change (3 runs) and passes " +
-    "after: the change fixes this (assert -1 == 5)" });
+    "after (assert -1 == 5)" });
   expect(exitCode(r)).toBe(0);
   // one session on the base, the four files run together `runs` times, after the change's own session
   expect(seen).toHaveLength(2);
@@ -168,12 +167,12 @@ test("a fix: fixed, unchanged, new code and flaky told apart; reported, and the 
   expect(ev.find((e) => e.type === "fix_proof.done")!.data.counts).toEqual({ fixed: 1, "new-code": 1, unchanged: 1,
     unknown: 1 });
   const md = readFileSync(join(rdir, "review.md"), "utf8");
-  const section = md.slice(md.indexOf("## The change fixes"), md.indexOf("## Findings"));
-  expect(section.replace(/\s+/g, " ")).toBe("## The change fixes This test fails on the code before the change in " +
-    "every run and passes on the change: the change fixes what it checks. - " +
+  const section = md.slice(md.indexOf("## Fails before the change, passes with it"), md.indexOf("## Findings"));
+  expect(section.replace(/\s+/g, " ")).toBe("## Fails before the change, passes with it This test fails on the code before the change in " +
+    "every run and passes on the change: the change fixes or adds what it checks. - " +
     "`tests/arnx_generated/test_add.py::test_add`: add sums its arguments ");
-  expect(md.indexOf("## The change fixes")).toBeLessThan(md.indexOf("## Findings"));
-  expect(summary(r, "review.md")).toContain("\n1 test proves the change fixes something.\n");
+  expect(md.indexOf("## Fails before the change, passes with it")).toBeLessThan(md.indexOf("## Findings"));
+  expect(summary(r, "review.md")).toContain("\n1 test fails before this change and passes with it.\n");
   const json = JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")) as Record<string, unknown>;
   expect((json.fix_proof as Record<string, unknown>[])[0]).toEqual({ test_id: id("add"), project: "main",
     file: `${G}/test_add.py`, before_status: "fixed", before_runs: ["failed", "failed", "failed"],
@@ -196,7 +195,7 @@ test("fix_proof_max: the first N passing tests by test id; 0 turns it off", asyn
   expect(none.fixProof).toBeUndefined();
   const raw = readFileSync(join(rdir, "review.json"), "utf8");
   expect(raw).not.toContain("fix_proof");
-  expect(readFileSync(join(rdir, "review.md"), "utf8")).not.toContain("The change fixes");
+  expect(readFileSync(join(rdir, "review.md"), "utf8")).not.toContain("Fails before the change, passes with it");
 });
 
 test("before_check = false turns the fix proof off too", async () => {
@@ -340,5 +339,5 @@ test("a test that fakes what only the change calls proves no fix: its failure th
   const add = r.fixProof!.find((x) => x.testId === id("add"))!;
   expect(add.beforeStatus).toBe("unknown");
   expect(add.beforeDetail).toContain("it fakes `helper`, which the change starts using");
-  expect(summary(r, "review.md")).not.toContain("proves the change fixes");
+  expect(summary(r, "review.md")).not.toContain("before this change and pass");
 });

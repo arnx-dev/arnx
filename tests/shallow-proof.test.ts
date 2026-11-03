@@ -70,9 +70,9 @@ test("a test that reads the code as text proves no fix and no regression; the re
     "the code as text: no proof of a regression");
   expect(md).toContain("Not counted as fixes (it reads the code as text): " +
     "`tests/arnx_generated/test_text.py::test_text`. ## Findings");
-  expect(md.slice(md.indexOf("## The change fixes"), md.indexOf("Not counted"))).not.toContain("test_text");
+  expect(md.slice(md.indexOf("## Fails before the change, passes with it"), md.indexOf("Not counted"))).not.toContain("test_text");
   const said = summary(r, "review.md");
-  expect(said).toContain("\n2 tests prove the change fixes something.\n");
+  expect(said).toContain("\n2 tests fail before this change and pass with it.\n");
   expect(said).not.toContain("regression");
   const json = JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")) as { fix_proof: Record<string, unknown>[];
     findings: { before: Record<string, unknown> }[] };
