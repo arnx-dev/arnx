@@ -319,3 +319,19 @@ test("out of time: the fix proof is skipped with reason time and judges nothing"
   expect(r.before).toBeUndefined();
   expect(r.fixProof).toMatchObject({ tests: {}, skipped: "time" });
 });
+
+test("a test that fakes what only the change calls proves no fix: its failure there comes from the fake", async () => {
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return helper(a, b)\n\ndef neg(x):\n    return -x\n");
+  const faked = `${G}/test_add.py`;
+  const source = "import app\n\ndef test_add(monkeypatch):\n    monkeypatch.setattr(app, \"helper\", lambda a, b: a + b)\n" +
+    "    assert app.add(2, 3) == 5\n";
+  const model = new ScriptedAgent([
+    Object.entries({ ...FILES, [faked]: source }).map(([path, content]) => tool("write_file", { path, content })),
+    [text(REPORT)], [text(REPORT)]]);
+  const { review: r } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
+    sessionFactory: sessions() });
+  const add = r.fixProof!.find((x) => x.testId === id("add"))!;
+  expect(add.beforeStatus).toBe("unknown");
+  expect(add.beforeDetail).toContain("it fakes `helper`, which the change starts using");
+  expect(summary(r, "review.md")).not.toContain("proves the change fixes");
+});
