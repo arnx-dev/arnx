@@ -1012,12 +1012,14 @@ class Commands {
     if (r.code !== 0) {
       this.d.out(`Not proven:\n${r.detail}`);
       this.d.out(`${cost} · last attempt: ${REVIEW_FILE} (not proven) · logs: .arnx/run/`);
+      // A review proves the file first, so from a first review the review itself goes on (as `arnx next` says).
+      const goOn = quick ? "arnx review" : "arnx approve";
       if (!(quick && add)) {
-        this.d.out(r.outOfTime ? "Next: arnx approve" : `Next: fix ${REVIEW_FILE}, then arnx approve`);
+        this.d.out(r.outOfTime ? "Next: arnx approve" : `Next: fix the ✗ above, then ${goOn}`);
       }
       const failing = r.outOfTime ? [] : r.projects.flatMap((p) => p.unexpected);
       const kind = r.outOfTime ? "time" : failing.length ? "tests" : "environment";
-      report("fail", 2, json({ approved: false, approval: r.projects, next: ["arnx approve"],
+      report("fail", 2, json({ approved: false, approval: r.projects, next: [r.outOfTime ? "arnx approve" : goOn],
         ...(r.outOfTime ? { stop: "time" as const } : {}), failure: { kind, reason: r.detail, failing } }));
       return finish(r.code, false);
     }
@@ -1120,8 +1122,7 @@ class Commands {
     const r = await this.approveRun(repo, a, undefined, untracked, { warnings: approvalWarnings(file), changes,
       quick: last?.quick ?? [], ...(last ? { unchanged: last } : {}) });
     if (r.code !== 0) {
-      throw new SetupRequired(`${REVIEW_FILE} ${why}, and its suites fail:\n${r.detail}\nNext: fix ${REVIEW_FILE}, ` +
-        `then ${command}`);
+      throw new SetupRequired(`${REVIEW_FILE} ${why}, and its suites fail:\n${r.detail}\nNext: fix the ✗ above, then ${command}`);
     }
     this.sayWorthALook(repo, file, { untracked: untracked ?? untrackedSetting(repo) });
   }

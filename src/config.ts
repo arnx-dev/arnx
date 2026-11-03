@@ -474,6 +474,13 @@ export function projectDigest(f: ReviewFile, name: string): string {
     : { project: spec, services });
 }
 
+/** projectDigest without the project's notes, which no run reads: a note added after a run leaves that run standing. */
+export function runDigest(f: ReviewFile, name: string): string {
+  const raw = f.legacy ? without(f.raw, "notes") : { ...f.raw, projects: { ...(f.raw.projects as Raw),
+    [name]: without((f.raw.projects as Raw)[name] as Raw, "notes") } };
+  return projectDigest({ ...f, raw }, name);
+}
+
 /** Commands that delete, move or overwrite files, at the start of a command (after ;, &&, ||, |, `(`, sudo or xargs,
  * by name or by path: /bin/rm). `pytest -k rm` names no command. */
 const AT_COMMAND = String.raw`(?:^|[;&|(])\s*(?:(?:sudo|xargs|command|env)\s+)*(?:\S*\/)?`;

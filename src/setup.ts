@@ -16,7 +16,7 @@ import type { AdapterId, TestResult } from "./adapters/types";
 import { addToSandbox, type Blanked, describeBlanked, filesAt, hasCommits, snapshot, snapshotDigest, someNames,
   takeSnapshot, type Withheld, workingTreeFiles } from "./change";
 import {
-  loadReviewFile, parseReviewFile, plainReviewYaml, projectDigest, readSecretPins, restDigest, type ReviewConfig,
+  loadReviewFile, parseReviewFile, plainReviewYaml, projectDigest, readSecretPins, restDigest, runDigest, type ReviewConfig,
   reviewConfigPath,
   type ReviewFile, sandboxOnlyOf, sandboxYaml, secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampFile,
 } from "./config";
@@ -274,7 +274,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     let listed = "";
     let listedFiles: string[] = [];
     if (precheck && !targets.length && (cfg.language === "rust" || hasOwnTests(cfg, snap))) {
-      const seen = look(session, snap, cfg, acceptedTestsDir);
+      const seen = look(session, snap, cfg, acceptedTestsDir, baseline);
       const early = seen.early;
       if (early) return [false, early.summary, tailOf(early.output), [], [], early.hints, none] as Out;
       if (quick && seen.sample) {
@@ -487,7 +487,7 @@ export interface ProjectProof { name: string; summary: string; skips: string[]; 
   gap?: string }
 
 /** The whole-suite run of setup that proved a project, on the file and the code it ran with: `digest`, the project's
- * part of review.yaml (projectDigest); `env`, what its suite needs (envDigest); `snapshot`, the code (withSandbox)
+ * part of review.yaml, notes left out (runDigest); `env`, what its suite needs (envDigest); `snapshot`, the code (withSandbox)
  * and whether it held untracked files. Approval right after setup takes it as the project's proof while all of these
  * are unchanged (approveFile's `afterSetup`). `after`: what the run's summary says after its counts (the type check). */
 export interface SetupRun { name: string; digest: string; env: string; snapshot: string; untracked: boolean;
@@ -1313,7 +1313,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const held = state.held.get(name);
       let onlySubset = false;
       // The project's part of the file the run ran with.
-      let ranWith = projectDigest(f, name);
+      let ranWith = runDigest(f, name);
       try {
         // Not when files went into the sandbox since: that run did not have them.
         if (held && held.env === env && held.files === sandboxKey()) {
@@ -1571,7 +1571,6 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         if (unproven.length) problems.push(`not proven yet: ${unproven.join(", ")} (propose runs them once the rest is right)`);
         state.problem = rejectedReason({ changed, overlaps: map.overlaps, unexplained: asked ? map.unexplained : [],
           ownTests, failed: [] });
-        say(`Proposal rejected: ${state.problem}. Retrying...`);
         return `refused:\n${problems.join("\n")}`;
       }
       // The map's paths are checked once, before any project runs: uses entries wider than meant go back as hints,
@@ -1591,18 +1590,14 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       }
       // The rest is right: propose runs each project changed since it was proven, instead of a round trip per project.
       const failed: string[] = [];
-      const failedNames: string[] = [];
       for (const name of unproven) {
         const r = await tryProject({ yaml: args.yaml, project: name });
         if (!r.startsWith(`the suite of ${name} runs:`)) {
           failed.push(r);
-          failedNames.push(name);
         }
       }
       if (failed.length) {
-        const why = rejectedReason({ changed: [], overlaps: [], unexplained: [], ownTests: [], failed: failedNames });
         // The suite's own failure (state.problem, state.failing) stays what a failed setup reports.
-        say(`Proposal rejected: ${why}. Retrying...`);
         return `refused: propose ran the projects changed since they were proven, and these do not run:\n` +
           failed.join("\n\n");
       }
@@ -1887,7 +1882,7 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
       }
       const prior = o.afterSetup?.find((r) => r.name === cfg.name && r.snapshot === code && r.untracked === untracked &&
         r.env === envDigest(cfg));
-      const stands = prior && prior.digest === projectDigest(f, cfg.name)
+      const stands = prior && prior.digest === runDigest(f, cfg.name)
         ? setupRunStands(prior, cfg, mine, trusted, accepted) : null;
       if (stands) rmSync(join(repo, output), { force: true });
       const [ok, summary, , skips, , , counts] = stands ?? await runSuite(cfg, snap, log, {

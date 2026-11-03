@@ -77,7 +77,7 @@ const refusedThenRight = () => new ScriptedAgent([
   [text("One project.")],
 ]);
 
-test("interactive: one reading milestone, the build in the suite line, a short rejection, the files line, proven",
+test("interactive: one reading milestone, the build in the suite line, no rejection, the files line, proven",
   async () => {
   const repo = await shop();
   const asked: string[] = [];
@@ -91,14 +91,13 @@ test("interactive: one reading milestone, the build in the suite line, a short r
     "reading the repository",
     "shop: building the test image, running its suite (try 1)",
     "shop: ✓ 1 passed",
-    "Proposal rejected: 2 files unaccounted for (pricing.py, tests/test_pricing.py). Retrying...",
     "shop: running its suite (try 2)",
     "shop: ✓ 1 passed",
     "shop: ✓ setup's run stands: 1 passed",
   ]);
   // One clock from setup's start to the proof's last line.
   const t = stamps(cli.err);
-  expect(t).toHaveLength(7);
+  expect(t).toHaveLength(6);
   expect(t.every((s, i) => i === 0 || s > t[i - 1]!)).toBe(true);
   expect(cli.stdout).toContain([
     "  project  runs in  with                  existing suite",

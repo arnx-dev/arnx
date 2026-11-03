@@ -100,11 +100,22 @@ test("a file edited after setup's run proves again, and a test it breaks is not 
 test("a project whose part of review.yaml changed after setup's run runs again", async () => {
   const repo = gitRepo(tmp());
   const r = await setUp(repo, whole([A]));
-  writeFileSync(reviewConfigPath(repo), `${r.yamlText!.trimEnd()}\nnotes: [edited after setup]\n`);
+  writeFileSync(reviewConfigPath(repo), `${r.yamlText!.trimEnd()}\nknown_failing: [tests/test_b.py]\n` +
+    "notes: [tests/test_b.py needs a database]\n");
   const sessions: FakeSession[] = [];
   const [ok, , suites] = await approveFile(repo, { by: "Dev", at: "2026-10-28", afterSetup: r.runs,
     sessionFactory: fakeFactory(whole([A]), sessions) });
   expect([ok, sessions.length, suites[0]!.reused]).toEqual([true, 1, undefined]);
+});
+
+test("a note added after setup's run leaves that run standing: no run reads the notes", async () => {
+  const repo = gitRepo(tmp());
+  const r = await setUp(repo, whole([A]));
+  writeFileSync(reviewConfigPath(repo), `${r.yamlText!.trimEnd()}\nnotes: [edited after setup]\n`);
+  const sessions: FakeSession[] = [];
+  const [ok, , suites] = await approveFile(repo, { by: "Dev", at: "2026-10-28", afterSetup: r.runs,
+    sessionFactory: fakeFactory(whole([A]), sessions) });
+  expect([ok, sessions.length, suites[0]!.reused]).toEqual([true, 0, true]);
 });
 
 test("the run kept is the whole suite's, not the rerun of the files that failed", async () => {

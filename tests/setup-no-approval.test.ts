@@ -166,7 +166,7 @@ test("a re-proof that fails stops the review before any model call, naming the f
   expect(await cli.run("review", "--quiet")).toBe(3);
   expect(cli.stderr).toContain("arnx: .arnx/review.yaml changed since its proof, and its suites fail:\n✗ ");
   expect(cli.stderr).toContain("tests/test_pricing.py::test_total");
-  expect(cli.stderr).toEndWith("Next: fix .arnx/review.yaml, then arnx review");
+  expect(cli.stderr).toEndWith("Next: fix the ✗ above, then arnx review");
   expect(proven(repo)).toBe(false);
 });
 

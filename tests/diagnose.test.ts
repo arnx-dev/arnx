@@ -80,6 +80,15 @@ test("a variable env sets is the cause when the error line quotes its value as a
     .toContain("variable `DB_HOST`, which env sets");
 });
 
+test("two variables env sets to the value the error line quotes: both are named, not the first", () => {
+  const cfg = parseReviewConfig(CFG.replace("env: {MODE: test}", "env: {MODE: test, CACHE_HOST: localhost, DB_URL: localhost}"));
+  const line = "pkg.errors.ConfigurationError: Invalid URI host: localhost is not a valid hostname";
+  expect(classify(line, cfg, tmp())).toMatchObject({ kind: "env-value", detail: "CACHE_HOST or DB_URL" });
+  expect(describeHints(diagnose([{ testId: "tests/test_db.py::test_find", name: "test_find",
+    fileAttr: "tests/test_db.py", outcome: "failed", message: line } as TestResult], cfg, tmp()), cfg))
+    .toContain("variable `CACHE_HOST` or `DB_URL`, which env sets");
+});
+
 test("a value arnx generates for env counts as the value env sets", () => {
   const cfg = parseReviewConfig(CFG.replace("env: {MODE: test}", "env: {MODE: test, SIGNING_KEY: arnx:generated}"));
   expect(classify(`ValueError: key ${envValue("arnx:generated")} must be 32 bytes`, cfg, tmp()))

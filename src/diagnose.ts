@@ -109,8 +109,10 @@ export function classify(message: string, cfg: ReviewConfig, snap: string): Omit
   const line = errorLine(message);
   if (/^KeyError\b/.test(line)) return null;
   const keys = Object.keys(cfg.env);
+  // Several variables can hold the value the line quotes, and the line does not say which: all of them are named.
   const name = keys.find((k) => ENV_NAME.test(k) && word(k).test(line)) ??
-    keys.find((k) => [cfg.env[k]!, envValue(cfg.env[k]!)].some((v) => ENV_VALUE.test(v) && word(v).test(line)));
+    keys.filter((k) => [cfg.env[k]!, envValue(cfg.env[k]!)].some((v) => ENV_VALUE.test(v) && word(v).test(line)))
+      .join(" or ");
   if (name) return { kind: "env-value", detail: name, evidence: line };
   return null;
 }
@@ -249,7 +251,7 @@ function sentence(h: Hint, cfg: ReviewConfig): string {
       return `variable \`${h.detail}\` is read without a default and is not set: give it a test value in env, ` +
         "unless the code needs a real one from outside";
     case "env-value":
-      return `the tests fail on variable \`${h.detail}\`, which env sets: env's value is not one the code accepts ` +
+      return `the tests fail on variable ${h.detail.split(" or ").map((v) => `\`${v}\``).join(" or ")}, which env sets: env's value is not one the code accepts ` +
         "(its format or length), or it overrides a default the tests set themselves (conftest, a setup file). Give " +
         "it a valid test value, or take it out of env";
     case "unresolved-host":
