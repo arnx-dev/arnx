@@ -415,8 +415,10 @@ const where = (b: Baked) => [...new Set(b.copies.map((c) => c.root))].join(", ")
 export const rebuildText = (cfg: ReviewConfig, b: Baked) =>
   `${cfg.name}: the test image holds an older copy of the code (${where(b)}); using one made from this code`;
 
-/** Why a run on code the image's copy does not match is refused (one short line: the before/after check quotes it in
- * each finding). */
-export const bakedError = (cfg: ReviewConfig, b: Baked) => new ArnxError(`${cfg.name}: the tests run the image's own ` +
+/** A run refused because the image's copy is not the code that was copied in after the session started. */
+export class CopyDiffers extends ArnxError {}
+
+/** Why a run on code the image's copy does not match is refused (one short line). */
+export const bakedError = (cfg: ReviewConfig, b: Baked) => new CopyDiffers(`${cfg.name}: the tests run the image's own ` +
   `copy of the code at ${where(b)}, which differs from this code in ${b.differ.length} ` +
   `file${b.differ.length === 1 ? "" : "s"}`);

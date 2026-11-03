@@ -16,7 +16,7 @@ import type { AdapterId, TestResult } from "./adapters/types";
 import { addToSandbox, type Blanked, describeBlanked, filesAt, hasCommits, snapshot, snapshotDigest, someNames,
   takeSnapshot, type Withheld, workingTreeFiles } from "./change";
 import {
-  loadReviewFile, parseReviewFile, plainReviewYaml, projectDigest, readSecretPins, restDigest, type ReviewConfig,
+  loadReviewFile, parseReviewFile, plainReviewYaml, projectDigest, readSecretPins, restDigest, runDigest, type ReviewConfig,
   reviewConfigPath,
   type ReviewFile, sandboxOnlyOf, sandboxYaml, secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampFile,
 } from "./config";
@@ -274,7 +274,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     let listed = "";
     let listedFiles: string[] = [];
     if (precheck && !targets.length && (cfg.language === "rust" || hasOwnTests(cfg, snap))) {
-      const seen = look(session, snap, cfg, acceptedTestsDir);
+      const seen = look(session, snap, cfg, acceptedTestsDir, baseline);
       const early = seen.early;
       if (early) return [false, early.summary, tailOf(early.output), [], [], early.hints, none] as Out;
       if (quick && seen.sample) {
@@ -305,7 +305,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
         [], "", none] as Out;
     }
     // A project with no tests of its own has no suite to run: arnx's one-line test, which reviews depend on anyway,
-    // proves the environment instead (dexdash's setup took 16 tries and wrote a placeholder test into test_command).
+    // proves the environment instead.
     if (!targets.length && !all?.length && cfg.language !== "rust" && !hasOwnTests(cfg, snap)) {
       return noOwnTests(session, snap, cfg, all === null, tailOf);
     }
@@ -487,7 +487,7 @@ export interface ProjectProof { name: string; summary: string; skips: string[]; 
   gap?: string }
 
 /** The whole-suite run of setup that proved a project, on the file and the code it ran with: `digest`, the project's
- * part of review.yaml (projectDigest); `env`, what its suite needs (envDigest); `snapshot`, the code (withSandbox)
+ * part of review.yaml, notes left out (runDigest); `env`, what its suite needs (envDigest); `snapshot`, the code (withSandbox)
  * and whether it held untracked files. Approval right after setup takes it as the project's proof while all of these
  * are unchanged (approveFile's `afterSetup`). `after`: what the run's summary says after its counts (the type check). */
 export interface SetupRun { name: string; digest: string; env: string; snapshot: string; untracked: boolean;
@@ -1054,7 +1054,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
   const keep = new Map(existing ? existing.projects.filter((p) => p.name !== o.project)
     .map((p) => [p.name, projectDigest(existing, p.name)] as const) : []);
   const state = { accepted: null as string | null, lastTried: null as string | null, summary: "no project tried",
-    proven: new Map<string, string>(), attempts: 0, proofs: new Map<string, ProjectProof>(),
+    proven: new Map<string, string>(), attempts: 0, tries: new Map<string, number>(), proofs: new Map<string, ProjectProof>(),
     final: null as ReviewFile | null, lastFailing: new Map<string, { env: string; files: string[] }>(),
     failing: [] as string[], failingProject: null as string | null, problem: "", needed: null as NeededFile[] | null,
     usesChecked: false, pathsChecked: false, pathHints: [] as UsesHint[],
@@ -1250,6 +1250,12 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           `it: set up only ${[...touched(f)].join(", ") || "the projects that own a changed file"}. propose takes ` +
           `${name} out of the file and lists /${cfg.workdir}/ under uncovered as "${NOT_SET_UP}".`;
       }
+      // Answers of nothing make tests pass or fail for no reason, and a before/after check then proves nothing.
+      if (cfg.install.some((c) => /\bMagicMock\b/.test(c))) {
+        return "refused: install replaces code with MagicMock, which answers everything with nothing, so tests pass or " +
+          "fail for no reason. Use a stand-in that behaves like the service (a library made for it), or leave those " +
+          "tests failing: they are recorded.";
+      }
       // A project whose files say its tests need MANY_SERVICES or more is not tried while it lists that many.
       const facts = detection.facts?.projects.find((p) => p.root === cfg.workdir && p.language === cfg.language);
       const many = facts && cfg.services.length >= MANY_SERVICES ? manyServices(facts) : null;
@@ -1300,7 +1306,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       state.lastTry.set(name, { cfg, env: envDigest(cfg),
         image: before?.env === envDigest(cfg) ? before.image : envTag(keyOf(cfg)) });
       // One line as the run starts: the image build, when there is one, is said in the same line.
-      announce = { name, n };
+      // Only a try that runs counts: a refused one above leaves no gap in what the developer sees.
+      const tried = (state.tries.get(name) ?? 0) + 1;
+      state.tries.set(name, tried);
+      announce = { name, n: tried };
       let ok: boolean, summary: string, tail: string, skips: string[], failing: string[], hints: string,
         counts: SuiteCounts;
       // A retry with the same environment runs only the files that failed last time (minus any now set aside);
@@ -1313,7 +1322,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const held = state.held.get(name);
       let onlySubset = false;
       // The project's part of the file the run ran with.
-      let ranWith = projectDigest(f, name);
+      let ranWith = runDigest(f, name);
       try {
         // Not when files went into the sandbox since: that run did not have them.
         if (held && held.env === env && held.files === sandboxKey()) {
@@ -1439,7 +1448,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         "for (a service and env) unless it needs the internet." : "";
       if (!ok) {
         say(`${name}: ✗ does not run yet: ${gist(summary)}`);
-        if (uiApp) return webUi(gist(summary)); // web UI rule
+        // A UI app's one try is for a suite that will not run in a sandbox: one whose tests pass goes on like any other.
+        if (uiApp && !counts.passed) return webUi(gist(summary)); // web UI rule
         return `the suite of ${name} does not run yet: ${summary}${skipped}${hints ? `\n${hints}` : ""}\n${tail}`;
       }
       say(`${name}: ✓ ${summary}${counts.failed.length ? ` · ${counts.failed.length} failing today, recorded` : ""}` +
@@ -1571,7 +1581,6 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         if (unproven.length) problems.push(`not proven yet: ${unproven.join(", ")} (propose runs them once the rest is right)`);
         state.problem = rejectedReason({ changed, overlaps: map.overlaps, unexplained: asked ? map.unexplained : [],
           ownTests, failed: [] });
-        say(`Proposal rejected: ${state.problem}. Retrying...`);
         return `refused:\n${problems.join("\n")}`;
       }
       // The map's paths are checked once, before any project runs: uses entries wider than meant go back as hints,
@@ -1591,18 +1600,14 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       }
       // The rest is right: propose runs each project changed since it was proven, instead of a round trip per project.
       const failed: string[] = [];
-      const failedNames: string[] = [];
       for (const name of unproven) {
         const r = await tryProject({ yaml: args.yaml, project: name });
         if (!r.startsWith(`the suite of ${name} runs:`)) {
           failed.push(r);
-          failedNames.push(name);
         }
       }
       if (failed.length) {
-        const why = rejectedReason({ changed: [], overlaps: [], unexplained: [], ownTests: [], failed: failedNames });
         // The suite's own failure (state.problem, state.failing) stays what a failed setup reports.
-        say(`Proposal rejected: ${why}. Retrying...`);
         return `refused: propose ran the projects changed since they were proven, and these do not run:\n` +
           failed.join("\n\n");
       }
@@ -1887,7 +1892,7 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
       }
       const prior = o.afterSetup?.find((r) => r.name === cfg.name && r.snapshot === code && r.untracked === untracked &&
         r.env === envDigest(cfg));
-      const stands = prior && prior.digest === projectDigest(f, cfg.name)
+      const stands = prior && prior.digest === runDigest(f, cfg.name)
         ? setupRunStands(prior, cfg, mine, trusted, accepted) : null;
       if (stands) rmSync(join(repo, output), { force: true });
       const [ok, summary, , skips, , , counts] = stands ?? await runSuite(cfg, snap, log, {

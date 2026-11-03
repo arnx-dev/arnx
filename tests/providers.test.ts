@@ -268,5 +268,5 @@ test("the harness's keys decide its roles; another provider's key changes nothin
   expect(await cli.run("init")).toBe(0);
   const s = loadSettings(repo);
   expect([refString(s.challenger), s.secondHunter, Object.keys(s.providers ?? {})])
-    .toEqual(["river:zai-org/GLM-5.3-Flash", undefined, ["zai"]]); // Z.ai's table is written (checked), unused
+    .toEqual(["anthropic:claude-sonnet-5-5", undefined, ["zai"]]); // Z.ai's table is written (checked), unused
 });

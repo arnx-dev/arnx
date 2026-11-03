@@ -31,17 +31,17 @@ test("a Rust crate root counts as tested by any generated test", async () => {
 
 test("an index file counts as referred to when a test imports a relative path that resolves to it", async () => {
   const { typescript } = await import("../src/adapters/typescript");
-  const owned = ["solana-parser/index.ts"];
-  const at = (body: string) => ({ "solana-parser/__tests__/arnx/app.test.ts": body });
+  const owned = ["parser/index.ts"];
+  const at = (body: string) => ({ "parser/__tests__/arnx/app.test.ts": body });
   for (const body of ["const { app } = require('../../index');", 'import { app } from "../../index.js";',
     "import { app } from '../../index.ts';", 'const m = require("../..");', 'import x from "../../";',
     "const m = await import('../../index.mjs');"]) {
     expect(untestedFiles(owned, at(body), typescript)).toEqual([]);
   }
-  expect(untestedFiles(owned, { "solana-parser/app.test.ts": 'import { app } from "./";' }, typescript)).toEqual([]);
-  expect(untestedFiles(owned, { "solana-parser/__tests__/app.test.ts": "require('../index')" }, typescript)).toEqual([]);
+  expect(untestedFiles(owned, { "parser/app.test.ts": 'import { app } from "./";' }, typescript)).toEqual([]);
+  expect(untestedFiles(owned, { "parser/__tests__/app.test.ts": "require('../index')" }, typescript)).toEqual([]);
   // The directory's name still counts; a mention of `index` elsewhere, or a path that resolves elsewhere, does not.
-  expect(untestedFiles(owned, at("// covers solana-parser"), typescript)).toEqual([]);
+  expect(untestedFiles(owned, at("// covers parser"), typescript)).toEqual([]);
   for (const body of ["const { app } = require('../index');", "import x from '../../other/index.js';",
     "expect(list.indexOf(1)).toBe(0); // index", "const index = require('./index');", "fetch('../../index.html')"]) {
     expect(untestedFiles(owned, at(body), typescript)).toEqual(owned);
@@ -66,11 +66,11 @@ test("a package __init__ counts when a test imports it relatively; a Rust mod.rs
 test("an index file holding SQL counts for the database check when a connecting test imports it relatively", async () => {
   const { typescript } = await import("../src/adapters/typescript");
   const read = () => "const Q = `SELECT a FROM t`;\n";
-  const owned = ["solana-parser/index.ts"];
+  const owned = ["parser/index.ts"];
   const connects = "const db = process.env.DB;\n";
-  expect(dbUntested(owned, read, { "solana-parser/__tests__/a.test.ts": connects + "require('../index')" },
+  expect(dbUntested(owned, read, { "parser/__tests__/a.test.ts": connects + "require('../index')" },
     typescript, ["DB"])).toEqual([]);
   // The import must be in a test that connects: another test importing it does not count.
-  expect(dbUntested(owned, read, { "solana-parser/__tests__/a.test.ts": connects,
-    "solana-parser/__tests__/b.test.ts": "require('../index')" }, typescript, ["DB"])).toEqual(owned);
+  expect(dbUntested(owned, read, { "parser/__tests__/a.test.ts": connects,
+    "parser/__tests__/b.test.ts": "require('../index')" }, typescript, ["DB"])).toEqual(owned);
 });

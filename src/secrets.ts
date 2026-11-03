@@ -16,8 +16,38 @@ const CONTENT = new RegExp(
 const ENV_NAME = /KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE/i;
 /** What every CONTENT match holds: a fast test first, since CONTENT's look-behind is slow on a large tree. */
 const QUICK = /-----BEGIN|AKIA|sk-|gh[pousr]_|xox[abpr]-/;
-/** Every CONTENT match in `text`. */
-const contentMatches = (text: string) => QUICK.test(text) ? [...text.matchAll(new RegExp(CONTENT, "g"))] : [];
+/** A password written into an address, `scheme://user:password@host`: the groups are the password and the host. A
+ * template (`{password}`, `${X}`, `<password>`) holds characters a password here may not, and an example's `u:p` is
+ * too short for one. */
+const ADDRESS = /:\/\/[^\s:/@"'`]{0,128}:([^\s/@"'`<>{}$*\\()[\]]{4,256})@([A-Za-z0-9._-]*)/g;
+/** What a doc or a form writes in place of a password. */
+const NO_PASSWORD = /^(?:password|passwd|pass|pwd|secret|changeme|change_me|example|test|dummy|fake|none|null|x+|\.+)$|%[sd]/i;
+/** A host no real password is for: a machine's own name, a service's one word, the names kept for examples and tests.
+ * A template host (none read) may be any. */
+const OWN_HOST = /^(?:[^.]+|127\..*|0\.0\.0\.0)$|(?:^|\.)(?:localhost|local|test|invalid|example|example\.(?:com|net|org))$/i;
+
+/** A match of a secret in a text: the string, and where it starts. */
+interface Hit { 0: string; index: number }
+
+/** Each password in an address in `text`, with the @ after it. On a host of one's own (`postgres:postgres@localhost`) only
+ * one that looks random counts: tests connect with the others, and a stand-in would break them. */
+function addressPasswords(text: string): Hit[] {
+  if (!text.includes("://")) return [];
+  const out: Hit[] = [];
+  for (const m of text.matchAll(ADDRESS)) {
+    const [whole, password, host] = m as unknown as [string, string, string];
+    if (NO_PASSWORD.test(password) || (host && OWN_HOST.test(host) && !secretValue(password, "weak"))) continue;
+    // With its @: a word-like password changes only here, and the host stays (a test may compare it).
+    const value = `${password}@`;
+    out.push({ 0: value, index: m.index + whole.length - host.length - value.length });
+  }
+  return out;
+}
+
+/** Every secret-shaped string in `text`, first to last: what CONTENT matches, and passwords in addresses. */
+const contentMatches = (text: string): Hit[] => [
+  ...(QUICK.test(text) ? [...text.matchAll(new RegExp(CONTENT, "g"))] as Hit[] : []), ...addressPasswords(text)]
+  .sort((a, b) => a.index - b.index);
 
 /** fnmatch.fnmatchcase for the simple globs above: * and ? only. */
 export function globRegex(glob: string): RegExp {
@@ -33,7 +63,7 @@ export function isSecretPath(rel: string): boolean {
 }
 
 export function hasSecretContent(text: string): boolean {
-  return CONTENT.test(text);
+  return CONTENT.test(text) || addressPasswords(text).length > 0;
 }
 
 /** A file the user allowed although it holds key-shaped text (a detector's fixtures): `matches` pins each such
@@ -44,18 +74,19 @@ const pinOf = (s: string) => createHash("sha256").update(s).digest("hex").slice(
 
 /** The pins of every key-shaped string in `text`, unique and sorted. */
 export function secretPins(text: string): string[] {
-  return [...new Set([...text.matchAll(new RegExp(CONTENT, "g"))].map((m) => pinOf(m[0])))].sort();
+  return [...new Set(contentMatches(text).map((m) => pinOf(m[0])))].sort();
 }
 
 /** Names a match without repeating it: its well-known prefix. */
 function label(match: string): string {
-  return match.startsWith("-----") ? "a private key"
-    : `${/^(sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|AKIA|gh[pousr]_|xox[abpr]-)/.exec(match)![0]}…`;
+  if (match.startsWith("-----")) return "a private key";
+  const prefix = /^(sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|AKIA|gh[pousr]_|xox[abpr]-)/.exec(match)?.[0];
+  return prefix ? `${prefix}…` : "a password in an address";
 }
 
 /** The first key-shaped string in `text` that `pins` does not allow, with its line, or null. */
 export function firstUnpinned(text: string, pins: readonly string[]): { line: number; label: string } | null {
-  for (const m of text.matchAll(new RegExp(CONTENT, "g"))) {
+  for (const m of contentMatches(text)) {
     if (pins.includes(pinOf(m[0]))) continue;
     return { line: text.slice(0, m.index).split("\n").length, label: label(m[0]) };
   }
@@ -150,10 +181,10 @@ function fake(original: string, made: Map<string, string>): string {
   const known = made.get(original);
   if (known !== undefined) return known;
   // A token's own prefix stays too (`whsec_`, `sk_test_`): code may check it. So does a number literal's (`0x`, `0b`,
-  // `0o`), whose digits stay in its base: the code around it still parses.
+  // `0o`), whose digits stay in its base: the code around it still parses. A password in an address keeps nothing.
   const radix = /^0([xXbBoO])(?=[0-9a-fA-F_]+n?$)/.exec(original);
   const prefix = radix?.[0] ?? PREFIX.exec(original)?.[0] ??
-    (/^(?:[a-z]{2,12}[_-]){1,3}(?=[^]{6})/.exec(original)?.[0] ?? "");
+    (original.includes("@") ? "" : /^(?:[a-z]{2,12}[_-]){1,3}(?=[^]{6})/.exec(original)?.[0] ?? "");
   const base = { b: 2, o: 8 }[radix?.[1]!.toLowerCase() ?? ""] ?? 10;
   const hex = /^[0-9a-fA-F-]+$/.test(original.slice(prefix.length));
   const seed = scryptSync(original, "arnx stand-in", 32, { N: 1024 });
@@ -273,7 +304,11 @@ export function suspects(path: string, text: string, pins: readonly string[], wh
   };
   const allowed = (s: string) => pins.includes(pinOf(s));
   for (const m of contentMatches(text)) {
-    if (!m[0].startsWith("-----") && !allowed(m[0])) add(m[0], "key-shaped");
+    if (m[0].startsWith("-----") || allowed(m[0])) continue;
+    const password = m[0].endsWith("@") ? m[0].slice(0, -1) : null;
+    add(m[0], password === null ? "key-shaped" : "address-password");
+    // Alone it goes too, unless it reads like a name: a value replaced everywhere must never be a name in code.
+    if (password !== null && secretValue(password, "strong")) add(password, "address-password");
   }
   const named = (name: string, raw: string) => {
     const strength = secretName(name);
@@ -301,8 +336,9 @@ export function standInsFor(values: Iterable<string>, made = new Map<string, str
     const key = here.join("\0");
     let matcher = matchers.get(key);
     if (!matcher) {
-      const escaped = here.map((v) => v.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&"));
-      matcher = new RegExp(`(?<![A-Za-z0-9+/])(?:${escaped.join("|")})(?![A-Za-z0-9])`, "g");
+      // A password with its @ has a host right after it; anything else ends where a word would.
+      const escaped = here.map((v) => v.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&") + (v.endsWith("@") ? "" : "(?![A-Za-z0-9])"));
+      matcher = new RegExp(`(?<![A-Za-z0-9+/])(?:${escaped.join("|")})`, "g");
       matchers.set(key, matcher);
     }
     let count = 0;
@@ -324,12 +360,12 @@ export function fakeAll(text: string, values: Iterable<string>, pins: readonly s
 /** A private key whose body may be in `text` (beside its header): no stand-in can keep it out. */
 export function privateKeyBody(text: string, pins: readonly string[]): boolean {
   const all = contentMatches(text);
-  const header = (m: RegExpMatchArray) => m[0].startsWith("-----");
+  const header = (m: Hit) => m[0].startsWith("-----");
   if (!all.some((m) => header(m) && !pins.includes(pinOf(m[0])))) return false;
   // Key-shaped strings aside, any run like a key body may be the private key's.
   let rest = text;
   for (const m of all.filter((x) => !header(x)).reverse()) {
-    rest = rest.slice(0, m.index) + " " + rest.slice(m.index! + m[0].length);
+    rest = rest.slice(0, m.index) + " " + rest.slice(m.index + m[0].length);
   }
   return hasKeyBody(rest);
 }
@@ -346,7 +382,7 @@ export function standIn(text: string, pins: readonly string[], path = ""): { tex
 export function secretHits(text: string): { line: number; label: string }[] {
   const out: { line: number; label: string }[] = [];
   let line = 1, at = 0;
-  for (const m of text.matchAll(new RegExp(CONTENT, "g"))) {
+  for (const m of contentMatches(text)) {
     for (; at < m.index; at++) if (text.charCodeAt(at) === 10) line++;
     out.push({ line, label: label(m[0]) });
   }

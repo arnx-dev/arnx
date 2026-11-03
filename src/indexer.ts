@@ -12,7 +12,7 @@ import { BUILD_TIMEOUT, DEFAULT_LIMITS, docker, dockerAsync, ensureEnv, requireD
   from "./sandbox";
 import { randomHex } from "./util";
 
-/** Seconds an index may take (Phase 0, 2026-10-25: 7–46 s per project). */
+/** Seconds an index may take (7–46 s per project when measured). */
 export const INDEX_TIMEOUT = 180;
 /** Part of the layer's image tag: a new indexer version builds a new layer. */
 export const LAYER_VERSION = "scip1";

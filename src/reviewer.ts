@@ -7,7 +7,7 @@ import { join, posix } from "node:path";
 import { adapterFor } from "./adapters";
 import { isPreExisting } from "./before";
 import type { Billed, Brain, Totals } from "./brain";
-import { inPool } from "./challenge";
+import { inPool, oneVerdict, sameTest } from "./challenge";
 import { shallowKind } from "./shallow";
 import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, withRole } from "./events";
 import { added, type Change, describe, describeBlanked, EMPTY_TREE, filesAt, removed, resolveChange, sliceDiff,
@@ -385,7 +385,7 @@ export async function runReview(repo: string, o: { settings: Settings;
         untracked: !!change.withUntracked,
         // The code before the change: its base (HEAD for uncommitted work); a first commit has none, nor has a
         // repository with no commits yet. Without one, or for a change to tests or docs only, there is no fix proof.
-        ...(s.beforeCheck ? { before: { base: change.base === EMPTY_TREE ? null : change.base,
+        ...(s.beforeCheck ? { before: { base: change.base === EMPTY_TREE ? null : change.base, diff: change.diff,
           fixProofMax: change.base !== EMPTY_TREE && changedSources(scope.owned, adapterFor(cfg)).length
             ? s.fixProofMax : 0 } } : {}),
         // The project's type check, once; its errors are compared with the code before the change when the
@@ -563,6 +563,16 @@ export async function runReview(repo: string, o: { settings: Settings;
     for (const k of Object.keys(verdicts)) if (redone.has(k.split("::")[0]!)) delete verdicts[k];
     const priorUses: ModelUse[] = [];
     let shown = 0;
+    const justJudged = new Set<string>(), revealed = new Set<string>();
+    // Shown as it is proven: its test failed on every run, not before the change, and the second opinion agrees.
+    // A suspect is proven by just this (adjudicate).
+    const reveal = (f: Finding) => {
+      if (f.verdict !== "confirmed" || f.dependsOn || !justJudged.has(f.id) || revealed.has(f.id)) return;
+      revealed.add(f.id);
+      shown++;
+      o.progress?.(`✓ proven: ${clip(f.explanation || firstLine(f.message), 140)} (${f.id}, failing test ` +
+        `${f.file ?? f.testId})`);
+    };
     const j = await brain.judge(challenged, questions, diffs, { diff: change.diff, sources,
       maxQuestions: s.maxQuestions, budgetLeft: left, trace, progress: o.progress, questionProjects,
       // Questions that ask the same thing became one: what referred to them is renumbered.
@@ -600,14 +610,16 @@ export async function runReview(repo: string, o: { settings: Settings;
         verdicts[`${f.project}::${f.testId}`] = { verdict: f.verdict, reason: f.reason, dependsOn: f.dependsOn ?? null,
           judge: f.judge ?? null, model: label ? `${label}/challenge` : f.judge ?? challengerRef, cost };
         writeFileSync(verdictsFile, JSON.stringify(verdicts) + "\n");
-        // Shown as it is proven: its test failed on every run, not before the change, and the second opinion agrees.
-        // A suspect is proven by just this (adjudicate), so nothing shown here is taken back.
-        if (f.verdict === "confirmed" && !f.dependsOn) {
-          shown++;
-          o.progress?.(`✓ proven: ${clip(f.explanation || firstLine(f.message), 140)} (${f.id}, failing test ` +
-            `${f.file ?? f.testId})`);
-        }
+        justJudged.add(f.id);
+        // A test's cases get one verdict, so a case waits for the others: nothing shown here is taken back.
+        const cases = challenged.filter((x) => sameTest(x) === sameTest(f));
+        if (cases.some((x) => x.verdict === null)) return;
+        oneVerdict(cases);
+        cases.forEach(reveal);
       } });
+    // Cases whose others got no verdict waited until now.
+    oneVerdict(challenged);
+    challenged.forEach(reveal);
     const [groups, judged] = [j.groups, j.uses];
     const second = huntSecond;
     adjudicate(suspects, findings);
@@ -702,9 +714,11 @@ export function checkedLine(sus: SuspectOutcome[], shown = 0): string {
   const proven = n("proven", "same cause");
   const answer = n("pending answer");
   const before = n("pre-existing");
-  const dropped = sus.length - proven - answer - before;
+  const disputed = n("disputed");
+  const dropped = sus.length - proven - answer - before - disputed;
   // One thing checked can prove more than one issue: the count matches the "✓ proven" lines shown.
   const issues = shown > proven ? ` (${shown} issues)` : "";
   return [`Checked ${sus.length}: ${proven} proven${issues}`, ...answer ? [`${answer} need${answer === 1 ? "s" : ""} your answer`]
-    : [], ...before ? [`${before} failing before this change too`] : [], `${dropped} dropped`].join(", ");
+    : [], ...before ? [`${before} failing before this change too`] : [], ...disputed ? [`${disputed} disputed`] : [],
+    ...dropped ? [`${dropped} dropped`] : []].join(", ");
 }

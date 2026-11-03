@@ -115,11 +115,20 @@ test("with every key, the defaults are the harness, role by role (arnx cloud bui
   }
 });
 
-test("a role whose key is missing falls back: Claude for the second opinion, no second hunter, no fallback", () => {
+test("a role whose key is missing falls back: no second hunter and no fallback without OpenAI's key", () => {
   const only = defaultSettings({ ANTHROPIC_API_KEY: "a" });
   expect([refString(only.challenger), only.secondHunter, only.challengerFallback])
     .toEqual(["anthropic:claude-sonnet-5-5", undefined, undefined]);
   const openai = defaultSettings({ ANTHROPIC_API_KEY: "a", OPENAI_API_KEY: "o" });
-  expect([refString(openai.challenger), refString(openai.secondHunter!), openai.challengerFallback])
-    .toEqual(["anthropic:claude-sonnet-5-5", "openai:gpt-6.1-sol", undefined]);
+  expect([refString(openai.challenger), refString(openai.secondHunter!), refString(openai.challengerFallback!)])
+    .toEqual(["anthropic:claude-sonnet-5-5", "openai:gpt-6.1-sol", "openai:gpt-6.1-sol"]);
+});
+
+test("the second opinion is Sonnet, with OpenAI's model behind it where its key is set", async () => {
+  const { HARNESS, defaultSettings } = await import("../src/settings");
+  expect(HARNESS.challenger).toBe("anthropic:claude-sonnet-5-5");
+  const all = defaultSettings({ ANTHROPIC_API_KEY: "a", OPENAI_API_KEY: "o", RIVER_API_KEY: "r" });
+  expect(refString(all.challenger)).toBe("anthropic:claude-sonnet-5-5");
+  expect(refString(all.challengerFallback!)).toBe(HARNESS.challengerFallback);
+  expect(defaultSettings({ ANTHROPIC_API_KEY: "a" }).challengerFallback).toBeUndefined();
 });

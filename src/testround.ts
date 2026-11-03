@@ -8,10 +8,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { type AgentResult, Workspace } from "./agent";
 import { adapterFor } from "./adapters";
-import { bakedError, bakedIn, bakedKey, type BakedCopy, copyOnly, type CopyOnly, copyStopText, rebuildText }
+import { bakedError, bakedIn, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
   from "./baked";
 import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
-  fixText, judgeBefore, judgeFix, notChecked, SKIP_REASONS, textBefore, textFix } from "./before";
+  fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, notChecked, SKIP_REASONS, textBefore, textFix } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
 import { snapshot, withSandboxFiles } from "./change";
 import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
@@ -265,9 +265,10 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
    * yet, and which hold SQL that no test connecting to the database names. */
   coverage?: string[];
   /** Run the tests that failed in every run on the code before the change: `base` is that commit (null: the change
-   * has none); `deadline` (performance.now() ms) is when the review is out of time; `fixProofMax`: also run up to
+   * has none); `diff`: the change, to tell a fix from a test that fakes what only the change uses; `deadline`
+   * (performance.now() ms) is when the review is out of time; `fixProofMax`: also run up to
    * this many tests that passed in every run, the first by test id (0 or absent: none). */
-  before?: { base: string | null; deadline?: number; fixProofMax?: number };
+  before?: { base: string | null; diff?: string; deadline?: number; fixProofMax?: number };
   /** Run the project's type check (`cfg.typecheck`) once after the final runs, without the generated tests:
    * `changed` are the change's files (repository paths); with errors, `base` (null: the change has none; absent: no
    * comparison) is the code before the change to compare them with. */
@@ -550,7 +551,7 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
  *
  * The fix proof shares its session: `proofs` (tests that passed in every run) in those files are judged from the same
  * runs; the files holding the others run `runs` times more, after the findings' runs, so they cannot change them. */
-async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | null; deadline?: number;
+async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | null; diff?: string; deadline?: number;
   findings: TestResult[]; proofs: TestResult[]; files: Record<string, string>; writeDir: string; runs: number;
   headSnap: string; headKey: string; tmp: string;
   outDir: string; sessionFactory: SessionFactory; say: (m: string) => void })
@@ -616,11 +617,14 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
     const snap = join(o.tmp, "before");
     let late = false, proofLate = false, envChanged = false;
     const proofRuns: BeforeRun[] = [];
-    const runs = await o.sessionFactory(cfg, snap, join(o.outDir, "before-env-build.log"), async (session) => {
+    const copyCode = () => snapshot(repo, o.base!, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw) });
+    // Set when the code is in place before the session, for an image made from it (below).
+    let inImage = false;
+    const inSession = async (session: Runner) => {
       // The code before the change is copied only once the image is ready: its files are then newer than any build
       // in the image, so cargo rebuilds them instead of running the change's build as fresh.
       const t0 = performance.now();
-      snapshot(repo, o.base!, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw) });
+      if (!inImage) copyCode();
       // Generated files the base happens to hold are cleared, as for the round; the round's own go in as they ran.
       mkdirSync(join(snap, o.writeDir), { recursive: true });
       for (const rel of collect(snap, o.writeDir, adapterFor(cfg).writable)) rmSync(join(snap, rel), { force: true });
@@ -629,7 +633,7 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
         writeFileSync(join(snap, rel), source);
       }
       // The image is the change's; when the change alters what keys it, a same failure before it proves nothing.
-      envChanged = envKey(cfg, snap) !== o.headKey;
+      envChanged = !inImage && envKey(cfg, snap) !== o.headKey;
       snapshotMs = ms(t0);
       const out: BeforeRun[] = [];
       // As in the final runs, a test that hangs would hang again: after a run times out the others are skipped, each
@@ -681,12 +685,29 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
         }
       }
       return out;
-    }, o.headSnap, o.headKey);
+    };
+    const buildLog = join(o.outDir, "before-env-build.log");
+    let runs: BeforeRun[];
+    try {
+      runs = await o.sessionFactory(cfg, snap, buildLog, inSession, o.headSnap, o.headKey);
+    } catch (e) {
+      if (!(e instanceof CopyDiffers)) throw e;
+      // The tests run the image's copy of the code, which is the change's: the code before it needs an image of its own,
+      // made from that code, which is there before the session this time. It has that code's dependencies too.
+      if (o.deadline !== undefined && performance.now() >= o.deadline) return skip("time");
+      [late, proofLate, inImage, snapshotMs, runsMs, proofMs] = [false, false, true, 0, 0, 0];
+      proofRuns.length = 0;
+      rmSync(snap, { recursive: true, force: true });
+      copyCode();
+      runs = await o.sessionFactory(cfg, snap, buildLog, inSession, o.headSnap, o.headKey);
+    }
     if (late) return skip("time");
     // A test that reads one of the project's source files as text and matches it proves no regression and no fix.
     const source = projectSource(o.headSnap, cfg.workdir, (name) => adapterFor(cfg).isTestFile(name));
     const asText = (t: TestResult, file: string | null) => file !== null &&
       shallowKind(o.files[file], funcOf(t), (p) => source(file, p)) === "source-text";
+    // Nor does a test that fakes what only the change uses prove a fix.
+    const added = namesAdded(o.diff ?? "", (name) => adapterFor(cfg).isTestFile(name));
     return result(() => done(Object.fromEntries(o.findings.map((t) => {
       const file = ownerFile(t.fileAttr, own), b = judgeBefore(t, file, runs, envChanged);
       return [t.testId, asText(t, file) ? textBefore(b) : b];
@@ -694,7 +715,8 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
     () => proofLate ? proved({}, "time") : proved(Object.fromEntries(o.proofs.map((t) => {
       const file = ownerFile(t.fileAttr, own);
       const f = judgeFix(t, file, file !== null && owners.includes(file) ? runs : proofRuns, envChanged);
-      return [t.testId, asText(t, file) ? textFix(f) : f];
+      const faked = file === null ? null : fakedName(o.files[file] ?? "", added);
+      return [t.testId, asText(t, file) ? textFix(f) : faked ? fakedFix(f, faked) : f];
     }))));
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

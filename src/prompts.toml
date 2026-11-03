@@ -327,6 +327,9 @@ refused, unless its value is arnx:generated or its name is in allow_env_names (t
 that uses it.
 - Propose one project per unit that is tested on its own. Put shared code under uses of every project that imports \
 it.
+- A service the tests need that cannot run in the sandbox (a hosted database, an outside API): use a stand-in that \
+behaves like it, such as mongomock for MongoDB. Never replace it with MagicMock, which answers everything with \
+nothing, so tests pass or fail for no reason. With no such stand-in, leave those tests failing: they are recorded.
 - Tests that fail on the current code are recorded one by one as failing today. Leave them in the suite: do not \
 exclude tests in test_command. Fix only what the environment causes. Failures that look like the environment come \
 back to you once; trying the project again unchanged records them with their cause.

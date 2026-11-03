@@ -77,7 +77,7 @@ const refusedThenRight = () => new ScriptedAgent([
   [text("One project.")],
 ]);
 
-test("interactive: one reading milestone, the build in the suite line, a short rejection, the files line, proven",
+test("interactive: one reading milestone, the build in the suite line, no rejection, the files line, proven",
   async () => {
   const repo = await shop();
   const asked: string[] = [];
@@ -91,14 +91,13 @@ test("interactive: one reading milestone, the build in the suite line, a short r
     "reading the repository",
     "shop: building the test image, running its suite (try 1)",
     "shop: ✓ 1 passed",
-    "Proposal rejected: 2 files unaccounted for (pricing.py, tests/test_pricing.py). Retrying...",
     "shop: running its suite (try 2)",
     "shop: ✓ 1 passed",
     "shop: ✓ setup's run stands: 1 passed",
   ]);
   // One clock from setup's start to the proof's last line.
   const t = stamps(cli.err);
-  expect(t).toHaveLength(7);
+  expect(t).toHaveLength(6);
   expect(t.every((s, i) => i === 0 || s > t[i - 1]!)).toBe(true);
   expect(cli.stdout).toContain([
     "  project  runs in  with                  existing suite",
@@ -379,3 +378,32 @@ test("setup --project after a proven setup: that project is proven again and joi
     expect(ran).toEqual(["web"]);
     expect(isFileApproved(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")))).toBe(true);
   });
+
+test("a try counts only when it runs: a refused one leaves no gap in the numbers", async () => {
+  const repo = await shop();
+  const model = new ScriptedAgent([[tool("try_project", { yaml: GOOD.replace("version: 1", "version: [") })],
+    [tool("try_project", { yaml: GOOD })], [tool("propose", { yaml: GOOD })], [text("Done.")]]);
+  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: suites([PASS]), approveSessions: suites([PASS]) });
+  expect(await cli.run("setup", "--yes")).toBe(0);
+  expect(cli.stderr).toContain("shop: running its suite (try 1)");
+});
+
+test("a project that swaps its service for MagicMock is refused before it runs, and told what to do instead", async () => {
+  const repo = await shop();
+  const mocked = GOOD.replace("[pip install pytest]",
+    "[pip install pytest, \"python -c \\\"open('sitecustomize.py','w').write('pymongo.MongoClient = MagicMock()')\\\"\"]");
+  expect(mocked).not.toBe(GOOD);
+  const ran: string[] = [];
+  const model = new ScriptedAgent([[tool("try_project", { yaml: mocked })], [tool("try_project", { yaml: GOOD })],
+    [tool("propose", { yaml: GOOD })], [text("Done.")]]);
+  const sessions: SessionFactory = (cfg, snap, log, body) => {
+    ran.push(cfg.install.join(" "));
+    return suites([PASS])(cfg, snap, log, body);
+  };
+  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: sessions, approveSessions: suites([PASS]) });
+  expect(await cli.run("setup", "--yes")).toBe(0);
+  expect(ran.some((i) => i.includes("MagicMock"))).toBe(false);
+  const first = JSON.stringify(model.calls[1]!.messages);
+  expect(first).toContain("refused: install replaces code with MagicMock");
+  expect(first).toContain("a stand-in that behaves like the service");
+});

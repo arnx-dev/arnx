@@ -218,9 +218,12 @@ test("the review's last progress line says what came of the things it checked", 
   const s = (outcome: string) => ({ project: "svc", id: "S1", outcome }) as never;
   expect(checkedLine([s("proven"), s("not reproduced"), s("not tested")])).toBe("Checked 3: 1 proven, 2 dropped");
   // One thing checked that proved two issues: the count matches the two "✓ proven" lines.
-  expect(checkedLine([s("proven"), s("disputed")], 2)).toBe("Checked 2: 1 proven (2 issues), 1 dropped");
+  expect(checkedLine([s("proven"), s("not tested")], 2)).toBe("Checked 2: 1 proven (2 issues), 1 dropped");
+  // Disputed things are still in the report, for the developer to decide: never called dropped.
   expect(checkedLine([s("proven"), s("same cause"), s("pending answer"), s("pre-existing"), s("disputed")]))
-    .toBe("Checked 5: 2 proven, 1 needs your answer, 1 failing before this change too, 1 dropped");
+    .toBe("Checked 5: 2 proven, 1 needs your answer, 1 failing before this change too, 1 disputed");
+  expect(checkedLine([s("disputed"), s("disputed"), s("not reproduced")])).toBe("Checked 3: 0 proven, 2 disputed, 1 dropped");
+  expect(checkedLine([s("proven")])).toBe("Checked 1: 1 proven");
 });
 
 test("a root project in the quick draft owns what the other drafted projects leave", () => {

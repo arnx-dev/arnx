@@ -141,7 +141,7 @@ export function fakeCloud(script: CloudScript = {}): FakeCloud {
       const steps = [...script.rounds?.[p.project!] ?? script.rounds?.["*"] ?? []];
       rounds.set(p.project!, { steps, turn: 0, done: false, last: null, answered: new Map() });
       const out = stepOf(p.project!);
-      const first = { ...out, progress: ["hunting", ...out.progress ?? []] };
+      const first = { ...out, progress: ["hunting", "reading the change", ...out.progress ?? []] };
       starts.set(key!, first);
       return first;
     },

@@ -24,6 +24,22 @@ export async function inPool<T>(items: T[], limit: number, work: (item: T) => Pr
   await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, lane));
 }
 
+/** One test: its project and name, its cases' parameters left out (`test_x[a]`, `test_x[b]`). */
+export const sameTest = (f: Finding) => `${f.project}::${f.testId.replace(/\[.*\]$/, "")}`;
+
+/** One test gets one verdict: when its cases disagree, all are disputed, for the developer to decide. */
+export function oneVerdict(findings: Finding[]): void {
+  const tests = new Map<string, Finding[]>();
+  for (const f of findings) tests.set(sameTest(f), [...tests.get(sameTest(f)) ?? [], f]);
+  for (const cases of tests.values()) {
+    const disputed = cases.find((f) => f.verdict === "disputed");
+    if (!disputed) continue;
+    for (const f of cases.filter((x) => x.verdict === "confirmed")) {
+      [f.verdict, f.reason] = ["disputed", `another case of this test was disputed: ${disputed.reason}`];
+    }
+  }
+}
+
 export async function challenge(findings: Finding[], o: { model: JsonModel; diff: string;
   /** The part of the change a finding's project was given, when it differs from `diff`. */
   diffOf?: (f: Finding) => string;

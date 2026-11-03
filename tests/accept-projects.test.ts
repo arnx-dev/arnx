@@ -74,7 +74,7 @@ projects:
     image: python:3.12-slim
     test_command: python -m pytest -q {targets}
   parser:
-    root: solana-parser
+    root: parser
     language: typescript
     image: node:22-slim
     runner: node
@@ -86,22 +86,22 @@ const TS_SRC = "const { app } = require('../../index');\ntest('bad', () => {});\
 function mixed(): { repo: string; rdir: string } {
   const repo = gitRepo(tmp());
   mkdirSync(join(repo, ".arnx"));
-  mkdirSync(join(repo, "solana-parser", "__tests__"), { recursive: true });
-  writeFileSync(join(repo, "solana-parser", "__tests__", "own.test.ts"), "test('own', () => {});\n");
+  mkdirSync(join(repo, "parser", "__tests__"), { recursive: true });
+  writeFileSync(join(repo, "parser", "__tests__", "own.test.ts"), "test('own', () => {});\n");
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(MIXED), "Dev", "2026-10-12"));
   const rdir = join(repo, ".arnx", "reviews", RID);
   save(sampleReview({ id: RID, projects: ["pay", "parser"], questions: [], questionProjects: [], flaky: [], errors: [],
     notSent: [], writeDir: "services/pay/tests/arnx_generated", findings: [
       { ...finding("F1", `${GEN}::test_bad`, "test_bad", `services/pay/${GEN}`, "boom", "pay wrong", "confirmed", "y"),
         project: "pay" },
-      { ...finding("F2", `${TS_GEN}::bad`, "bad", `solana-parser/${TS_GEN}`, "boom", "parser wrong", "confirmed", "y"),
+      { ...finding("F2", `${TS_GEN}::bad`, "bad", `parser/${TS_GEN}`, "boom", "parser wrong", "confirmed", "y"),
         project: "parser" }],
-    writeDirs: { pay: "services/pay/tests/arnx_generated", parser: "solana-parser/__tests__/arnx_generated" } }),
+    writeDirs: { pay: "services/pay/tests/arnx_generated", parser: "parser/__tests__/arnx_generated" } }),
   rdir, "d");
   const py = join(rdir, "projects", "pay", "tests", "services", "pay", "tests", "arnx_generated");
   mkdirSync(py, { recursive: true });
   writeFileSync(join(py, "test_x.py"), SRC);
-  const ts = join(rdir, "projects", "parser", "tests", "solana-parser", "__tests__", "arnx_generated");
+  const ts = join(rdir, "projects", "parser", "tests", "parser", "__tests__", "arnx_generated");
   mkdirSync(ts, { recursive: true });
   writeFileSync(join(ts, "app.test.ts"), TS_SRC);
   return { repo, rdir };
@@ -111,18 +111,18 @@ test("a configured accepted_tests_dir holds every project's accepted tests, a Ty
   const { repo, rdir } = mixed();
   const result = await accept(repo, rdir, { ...SETTINGS, acceptedTestsDir: "test/locks" });
   const rel = result.kept.map((p) => p.slice(repo.length + 1)).sort();
-  expect(rel).toEqual([".arnx/tests/services/pay/test/locks/r20261012_abcdef/test_pay_wrong.py",
-    ".arnx/tests/solana-parser/test/locks/r20261012_abcdef/parser_wrong.test.ts"]);
+  expect(rel).toEqual([".arnx/tests/parser/test/locks/r20261012_abcdef/parser_wrong.test.ts",
+    ".arnx/tests/services/pay/test/locks/r20261012_abcdef/test_pay_wrong.py"]);
   // Its import is moved with it.
-  expect(readFileSync(join(repo, rel[1]!), "utf8")).toContain("require('../../../index')");
+  expect(readFileSync(join(repo, rel[0]!), "utf8")).toContain("require('../../../index')");
 });
 
 test("with the default accepted_tests_dir, a TypeScript project keeps them under __tests__/arnx/", async () => {
   const { repo, rdir } = mixed();
   const result = await accept(repo, rdir, SETTINGS);
   expect(result.kept.map((p) => p.slice(repo.length + 1)).sort()).toEqual([
-    ".arnx/tests/services/pay/tests/arnx/r20261012_abcdef/test_pay_wrong.py",
-    ".arnx/tests/solana-parser/__tests__/arnx/r20261012_abcdef/parser_wrong.test.ts"]);
+    ".arnx/tests/parser/__tests__/arnx/r20261012_abcdef/parser_wrong.test.ts",
+    ".arnx/tests/services/pay/tests/arnx/r20261012_abcdef/test_pay_wrong.py"]);
 });
 
 test("accept lists where each accepted test went, under its project's root", async () => {
@@ -130,6 +130,6 @@ test("accept lists where each accepted test went, under its project's root", asy
   const cli = new Cli({ cwd: repo });
   await cli.run("init");
   expect(await cli.run("accept", RID, "--no-answers")).toBe(0);
-  expect(cli.stdout).toContain("  kept: .arnx/tests/solana-parser/__tests__/arnx/r20261012_abcdef/parser_wrong.test.ts");
+  expect(cli.stdout).toContain("  kept: .arnx/tests/parser/__tests__/arnx/r20261012_abcdef/parser_wrong.test.ts");
   expect(cli.stdout).not.toContain("accepted_tests_dir"); // the path says it
 });

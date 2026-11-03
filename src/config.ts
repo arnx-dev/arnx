@@ -474,14 +474,21 @@ export function projectDigest(f: ReviewFile, name: string): string {
     : { project: spec, services });
 }
 
+/** projectDigest without the project's notes, which no run reads: a note added after a run leaves that run standing. */
+export function runDigest(f: ReviewFile, name: string): string {
+  const raw = f.legacy ? without(f.raw, "notes") : { ...f.raw, projects: { ...(f.raw.projects as Raw),
+    [name]: without((f.raw.projects as Raw)[name] as Raw, "notes") } };
+  return projectDigest({ ...f, raw }, name);
+}
+
 /** Commands that delete, move or overwrite files, at the start of a command (after ;, &&, ||, |, `(`, sudo or xargs,
  * by name or by path: /bin/rm). `pytest -k rm` names no command. */
 const AT_COMMAND = String.raw`(?:^|[;&|(])\s*(?:(?:sudo|xargs|command|env)\s+)*(?:\S*\/)?`;
 const WRITER = new RegExp(`${AT_COMMAND}(?:rm|rmdir|unlink|shred|truncate|mv|cp|tee|dd)(?=[\\s;&|)]|$)|` +
   String.raw`${AT_COMMAND}sed\s+(?:\S+\s+)*-[a-zA-Z]*i|\s-delete\b`);
 
-/** A test command that deletes files or writes them: each run then tests a different repository (dexdash's setup
- * wrote `rm -rf tests && echo "test(...)" > smoke/smoke.test.ts; npx vitest run {targets}`). Every redirect must go
+/** A test command that deletes files or writes them: each run then tests a different repository (for example
+ * `rm -rf tests && echo "test(...)" > smoke/smoke.test.ts; npx vitest run {targets}`). Every redirect must go
  * to another descriptor (2>&1) or to /dev/null; a symlink (ln) is fine. Fails closed: a `>` inside quotes counts. */
 export function writesFiles(command: string): boolean {
   return fileWrite(command) !== null;

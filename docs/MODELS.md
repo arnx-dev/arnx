@@ -12,13 +12,13 @@ Which models arnx uses, how to change them, and what they cost. With arnx cloud 
     setup = "anthropic:claude-sonnet-5-5"         # sets up the test environment
     hunter = "anthropic:claude-haiku-5-5"         # looks at each part of a big change
     second_hunter = "openai:gpt-6.1-sol"          # a second look, from another vendor
-    challenger = "river:zai-org/GLM-5.3-Flash"    # second opinion on each finding
+    challenger = "anthropic:claude-sonnet-5-5"    # second opinion on each finding
     challenger_fallback = "openai:gpt-6.1-sol"    # asked when the challenger fails
     answer_model = "anthropic:claude-haiku-5-5"   # turns your answers into tests
     effort = "medium"                             # low, medium or high
 
 The keys in your environment decide: a role whose key is missing is written commented out, with the key it needs,
-and Claude stands in (Sonnet gives the second opinion; there is no second hunter and no fallback). With only
+and Claude stands in (there is no second hunter and no fallback). With only
 `ANTHROPIC_API_KEY`, every job runs on Claude. Change any model there.
 
 Built in: `anthropic` (ANTHROPIC_API_KEY), `openai` (OPENAI_API_KEY; `openai_tier = "fast"` for priority processing)

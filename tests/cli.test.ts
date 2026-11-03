@@ -36,9 +36,9 @@ test("init only writes the files: no consent, no key line; doctor and setup name
   expect(await cli.run("init")).toBe(0);
   const s = loadSettings(repo);
   expect(s.consentAt).toBeNull(); // asked on the first send
-  // The harness, keys deciding: OpenAI's key brings its second hunter; without River's, Claude gives the second opinion.
-  expect([s.challenger.provider, s.secondHunter?.provider, s.challengerFallback]).toEqual(["anthropic", "openai",
-    undefined]);
+  // The harness, keys deciding: OpenAI's key brings its second hunter and the second opinion's fallback.
+  expect([s.challenger.provider, s.secondHunter?.provider, s.challengerFallback?.provider]).toEqual(["anthropic", "openai",
+    "openai"]);
   expect(cli.stdout).toBe([
     "✓ arnx initialized",
     "  .arnx/config.toml  created (models, budgets: edit to change)",
@@ -47,8 +47,6 @@ test("init only writes the files: no consent, no key line; doctor and setup name
     "Next: arnx review",
     "Optional: arnx skill install (coding agents)",
   ].join("\n"));
-  expect(readFileSync(join(repo, ".arnx", "config.toml"), "utf8")).toMatch(
-    /^# challenger = "river:zai-org\/GLM-5\.3-Flash" +# harness; needs RIVER_API_KEY$/m);
   expect(readFileSync(join(repo, ".arnx", ".gitignore"), "utf8").startsWith("reviews/")).toBe(true);
   expect(await cli.run("doctor")).toBe(3);
   const missing = "✗ Keys: missing ANTHROPIC_API_KEY: export it (https://console.anthropic.com/settings/keys), " +

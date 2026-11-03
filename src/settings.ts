@@ -168,18 +168,16 @@ export const KNOWN_PROVIDERS: readonly KnownProvider[] = [
 /** The line that starts the known providers in a written file: what follows it is init's, written again each time. */
 const KNOWN_MARKER = "# Other providers arnx knows";
 
-export const RIVER_CHALLENGER = "river:zai-org/GLM-5.3-Flash";
-
 /** The harness: the model arnx is measured with for each role. */
-export const HARNESS = { reviewer: REVIEWER, hunter: HAIKU, secondHunter: OPENAI_HUNTER, challenger: RIVER_CHALLENGER,
+export const HARNESS = { reviewer: REVIEWER, hunter: HAIKU, secondHunter: OPENAI_HUNTER, challenger: REVIEWER,
   challengerFallback: OPENAI_HUNTER, answerModel: HAIKU } as const;
 export type HarnessRole = keyof typeof HARNESS;
 
 /** The environment variables a built-in model ref needs. */
 export const keysOf = (ref: string): string[] => envNames(resolveProvider(parseModelRef(ref).provider)!);
 
-/** What `arnx init` writes: the harness, role by role, where the role's key is in `env`. Without River's key Claude
- * Sonnet gives the second opinion; without OpenAI's there is no second hunter, and the fallback needs both. */
+/** What `arnx init` writes: the harness, role by role, where the role's key is in `env`. Without OpenAI's key there
+ * is no second hunter and no fallback for the second opinion. */
 export function defaultSettings(env: Env = {}): Settings {
   const has = (ref: string) => keysOf(ref).every((k) => !!env[k]);
   const challenger = has(HARNESS.challenger) ? HARNESS.challenger : REVIEWER;

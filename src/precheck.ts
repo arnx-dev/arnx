@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { dirname, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
 import type { Listing, TestResult } from "./adapters/types";
+import type { BaselineTest } from "./baseline";
 import type { ReviewConfig } from "./config";
 import { describeHints, diagnose, firstErrors } from "./diagnose";
 import { ownerFile, runTests } from "./outcomes";
@@ -48,16 +49,17 @@ export function listTests(session: Runner, snap: string, cfg: ReviewConfig, targ
   return listing ? { listing, result } : null;
 }
 
-/** Why a listing stops the try ("" when it does not). */
-export function listingProblem(listing: Listing, exitCode: number | null): string {
+/** Why a listing stops the try ("" when it does not). `known`: files recorded as not loading, which do not stop it. */
+export function listingProblem(listing: Listing, exitCode: number | null, known: (file: string) => boolean = () => false): string {
   if (listing.failed) {
     return `listing the tests stopped with an error (exit ${exitCode ?? "?"}) before any test ran: the runner does not ` +
       "start, or its configuration does not load; the end of the output says why";
   }
   if (!(listing.tests ?? listing.files.length)) return "listing the tests found none: test_command collects no tests";
-  const n = listing.broken.length;
+  const broken = listing.broken.filter((f) => !known(f));
+  const n = broken.length;
   if (n) {
-    return `listing the tests: ${plural(n, "test file")} do${n === 1 ? "es" : ""} not load (${few(listing.broken)}), ` +
+    return `listing the tests: ${plural(n, "test file")} do${n === 1 ? "es" : ""} not load (${few(broken)}), ` +
       "so none of their tests would run";
   }
   return "";
@@ -113,26 +115,33 @@ export interface Look { early: Early | null; tests: number; files: number;
   listed: string[];
   sample: { files: string[]; run: RunResult; results: TestResult[] } | null }
 
-/** precheck, with what it listed and the sample's run. */
-export function look(session: Runner, snap: string, cfg: ReviewConfig, acceptedTestsDir?: string): Look {
+/** precheck, with what it listed and the sample's run. `baseline`: "record" while setup's agent is trying the project;
+ * in a proof, the tests recorded as failing today: a file recorded as not loading stays recorded, and nobody tries
+ * again, so nothing says it. */
+export function look(session: Runner, snap: string, cfg: ReviewConfig, acceptedTestsDir?: string,
+                     baseline: BaselineTest[] | "record" = "record"): Look {
+  const proof = baseline === "record" ? null : baseline;
+  const again = proof ? "" : AGAIN;
+  const known = (file: string) => !!proof && (proof.some((t) => t.load && t.file === file) ||
+    cfg.knownFailing.some((k) => file.startsWith(k)));
   const none: Look = { early: null, tests: 0, files: 0, listed: [], sample: null };
   const listed = listTests(session, snap, cfg, []);
   if (!listed) return none;
   const { listing, result } = listed;
   const counts = { tests: listing.tests ?? listing.files.length, files: listing.files.length, listed: listing.files };
-  const why = listingProblem(listing, result.exitCode);
-  if (why) return { ...none, ...counts, early: { summary: why + AGAIN, output: result.output, hints: "" } };
+  const why = listingProblem(listing, result.exitCode, known);
+  if (why) return { ...none, ...counts, early: { summary: why + again, output: result.output, hints: "" } };
   if (!listing.files.length) return { ...none, ...counts };
   const probe = probeListed(session, snap, cfg);
   if (probe && !probe.seen) {
-    return { ...none, ...counts, early: { summary: probeText(cfg) + AGAIN, output: probe.output, hints: "" } };
+    return { ...none, ...counts, early: { summary: probeText(cfg) + again, output: probe.output, hints: "" } };
   }
   const sample = sampleOf(listing, cfg, snap, acceptedTestsDir);
   if (!sample.length) return { ...none, ...counts };
   const [run, results] = runTests(session, snap, cfg, sample, "sample.xml", SAMPLE_TIMEOUT);
   const stop = sampleProblem(sample, run, results);
   if (!stop) return { ...none, ...counts, sample: { files: sample, run, results: results ?? [] } };
-  return { ...none, ...counts, early: { summary: stop + AGAIN, output: run.output,
+  return { ...none, ...counts, early: { summary: stop + again, output: run.output,
     hints: [describeHints(diagnose(results, cfg, snap), cfg), firstErrors(results, cfg)].filter(Boolean).join("\n") } };
 }
 
