@@ -7,7 +7,6 @@ setup = "anthropic:claude-sonnet-5-5"         # sets up the test environment
 hunter = "anthropic:claude-haiku-5-5"         # looks at each part of a big change
 # second_hunter = "openai:gpt-6.1-sol"        # harness; needs OPENAI_API_KEY
 challenger = "anthropic:claude-sonnet-5-5"    # second opinion on each finding
-# challenger = "river:zai-org/GLM-5.3-Flash"  # harness; needs RIVER_API_KEY
 # challenger_fallback = "openai:gpt-6.1-sol"  # harness; needs OPENAI_API_KEY
 answer_model = "anthropic:claude-haiku-5-5"   # turns your answers into tests
 effort = "medium"                             # low, medium or high
