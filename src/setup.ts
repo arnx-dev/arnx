@@ -305,7 +305,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
         [], "", none] as Out;
     }
     // A project with no tests of its own has no suite to run: arnx's one-line test, which reviews depend on anyway,
-    // proves the environment instead (dexdash's setup took 16 tries and wrote a placeholder test into test_command).
+    // proves the environment instead.
     if (!targets.length && !all?.length && cfg.language !== "rust" && !hasOwnTests(cfg, snap)) {
       return noOwnTests(session, snap, cfg, all === null, tailOf);
     }

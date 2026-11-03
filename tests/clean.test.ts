@@ -3,14 +3,16 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { secretHits } from "../src/secrets";
 
 const ROOT = join(import.meta.dir, "..");
-const rot13 = (s: string) => s.replace(/[a-z]/g, (c) => String.fromCharCode(((c.charCodeAt(0) - 84) % 26) + 97));
-// Stored as rot13 so this file does not itself contain the words it forbids.
-const FORBIDDEN = ["fbynanjbexre", "havirefny_sbezny_irevsvre", "hsi-", "hsi_", "qrqtrk", "tebory", "zbabercb",
-  "/ubzr/", "gtobg", "gncr_grfg", "gncr/", "chzcsha", "chzc.sha", "pnyybhg", "qhar.pbz", "gjrrcl", "qhpnnyr", "yepyvo", "jrofhesk", "ubabwf", "/gzc/pynhqr", "fpengpucnq"].map(rot13);
+// Words no published file may hold, kept outside the repository so this file does not name them. Without the list (a
+// fresh clone, CI) they are not checked.
+const NAMES = process.env.ARNX_PRIVATE_NAMES ?? join(homedir(), ".config", "arnx", "private-names.txt");
+const FORBIDDEN = existsSync(NAMES) ? readFileSync(NAMES, "utf8").split("\n").map((l) => l.trim().toLowerCase())
+  .filter((l) => l && !l.startsWith("#")) : [];
 const DEPENDENCIES = new Set(["@anthropic-ai/sdk", "yaml", "smol-toml", "fast-xml-parser"]);
 
 /** What could be published: files git tracks or would add, so local state that a .gitignore keeps out (dist/, review

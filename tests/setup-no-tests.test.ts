@@ -1,6 +1,6 @@
-// A project with no tests of its own (an app an agent built, dexdash) has no suite to prove its environment: setup
+// A project with no tests of its own (an app an agent built) has no suite to prove its environment: setup
 // proves it with arnx's one-line test, says so before and after, and refuses a test_command that deletes or writes
-// files (dexdash's setup wrote `rm -rf tests && echo "test(...)" > smoke/smoke.test.ts` into one).
+// files (`rm -rf tests && echo "test(...)" > smoke/smoke.test.ts`).
 import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -74,9 +74,9 @@ test("no tests of its own and the runner does not start: what to install, and no
 });
 
 test("a test_command that deletes or writes files is refused; redirects to /dev/null and links are fine", () => {
-  const dexdash = "rm -rf tests && mkdir -p smoke && echo \"import {test,expect} from 'vitest';test('smoke',()=>" +
+  const placeholder = "rm -rf tests && mkdir -p smoke && echo \"import {test,expect} from 'vitest';test('smoke',()=>" +
     "{expect(1).toBe(1)})\" > smoke/smoke.test.ts; npx vitest run {targets}";
-  for (const c of [dexdash, "rm -rf build; pytest {targets}", "pytest {targets} | tee out.log",
+  for (const c of [placeholder, "rm -rf build; pytest {targets}", "pytest {targets} | tee out.log",
     "pytest {targets} > out.log", "pytest {targets} >>out.log", "mv conftest.py x; pytest {targets}",
     "find . -name '*.pyc' -delete && pytest {targets}",
     // arnx review 20261022-20f6fa: by path, cp and sed -i, redirects of stderr or all output to a file.
