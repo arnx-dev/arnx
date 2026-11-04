@@ -4,7 +4,8 @@
 // wrong guess costs an odd string in a prompt: nothing on disk changes. One Boundary serves a run: it starts empty and
 // is told each value before the text holding it can leave (a run's snapshots, both sides of its diff).
 import type { AgentModel, JsonModel } from "./llm";
-import { fake, type SecretPin, standInsFor, suspects } from "./secrets";
+import { fake, type SecretPin, suspects } from "./secrets";
+import { ValueIndex } from "./valueindex";
 
 /** The shortest piece of a value taken for that value: shorter ones are too often a piece of something else. */
 const FRAGMENT_MIN = 12;
@@ -26,12 +27,31 @@ const endsAt = (text: string, at: number) => at === text.length || text[at] === 
 const startsAt = (text: string, at: number) => at === 0 || text[at - 1] === "\n" || text[at - 1] === "…" ||
   text.startsWith("...", at - 3);
 
+/** A place in a text to replace: a whole value, or a piece from its start or its end. */
+interface Edit { at: number; length: number; value: string; kind: "start" | "end" }
+
+/** `text` with `edits` made, the first and longest at each place; one that overlaps an earlier one still replaces the
+ * rest of what it covers. */
+function apply(text: string, edits: Edit[], withText: (e: Edit) => string): string {
+  edits.sort((a, b) => a.at - b.at || b.length - a.length);
+  const parts: string[] = [];
+  let from = 0;
+  for (const e of edits) {
+    if (e.at + e.length <= from) continue;
+    parts.push(text.slice(from, Math.max(from, e.at)), withText(e).slice(Math.max(0, from - e.at)));
+    from = e.at + e.length;
+  }
+  parts.push(text.slice(from));
+  return parts.join("");
+}
+
 export class Boundary {
   private values = new Set<string>();
   /** Longest first, so a value inside another never breaks it. */
   private longest: string[] = [];
   private made = new Map<string, string>();
-  private whole: ReturnType<typeof standInsFor> = standInsFor([]);
+  /** Made when first asked, and again after values are added. */
+  private index: ValueIndex | null = null;
 
   constructor(values: Iterable<string> = []) {
     this.add(values);
@@ -45,7 +65,7 @@ export class Boundary {
     }
     if (this.values.size === before) return;
     this.longest = [...this.values].sort((a, b) => b.length - a.length);
-    this.whole = standInsFor(this.longest, this.made);
+    this.index = null;
   }
 
   /** The values on both sides of a diff, a value only removed too. */
@@ -56,40 +76,32 @@ export class Boundary {
   /** `text` without any of the values, each replaced wherever it stands, inside a longer word too, and without the piece
    * of one that text cut before the filter left: FRAGMENT_MIN characters or more at its start or end, at a cut's edge. */
   mask(text: string): string {
-    const here = this.longest.filter((v) => text.includes(v));
-    let out = here.length ? this.whole(text).text : text;
-    // What the matcher leaves: inside a longer word, after a slash, or a value `fake` cannot change.
-    for (const v of here) if (out.includes(v)) out = out.replaceAll(v, this.standIn(v));
-    for (const v of this.longest) {
-      if (v.length <= FRAGMENT_MIN) break;
-      out = this.maskTail(this.maskHead(out, v), v);
-    }
-    return out;
+    const edits = this.editsOf(text);
+    if (!edits.length) return text;
+    return apply(text, edits, (e) => {
+      const s = this.standIn(e.value);
+      return e.kind === "end" ? s.slice(-e.length) : s.slice(0, e.length);
+    });
   }
 
-  /** `text` without the start of `v` where text was cut after it (a grep line, a clipped diff). */
-  private maskHead(text: string, v: string): string {
-    const head = v.slice(0, FRAGMENT_MIN);
-    let out = text;
-    for (let at = out.indexOf(head); at >= 0; at = out.indexOf(head, at + 1)) {
-      let n = FRAGMENT_MIN;
-      while (n < v.length && out[at + n] === v[n]) n++;
-      if (endsAt(out, at + n)) out = out.slice(0, at) + this.standIn(v).slice(0, n) + out.slice(at + n);
-    }
-    return out;
-  }
-
-  /** `text` without the end of `v` where text was cut before it (the tail of a run's output). */
-  private maskTail(text: string, v: string): string {
-    const tail = v.slice(-FRAGMENT_MIN);
-    let out = text;
-    for (let at = out.indexOf(tail); at >= 0; at = out.indexOf(tail, at + 1)) {
+  /** Where `text` holds a value, whole or as a piece a cut left. */
+  private editsOf(text: string): Edit[] {
+    const edits: Edit[] = [];
+    this.index ??= new ValueIndex(this.values);
+    this.index.eachStart(text, (v, at) => {
+      if (!text.startsWith(v.slice(0, Math.min(v.length, FRAGMENT_MIN)), at)) return;
+      let n = Math.min(v.length, FRAGMENT_MIN);
+      while (n < v.length && text[at + n] === v[n]) n++;
+      if (n === v.length || (n >= FRAGMENT_MIN && endsAt(text, at + n))) edits.push({ at, length: n, value: v, kind: "start" });
+    });
+    this.index.eachEnd(text, (v, at) => {
       const end = at + FRAGMENT_MIN;
+      if (!text.startsWith(v.slice(-FRAGMENT_MIN), at)) return;
       let n = FRAGMENT_MIN;
-      while (n < v.length && out[end - n - 1] === v[v.length - n - 1]) n++;
-      if (startsAt(out, end - n)) out = out.slice(0, end - n) + this.standIn(v).slice(-n) + out.slice(end);
-    }
-    return out;
+      while (n < v.length && text[end - n - 1] === v[v.length - n - 1]) n++;
+      if (n < v.length && startsAt(text, end - n)) edits.push({ at: end - n, length: n, value: v, kind: "end" });
+    });
+    return edits;
   }
 
   /** A copy of `value` with `mask` applied to every string in it, keys too; the same object when there are no values. */

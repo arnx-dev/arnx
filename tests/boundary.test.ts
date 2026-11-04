@@ -10,9 +10,10 @@ import { Boundary, boundaryOf, diffSuspects, isMasked, maskedAgent, maskedJson }
 import { CloudClient } from "../src/cloud";
 import { CloudBrain } from "../src/cloudbrain";
 import { loadReviewFile, parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
-import { changeLimits, takeSnapshot, tooLargeText } from "../src/change";
+import { BIG_KEYS_MOST, changeLimits, takeSnapshot, tooLargeText } from "../src/change";
 import { ModelError } from "../src/errors";
 import { EventLog } from "../src/events";
+import { classify, describeHints, errorLine, firstLine } from "../src/diagnose";
 import { jevModel } from "../src/jev";
 import { AnthropicJson, FallbackJson, type AgentModel, type Block, type JsonModel, type JsonReply, makeAgentModel,
   makeChallenger, makeJsonModel, makeSecondHunter, PRICES, type Reply, ResponsesJson } from "../src/llm";
@@ -21,9 +22,9 @@ import { describeRun } from "../src/outcomes";
 import { DEFAULT_PROMPTS, explainUser } from "../src/prompts";
 import { runReview } from "../src/reviewer";
 import type { ExecFactory } from "../src/sandbox";
-import { isCertainRule, suspects } from "../src/secrets";
+import { isCertainRule, standInsFor, suspects } from "../src/secrets";
 import { defaultSettings, parseModelRef, type Settings, writeSettings } from "../src/settings";
-import { runSetup } from "../src/setup";
+import { runSetup, skipReasons } from "../src/setup";
 import { clipOutput } from "../src/setupexec";
 import { checkData, reportTelemetry } from "../src/telemetry";
 import { Cli } from "./helpers/cli";
@@ -751,6 +752,27 @@ test("a value cut by what really cuts it: grep, the diff limits, a clipped outpu
   }
 });
 
+test("a value cut in a hint's evidence or a skip reason goes: each is written inside quotes", () => {
+  const b = new Boundary([LONG]);
+  const cfg = parseReviewConfig(YAML);
+  const start = LONG.slice(0, 12);
+  // The three cuts of a failure's line: a signature's line, a file that did not load, and the first line of a message.
+  const signature = classify(`ModuleNotFoundError: No module named 'x' ${LONG}`, cfg, tmp())!;
+  expect(signature.evidence.endsWith("…")).toBe(true);
+  const written = describeHints([{ ...signature, files: ["tests/test_a.py"] }], cfg);
+  expect(written).toContain('…"');
+  expect(b.mask(written)).not.toContain(start);
+  for (const cut of [errorLine(`collection failure\nE   boom ${LONG}`), firstLine(`boom ${LONG}`)]) {
+    expect(cut.endsWith("…")).toBe(true);
+    expect(b.mask(`From: "${cut}"`)).not.toContain(start);
+  }
+  // A short line stays as it was.
+  expect(firstLine("E   short line")).toBe("short line");
+  const [reason] = skipReasons([{ testId: "t", fileAttr: "t.py", name: "t", outcome: "skipped", message: `needs ${LONG}` }]);
+  expect(reason).toContain('…" (1)');
+  expect(b.mask(reason!)).not.toContain(start);
+});
+
 test("route: a long value on a grep line, which grep cuts at 200 characters", async () => {
   const repo = leakyRepo();
   writeFileSync(join(repo, "creds.py"), `private_key = "${LONG}"\n`);
@@ -812,6 +834,54 @@ test("a large diff with no value in it costs little; one with a value is still q
   const t1 = performance.now();
   for (let i = 0; i < 10; i++) many.mask(big);
   expect((performance.now() - t1) / 10).toBeLessThan(200);
+});
+
+// A named field on every line of a large file: as many values as that file has lines.
+const VALUES = 200_000;
+const manyValues = () => Array.from({ length: VALUES }, (_, i) => createHash("sha256").update(`v${i}`).digest("base64url").slice(0, 24));
+
+test("masking costs no more with many values, and every one of them still goes", () => {
+  const values = manyValues();
+  const b = new Boundary(values);
+  const line = "+x = 1 # some ordinary line of a change\n";
+  b.mask("the index is made once");
+  for (const [size, most] of [[2_000, 100], [20_000, 100], [200_000, 200], [1_000_000, 500]] as const) {
+    const text = line.repeat(Math.ceil(size / line.length));
+    const t0 = performance.now();
+    expect(b.mask(text)).toBe(text);
+    expect([size, performance.now() - t0 < most]).toEqual([size, true]);
+  }
+  // Any of them: first, last, a whole one, its start and end by a cut, and its URL form.
+  const [first, last, odd] = [values[0]!, values.at(-1)!, "Ab3/cd+Ef9=gh&Ij2KL"];
+  b.add([odd]);
+  expect(b.mask(`a ${first} b ${last} c`)).not.toMatch(new RegExp(`${first}|${last}`));
+  expect(b.mask(`key = "${first.slice(0, 15)}\nnext`)).not.toContain(first.slice(0, 12));
+  expect(b.mask(`${last.slice(-15)}" more`)).not.toContain(last.slice(-12));
+  expect(b.mask(`?t=${encodeURIComponent(odd)}&n=1`)).not.toContain(encodeURIComponent(odd));
+  expect(b.mask(`has ${odd}!`)).not.toContain(odd);
+}, 60_000);
+
+test("a matcher for a whole tree costs no more with many values either", () => {
+  const values = manyValues();
+  const replace = standInsFor(values);
+  const text = "x = 1\n".repeat(30_000);
+  const t0 = performance.now();
+  for (let i = 0; i < 10; i++) expect(replace(text).count).toBe(0);
+  expect(performance.now() - t0).toBeLessThan(500);
+  expect(replace(`x = "${values[7]}"`).count).toBe(1);
+  // Whole occurrences only, as with few values.
+  expect(replace(`x${values[7]}y`).count).toBe(0);
+}, 60_000);
+
+test("values of every length, sharing a start or inside one another, all go", () => {
+  const b = new Boundary(["abc", "abcd", "abcdefg", "abcdefgh", "abcdefghijkl", "abcdefghijklmnop", "defghijklmnopqrs"]);
+  for (const v of ["abc", "abcd", "abcdefg", "abcdefgh", "abcdefghijkl", "abcdefghijklmnop", "defghijklmnopqrs"]) {
+    expect(b.mask(`[${v}]`)).not.toContain(v);
+  }
+  // Two that overlap in the text: nothing of either is left, and the text keeps its length.
+  const masked = b.mask("[abcdefghijklmnopqrs]");
+  expect(masked).not.toMatch(/abcd|defg|mnop|qrs/);
+  expect(masked).toHaveLength("[abcdefghijklmnopqrs]".length);
 });
 
 test("the values of a diff: both sides, by file, hunk context too", () => {
@@ -899,6 +969,17 @@ test("a private key with its body in a big text file leaves the file out", () =>
   expect(r.withheld.map((w) => w.path)).toEqual(["dump.txt"]);
   expect(existsSync(join(tmp(), "snap", "dump.txt"))).toBe(false);
 });
+
+test("a big file full of keys is left out: each stand-in takes a slow hash", () => {
+  const keys = Array.from({ length: BIG_KEYS_MOST + 1 }, (_, i) => `"sk-${"a".repeat(32)}${String(i).padStart(8, "0")}"`).join("\n");
+  const repo = bigRepo("keys.json", `${keys}\n${padding(1_100_000)}`);
+  const r = takeSnapshot(repo, null, join(tmp(), "snap"), [], { standIns: true });
+  expect(r.withheld).toEqual([{ path: "keys.json", line: 1, label: `over ${BIG_KEYS_MOST} key-shaped strings` }]);
+  expect(existsSync(join(tmp(), "snap", "keys.json"))).toBe(false);
+  // Its values still count wherever else they stand.
+  expect(r.suspects.size).toBeGreaterThan(BIG_KEYS_MOST);
+  expect([...r.secrets].some((v) => v.startsWith("sk-"))).toBe(false);
+}, 30_000);
 
 test("a big binary file stays and is not scanned: no model can read it, and its bytes are not text", () => {
   const repo = bigRepo("data.bin", `\0binary\n"api_token": "${AWS}"\n${padding(1_100_000)}`);

@@ -27,6 +27,8 @@ export const SCAN_LIMIT = 1_000_000;
  * the slowest shapes (a name on every line, one long line): about 0.25 s per MB and a few hundred MB of memory at this
  * size; 64 MB takes twice the time and near 1 GB, on every snapshot of a review. */
 export const BIG_SCAN_LIMIT = 32_000_000;
+/** The most key-shaped strings a file over SCAN_LIMIT may hold and stay: about 5 s of stand-ins on each snapshot. */
+export const BIG_KEYS_MOST = 2000;
 /** Mutable so tests can lower it. */
 export const changeLimits = { maxSnapshotFiles: 20_000, maxScanBytes: BIG_SCAN_LIMIT };
 const MAX_BUFFER = 1 << 30;
@@ -809,11 +811,18 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
     const blank = scan && "blank" in scan ? scan : null;
     if (blank) blanks.set(f.rel, blank.blank);
     const why = new Map<string, string>();
-    for (const v of suspects(f.rel, blank ? blank.text : text, pins, why)) {
-      seen.add(v);
-      // A big file's guesses stay as they are: its data is more often a wrong guess, and the filter covers them.
-      if (fakes(f.rel) && (big === null || isCertainRule(why.get(v) ?? ""))) values.add(v);
+    const found = suspects(f.rel, blank ? blank.text : text, pins, why);
+    for (const v of found) seen.add(v);
+    // A big file's guesses stay as they are: its data is more often a wrong guess, and the filter covers them.
+    const faked = fakes(f.rel) ? found.filter((v) => big === null || isCertainRule(why.get(v) ?? "")) : [];
+    // Each stand-in takes a slow hash: a big file full of keys would hold a run for minutes, and is no one's code.
+    if (big !== null && faked.length > BIG_KEYS_MOST) {
+      unlinkSync(f.p);
+      sandboxed.delete(f.rel);
+      removedFiles.push({ path: f.rel, line: 1, label: `over ${BIG_KEYS_MOST} key-shaped strings` });
+      continue;
     }
+    for (const v of faked) values.add(v);
     scanned.push(f);
   }
   // Then each value's stand-in, wherever it is.

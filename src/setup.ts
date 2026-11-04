@@ -174,7 +174,7 @@ export function skipReasons(results: TestResult[] | null, max = 5): string[] {
   for (const t of results ?? []) {
     if (t.outcome !== "skipped") continue;
     const first = t.message.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
-    const reason = first.replace(/^\S+:\d+: /, "").replace(/^Skipped: /, "").slice(0, 160);
+    const reason = clip(first.replace(/^\S+:\d+: /, "").replace(/^Skipped: /, ""), 160);
     if (!reason && t.fileAttr) silent.add(t.fileAttr);
     counts.set(reason, (counts.get(reason) ?? 0) + 1);
   }
