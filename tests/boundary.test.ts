@@ -755,7 +755,7 @@ test("a word-like value's piece stays in the text, and the value itself still go
     ["Beschreibungstext...", ["label: Beschreibungstext\n", "x = Beschreibungstext", "{ title: 'Beschreibungs' }"]],
     ["ReturningGuest123!", ["const user = ReturningGuest\n", "(ReturningGuest)"]],
     ["2:new-signing-key,1:old-signing-key", ["env = 2:new-signing\n", "1:old-signing-key\n"]],
-    ["correcthorsebatterystaple", ["word = correcthorse\n", "correcthorsebattery ", "(horsebatterystaple)"]],
+    ["correct-horse-12-battery-staple", ["word = correct-horse\n", "correct-horse-12 ", "(battery-staple)"]],
   ];
   for (const [value, texts] of cases) {
     const b = new Boundary([value]);
@@ -811,17 +811,13 @@ test("a value's JSON and URL forms are judged as the value", () => {
   const url = encodeURIComponent(random);
   expect(url).not.toBe(random);
   expect(new Boundary([random]).mask(`${url.slice(0, 16)} failed`)).not.toContain(url.slice(0, 16));
-  // Encoded, this one would read as too little spread by itself.
-  const signs = "KfD,]5H+[5{>Y2jpFdSj2U$4";
-  const encoded = encodeURIComponent(signs);
-  expect([piecesAllowed(signs), piecesAllowed(encoded)]).toEqual([true, false]);
-  expect(new Boundary([signs]).mask(`${encoded.slice(0, 20)} failed`)).not.toContain(encoded.slice(0, 20));
   const quoted = 'Ab3"dE6gH9jK2mN5pQ8sT1vW4';
   const json = JSON.stringify(quoted).slice(1, -1);
   expect(new Boundary([quoted]).mask(`${json.slice(0, 16)}…`)).not.toContain(json.slice(0, 16));
-  // Word-like, all its forms keep whole-value masking only.
+  // Word-like, all its forms keep whole-value masking only, though an encoded one by itself would not read as words.
   const worded = "session handle/primary@";
   const form = encodeURIComponent(worded);
+  expect([piecesAllowed(worded), piecesAllowed(form)]).toEqual([false, true]);
   const b = new Boundary([worded]);
   expect(b.mask(`${form.slice(0, 16)} failed`)).toBe(`${form.slice(0, 16)} failed`);
   expect(b.mask(`=${form}=`)).not.toContain(form);
@@ -840,9 +836,10 @@ test("piecesAllowed: a random value yes, a word-like one no, from the value as a
   // An address's password keeps its @ in the value; the choice is made without it.
   expect(piecesAllowed(`${SIGNED}@`)).toBe(true);
   expect(piecesAllowed("70e4d786628fea6478f785a6d7e704777c86a7c5@")).toBe(true);
+  expect(piecesAllowed("1111aaaa2222bbbb3333cccc4444dddd@")).toBe(true);
   const worded = ["session_handle@", "session_handle", "sortableField]", "[sortableField]", "row[sortableField]", "item[sortableKey",
     "Beschreibungstext...", "ReturningGuest123!", "correctPassword123!", "text/plain+frozenset:[NaN]", "props.itemValue]",
-    "2:new-signing-key,1:old-signing-key", "at-least-32-chars-long!!", "old-signing-key", "correcthorsebatterystaple",
+    "2:new-signing-key,1:old-signing-key", "at-least-32-chars-long!!", "old-signing-key", "correct-horse-12-battery-staple",
     "oauth2Client", "base64Encoded", "sha256sum", "XMLParserOptions", "group.date.toString()", "String(item.value)", "_v402_is_retry",
     "demo-m2m-signing", "getIdFromUrl", "quizQuestionnaireQ1No", "v402ChargeCounts"];
   for (const v of worded) expect([v, piecesAllowed(v)]).toEqual([v, false]);
@@ -871,6 +868,102 @@ test("piecesAllowed: strings drawn at random from a key's alphabets are taken as
   let yes = 0;
   for (let i = 0; i < 500; i++) if (piecesAllowed(Array.from({ length: 16 }, () => (digits + "abcdef")[next(16)]).join(""))) yes++;
   expect(yes).toBeGreaterThanOrEqual(450);
+});
+
+// Random strings for the rate tests: a fixed stream, so a rate near its bar can't flake.
+function randomText(label: string) {
+  let block = 0;
+  let bytes = Buffer.alloc(0), at = 0;
+  return (length: number, alphabet: string) => Array.from({ length }, () => {
+    for (;;) {
+      if (at === bytes.length) [bytes, at] = [createHash("sha256").update(`${label} ${block++}`).digest(), 0];
+      const x = bytes[at++]!;
+      if (x < 256 - 256 % alphabet.length) return alphabet[x % alphabet.length]!;
+    }
+  }).join("");
+}
+const LOWER = "abcdefghijklmnopqrstuvwxyz", UPPER = LOWER.toUpperCase(), DIGITS = "0123456789", HEX = `${DIGITS}abcdef`;
+const BASE62 = LOWER + UPPER + DIGITS, BASE32 = `${UPPER}234567`;
+
+/** How many of 500 fresh values from `make` have pieces that count. */
+function piecesRate(label: string, make: (r: ReturnType<typeof randomText>) => string): number {
+  const r = randomText(label);
+  return Array.from({ length: 500 }, () => make(r)).filter(piecesAllowed).length / 500;
+}
+
+const KEY_SHAPES: Record<string, (r: ReturnType<typeof randomText>) => string> = {
+  "name_ and 32 hex": (r) => `api_${r(32, HEX)}`,
+  "name_ and 40 hex": (r) => `tok_${r(40, HEX)}`,
+  "name- and 32 hex": (r) => `key-${r(32, HEX)}`,
+  "sk- and 32 hex": (r) => `s${"k-"}${r(32, HEX)}`,
+  "a longer name_ and 32 hex": (r) => `shpss_${r(32, HEX)}`,
+  "four letters and 32 hex": (r) => `dapi${r(32, HEX)}`,
+  "two capitals and 32 hex": (r) => `SK${r(32, HEX)}`,
+  "chat app token": (r) => `xa${"pp-"}1-A${r(10, UPPER + DIGITS)}-${r(13, DIGITS)}-${r(64, HEX)}`,
+  "chat user token": (r) => `xo${"xp-"}${r(12, DIGITS)}-${r(12, DIGITS)}-${r(13, DIGITS)}-${r(32, HEX)}`,
+  "chat bot token": (r) => `xo${"xb-"}${r(12, DIGITS)}-${r(13, DIGITS)}-${r(24, BASE62)}`,
+  "cloud access key": (r) => `AK${"IA"}${r(16, BASE32)}`,
+  "cloud session key": (r) => `AS${"IA"}${r(16, BASE32)}`,
+  "base32, 16": (r) => r(16, BASE32),
+  "base32, 32": (r) => r(32, BASE32),
+  "digits, 16": (r) => r(16, DIGITS),
+  "letters, one case, 32": (r) => r(32, LOWER),
+  "framework's insecure key": (r) => `webapp-insecure-${r(50, `${LOWER}${DIGITS}!@#$%^&*(-_=+)`)}`,
+};
+for (const [shape, make] of Object.entries(KEY_SHAPES)) {
+  test(`a key's pieces count at least 99% of the time: ${shape}`, () => {
+    expect(piecesRate(shape, make)).toBeGreaterThanOrEqual(0.99);
+  });
+}
+
+for (const [name, alphabet] of Object.entries({ base62: BASE62, base64url: `${BASE62}-_`, base64: `${BASE62}+/`, hex: HEX,
+  "upper hex": `${DIGITS}ABCDEF`, "lower and digits": LOWER + DIGITS, "upper and digits": UPPER + DIGITS, base32: BASE32,
+  "with signs": `${BASE62}!@#$%^&*` })) {
+  test(`a random string's pieces count at least 99% of the time from 24 characters: ${name}`, () => {
+    for (const length of [24, 32, 40, 64, 128]) {
+      expect([length, piecesRate(`${name} ${length}`, (r) => r(length, alphabet)) >= 0.99]).toEqual([length, true]);
+    }
+  });
+}
+
+test("a value in a key's shape always has pieces that count, however little it looks random", () => {
+  for (const v of [`AK${"IA"}IOSFODNN7EXAMPLE`, `s${"k-"}abcdefghijklmnopqrstuvwxyz123456`, `sk-a${"nt-"}test-fake-provider-key`,
+    `xo${"xb-"}just-some-words-here`]) {
+    expect([v, piecesAllowed(v)]).toEqual([v, true]);
+  }
+});
+
+test("a value of capitals and digits, 16 characters or more, has pieces that count; a constant's name does not", () => {
+  for (const v of ["JBSWY3DPEHPK3PXP", `AS${"IA"}Q3X9RT5L2MZP7WKJ`, "GEZDGNBVGY3TQOJQ", "48213975601827364", "abcdef-1234-abcd-1234"]) {
+    expect([v, piecesAllowed(v)]).toEqual([v, true]);
+  }
+  for (const v of ["MAX_RETRY_COUNT", "SOME_LONG_CONSTANT_NAME_HERE", "SHORTCAPS"]) expect([v, piecesAllowed(v)]).toEqual([v, false]);
+});
+
+test("a short name before a key says nothing about the rest: it goes by what follows", () => {
+  const hex = createHash("sha256").update("short name").digest("hex").slice(0, 32);
+  for (const name of ["api", "tok", "key", "x", "shpat"]) {
+    expect(piecesAllowed(`${name}_${hex}`)).toBe(true);
+    expect(piecesAllowed(`${name}-${hex}`)).toBe(true);
+  }
+  // A repetitive hex part: the name before it must not change how it is judged.
+  for (const v of ["tok_1111aaaa2222bbbb3333cccc4444dddd", "0x1111aaaa2222bbbb3333cccc4444dddd", `shpat_${"1111aaaa2222bbbb3333cccc4444dddd".repeat(2)}`]) {
+    expect([v, piecesAllowed(v)]).toEqual([v, true]);
+  }
+  // Words after it stay words.
+  for (const v of ["api_request_timeout", "tok-refresh-interval", "key_value_store_options"]) expect([v, piecesAllowed(v)]).toEqual([v, false]);
+});
+
+test("a run of letters or digits no word has is not proven a name", () => {
+  // No vowel; a vowel too rarely for a word; digits alone, too short for the capitals rule.
+  for (const v of ["xkqzjwvmplhrtbnc", "xkqzjw-plhrtb-vmnqgd", "kzrtaxlmqevnbpiwdfgo", "4821397560182"]) expect([v, piecesAllowed(v)]).toEqual([v, true]);
+});
+
+test("names proven by words, humps or separators stay word-like", () => {
+  for (const v of ["access_token", "access_token@", "Identifikatorius", "Identifikatorius...", "permit2Authorization", "v402ChargeCounts",
+    "e2e-entry-access-token", "swapsAB4135AbtestButtonColor", "correct-horse-12-battery-staple", "useHTTPSAgent", "group.date.toString()"]) {
+    expect([v, piecesAllowed(v)]).toEqual([v, false]);
+  }
 });
 
 test("a value cut by what really cuts it: grep, the diff limits, a clipped output, a run's tail", async () => {

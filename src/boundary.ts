@@ -1,39 +1,51 @@
 // The one filter for what leaves arnx. Each value that looks like a secret gets its stand-in in every request to a model
 // (system text, messages, tool results, the diff), in a request's every string, in telemetry and in the event log, and so
-// does a piece of a random one at the edge of a word, as a cut leaves it. A
+// does a piece of one at the edge of a word, as a cut leaves it, unless the value is proven word-like. A
 // wrong guess costs an odd string in a prompt: nothing on disk changes. One Boundary serves a run: it starts empty and
 // is told each value before the text holding it can leave (a run's snapshots, both sides of its diff).
 import type { AgentModel, JsonModel } from "./llm";
-import { fake, type SecretPin, suspects } from "./secrets";
+import { fake, hasSecretContent, type SecretPin, suspects } from "./secrets";
 import { ValueIndex } from "./valueindex";
 
 /** The shortest piece of a value taken for that value: shorter ones are too often a piece of something else. */
 const FRAGMENT_MIN = 12;
 
-/** Whether `s` is spread over its characters as random text is: its characters' entropy near the most its length and
- * alphabet allow. Hex, with few characters to spread over, falls further short at a key's length, so its bar is lower. */
+/** What may stand before a key's random part: it says what kind of key, and says nothing about how random the rest is. */
+const KEY_KIND = /^(?:0x|[A-Za-z]{1,8}[-_])/i;
+const HEX = /^[0-9a-fA-F-]+$/;
+
+/** Whether `s` is spread over its characters as random text is: its characters' entropy not far from the most its length
+ * and alphabet allow. This only catches repetition, so its bar is low. */
 function spread(s: string): boolean {
-  const body = s.replace(/^0x/i, "");
   const counts = new Map<string, number>();
-  for (const c of body) counts.set(c, (counts.get(c) ?? 0) + 1);
+  for (const c of s) counts.set(c, (counts.get(c) ?? 0) + 1);
   let bits = 0;
-  for (const n of counts.values()) bits -= (n / body.length) * Math.log2(n / body.length);
-  if (/^[0-9a-fA-F-]+$/.test(body)) return bits >= 0.65 * Math.log2(Math.min(body.length, 16));
+  for (const n of counts.values()) bits -= (n / s.length) * Math.log2(n / s.length);
   let alphabet = 0;
-  for (const c of counts.keys()) if (!/[0-9A-Za-z]/.test(c)) alphabet++;
-  if (/[0-9]/.test(body)) alphabet += 10;
-  if (/[a-z]/.test(body)) alphabet += 26;
-  if (/[A-Z]/.test(body)) alphabet += 26;
-  return bits > 0 && bits >= 0.75 * Math.log2(Math.min(body.length, alphabet));
+  if (/^[0-9-]+$/.test(s)) alphabet = 10;
+  else if (HEX.test(s)) alphabet = 16;
+  else {
+    for (const c of counts.keys()) if (!/[0-9A-Za-z]/.test(c)) alphabet++;
+    if (/[0-9]/.test(s)) alphabet += 10;
+    if (/[a-z]/.test(s)) alphabet += 26;
+    if (/[A-Z]/.test(s)) alphabet += 26;
+  }
+  return bits > 0 && bits >= 0.65 * Math.log2(Math.min(s.length, alphabet));
 }
 
-/** A word or an abbreviation: no longer run of consonants than a word has. */
-const readsAsWord = (w: string) => !/[^aeiouy]{6,}/i.test(w);
+/** A word or an abbreviation by its letters. A long unbroken run of letters proves nothing. */
+function readsAsWord(w: string): boolean {
+  if (w.length <= 5) return true;
+  if (w.length > 20 || /[^aeiouy]{5,}/i.test(w)) return false;
+  return w.length < 12 || (w.match(/[aeiouy]/gi)?.length ?? 0) * 4 >= w.length;
+}
 
-/** Whether `s` reads as a name or as words: each part a word by case or by a sign (`primaryKeyField]`, `old-signing-key`,
+/** Whether `s` is proven a name or words: words joined by signs or case (`primaryKeyField]`, `old-signing-key`,
  * `oauth2Client`, `_v402_is_retry`). Random text breaks that: scraps of a letter or two beside digits and other letters,
- * digits inside words. */
+ * digits inside words, a long run of letters no word has. */
 function nameShaped(s: string): boolean {
+  // Signs a password has and a name does not, past a mark at its end (`Password1!`).
+  if ((s.replace(/[^A-Za-z0-9]+$/, "").match(/[!#$%^&*]/g)?.length ?? 0) > 1) return false;
   const parts = s.match(/[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+|[^A-Za-z0-9]+/g) ?? [];
   const isWord = (p: string | undefined) => p !== undefined && /^[A-Za-z]/.test(p);
   const isNumber = (p: string | undefined) => p !== undefined && /^[0-9]/.test(p);
@@ -49,13 +61,18 @@ function nameShaped(s: string): boolean {
   return letters > 0 && scraps * 6 <= letters && inner <= 1;
 }
 
-/** Whether a piece of `value` counts as that value. Decided from all of it, as a piece on its own can read as anything:
- * every piece of a random value goes, a dotted tail too, and a word-like value is masked whole only, since its pieces are
- * names in code and one name with two spellings reads as a bug. So a cut piece of a long word-like password leaves. An
- * address's password keeps its `@` in the value. */
+/** Whether a piece of `value` counts as that value. Decided from all of it, as a piece on its own can read as anything.
+ * When in doubt it does: a leak costs more than an odd name. Only a value proven word-like is masked whole only, since its
+ * pieces are names in code and one name with two spellings reads as a bug. So a cut piece of a passphrase of words and
+ * digits leaves. An address's password keeps its `@` in the value. */
 export function piecesAllowed(value: string): boolean {
   const v = value.endsWith("@") ? value.slice(0, -1) : value;
-  return spread(v) && !nameShaped(v);
+  if (hasSecretContent(v)) return true;
+  const rest = v.replace(KEY_KIND, "");
+  if (!spread(rest)) return false;
+  // Capitals and digits (base32, cloud keys), or hex: their letters can read as anything. A constant's name holds a `_`.
+  if (v.length >= 16 && (!/[a-z_]/.test(v) || HEX.test(rest))) return true;
+  return !nameShaped(v);
 }
 
 /** A value as it reads in text that was made into JSON or into a URL. */
@@ -148,8 +165,8 @@ export class Boundary {
   }
 
   /** `text` without any of the values, each replaced wherever it stands, inside a longer word too, and without the piece
-   * of a random one that text cut before the filter left: FRAGMENT_MIN characters or more of its start that end a word,
-   * or of its end that start one. */
+   * of one (`piecesAllowed`) that text cut before the filter left: FRAGMENT_MIN characters or more of its start that end
+   * a word, or of its end that start one. */
   mask(text: string): string {
     const edits = this.editsOf(text);
     if (!edits.length) return text;
