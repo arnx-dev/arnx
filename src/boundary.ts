@@ -71,7 +71,7 @@ export function piecesAllowed(value: string): boolean {
   const rest = v.replace(KEY_KIND, "");
   if (!spread(rest)) return false;
   // Capitals and digits (base32, cloud keys), or hex: their letters can read as anything. A constant's name holds a `_`.
-  if (v.length >= 16 && (!/[a-z_]/.test(v) || HEX.test(rest))) return true;
+  if (v.length >= 16 && (!/[a-z_]/.test(rest) || HEX.test(rest))) return true;
   return !nameShaped(v);
 }
 

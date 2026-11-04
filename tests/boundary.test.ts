@@ -1416,3 +1416,17 @@ test("a suspect's rule says whether it is certain or a guess", () => {
   suspects("a.py", `api_token = "${CANARY}"\n`, [], why);
   expect(isCertainRule(why.get(CANARY)!)).toBe(false);
 });
+
+test("a capitals key behind a short kind prefix is judged as its body is, whatever its draw", () => {
+  const caps = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  // (A body too repetitive to look random is refused with or without a prefix: the prefix must change nothing.)
+  for (const prefix of ["key-", "aws_", "tok_"]) {
+    let differ = 0;
+    for (let i = 0; i < 3000; i++) {
+      let body = "";
+      for (let j = 0; j < 16; j++) body += caps[Math.floor(Math.random() * caps.length)];
+      if (piecesAllowed(prefix + body) !== piecesAllowed(body)) differ++;
+    }
+    expect(differ).toBe(0);
+  }
+});
