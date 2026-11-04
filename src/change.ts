@@ -24,8 +24,8 @@ export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 export const MAX_DIFF_BYTES = 200_000;
 export const SCAN_LIMIT = 1_000_000;
 /** The largest text file a snapshot keeps. read_file has no size limit, so one it cannot scan may not stay. Measured on
- * the slowest shapes (a name on every line, one long line): about 0.25 s per MB and a few hundred MB of memory at this
- * size; 64 MB takes twice the time and near 1 GB, on every snapshot of a review. */
+ * the slowest shapes (one long line, a name or a key on every line): up to 0.2 s per MB, and up to 1 GB of memory at this
+ * size, on every snapshot of a review. */
 export const BIG_SCAN_LIMIT = 32_000_000;
 /** The most key-shaped strings a file over SCAN_LIMIT may hold and stay: about 5 s of stand-ins on each snapshot. */
 export const BIG_KEYS_MOST = 2000;
