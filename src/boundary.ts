@@ -1,6 +1,6 @@
 // The one filter for what leaves arnx. Each value that looks like a secret gets its stand-in in every request to a model
 // (system text, messages, tool results, the diff), in a request's every string, in telemetry and in the event log, and so
-// does a piece of one at the edge of a word, as a cut leaves it. A
+// does a piece of a random one at the edge of a word, as a cut leaves it. A
 // wrong guess costs an odd string in a prompt: nothing on disk changes. One Boundary serves a run: it starts empty and
 // is told each value before the text holding it can leave (a run's snapshots, both sides of its diff).
 import type { AgentModel, JsonModel } from "./llm";
@@ -9,6 +9,54 @@ import { ValueIndex } from "./valueindex";
 
 /** The shortest piece of a value taken for that value: shorter ones are too often a piece of something else. */
 const FRAGMENT_MIN = 12;
+
+/** Whether `s` is spread over its characters as random text is: its characters' entropy near the most its length and
+ * alphabet allow. Hex, with few characters to spread over, falls further short at a key's length, so its bar is lower. */
+function spread(s: string): boolean {
+  const body = s.replace(/^0x/i, "");
+  const counts = new Map<string, number>();
+  for (const c of body) counts.set(c, (counts.get(c) ?? 0) + 1);
+  let bits = 0;
+  for (const n of counts.values()) bits -= (n / body.length) * Math.log2(n / body.length);
+  if (/^[0-9a-fA-F-]+$/.test(body)) return bits >= 0.65 * Math.log2(Math.min(body.length, 16));
+  let alphabet = 0;
+  for (const c of counts.keys()) if (!/[0-9A-Za-z]/.test(c)) alphabet++;
+  if (/[0-9]/.test(body)) alphabet += 10;
+  if (/[a-z]/.test(body)) alphabet += 26;
+  if (/[A-Z]/.test(body)) alphabet += 26;
+  return bits > 0 && bits >= 0.75 * Math.log2(Math.min(body.length, alphabet));
+}
+
+/** A word or an abbreviation: no longer run of consonants than a word has. */
+const readsAsWord = (w: string) => !/[^aeiouy]{6,}/i.test(w);
+
+/** Whether `s` reads as a name or as words: each part a word by case or by a sign (`primaryKeyField]`, `old-signing-key`,
+ * `oauth2Client`, `_v402_is_retry`). Random text breaks that: scraps of a letter or two beside digits and other letters,
+ * digits inside words. */
+function nameShaped(s: string): boolean {
+  const parts = s.match(/[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+|[^A-Za-z0-9]+/g) ?? [];
+  const isWord = (p: string | undefined) => p !== undefined && /^[A-Za-z]/.test(p);
+  const isNumber = (p: string | undefined) => p !== undefined && /^[0-9]/.test(p);
+  let letters = 0, scraps = 0, inner = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i]!, before = parts[i - 1], after = parts[i + 1];
+    if (isWord(p)) {
+      if (!readsAsWord(p)) return false;
+      letters += p.length;
+      if (p.length < 3 && (isWord(before) || isNumber(before) || isWord(after) || isNumber(after))) scraps += p.length;
+    } else if (isNumber(p) && isWord(before) && isWord(after)) inner++;
+  }
+  return letters > 0 && scraps * 6 <= letters && inner <= 1;
+}
+
+/** Whether a piece of `value` counts as that value. Decided from all of it, as a piece on its own can read as anything:
+ * every piece of a random value goes, a dotted tail too, and a word-like value is masked whole only, since its pieces are
+ * names in code and one name with two spellings reads as a bug. So a cut piece of a long word-like password leaves. An
+ * address's password keeps its `@` in the value. */
+export function piecesAllowed(value: string): boolean {
+  const v = value.endsWith("@") ? value.slice(0, -1) : value;
+  return spread(v) && !nameShaped(v);
+}
 
 /** A value as it reads in text that was made into JSON or into a URL. */
 function forms(v: string): string[] {
@@ -70,6 +118,10 @@ export class Boundary {
   private made = new Map<string, string>();
   /** Made when first asked, and again after values are added. */
   private index: ValueIndex | null = null;
+  /** The value a JSON or URL form was made from. */
+  private formOf = new Map<string, string>();
+  /** What `piecesAllowed` said, for each value or form a text has held a piece of. */
+  private judged = new Map<string, boolean>();
 
   constructor(values: Iterable<string> = []) {
     this.add(values);
@@ -79,7 +131,11 @@ export class Boundary {
   add(values: Iterable<string>): void {
     const before = this.values.size;
     for (const v of values) {
-      if (v) for (const form of forms(v)) this.values.add(form);
+      if (!v) continue;
+      for (const form of forms(v)) {
+        this.values.add(form);
+        if (form !== v) this.formOf.set(form, v);
+      }
     }
     if (this.values.size === before) return;
     this.longest = [...this.values].sort((a, b) => b.length - a.length);
@@ -92,8 +148,8 @@ export class Boundary {
   }
 
   /** `text` without any of the values, each replaced wherever it stands, inside a longer word too, and without the piece
-   * of one that text cut before the filter left: FRAGMENT_MIN characters or more of its start that end a word, or of its
-   * end that start one. */
+   * of a random one that text cut before the filter left: FRAGMENT_MIN characters or more of its start that end a word,
+   * or of its end that start one. */
   mask(text: string): string {
     const edits = this.editsOf(text);
     if (!edits.length) return text;
@@ -113,17 +169,24 @@ export class Boundary {
     const signsOf = () => signs ??= signPlaces(text);
     this.index.eachStart(text, (v, at, n) => {
       if (n === v.length) edits.push({ at, length: n, value: v, kind: "start" });
-      else if (n >= FRAGMENT_MIN) {
+      else if (n >= FRAGMENT_MIN && this.piecesCount(v)) {
         const end = endsAt(text, at + n) ? at + n : signsOf()[countBelow(signsOf(), at + n) - 1] ?? -1;
         if (end - at >= FRAGMENT_MIN) edits.push({ at, length: end - at, value: v, kind: "start" });
       }
     });
     this.index.eachEnd(text, (v, end, n) => {
-      if (n < FRAGMENT_MIN || n >= v.length) return;
+      if (n < FRAGMENT_MIN || n >= v.length || !this.piecesCount(v)) return;
       const sign = startsAt(text, end - n) ? end - n - 1 : signsOf()[countBelow(signsOf(), end - n)] ?? end;
       if (end - sign - 1 >= FRAGMENT_MIN) edits.push({ at: sign + 1, length: end - sign - 1, value: v, kind: "end" });
     });
     return edits;
+  }
+
+  /** `piecesAllowed` for a value or a form of one, which is judged as the value. */
+  private piecesCount(form: string): boolean {
+    let yes = this.judged.get(form);
+    if (yes === undefined) this.judged.set(form, yes = piecesAllowed(this.formOf.get(form) ?? form));
+    return yes;
   }
 
   /** A copy of `value` with `mask` applied to every string in it, keys too; the same object when there are no values. */

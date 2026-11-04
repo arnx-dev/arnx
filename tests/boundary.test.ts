@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { dirname, join } from "node:path";
 import { makeAnswerRunner } from "../src/accept";
 import { agreements, selfAgreement } from "../src/valueindex";
-import { Boundary, boundaryOf, diffSuspects, isMasked, maskedAgent, maskedJson } from "../src/boundary";
+import { Boundary, boundaryOf, diffSuspects, isMasked, maskedAgent, maskedJson, piecesAllowed } from "../src/boundary";
 import { CloudClient } from "../src/cloud";
 import { clipOutput as cutForBrain, CloudBrain } from "../src/cloudbrain";
 import { loadReviewFile, parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
@@ -737,13 +737,140 @@ test("a piece of a value inside a longer word, or shorter than 12 characters, st
 });
 
 test("a value's own signs are edges: what stands past one goes, though a letter stands before the piece", () => {
-  const value = "abc-defghijklmnopqrs-tuvwxyz012345";
+  const value = "aB3-dE6gH9jK2mN5pQ8sT-1vW4yZ7bC0fG3iL";
   const b = new Boundary([value]);
-  expect(b.mask("Xbc-defghijklmnopqrs-tuvwxyz012345 end")).not.toContain("defghijklmnopqrs");
-  expect(b.mask("abc-defghijklmnopqrs-tuvwxyz0Q")).not.toContain("defghijklmnopqrs");
+  expect(b.mask("Xb3-dE6gH9jK2mN5pQ8sT-1vW4yZ7bC0fG3iL end")).not.toContain("dE6gH9jK2mN5pQ8sT");
+  expect(b.mask("aB3-dE6gH9jK2mN5pQ8sT-1vW4yZ0Q")).not.toContain("dE6gH9jK2mN5pQ8sT");
   // Longer than the value, a run still leaves nothing of it.
-  const run = `Ab1-${"cD2-".repeat(100)}`;
-  expect(new Boundary([run]).mask("cD2-".repeat(300))).not.toContain("cD2-cD2-cD2-cD2-");
+  const run = `Ab1-${`${SIGNED}-`.repeat(5)}`;
+  expect(new Boundary([run]).mask(`${SIGNED}-`.repeat(12))).not.toContain(SIGNED);
+});
+
+// Whether a value's pieces count is decided from the whole value: a piece of a word-like one is a name in code.
+/** Random, with signs of every kind that may stand inside a value. */
+const SIGNED = "Ab3_dE6gH9-jK2mN5pQ8.sT1vW4yZ7bC0fG3iL6";
+
+test("a word-like value's piece stays in the text, and the value itself still goes", () => {
+  const cases: [string, string[]][] = [
+    ["Beschreibungstext...", ["label: Beschreibungstext\n", "x = Beschreibungstext", "{ title: 'Beschreibungs' }"]],
+    ["ReturningGuest123!", ["const user = ReturningGuest\n", "(ReturningGuest)"]],
+    ["2:new-signing-key,1:old-signing-key", ["env = 2:new-signing\n", "1:old-signing-key\n"]],
+    ["correcthorsebatterystaple", ["word = correcthorse\n", "correcthorsebattery ", "(horsebatterystaple)"]],
+  ];
+  for (const [value, texts] of cases) {
+    const b = new Boundary([value]);
+    for (const text of texts) expect(b.mask(text)).toBe(text);
+    expect(b.mask(`[${value}]`)).not.toContain(value);
+  }
+});
+
+test("a name is one name: the piece of a value that names a variable does not rename it there", () => {
+  const b = new Boundary(["row[sortableField]"]);
+  const line = "query.select(sortableField).first()?.[sortableField]";
+  expect(b.mask(line)).toBe(line);
+  expect(b.mask(`const key = row[sortableField];`)).not.toContain("row[sortableField]");
+});
+
+test("an address's password that reads like a name: the name alone stays, the password in its address goes", () => {
+  const comment = ["# postgres://user", "session_handle@db.prod.net/app\n"].join(":");
+  const picked = suspects("a.py", comment, []);
+  expect(picked).toEqual(["session_handle@"]);
+  const b = new Boundary(picked);
+  const line = `params["session_handle"] = value`;
+  expect(b.mask(line)).toBe(line);
+  expect(b.mask(comment)).not.toContain("session_handle");
+  expect(b.mask(JSON.stringify(comment))).not.toContain("session_handle");
+});
+
+test("a random value's piece goes at each kind of edge, from either end", () => {
+  const b = new Boundary([LONG, SIGNED]);
+  for (const value of [LONG, SIGNED]) {
+    for (const n of [12, 20, 30]) {
+      const start = value.slice(0, n), end = value.slice(-n);
+      const texts = [start, `x ${start}`, `${start}\n`, `${start}\r\n`, `${start}…`, `${start}...`, `(${start})`, `"${start}"`,
+        `'${start}'`, `${start}:`, `${start}=`, `${start} `, `${start}\t`, `${start}/`, `${start}�`, `${start}_`, `${start}é`];
+      for (const text of texts) expect([text, b.mask(text).includes(start)]).toEqual([text, false]);
+      const ends = [end, `${end} x`, `\n${end}`, `\t${end}`, `…${end}`, `...${end}`, `(${end})`, `"${end}"`, `'${end}'`, `:${end}`,
+        `=${end}`, ` ${end}`, `/${end}`, `�${end}`, `_${end}`, `é${end}`];
+      for (const text of ends) expect([text, b.mask(text).includes(end)]).toEqual([text, false]);
+    }
+  }
+});
+
+test("a random value's tail that reads as a dotted name goes", () => {
+  const tail = SIGNED.slice(SIGNED.indexOf("Q8."));
+  expect(tail).toBe("Q8.sT1vW4yZ7bC0fG3iL6");
+  const b = new Boundary([SIGNED]);
+  for (const text of [`${tail} failed`, `\n    ${tail}`, `error: ${tail}`, `"${tail}"`, `(${tail})`]) {
+    expect(b.mask(text)).not.toContain(tail);
+  }
+});
+
+test("a value's JSON and URL forms are judged as the value", () => {
+  const random = "Ab3/dE6+gH9=jK2$mN5pQ8sT1vW4";
+  const url = encodeURIComponent(random);
+  expect(url).not.toBe(random);
+  expect(new Boundary([random]).mask(`${url.slice(0, 16)} failed`)).not.toContain(url.slice(0, 16));
+  // Encoded, this one would read as too little spread by itself.
+  const signs = "KfD,]5H+[5{>Y2jpFdSj2U$4";
+  const encoded = encodeURIComponent(signs);
+  expect([piecesAllowed(signs), piecesAllowed(encoded)]).toEqual([true, false]);
+  expect(new Boundary([signs]).mask(`${encoded.slice(0, 20)} failed`)).not.toContain(encoded.slice(0, 20));
+  const quoted = 'Ab3"dE6gH9jK2mN5pQ8sT1vW4';
+  const json = JSON.stringify(quoted).slice(1, -1);
+  expect(new Boundary([quoted]).mask(`${json.slice(0, 16)}…`)).not.toContain(json.slice(0, 16));
+  // Word-like, all its forms keep whole-value masking only.
+  const worded = "session handle/primary@";
+  const form = encodeURIComponent(worded);
+  const b = new Boundary([worded]);
+  expect(b.mask(`${form.slice(0, 16)} failed`)).toBe(`${form.slice(0, 16)} failed`);
+  expect(b.mask(`=${form}=`)).not.toContain(form);
+});
+
+test("piecesAllowed: a random value yes, a word-like one no, from the value as a whole", () => {
+  const hash = (s: string) => createHash("sha256").update(s).digest();
+  const random = [LONG, SIGNED, "Q8.sT1vW4yZ7bC0fG3iL6", "Xk9#mP2$vL5!qR8wT", "ab12.c0DEF5g7hQ_some_oauth_token_with-dashes",
+    hash("a").toString("hex"), hash("b").toString("hex").toUpperCase(), `0x${hash("c").toString("hex")}`,
+    hash("d").toString("hex").slice(0, 16), "f47ac10b-58cc-4372-a567-0e02b2c3d479", hash("e").toString("base64"),
+    hash("f").toString("base64url"), `sk-${hash("g").toString("hex")}`, `AKIA${"Q3X9RT5L2MZP7WKJ"}`, `ghp_${hash("h").toString("base64url").slice(0, 40)}`,
+    `xoxb${"-263594206564-2343594206564-AbCdEfGhIjKlMnOpQrStUvWx"}`, "key_test_9fZ31HqLyjWDarjtT1zdp7dc", "k3jd9xm2qp7wzr5t",
+    "JBSWY3DPEHPK3PXP", "mycompany_production_api_aB3dE6gH9jK2mN", "rotate_password_Xy12Zq9", "48213975601827364",
+    "70e4d786628fea6478f785a6d7e704777c86a7c5"];
+  for (const v of random) expect([v, piecesAllowed(v)]).toEqual([v, true]);
+  // An address's password keeps its @ in the value; the choice is made without it.
+  expect(piecesAllowed(`${SIGNED}@`)).toBe(true);
+  expect(piecesAllowed("70e4d786628fea6478f785a6d7e704777c86a7c5@")).toBe(true);
+  const worded = ["session_handle@", "session_handle", "sortableField]", "[sortableField]", "row[sortableField]", "item[sortableKey",
+    "Beschreibungstext...", "ReturningGuest123!", "correctPassword123!", "text/plain+frozenset:[NaN]", "props.itemValue]",
+    "2:new-signing-key,1:old-signing-key", "at-least-32-chars-long!!", "old-signing-key", "correcthorsebatterystaple",
+    "oauth2Client", "base64Encoded", "sha256sum", "XMLParserOptions", "group.date.toString()", "String(item.value)", "_v402_is_retry",
+    "demo-m2m-signing", "getIdFromUrl", "quizQuestionnaireQ1No", "v402ChargeCounts"];
+  for (const v of worded) expect([v, piecesAllowed(v)]).toEqual([v, false]);
+  // Too little spread to be random.
+  for (const v of ["aB1aB1aB1aB1aB1aB1", "0x0000000000000000000000000000000000000001", "deadbeefdeadbeef", "AAAAAAAAAAAAAAAAAAAA", "-".repeat(30), "!".repeat(30)]) {
+    expect([v, piecesAllowed(v)]).toEqual([v, false]);
+  }
+});
+
+test("piecesAllowed: strings drawn at random from a key's alphabets are taken as random", () => {
+  let seed = 11;
+  const next = (n: number) => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0, (seed >>> 8) % n);
+  const lower = "abcdefghijklmnopqrstuvwxyz", upper = lower.toUpperCase(), digits = "0123456789";
+  const alphabets = [lower + upper + digits, `${lower + upper + digits}-_`, `${lower + upper + digits}+/`, digits + "abcdef", digits + "ABCDEF", lower + digits,
+    upper + digits, `${upper}234567`, `${lower + upper + digits}!@#$%^&*`];
+  for (const alphabet of alphabets) {
+    for (const length of [24, 32, 40, 64, 128]) {
+      let yes = 0;
+      for (let i = 0; i < 500; i++) {
+        if (piecesAllowed(Array.from({ length }, () => alphabet[next(alphabet.length)]).join(""))) yes++;
+      }
+      expect([alphabet, length, yes >= 480]).toEqual([alphabet, length, true]);
+    }
+  }
+  // Short hex spreads least.
+  let yes = 0;
+  for (let i = 0; i < 500; i++) if (piecesAllowed(Array.from({ length: 16 }, () => (digits + "abcdef")[next(16)]).join(""))) yes++;
+  expect(yes).toBeGreaterThanOrEqual(450);
 });
 
 test("a value cut by what really cuts it: grep, the diff limits, a clipped output, a run's tail", async () => {
@@ -915,17 +1042,18 @@ test("a matcher for a whole tree costs no more with many values either", () => {
   expect(replace(`x${values[7]}y`).count).toBe(0);
 }, 60_000);
 
-// A value of one letter over and over: a place in the text that looks like its end at every character.
+// A value of one letter over and over: a place in the text that looks like its end at every character. Word-like, so only
+// the whole value goes.
 const RUN = 100_000;
 const longRun = `sk-${"a".repeat(RUN)}`;
 const QUICK = 2000;
 for (const [name, text, leaves] of [
   ["the whole value", `key = "${longRun}"`, longRun],
   ["twice the length, whole", `key = "${`sk-${"a".repeat(2 * RUN)}`}"`, null],
-  ["a run with no start", `key = "${"a".repeat(RUN - 5)}"`, "a".repeat(RUN - 5)],
+  ["a run with no start", `key = "${"a".repeat(RUN - 5)}"`, null],
   ["a run inside a word", `key = "b${"a".repeat(RUN)}c"`, null],
   ["a run broken in the middle", `-${"a".repeat(RUN / 2)}b${"a".repeat(RUN / 2)}-`, null],
-  ["its start, cut", `key = "${longRun.slice(0, RUN - 7)}\n`, longRun.slice(0, RUN - 7)],
+  ["its start, cut", `key = "${longRun.slice(0, RUN - 7)}\n`, null],
 ] as const) {
   test(`masking a long run takes no time to speak of: ${name}`, () => {
     const b = new Boundary([longRun]);
@@ -936,13 +1064,33 @@ for (const [name, text, leaves] of [
   }, 60_000);
 }
 
+// A random block over and over: as many places to compare, and here each piece goes too.
+const BLOCK = LONG.slice(0, 64);
+const blockRun = BLOCK.repeat(RUN / 64);
+for (const [name, text] of [
+  ["the whole value", `key = "${blockRun}"`],
+  ["twice the length", `key = "${blockRun}${blockRun}"`],
+  ["no start", `key = "${blockRun.slice(5)}"`],
+  ["a start, cut", `key = "${blockRun.slice(0, -7)}\n`],
+  ["inside a word", `key = "b${blockRun}c"`],
+] as const) {
+  test(`masking a long run of a random value takes no time to speak of: ${name}`, () => {
+    expect(piecesAllowed(blockRun)).toBe(true);
+    const b = new Boundary([blockRun]);
+    const t0 = performance.now();
+    const masked = b.mask(text);
+    expect(performance.now() - t0).toBeLessThan(QUICK);
+    if (name !== "inside a word") expect(masked).not.toContain(BLOCK);
+  }, 60_000);
+}
+
 test("masking a value that repeats a short pattern takes no time to speak of, nor a tree's matcher", () => {
   const value = `Ab1-${"cD2-".repeat(25_000)}`;
   const b = new Boundary([value]);
   const t0 = performance.now();
-  for (const text of [value, `${value}${value}`, value.slice(4), value.slice(0, -4), `${"cD2-".repeat(50_000)}`]) {
-    expect(b.mask(text)).not.toContain("cD2-cD2-cD2-cD2-");
-  }
+  for (const text of [value, `${value}${value}`]) expect(b.mask(text)).not.toContain("cD2-cD2-cD2-cD2-");
+  // Too little spread to be random, so a piece stays: only the time counts here.
+  for (const text of [value.slice(4), value.slice(0, -4), `${"cD2-".repeat(50_000)}`]) b.mask(text);
   const matcher = standInsFor([value, ...Array.from({ length: 100 }, (_, i) => `Zq7xK2mP9vR4tY1w${i}`)]);
   matcher(`${"cD2-".repeat(50_000)}`);
   expect(performance.now() - t0).toBeLessThan(QUICK * 2);
@@ -973,14 +1121,18 @@ test("the agreement found by the quick way is the plain comparison's", () => {
   }
 });
 
-test("on random text nothing of a value is left at a word's edge", () => {
-  let seed = 7;
-  const next = (n: number) => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) % n;
+const KEY_LETTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+test("on random text nothing of a random value is left at a word's edge", () => {
+  let seed = 8;
+  const next = (n: number) => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0, (seed >>> 8) % n);
   const word = (min: number, max: number, letters: string) =>
     Array.from({ length: min + next(max - min + 1) }, () => letters[next(letters.length)]).join("");
   for (let round = 0; round < 1500; round++) {
     const letters = round % 2 ? "aB" : "aB1-";
-    const value = `Q${word(13, 40, letters)}Z`;
+    // A random head, and a tail whose pieces overlap one another.
+    const value = `Q${word(60, 60, KEY_LETTERS)}${word(13, 15, letters)}Z`;
+    expect(piecesAllowed(value)).toBe(true);
     const b = new Boundary([value]);
     const cutAt = next(value.length);
     const pieces = [value, value.slice(cutAt), value.slice(0, cutAt), word(0, 10, letters), " ", "(", "\n", "x"];
