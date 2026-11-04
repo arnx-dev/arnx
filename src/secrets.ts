@@ -20,9 +20,12 @@ const QUICK = /-----BEGIN|AKIA|sk-|gh[pousr]_|xox[abpr]-/;
 /** A password written into an address, `scheme://user:password@host`: the groups are the password and the host. A
  * template (`{password}`, `${X}`, `<password>`) holds characters a password here may not, and an example's `u:p` is
  * too short for one. */
-const ADDRESS = /:\/\/[^\s:/@"'`]{0,128}:([^\s/@"'`<>{}$*\\()[\]]{4,256})@([A-Za-z0-9._-]*)/g;
-/** What a doc or a form writes in place of a password; a number of up to five digits is a port. */
-const NO_PASSWORD = /^(?:\d{1,5}|password|passwd|pass|pwd|secret|changeme|change_me|example|test|dummy|fake|none|null|x+|\.+)$|%[sd]/i;
+const ADDRESS = /:\/\/([^\s:/@"'`]{0,128}):([^\s/@"'`<>{}$*\\()[\]]{4,256})@([A-Za-z0-9._-]*)/g;
+/** What a doc or a form writes in place of a password. */
+const NO_PASSWORD = /^(?:password|passwd|pass|pwd|secret|changeme|change_me|example|test|dummy|fake|none|null|x+|\.+)$|%[sd]/i;
+/** What stands before `:digits@` when the digits are a port: a host's name (a dot, or the machine itself) or nothing; a
+ * word with a number after it is a user and a password. */
+const HOST_NAME = /^$|\.|^(?:localhost|local)$/i;
 /** A host no real password is for: a machine's own name, a service's one word, the names kept for examples and tests.
  * A template host (none read) may be any. */
 const OWN_HOST = /^(?:[^.]+|127\..*|0\.0\.0\.0)$|(?:^|\.)(?:localhost|local|test|invalid|example|example\.(?:com|net|org))$/i;
@@ -36,8 +39,8 @@ function addressPasswords(text: string): Hit[] {
   if (!text.includes("://")) return [];
   const out: Hit[] = [];
   for (const m of text.matchAll(ADDRESS)) {
-    const [whole, password, host] = m as unknown as [string, string, string];
-    if (NO_PASSWORD.test(password) || (host && OWN_HOST.test(host) && !secretValue(password, "weak"))) continue;
+    const [whole, user, password, host] = m as unknown as [string, string, string, string];
+    if (NO_PASSWORD.test(password) || (/^\d{1,5}$/.test(password) && HOST_NAME.test(user)) || (host && OWN_HOST.test(host) && !secretValue(password, "weak"))) continue;
     // With its @: a word-like password changes only here, and the host stays (a test may compare it).
     const value = `${password}@`;
     out.push({ 0: value, index: m.index + whole.length - host.length - value.length });
