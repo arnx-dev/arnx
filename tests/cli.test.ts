@@ -10,6 +10,7 @@ import { commandHelp, ownKeysLine } from "../src/cli";
 import { VERSION } from "../src/version";
 import { Cli } from "./helpers/cli";
 import { commit, gitRepo } from "./helpers/gitutil";
+import { ScriptedAgent, text } from "./helpers/fakes";
 import { finding, sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
 import { PROJECTS } from "./helpers/yaml";
@@ -161,12 +162,14 @@ test("own keys: the first send asks nothing, even without a terminal, and says o
   const repo = gitRepo(tmp());
   const env = { ANTHROPIC_API_KEY: "a" };
   await new Cli({ cwd: repo, env }).run("init");
-  const first = new Cli({ cwd: repo, env, ask: async () => { throw new Error("asked"); } });
+  // A fake model keeps the run on this machine: the key above is not one a provider would take.
+  const setupModel = () => new ScriptedAgent([[text("done")]]);
+  const first = new Cli({ cwd: repo, env, setupModel: setupModel(), ask: async () => { throw new Error("asked"); } });
   await first.run("setup");
   expect(first.stdout).toContain(ownKeysLine(["Anthropic"]));
   expect(first.stderr).not.toContain("consent");
   expect(loadSettings(repo).consentAt).toBeTruthy();
-  const again = new Cli({ cwd: repo, env });
+  const again = new Cli({ cwd: repo, env, setupModel: setupModel() });
   await again.run("setup");
   expect(again.stdout).not.toContain(ownKeysLine(["Anthropic"]));
   expect(await again.run("consent")).toBe(0);
