@@ -56,7 +56,47 @@ function slide(text: string, t: Table, visit: (value: string, at: number) => voi
   }
 }
 
+/** How far a string agrees with itself from each of its places (the Z algorithm's table). */
+export function selfAgreement(at: (i: number) => number, length: number): Int32Array {
+  const z = new Int32Array(length);
+  if (length) z[0] = length;
+  for (let i = 1, left = 0, right = 0; i < length; i++) {
+    let k = i < right ? Math.min(right - i, z[i - left]!) : 0;
+    while (i + k < length && at(k) === at(i + k)) k++;
+    z[i] = k;
+    if (i + k > right) [left, right] = [i, i + k];
+  }
+  return z;
+}
+
+/** How far a text agrees with a string read from its start, asked for places in ascending order. Each character of the
+ * text is compared once per string, however many of the string's places overlap (a long run of one letter). */
+class Agreement {
+  private left = 0;
+  private right = 0;
+  constructor(private text: (i: number) => number, private size: number, private str: (i: number) => number,
+              private length: number, private self: Int32Array) {}
+
+  from(place: number): number {
+    let k = 0;
+    if (place < this.right) k = Math.min(this.self[place - this.left]!, this.right - place);
+    while (k < this.length && place + k < this.size && this.text(place + k) === this.str(k)) k++;
+    if (place + k > this.right) [this.left, this.right] = [place, place + k];
+    return k;
+  }
+}
+
+/** What a place found: how many characters agree. Exported for the test against a plain comparison. */
+export function agreements(text: string, value: string, places: readonly number[]): number[] {
+  const a = new Agreement((i) => text.charCodeAt(i), text.length, (i) => value.charCodeAt(i), value.length,
+    selfAgreement((i) => value.charCodeAt(i), value.length));
+  return places.map((p) => a.from(p));
+}
+
 export class ValueIndex {
+  /** Each string's table, read from its start and from its end, once it has been met. */
+  private selves = new Map<string, Int32Array>();
+  private backSelves = new Map<string, Int32Array>();
   private starts: Table[] = [];
   private ends: Table | null = null;
   private tiny: string[] = [];
@@ -77,23 +117,48 @@ export class ValueIndex {
     if (ends.length) this.ends = tableOf(LONG_PIECE, ends);
   }
 
-  /** Each place `text` may hold the start of a string (`at`: where), as many characters of it as the piece holds: the
-   * caller compares. */
-  eachStart(text: string, visit: (value: string, at: number) => void): void {
-    for (const t of this.starts) slide(text, t, visit);
-    for (const v of this.tiny) for (let at = text.indexOf(v); at >= 0; at = text.indexOf(v, at + 1)) visit(v, at);
+  /** Each place `text` may hold the start of a string: `length`, how many of its characters agree there. */
+  eachStart(text: string, visit: (value: string, at: number, length: number) => void): void {
+    const met = new Map<string, Agreement>();
+    const look = (v: string, at: number) => {
+      let a = met.get(v);
+      if (!a) {
+        let self = this.selves.get(v);
+        if (!self) this.selves.set(v, self = selfAgreement((i) => v.charCodeAt(i), v.length));
+        met.set(v, a = new Agreement((i) => text.charCodeAt(i), text.length, (i) => v.charCodeAt(i), v.length, self));
+      }
+      visit(v, at, a.from(at));
+    };
+    for (const t of this.starts) slide(text, t, look);
+    for (const v of this.tiny) for (let at = text.indexOf(v); at >= 0; at = text.indexOf(v, at + 1)) look(v, at);
   }
 
-  /** Each place `text` may hold the last LONG_PIECE characters of a longer string (`at`: where they start). */
-  eachEnd(text: string, visit: (value: string, at: number) => void): void {
-    if (this.ends) slide(text, this.ends, visit);
+  /** Each place `text` may hold the end of a longer string, read backwards from `end`: `length`, how many of its last
+   * characters agree there. */
+  eachEnd(text: string, visit: (value: string, end: number, length: number) => void): void {
+    if (!this.ends) return;
+    const places = new Map<string, number[]>();
+    slide(text, this.ends, (v, at) => {
+      const list = places.get(v);
+      if (list) list.push(at + LONG_PIECE);
+      else places.set(v, [at + LONG_PIECE]);
+    });
+    const size = text.length;
+    for (const [v, ends] of places) {
+      const last = v.length - 1;
+      let self = this.backSelves.get(v);
+      if (!self) this.backSelves.set(v, self = selfAgreement((i) => v.charCodeAt(last - i), v.length));
+      const a = new Agreement((i) => text.charCodeAt(size - 1 - i), size, (i) => v.charCodeAt(last - i), v.length, self);
+      // Read from the end of the text, so the last place comes first.
+      for (let i = ends.length - 1; i >= 0; i--) visit(v, ends[i]!, a.from(size - ends[i]!));
+    }
   }
 
   /** The strings `text` holds whole. */
   present(text: string): Set<string> {
     const out = new Set<string>();
-    this.eachStart(text, (v, at) => {
-      if (!out.has(v) && text.startsWith(v, at)) out.add(v);
+    this.eachStart(text, (v, _at, length) => {
+      if (length === v.length) out.add(v);
     });
     return out;
   }

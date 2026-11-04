@@ -1,6 +1,6 @@
 // The one filter for what leaves arnx. Each value that looks like a secret gets its stand-in in every request to a model
 // (system text, messages, tool results, the diff), in a request's every string, in telemetry and in the event log, and so
-// does a piece of one that a cut left at the edge of a line or of the text. A
+// does a piece of one at the edge of a word, as a cut leaves it. A
 // wrong guess costs an odd string in a prompt: nothing on disk changes. One Boundary serves a run: it starts empty and
 // is told each value before the text holding it can leave (a run's snapshots, both sides of its diff).
 import type { AgentModel, JsonModel } from "./llm";
@@ -19,13 +19,31 @@ function forms(v: string): string[] {
   }
 }
 
-/** Whether text cut at `at` would end there: the text or its line ends, a mark of the cut follows, or the bracket that
- * closes a clipped quote (`(${message.slice(0, 200)})`). */
-const endsAt = (text: string, at: number) => at === text.length || text[at] === "\n" || text[at] === "\r" ||
-  text[at] === "…" || text[at] === ")" || text.startsWith("...", at);
-/** Whether text cut at `at` would start there. */
-const startsAt = (text: string, at: number) => at === 0 || text[at - 1] === "\n" || text[at - 1] === "…" ||
-  text.startsWith("...", at - 3);
+const alphanumeric = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+/** Whether a piece may end at `at`: the text ends, or what follows is no letter or digit of a longer word. Text is cut in
+ * too many ways to list its marks (a space, a quote, a bracket, a broken character), and a wrong guess costs an odd
+ * string in a prompt. */
+const endsAt = (text: string, at: number) => at === text.length || !alphanumeric(text.charCodeAt(at));
+/** Whether a piece may start at `at`, by what stands before it. */
+const startsAt = (text: string, at: number) => at === 0 || !alphanumeric(text.charCodeAt(at - 1));
+
+/** Where `text` holds a character that is no letter or digit. */
+function signPlaces(text: string): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < text.length; i++) if (!alphanumeric(text.charCodeAt(i))) out.push(i);
+  return out;
+}
+
+/** How many of `sorted` are below `x`. */
+function countBelow(sorted: readonly number[], x: number): number {
+  let lo = 0, hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sorted[mid]! < x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
 
 /** A place in a text to replace: a whole value, or a piece from its start or its end. */
 interface Edit { at: number; length: number; value: string; kind: "start" | "end" }
@@ -74,7 +92,8 @@ export class Boundary {
   }
 
   /** `text` without any of the values, each replaced wherever it stands, inside a longer word too, and without the piece
-   * of one that text cut before the filter left: FRAGMENT_MIN characters or more at its start or end, at a cut's edge. */
+   * of one that text cut before the filter left: FRAGMENT_MIN characters or more of its start that end a word, or of its
+   * end that start one. */
   mask(text: string): string {
     const edits = this.editsOf(text);
     if (!edits.length) return text;
@@ -88,18 +107,21 @@ export class Boundary {
   private editsOf(text: string): Edit[] {
     const edits: Edit[] = [];
     this.index ??= new ValueIndex(this.values);
-    this.index.eachStart(text, (v, at) => {
-      if (!text.startsWith(v.slice(0, Math.min(v.length, FRAGMENT_MIN)), at)) return;
-      let n = Math.min(v.length, FRAGMENT_MIN);
-      while (n < v.length && text[at + n] === v[n]) n++;
-      if (n === v.length || (n >= FRAGMENT_MIN && endsAt(text, at + n))) edits.push({ at, length: n, value: v, kind: "start" });
+    // A piece runs up to the last sign it holds when what follows it is a letter: the part before that sign is still
+    // the value's, at a word's edge.
+    let signs: number[] | null = null;
+    const signsOf = () => signs ??= signPlaces(text);
+    this.index.eachStart(text, (v, at, n) => {
+      if (n === v.length) edits.push({ at, length: n, value: v, kind: "start" });
+      else if (n >= FRAGMENT_MIN) {
+        const end = endsAt(text, at + n) ? at + n : signsOf()[countBelow(signsOf(), at + n) - 1] ?? -1;
+        if (end - at >= FRAGMENT_MIN) edits.push({ at, length: end - at, value: v, kind: "start" });
+      }
     });
-    this.index.eachEnd(text, (v, at) => {
-      const end = at + FRAGMENT_MIN;
-      if (!text.startsWith(v.slice(-FRAGMENT_MIN), at)) return;
-      let n = FRAGMENT_MIN;
-      while (n < v.length && text[end - n - 1] === v[v.length - n - 1]) n++;
-      if (n < v.length && startsAt(text, end - n)) edits.push({ at: end - n, length: n, value: v, kind: "end" });
+    this.index.eachEnd(text, (v, end, n) => {
+      if (n < FRAGMENT_MIN || n >= v.length) return;
+      const sign = startsAt(text, end - n) ? end - n - 1 : signsOf()[countBelow(signsOf(), end - n)] ?? end;
+      if (end - sign - 1 >= FRAGMENT_MIN) edits.push({ at: sign + 1, length: end - sign - 1, value: v, kind: "end" });
     });
     return edits;
   }

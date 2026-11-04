@@ -6,9 +6,10 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { makeAnswerRunner } from "../src/accept";
+import { agreements, selfAgreement } from "../src/valueindex";
 import { Boundary, boundaryOf, diffSuspects, isMasked, maskedAgent, maskedJson } from "../src/boundary";
 import { CloudClient } from "../src/cloud";
-import { CloudBrain } from "../src/cloudbrain";
+import { clipOutput as cutForBrain, CloudBrain } from "../src/cloudbrain";
 import { loadReviewFile, parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { BIG_KEYS_MOST, changeLimits, takeSnapshot, tooLargeText } from "../src/change";
 import { ModelError } from "../src/errors";
@@ -21,6 +22,7 @@ import { LocalBrain } from "../src/localbrain";
 import { describeRun } from "../src/outcomes";
 import { DEFAULT_PROMPTS, explainUser } from "../src/prompts";
 import { runReview } from "../src/reviewer";
+import { probeFailure } from "../src/testround";
 import type { ExecFactory } from "../src/sandbox";
 import { isCertainRule, standInsFor, suspects } from "../src/secrets";
 import { defaultSettings, parseModelRef, type Settings, writeSettings } from "../src/settings";
@@ -722,16 +724,26 @@ test("the end of a value left by a cut goes: at the text's start, a line's start
   }
 });
 
-test("a piece of a value away from a cut, or shorter than 12 characters, stays: a name can begin the same way", () => {
-  const value = "ResetPassword_Xy12Zq9";
+test("a piece of a value inside a longer word, or shorter than 12 characters, stays: a name can begin the same way", () => {
+  const value = "ResetPasswordXy12Zq9";
   const b = new Boundary([value]);
-  for (const text of ["ResetPassword_ok(user)", "x = ResetPasswo\n", "def ResetPassword_link():\n"]) {
+  for (const text of ["ResetPasswordOk(user)", "x = ResetPasswo\n", "def ResetPasswordLink():\n"]) {
     expect(b.mask(text)).toBe(text);
   }
-  expect(b.mask("y = ResetPassword_\n")).not.toContain("ResetPassword_");
-  // The same at its other end: its last characters mean a cut only at the start of a line or a mark.
-  expect(b.mask("before_word_Xy12Zq9(x)")).toBe("before_word_Xy12Zq9(x)");
-  expect(b.mask("word_Xy12Zq9(x)")).not.toContain("word_Xy12Zq9");
+  expect(b.mask("y = ResetPassword\n")).not.toContain("ResetPassword");
+  // The same at its other end: its last characters count only where a word starts.
+  expect(b.mask("beforeswordXy12Zq9(x)")).toBe("beforeswordXy12Zq9(x)");
+  expect(b.mask("swordXy12Zq9(x)")).not.toContain("swordXy12Zq9");
+});
+
+test("a value's own signs are edges: what stands past one goes, though a letter stands before the piece", () => {
+  const value = "abc-defghijklmnopqrs-tuvwxyz012345";
+  const b = new Boundary([value]);
+  expect(b.mask("Xbc-defghijklmnopqrs-tuvwxyz012345 end")).not.toContain("defghijklmnopqrs");
+  expect(b.mask("abc-defghijklmnopqrs-tuvwxyz0Q")).not.toContain("defghijklmnopqrs");
+  // Longer than the value, a run still leaves nothing of it.
+  const run = `Ab1-${"cD2-".repeat(100)}`;
+  expect(new Boundary([run]).mask("cD2-".repeat(300))).not.toContain("cD2-cD2-cD2-cD2-");
 });
 
 test("a value cut by what really cuts it: grep, the diff limits, a clipped output, a run's tail", async () => {
@@ -771,6 +783,36 @@ test("a value cut in a hint's evidence or a skip reason goes: each is written in
   const [reason] = skipReasons([{ testId: "t", fileAttr: "t.py", name: "t", outcome: "skipped", message: `needs ${LONG}` }]);
   expect(reason).toContain('…" (1)');
   expect(b.mask(reason!)).not.toContain(start);
+});
+
+test("the end of a value goes after any sign: how a run's output, a quote or an error really starts", () => {
+  const b = new Boundary([LONG]);
+  const end = LONG.slice(-20);
+  // An adapter keeps the end of stderr; describeRun then indents the message under its test.
+  const run = describeRun({ exitCode: 1, output: "", timedOut: false, seconds: 1 },
+    [{ testId: "t.test.ts::a", fileAttr: "t.test.ts", name: "a", outcome: "failed", message: `${end} failed` }], ["t.test.ts"]);
+  expect(run).toContain(`\n    ${end}`);
+  expect(b.mask(run)).not.toContain(end);
+  const cfg = parseReviewConfig(YAML);
+  const failed = { exitCode: 1, output: `one\n${end}`, timedOut: false, seconds: 1 };
+  for (const text of [`the indexer exited with 1: ${end}`, `the indexer layer did not build: ${end}`,
+    probeFailure(cfg, failed, "probe.log").message, `could not run on the code before the change (${end})`, `From: "${end}"`,
+    `�${end}`, `\t${end}`, `=${end}`, `/${end}`]) {
+    expect([text.slice(0, 40), b.mask(text).includes(end)]).toEqual([text.slice(0, 40), false]);
+  }
+});
+
+test("the start of a value goes before any sign, a broken character too", () => {
+  const accented = `pä${LONG.slice(0, 30)}é${LONG.slice(30, 50)}`;
+  const b = new Boundary([accented]);
+  // Cut in bytes, inside the é: what stays of it reads as a broken character, and the note follows.
+  const cut = Array.from({ length: 300 }, (_, max) => cutForBrain(`${accented} and on and on`, max))
+    .find((c) => c.includes(`${accented.slice(0, 32)}�`));
+  expect(cut).toBeDefined();
+  expect(b.mask(cut!)).not.toContain(accented.slice(0, 20));
+  for (const text of [`${LONG.slice(0, 30)} `, `${LONG.slice(0, 30)}"`, `${LONG.slice(0, 30)}:`, `${LONG.slice(0, 30)}�`]) {
+    expect(new Boundary([LONG]).mask(text)).not.toContain(LONG.slice(0, 12));
+  }
 });
 
 test("route: a long value on a grep line, which grep cuts at 200 characters", async () => {
@@ -872,6 +914,90 @@ test("a matcher for a whole tree costs no more with many values either", () => {
   // Whole occurrences only, as with few values.
   expect(replace(`x${values[7]}y`).count).toBe(0);
 }, 60_000);
+
+// A value of one letter over and over: a place in the text that looks like its end at every character.
+const RUN = 100_000;
+const longRun = `sk-${"a".repeat(RUN)}`;
+const QUICK = 2000;
+for (const [name, text, leaves] of [
+  ["the whole value", `key = "${longRun}"`, longRun],
+  ["twice the length, whole", `key = "${`sk-${"a".repeat(2 * RUN)}`}"`, null],
+  ["a run with no start", `key = "${"a".repeat(RUN - 5)}"`, "a".repeat(RUN - 5)],
+  ["a run inside a word", `key = "b${"a".repeat(RUN)}c"`, null],
+  ["a run broken in the middle", `-${"a".repeat(RUN / 2)}b${"a".repeat(RUN / 2)}-`, null],
+  ["its start, cut", `key = "${longRun.slice(0, RUN - 7)}\n`, longRun.slice(0, RUN - 7)],
+] as const) {
+  test(`masking a long run takes no time to speak of: ${name}`, () => {
+    const b = new Boundary([longRun]);
+    const t0 = performance.now();
+    const masked = b.mask(text);
+    expect(performance.now() - t0).toBeLessThan(QUICK);
+    if (leaves) expect(masked).not.toContain(leaves);
+  }, 60_000);
+}
+
+test("masking a value that repeats a short pattern takes no time to speak of, nor a tree's matcher", () => {
+  const value = `Ab1-${"cD2-".repeat(25_000)}`;
+  const b = new Boundary([value]);
+  const t0 = performance.now();
+  for (const text of [value, `${value}${value}`, value.slice(4), value.slice(0, -4), `${"cD2-".repeat(50_000)}`]) {
+    expect(b.mask(text)).not.toContain("cD2-cD2-cD2-cD2-");
+  }
+  const matcher = standInsFor([value, ...Array.from({ length: 100 }, (_, i) => `Zq7xK2mP9vR4tY1w${i}`)]);
+  matcher(`${"cD2-".repeat(50_000)}`);
+  expect(performance.now() - t0).toBeLessThan(QUICK * 2);
+}, 60_000);
+
+test("the agreement found by the quick way is the plain comparison's", () => {
+  let seed = 20261105;
+  const next = (n: number) => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) % n;
+  const word = (max: number, letters: string) => Array.from({ length: next(max) + 1 }, () => letters[next(letters.length)]).join("");
+  for (let round = 0; round < 20_000; round++) {
+    const letters = round % 2 ? "ab" : "abc-";
+    const text = word(60, letters), value = word(30, letters);
+    const places = Array.from({ length: text.length }, (_, i) => i).filter(() => next(3) > 0);
+    const plain = places.map((p) => {
+      let k = 0;
+      while (k < value.length && p + k < text.length && text[p + k] === value[k]) k++;
+      return k;
+    });
+    const got = agreements(text, value, places);
+    if (JSON.stringify(got) !== JSON.stringify(plain)) expect([text, value, got]).toEqual([text, value, plain] as never);
+    const own = [...selfAgreement((i) => value.charCodeAt(i), value.length)];
+    const ownPlain = Array.from({ length: value.length }, (_, i) => {
+      let k = 0;
+      while (i + k < value.length && value[i + k] === value[k]) k++;
+      return k;
+    });
+    if (JSON.stringify(own) !== JSON.stringify(ownPlain)) expect([value, own]).toEqual([value, ownPlain] as never);
+  }
+});
+
+test("on random text nothing of a value is left at a word's edge", () => {
+  let seed = 7;
+  const next = (n: number) => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) % n;
+  const word = (min: number, max: number, letters: string) =>
+    Array.from({ length: min + next(max - min + 1) }, () => letters[next(letters.length)]).join("");
+  for (let round = 0; round < 1500; round++) {
+    const letters = round % 2 ? "aB" : "aB1-";
+    const value = `Q${word(13, 40, letters)}Z`;
+    const b = new Boundary([value]);
+    const cutAt = next(value.length);
+    const pieces = [value, value.slice(cutAt), value.slice(0, cutAt), word(0, 10, letters), " ", "(", "\n", "x"];
+    const text = Array.from({ length: 5 }, () => pieces[next(pieces.length)]).join("");
+    const masked = b.mask(text);
+    expect(masked).not.toContain(value);
+    const edge = (at: number) => at === masked.length || !/[A-Za-z0-9]/.test(masked[at]!);
+    for (let at = 0; at < masked.length; at++) {
+      for (let n = 0; n < value.length && masked[at + n] === value[n]; n++) {
+        if (n + 1 >= 12 && edge(at + n + 1)) throw new Error(`a start left in ${JSON.stringify(masked)} of ${value}`);
+      }
+      for (let n = 0; n < value.length && masked[at - n - 1] === value[value.length - n - 1]; n++) {
+        if (n + 1 >= 12 && (at - n - 1 === 0 || edge(at - n - 2))) throw new Error(`an end left in ${JSON.stringify(masked)} of ${value}`);
+      }
+    }
+  }
+});
 
 test("values of every length, sharing a start or inside one another, all go", () => {
   const b = new Boundary(["abc", "abcd", "abcdefg", "abcdefgh", "abcdefghijkl", "abcdefghijklmnop", "defghijklmnopqrs"]);
