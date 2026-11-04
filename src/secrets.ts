@@ -2,7 +2,7 @@
 // key, and environment variable names that look like credentials.
 import { createHash, scryptSync } from "node:crypto";
 import { posix } from "node:path";
-import { comments, commentStyle } from "./comments";
+import { type Comment, comments, commentStyle } from "./comments";
 import { ValueIndex } from "./valueindex";
 
 export const SECRET_FILE_GLOBS: readonly string[] = [
@@ -285,16 +285,93 @@ function secretName(name: string): "strong" | "weak" | null {
   return head === "key" && words.includes("account") ? null : "weak";
 }
 
+/** A word or an abbreviation by its letters. A long unbroken run of letters proves nothing. */
+function readsAsWord(w: string): boolean {
+  if (w.length <= 5) return true;
+  if (w.length > 20 || /[^aeiouy]{5,}/i.test(w)) return false;
+  return w.length < 12 || (w.match(/[aeiouy]/gi)?.length ?? 0) * 4 >= w.length;
+}
+
+/** Whether `s` is proven a name or words: words joined by signs or case (`primaryKeyField]`, `old-signing-key`,
+ * `oauth2Client`, `_v402_is_retry`). Random text breaks that: scraps of a letter or two beside digits and other letters,
+ * digits inside words, a long run of letters no word has. */
+export function nameShaped(s: string): boolean {
+  // Signs a password has and a name does not, past a mark at its end (`Password1!`).
+  if ((s.replace(/[^A-Za-z0-9]+$/, "").match(/[!#$%^&*]/g)?.length ?? 0) > 1) return false;
+  const parts = s.match(/[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+|[^A-Za-z0-9]+/g) ?? [];
+  const isWord = (p: string | undefined) => p !== undefined && /^[A-Za-z]/.test(p);
+  const isNumber = (p: string | undefined) => p !== undefined && /^[0-9]/.test(p);
+  let letters = 0, scraps = 0, inner = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i]!, before = parts[i - 1], after = parts[i + 1];
+    if (isWord(p)) {
+      if (!readsAsWord(p)) return false;
+      letters += p.length;
+      if (p.length < 3 && (isWord(before) || isNumber(before) || isWord(after) || isNumber(after))) scraps += p.length;
+    } else if (isNumber(p) && isWord(before) && isWord(after)) inner++;
+  }
+  return letters > 0 && scraps * 6 <= letters && inner <= 1;
+}
+
+/** Each part letters and digits, one run each: words or a name, or now and then a random string of that shape. */
+const NAME_PARTS = /^(?:[A-Za-z]+[0-9]*|[0-9]+[A-Za-z]*)(?:[-_.:@](?:[A-Za-z]+[0-9]*|[0-9]+[A-Za-z]*))*$/;
+/** A JSON web token: it reads as a dotted name when no part holds a `-`. */
+const JWT = /^eyJ[\w-]{4,}\.[\w-]{4,}\.[\w-]*$/;
+/** Words a placeholder or a name is made of, whatever it stands for. */
+const STANDS_FOR = /passw|secret|token|key|auth|example|test|demo|sample|admin|change|default|version|user/i;
+
+/** Whether a value NAME_PARTS turned down is a secret after all, under a strong name: "random" (no word reads in it: `hf_`
+ * and random letters, a generated password), "word" (a capitalised word and a number, as people choose:
+ * only while no code uses it as a name, usedAsName) or null. The cost of a wrong yes is an odd string in a prompt. */
+function wordyValue(value: string): "random" | "word" | null {
+  if (value.length < 8 || value.length > 4096 || !NAME_PARTS.test(value)) return null;
+  if ([/[a-z]/, /[A-Z]/, /[0-9]/].filter((r) => r.test(value)).length < 2) return null;
+  // A long name's capitals start its words, a few among many; random letters are about half capitals.
+  const body = value.replace(/^[a-z]{1,8}[-_]/, "");
+  const capitals = (body.match(/[A-Z]/g)?.length ?? 0) / body.length;
+  if (/^[A-Za-z]{24,}$/.test(body) && capitals >= 0.25 && capitals <= 0.75) return "random";
+  if (value.length >= 12 && random(value) && !nameShaped(value)) return "random";
+  return /^[A-Z][a-z]{3,}[0-9]{2,}$/.test(value) && !STANDS_FOR.test(value) ? "word" : null;
+}
+
+const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+/** Where code is written, for telling a name from a string: what a comment reader knows, and other languages' sources. */
+const SOURCE = /\.(?:go|java|kt|rb|php|cs|c|h|cc|cpp|hpp|swift|scala|vue|svelte|sh)$/i;
+
+export const isCodePath = (path: string) => commentStyle(path) !== null || SOURCE.test(path);
+
+/** The rule of a guess that is an ordinary word (`wordyValue`): the tree may overrule it (usedAsName). */
+export const WORD_RULE = "named-word";
+
+/** Whether `text`, the file at `path`, uses `value` as a name in its code: outside comments and strings (an even count of
+ * quotes before it on its line, which misreads a multi-line string as code; a real password that is also a name there is
+ * the rare case). */
+export function usedAsName(value: string, text: string, path: string): boolean {
+  if (!IDENTIFIER.test(value) || !isCodePath(path) || !text.includes(value)) return false;
+  const style = commentStyle(path);
+  const spans = style ? comments(text, style) : [];
+  const edge = (c: string | undefined) => c === undefined || !/[\w$]/.test(c);
+  for (let at = text.indexOf(value); at >= 0; at = text.indexOf(value, at + 1)) {
+    if (!edge(text[at - 1]) || !edge(text[at + value.length])) continue;
+    const s = spans[lastAtOrBefore(spans, (x) => x.start, at)];
+    if (s && at < s.end) continue;
+    const before = text.slice(text.lastIndexOf("\n", at) + 1, at).replace(/\\./g, "");
+    if ((before.match(/["'`]/g)?.length ?? 0) % 2 === 0) return true;
+  }
+  return false;
+}
+
 /** A literal that may be a secret: 8 printable ASCII characters or more, no blanks, two of lower case, upper case and
- * digits; not words or a name (`PublicKey`, `password123`, `count_3mo`: each part letters and digits, one run each),
- * a placeholder, a URL, a path or a dotted name. Beside a weak name, or holding a /, it must also look random: 16
- * characters or more for a weak name, and hold nothing a key does not (brackets, a version range). A value replaced
- * everywhere it appears must never be a name in code. */
+ * digits; not cut short with dots (a token's start may be real); not words or a name (`PublicKey`, `password123`,
+ * `count_3mo`: each part letters and digits, one run each), a placeholder, a URL, a path or a dotted name. Beside a weak
+ * name, or holding a /, it must also look random: 16 characters or more for a weak name, and hold nothing a key does not
+ * (brackets, a version range). A value replaced everywhere it appears must never be a name in code. */
 function secretValue(value: string, strength: "strong" | "weak"): boolean {
   if (value.length < (strength === "strong" ? 8 : 16) || value.length > 4096 || !/^[\x21-\x7e]+$/.test(value)) {
     return false;
   }
-  if (/^(?:[A-Za-z]+[0-9]*|[0-9]+[A-Za-z]*)(?:[-_.:@](?:[A-Za-z]+[0-9]*|[0-9]+[A-Za-z]*))*$/.test(value)) return false;
+  if (JWT.test(value)) return true;
+  if (NAME_PARTS.test(value) || (/(?:\.\.\.|…)$/.test(value) && !value.startsWith("eyJ"))) return false;
   if ([/[a-z]/, /[A-Z]/, /[0-9]/].filter((r) => r.test(value)).length < 2) return false;
   if (/\$\{|\{\{|^\$|^<.*>$|%[(sd]/.test(value) || /^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
   if (/^[.~]?\//.test(value) || (value.includes("/") && /\.[A-Za-z0-9]{1,5}$/.test(value))) return false;
@@ -365,6 +442,28 @@ export function assignedPairs(text: string): [string, string][] {
 
 const UNQUOTED = /^[ \t]*(?:export[ \t]+)?([A-Za-z_][\w.-]*)[ \t]*[:=][ \t]*([^\s"'#][^\s#]*)[ \t]*(?:#.*)?$/gm;
 
+/** What may hold an unquoted value in a command line: it ends where the shell's next word does. */
+const ARG = "[^\\s\"'`;&|#]{1,4096}";
+/** `export NAME=v`, in any file: a script, a CI step, a how-to. */
+const EXPORTED = new RegExp(`(?:^|[\\s;&(])export[ \\t]+([A-Za-z_]\\w*)=(${ARG})`, "gm");
+const SHELL_FILE = /\.(?:sh|bash|zsh|ksh)$|(?:^|\/)\.envrc$/i;
+/** `NAME=v` at the start of a line of a shell file, alone or before a command. */
+const SHELL_SET = new RegExp(
+  `^[ \\t]*(?:(?:readonly|local|declare(?:[ \\t]+-\\w+)*)[ \\t]+)?([A-Za-z_]\\w*)=(${ARG})`, "gm");
+const DOCKER_FILE = /(?:^|\/)(?:Dockerfile|Containerfile)[^/]*$|\.dockerfile$/i;
+const DOCKER_SET = /^[ \t]*(?:ENV|ARG)[ \t]+([^\n]{1,8192})$/gim;
+const MAKE_FILE = /(?:^|\/)(?:GNU)?[Mm]akefile[^/]*$|\.mk$/;
+const MAKE_SET =
+  /^[ \t]*(?:(?:export|override)[ \t]+)?([A-Za-z_]\w*)[ \t]*(?:::?=|\?=|\+=|=)[ \t]*([^\s"'#$]\S{0,4095})[ \t]*(?:#.*)?$/gm;
+/** `curl -H "Authorization: Bearer v"`: the token. */
+const AUTH_HEADER = /\bAuthorization:[ \t]*(?:Bearer|Basic|Token)[ \t]+([^\s"'`]{1,4096})/gi;
+/** `?api_key=v` in a URL. */
+const URL_PARAM = /(?:[?&]|&amp;)([A-Za-z_][\w-]{0,64})=([^\s&#"'`]{1,4096})/g;
+/** `docker run -e NAME=v`. */
+const DOCKER_E = new RegExp(`(?:^|\\s)(?:-e|--env)[ \\t=]+([A-Za-z_]\\w*)=(${ARG})`, "g");
+/** What a value on a command line or in a URL does not hold: it is an expansion or a template there, and no literal. */
+const NOT_LITERAL = /[{}()<>[\]$\\`]/;
+
 /** A word of a secret-looking name, anywhere in a line. */
 const WORD = /key|token|secret|passw|pwd|passphrase|credential|private|auth|bearer|salt|signature|cookie/i;
 
@@ -384,42 +483,87 @@ function namedLines(text: string): string {
   return out.join("\n");
 }
 
-/** Whether a suspect's rule (`why` in suspects) is certain: the string's own shape says it is a secret. The other rules
- * guess from a name beside it. */
+/** Whether a suspect's rule (`why` in suspects) is certain: the string's own shape says it is a secret, and it is replaced
+ * wherever tests run. The other rules guess from a name beside it: what a wrong guess may change is what a model reads
+ * (boundary.ts) and what an image is built from, never the code tests run. */
 export const isCertainRule = (rule: string): boolean => rule === "key-shaped" || rule === "address-password";
 
-/** The strings of `text` (the file at `path`) that get stand-ins, `pins` aside: key-shaped strings (private key headers
- * aside) and literal values given to secret-looking names (a `Bearer`/`Basic` value: its token). A random-looking
- * string, hex or base64, is a key only where a name says so: unnamed, it is a hash, a commit id, an address or a
- * signature that tests compare. */
+/** The strings of `text` (the file at `path`) that may be secrets, `pins` aside: key-shaped strings (private key headers
+ * aside) and literal values given to secret-looking names (a `Bearer`/`Basic` value: its token), in code, in config, on a
+ * command line or in a URL. A random-looking string, hex or base64, is a key only where a name says so: unnamed, it is a
+ * hash, a commit id, an address or a signature that tests compare. */
 export function suspects(path: string, text: string, pins: readonly string[], why?: Map<string, string>): string[] {
   const out = new Set<string>();
   const add = (v: string, rule: string) => {
     out.add(v);
-    if (why && !why.has(v)) why.set(v, rule);
+    if (why && (!why.has(v) || isCertainRule(rule))) why.set(v, rule);
   };
   const allowed = (s: string) => pins.includes(pinOf(s));
+  let spans: Comment[] | undefined;
+  const inComment = (at: number) => {
+    const style = commentStyle(path);
+    if (!style) return false;
+    spans ??= comments(text, style);
+    const s = spans[lastAtOrBefore(spans, (x) => x.start, at)];
+    return !!s && at < s.end;
+  };
   for (const m of contentMatches(text)) {
     if (m[0].startsWith("-----") || allowed(m[0])) continue;
     const password = m[0].endsWith("@") ? m[0].slice(0, -1) : null;
-    add(m[0], password === null ? "key-shaped" : "address-password");
-    // Alone it goes too, unless it reads like a name: a value replaced everywhere must never be a name in code.
-    if (password !== null && secretValue(password, "strong")) add(password, "address-password");
+    if (password === null) {
+      add(m[0], "key-shaped");
+    } else if (secretValue(password, "strong")) {
+      add(m[0], "address-password");
+      add(password, "address-password");
+    } else {
+      // It reads like a name: alone it stays. And in a comment it is more often a doc's example than a password.
+      add(m[0], inComment(m.index) ? "named-address" : "address-password");
+    }
   }
   const named = (name: string, raw: string) => {
     const strength = secretName(name);
     if (!strength) return;
     const value = /^(?:Bearer|Basic|Token|token)\s+(\S+)$/.exec(raw)?.[1] ?? raw;
-    if (secretValue(value, strength) && !allowed(value)) add(value, `named-${strength}`);
+    if (allowed(value)) return;
+    if (secretValue(value, strength)) return add(value, `named-${strength}`);
+    if (strength !== "strong") return;
+    const wordy = wordyValue(value);
+    if (wordy === "random") add(value, "named-strong");
+    else if (wordy === "word" && !usedAsName(value, text, path)) add(value, WORD_RULE);
   };
   const near = namedLines(text);
   for (const [name, value] of assignedPairs(near)) named(name, value);
   for (const m of near.matchAll(PAIR)) named(m[2]!, m[4]!);
   if (CONFIG.test(path)) for (const m of near.matchAll(UNQUOTED)) named(m[1]!, m[2]!);
+  /** On a command line or in a URL: what is there unquoted is a value only when it holds nothing a template does. */
+  const literal = (name: string, value: string) => {
+    if (!NOT_LITERAL.test(value)) named(name, value);
+  };
+  for (const m of near.matchAll(EXPORTED)) literal(m[1]!, m[2]!);
+  for (const m of near.matchAll(DOCKER_E)) literal(m[1]!, m[2]!);
+  for (const m of near.matchAll(URL_PARAM)) literal(m[1]!, m[2]!.replace(/[),.;:]+$/, ""));
+  for (const m of near.matchAll(AUTH_HEADER)) literal("authorization", m[1]!);
+  if (SHELL_FILE.test(path)) for (const m of near.matchAll(SHELL_SET)) literal(m[1]!, m[2]!);
+  if (MAKE_FILE.test(path)) for (const m of near.matchAll(MAKE_SET)) literal(m[1]!, m[2]!);
+  if (DOCKER_FILE.test(path)) {
+    for (const [, rest] of near.matchAll(DOCKER_SET)) {
+      const pairs = [...rest!.matchAll(/([A-Za-z_]\w*)=([^\s"']+)/g)];
+      for (const m of pairs) literal(m[1]!, m[2]!);
+      const old = pairs.length ? null : /^([A-Za-z_]\w*)[ \t]+([^\s"']+)[ \t]*$/.exec(rest!);
+      if (old) literal(old[1]!, old[2]!);
+    }
+  }
   return [...out];
 }
 
 const MANY_VALUES = 64;
+
+/** Whole occurrences of `values`, longest first. A password with its @ has a host right after it; anything else ends where
+ * a word would. */
+function matcherOf(values: readonly string[]): RegExp {
+  const escaped = values.map((v) => v.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&") + (v.endsWith("@") ? "" : "(?![A-Za-z0-9])"));
+  return new RegExp(`(?<![A-Za-z0-9+/])(?:${escaped.join("|")})`, "g");
+}
 
 /** Replaces every whole occurrence of `values` (not inside a longer word) in a text with its stand-in, a value a file
  * allows (pinned) aside. `count`: the strings replaced. One matcher for a whole tree. */
@@ -437,9 +581,7 @@ export function standInsFor(values: Iterable<string>, made = new Map<string, str
     const key = here.join("\0");
     let matcher = matchers.get(key);
     if (!matcher) {
-      // A password with its @ has a host right after it; anything else ends where a word would.
-      const escaped = here.map((v) => v.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&") + (v.endsWith("@") ? "" : "(?![A-Za-z0-9])"));
-      matcher = new RegExp(`(?<![A-Za-z0-9+/])(?:${escaped.join("|")})`, "g");
+      matcher = matcherOf(here);
       matchers.set(key, matcher);
     }
     let count = 0;
@@ -450,6 +592,13 @@ export function standInsFor(values: Iterable<string>, made = new Map<string, str
     });
     return { text: out, count };
   };
+}
+
+/** Which of `values` `text` holds whole: as standInsFor would replace them, without making a stand-in. */
+export function wholeIn(text: string, values: Iterable<string>): string[] {
+  const here = [...new Set(values)].filter((v) => v && text.includes(v)).sort((a, b) => b.length - a.length);
+  if (!here.length) return [];
+  return [...new Set(text.match(matcherOf(here)) ?? [])];
 }
 
 /** `text` with every whole occurrence of `values` given its stand-in (standInsFor). */

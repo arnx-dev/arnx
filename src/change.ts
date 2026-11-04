@@ -7,18 +7,20 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync,
+  closeSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync,
+  readlinkSync,
   readSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve, sep } from "node:path";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
-import { excludePathspecs, firstUnpinned, hasKeyBody, isCertainRule, isSecretPath, privateKeyBody, scanKeys, type SecretPin,
-  standInsFor, suspects } from "./secrets";
-import { REPORT_DIR, type Runner } from "./sandbox";
+import { excludePathspecs, firstUnpinned, hasKeyBody, isCertainRule, isCodePath, isSecretPath, privateKeyBody, scanKeys,
+  type SecretPin, standInsFor, suspects, usedAsName, wholeIn, WORD_RULE } from "./secrets";
+import { buildContextDir, isManifest, REPORT_DIR, type Runner } from "./sandbox";
 import { standInsSetting } from "./settings";
 import { splitLines } from "./util";
+import { ValueIndex } from "./valueindex";
 
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 export const MAX_DIFF_BYTES = 200_000;
@@ -433,15 +435,22 @@ export function describeBlanked(b: Blanked[]): string {
  * key-shaped text in code is kept with a stand-in for each such string (secrets.ts standIn) instead of left out.
  * `sandbox`: files .arnxignore leaves out that the tests need (review.yaml sandbox_only): kept beside the snapshot
  * (sandboxDir), never in it, and placed in it only while a test runs (withSandboxFiles). */
-export interface SnapshotOptions { untracked?: boolean; standIns?: boolean; sandbox?: readonly string[] }
+export interface SnapshotOptions { untracked?: boolean; standIns?: boolean; sandbox?: readonly string[];
+  /** Only its values are wanted: no build context is made. */
+  valuesOnly?: boolean }
 
 /** What a snapshot left out or changed: files left out for their content, files kept with comment lines blanked,
- * files kept with stand-ins, and the sandbox-only files it holds beside it. */
+ * files kept with stand-ins (for the certain values), and the sandbox-only files it holds beside it. */
 export interface Scrubbed { withheld: Withheld[]; blanked: Blanked[]; standIns: string[]; sandboxed: string[];
-  /** The values given stand-ins: kept in memory for a later copy into the sandbox (addToSandbox), never logged. */
+  /** The values given stand-ins where tests run, the certain ones (secrets.ts isCertainRule): kept in memory for a later
+   * copy into the sandbox (addToSandbox), never logged. */
   secrets: ReadonlySet<string>;
-  /** Every value that looks like a secret, in memory only: all of `secrets`, and those of files that get no stand-ins, of
-   * secret files and of files left out, none of them changed. What leaves arnx is masked for each (boundary.ts). */
+  /** The values real where tests run and stand-ins only in the build context (sandbox.ts buildContextOf): the guesses. A
+   * guess a manifest or a lockfile holds is not one of them: it stays real in every file of both. */
+  guesses: ReadonlySet<string>;
+  /** Every value that looks like a secret, in memory only: all of `secrets` and `guesses`, and those of files that get no
+   * stand-ins, of secret files and of files left out, none of them changed. What leaves arnx is masked for each
+   * (boundary.ts). */
   suspects: ReadonlySet<string>;
   /** Text files left out because no scan reads them (over changeLimits.maxScanBytes). */
   tooLarge: string[] }
@@ -467,6 +476,7 @@ export function snapshot(repo: string, head: string | null, dest: string, allow:
 export function takeSnapshot(repo: string, head: string | null, dest: string, allow: readonly SecretPin[] = [],
                              o: SnapshotOptions = {}): Scrubbed {
   mkdirSync(dest, { recursive: true });
+  rmSync(buildContextDir(dest), { recursive: true, force: true });
   const ignored = loadIgnore(repo);
   const limit = changeLimits.maxSnapshotFiles;
   const sandbox = new Set(o.sandbox ?? []);
@@ -502,7 +512,25 @@ export function takeSnapshot(repo: string, head: string | null, dest: string, al
       throw new ArnxError(`unpacking the snapshot failed: ${(tar.stderr || tar.error?.message || "").trim().slice(0, 300)}`);
     }
   }
-  return scrub(dest, ignored, allow, { standIns: o.standIns ?? standInsSetting(repo), sandbox });
+  return scrub(dest, ignored, allow, { standIns: o.standIns ?? standInsSetting(repo), sandbox, build: !o.valuesOnly,
+    rootEnv: rootEnvValues(repo, allow) });
+}
+
+/** The values of the `.env*` files at the top of `repo`, tracked or not, with their rules: they are read for this and
+ * copied nowhere, so a value hard-coded from one into tracked code is known for what it is. */
+function rootEnvValues(repo: string, allow: readonly SecretPin[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const name of readdirSync(repo)) {
+    if (!name.startsWith(".env")) continue;
+    const p = join(repo, name);
+    if (!lstatSync(p).isFile()) continue;
+    const read = scrubText(p);
+    if (!read || read.binary) continue;
+    const why = new Map<string, string>();
+    suspects(name, read.text, allow.find((a) => a.path === name)?.matches ?? [], why);
+    for (const [v, rule] of why) if (!out.has(v)) out.set(v, rule);
+  }
+  return out;
 }
 
 /** The suspects of the code at `head` (the working tree when null), from a snapshot taken only for them. */
@@ -510,7 +538,7 @@ export function treeSuspects(repo: string, head: string | null, allow: readonly 
                              o: SnapshotOptions = {}): ReadonlySet<string> {
   const dir = mkdtempSync(join(tmpdir(), "arnx-"));
   try {
-    return takeSnapshot(repo, head, join(dir, "repo"), allow, o).suspects;
+    return takeSnapshot(repo, head, join(dir, "repo"), allow, { ...o, valuesOnly: true }).suspects;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -698,18 +726,38 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
   } };
 }
 
+/** The tree at `from`, in `to`: each file a hard link, so a second tree costs no second copy, unless `to` holds it already
+ * or `skip` names it. A file a run later changes in place changes in both; what it writes new stays out. */
+function linkTree(from: string, to: string, skip: ReadonlySet<string>, rel = ""): void {
+  mkdirSync(join(to, rel), { recursive: true });
+  for (const e of readdirSync(join(from, rel), { withFileTypes: true })) {
+    const r = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) linkTree(from, to, skip, r);
+    else if (e.isSymbolicLink()) symlinkSync(readlinkSync(join(from, r)), join(to, r));
+    else if (!skip.has(r) && !existsSync(join(to, r))) linkSync(join(from, r), join(to, r));
+  }
+}
+
 /** Remove .git, .arnx, paths matched by .arnxignore, secret files and symlinks leaving the tree; then scrub every text
  * file kept (in the tree, or beside it: files .arnxignore matches that `sandbox` names move beside the tree,
  * sandboxDir). A file whose key-shaped text is all in comments gets those lines blanked. With `standIns`, every
- * suspect (secrets.ts suspects) of every file, and of `known` (another scrub's), is collected first, and then each
- * whole occurrence of one, in any file but a lockfile, gets its stand-in: a value is replaced wherever it appears, so
- * no file keeps it and the files agree. A file is left out only when no stand-in keeps a key out (a private key with
- * its body), or, without `standIns`, when it holds key-shaped text in code. Returns those files, the files blanked,
- * given stand-ins and moved beside the tree, and the values replaced (in memory only: never logged or sent). */
+ * suspect (secrets.ts suspects) of every file, and of `known` (another scrub's), is collected first. Then each whole
+ * occurrence of a certain one (isCertainRule), in any file but a lockfile, gets its stand-in: a value is replaced wherever
+ * it appears, so no file keeps it and the files agree. The guesses stay real here, since a wrong one must not change code
+ * that runs, and a model reads them only through the filter (boundary.ts). A build has network, so with `build` the image
+ * gets its own tree beside this one (buildContextOf), with a stand-in for each guess too; except a guess a manifest or a
+ * lockfile holds, which stays in every file of both: a stand-in there can break an install. A file is left out only when
+ * no stand-in keeps a key out (a private key with its body), or, without `standIns`, when it holds key-shaped text in
+ * code. Returns those files, the files blanked, given stand-ins and moved beside the tree, and the values (in memory only:
+ * never logged or sent). */
 function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly SecretPin[],
                o: { standIns: boolean; sandbox: ReadonlySet<string>; known?: ReadonlySet<string>;
                  /** All of `root` goes beside a snapshot, where no model reads. */
-                 aside?: boolean }): Scrubbed {
+                 aside?: boolean;
+                 /** Make the build context. */
+                 build?: boolean;
+                 /** Values of files no snapshot holds, with their rules (rootEnvValues). */
+                 rootEnv?: ReadonlyMap<string, string> }): Scrubbed {
   const realRoot = realpathSync(root);
   const removedFiles: Withheld[] = [];
   const blanked: Blanked[] = [];
@@ -722,10 +770,15 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   const kept: { p: string; rel: string }[] = [];
   const pinsOf = (rel: string) => allow.find((a) => a.path === rel)?.matches ?? [];
   const seen = new Set<string>(o.known ?? []);
+  const guesses = new Set<string>();
   /** A file about to be left out: its value may stand elsewhere with no name beside it. */
   const leaving = (p: string, rel: string) => {
     const read = scrubText(p, changeLimits.maxScanBytes);
-    if (read && !read.binary) for (const v of suspects(rel, read.text, pinsOf(rel))) seen.add(v);
+    if (!read || read.binary) return;
+    for (const v of suspects(rel, read.text, pinsOf(rel))) {
+      seen.add(v);
+      if (o.standIns) guesses.add(v);
+    }
   };
   const walk = (dir: string, relDir: string, out: boolean) => {
     for (const name of readdirSync(dir)) {
@@ -771,6 +824,15 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   const fakes = (rel: string) => o.standIns && !isLockfile(rel);
   // First every file's suspects, and what each file needs: left out, or blanked lines.
   const values = new Set<string>(o.known ?? []);
+  /** Guesses that are ordinary words: out again if code anywhere uses them as names. */
+  const words = new Set<string>();
+  /** Big files with too many guesses for their stand-ins: in the snapshot, never in the build. */
+  const notBuilt = new Set<string>();
+  for (const [v, rule] of o.rootEnv ?? []) {
+    seen.add(v);
+    if (o.standIns) guesses.add(v);
+    if (rule === WORD_RULE) words.add(v);
+  }
   const blanks = new Map<string, number[]>();
   const scanned: { p: string; rel: string }[] = [];
   const tooLarge: string[] = [];
@@ -812,27 +874,66 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
     if (blank) blanks.set(f.rel, blank.blank);
     const why = new Map<string, string>();
     const found = suspects(f.rel, blank ? blank.text : text, pins, why);
-    for (const v of found) seen.add(v);
-    // A big file's guesses stay as they are: its data is more often a wrong guess, and the filter covers them.
-    const faked = fakes(f.rel) ? found.filter((v) => big === null || isCertainRule(why.get(v) ?? "")) : [];
+    for (const v of found) {
+      seen.add(v);
+      if (why.get(v) === WORD_RULE) words.add(v);
+    }
+    const isCertain = (v: string) => isCertainRule(why.get(v) ?? "");
+    const certain = fakes(f.rel) ? found.filter(isCertain) : [];
     // Each stand-in takes a slow hash: a big file full of keys would hold a run for minutes, and is no one's code.
-    if (big !== null && faked.length > BIG_KEYS_MOST) {
+    if (big !== null && certain.length > BIG_KEYS_MOST) {
       unlinkSync(f.p);
       sandboxed.delete(f.rel);
       removedFiles.push({ path: f.rel, line: 1, label: `over ${BIG_KEYS_MOST} key-shaped strings` });
       continue;
     }
-    for (const v of faked) values.add(v);
+    for (const v of certain) values.add(v);
+    const guessed = fakes(f.rel) ? found.filter((v) => !isCertain(v)) : [];
+    if (big !== null && guessed.length > BIG_KEYS_MOST) notBuilt.add(f.rel);
+    else for (const v of guessed) guesses.add(v);
     scanned.push(f);
   }
-  // Then each value's stand-in, wherever it is.
+  const textOfScanned = (f: { p: string }) => scrubText(f.p, changeLimits.maxScanBytes)?.text ?? "";
+  // A word code uses as a name is a name, wherever that code is.
+  for (const f of words.size ? scanned : []) {
+    if (!isCodePath(f.rel)) continue;
+    const text = textOfScanned(f);
+    for (const v of words) {
+      if (!values.has(v) && usedAsName(v, text, f.rel)) {
+        words.delete(v);
+        seen.delete(v);
+        guesses.delete(v);
+      }
+    }
+  }
+  // A certain value is certain everywhere. A guess a manifest or a lockfile holds stays in every file, or the install and
+  // the code would disagree; the manifest has it next to the network anyway.
+  for (const v of values) guesses.delete(v);
+  if (guesses.size) {
+    const index = new ValueIndex([...guesses]);
+    for (const f of scanned) {
+      if (!isManifest(f.rel) && !isLockfile(f.rel)) continue;
+      const text = textOfScanned(f);
+      for (const v of wholeIn(text, index.present(text))) guesses.delete(v);
+    }
+  }
+  // Then each value's stand-in, wherever it is: for the build each guess too, into a file of its own.
   const made = new Map<string, string>();
   const replace = values.size ? standInsFor(values, made) : null;
+  const context = buildContextDir(root);
+  const toBuild = o.build && guesses.size ? standInsFor([...values, ...guesses], made) : null;
   for (const f of scanned) {
     const lines = blanks.get(f.rel);
     let text = scrubText(f.p, changeLimits.maxScanBytes)!.text;
     if (lines) text = (scanKeys(f.rel, text, pinsOf(f.rel)) as { text: string }).text;
     const r = replace && fakes(f.rel) ? replace(text, pinsOf(f.rel)) : { text, count: 0 };
+    const built = toBuild && fakes(f.rel) && !sandboxed.has(f.rel) && !notBuilt.has(f.rel)
+      ? toBuild(text, pinsOf(f.rel)) : null;
+    if (built && built.text !== r.text) {
+      const at = join(context, f.rel);
+      mkdirSync(dirname(at), { recursive: true });
+      writeFileSync(at, built.text, { mode: lstatSync(f.p).mode & 0o777 });
+    }
     if (!lines && !r.count) continue;
     writeFileSync(f.p, r.text);
     if (lines) blanked.push({ path: f.rel, lines });
@@ -846,9 +947,11 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
       rmdirSync(at);
     }
   }
+  // Last: a hard link must not see the writes above.
+  if (toBuild) linkTree(root, context, notBuilt);
   const byPath = (a: { path: string }, b: { path: string }) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
   return { withheld: removedFiles.sort(byPath), blanked: blanked.sort(byPath), standIns: standIns.sort(),
-    sandboxed: [...sandboxed].sort(), secrets: values, suspects: seen, tooLarge: tooLarge.sort() };
+    sandboxed: [...sandboxed].sort(), secrets: values, guesses, suspects: seen, tooLarge: tooLarge.sort() };
 }
 
 /** A text file's content (scrubText); null for a binary file. */

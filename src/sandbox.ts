@@ -5,7 +5,8 @@
 // its build (Rust): its session's runs share one (see Session).
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync }
+  from "node:fs";
 import { dirname, join, posix } from "node:path";
 import { adapterFor, getAdapter, LANGUAGES } from "./adapters";
 import type { CopyOnly } from "./baked";
@@ -196,19 +197,56 @@ export function depsLink(cfg: Pick<ReviewConfig, "depsDir" | "installRoot">): st
     `2>/dev/null; done; else echo "arnx: deps_dir ${cfg.depsDir} is not in the image" >&2; fi; `;
 }
 
-/** Copies every file that can key an image (any language's manifests, at any depth) from `snapshot` to `dest`:
- * keys computed there stay as the snapshot was before runs wrote into it (cargo writes a missing Cargo.lock). */
-export function copyManifests(snapshot: string, dest: string): void {
-  const globs = LANGUAGES.flatMap((l) => {
+let manifestGlobs: RegExp[] | undefined;
+/** Whether `path` names a file that can key an image: any language's manifests. */
+export function isManifest(path: string): boolean {
+  manifestGlobs ??= LANGUAGES.flatMap((l) => {
     try {
       return getAdapter(l).manifests.map(globRegex);
     } catch {
       return []; // a language without an adapter yet
     }
   });
+  const name = posix.basename(path);
+  return manifestGlobs.some((g) => g.test(name));
+}
+
+/** Where a snapshot's build context is kept when it has one of its own: beside the snapshot, so nothing that reads the
+ * snapshot sees it. */
+export const buildContextDir = (snapshot: string) => `${snapshot}.build`;
+
+/** What an image of `snapshot` is built from. Builds have network and tests do not, so the snapshot's guesses (secrets.ts
+ * isCertainRule) are real there and stand-ins here; with no guess to keep out it has no folder of its own (change.ts
+ * scrub). */
+export const buildContextOf = (snapshot: string) => {
+  const own = buildContextDir(snapshot);
+  return existsSync(own) ? own : snapshot;
+};
+
+/** Makes the snapshot's files that differ from the build context newer than the build just made. Cargo trusts a build when
+ * no source file is newer: without this, tests would run a build of the context's stand-ins, and only on the run
+ * that built the image. Hard links are the files the two share. */
+function newerThanBuild(snapshot: string, context: string, rel = ""): void {
+  const now = new Date();
+  for (const e of readdirSync(join(context, rel), { withFileTypes: true })) {
+    const r = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) newerThanBuild(snapshot, context, r);
+    else if (e.isFile() && statSync(join(context, r)).nlink === 1) {
+      try {
+        utimesSync(join(snapshot, r), now, now);
+      } catch {
+        // a run took it away
+      }
+    }
+  }
+}
+
+/** Copies every file that can key an image (any language's manifests, at any depth) from `snapshot` to `dest`:
+ * keys computed there stay as the snapshot was before runs wrote into it (cargo writes a missing Cargo.lock). */
+export function copyManifests(snapshot: string, dest: string): void {
   for (const rel of readdirSync(snapshot, { recursive: true }) as string[]) {
-    const name = posix.basename(rel.split("\\").join("/"));
-    if (!globs.some((g) => g.test(name)) || !statSync(join(snapshot, rel), { throwIfNoEntry: false })?.isFile()) continue;
+    if (!isManifest(rel.split("\\").join("/"))) continue;
+    if (!statSync(join(snapshot, rel), { throwIfNoEntry: false })?.isFile()) continue;
     mkdirSync(dirname(join(dest, rel)), { recursive: true });
     copyFileSync(join(snapshot, rel), join(dest, rel));
   }
@@ -292,7 +330,8 @@ export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: st
   dockerSteps.say?.(`${cfg.name}: building its test image (minutes on a first build)`);
   const text = dockerfile(cfg, { cache: buildkit(), ...(mark ? { mark: tag } : {}) });
   const labels = envLabels(cfg);
-  let r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", snapshot], { timeout: stepTimeout(BUILD_TIMEOUT),
+  const context = buildContextOf(snapshot);
+  let r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", context], { timeout: stepTimeout(BUILD_TIMEOUT),
     stdin: text });
   stepLog({ step: "image", project: cfg.name, tag, built: true, ok: r.status === 0, secs: secsSince(t0) });
   mkdirSync(dirname(logPath), { recursive: true });
@@ -303,7 +342,7 @@ export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: st
     dockerSteps.say?.(`${cfg.name}: the package index did not answer; trying again in ${networkRetry.waitSeconds}s`);
     await sleep(networkRetry.waitSeconds * 1000);
     const t1 = performance.now();
-    r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", snapshot], { timeout: stepTimeout(BUILD_TIMEOUT),
+    r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", context], { timeout: stepTimeout(BUILD_TIMEOUT),
       stdin: text });
     stepLog({ step: "image", project: cfg.name, tag, built: true, ok: r.status === 0, retry: "network", secs: secsSince(t1) });
     writeFileSync(logPath, r.stdout + r.stderr);
@@ -316,6 +355,7 @@ export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: st
     }
     throw new ArnxError(`building the test environment failed; see ${logPath}`);
   }
+  if (adapterFor(cfg).keepBuild && context !== snapshot) newerThanBuild(snapshot, context);
   return tag;
 }
 

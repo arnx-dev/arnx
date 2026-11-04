@@ -26,22 +26,33 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   never sent to a model. A file left out this way is named at setup and in each review. When every key-shaped
   string in a JavaScript, TypeScript, Python or Rust file is inside a comment that has its lines to itself (a doc
   example), the file is sent with those comment lines blanked instead (a private key's whole block too, when it lies
-  in the comment), and setup names the file and its lines. Everything else that may be a secret gets a stand-in, a
-  fake of the same shape (its prefix such as `sk-`, `whsec_` or `AKIA` kept, then the same length and kinds of
-  characters, hex staying hex), and the tests run with the fake: key-shaped text; a literal given to a secret-looking
-  name (token, secret, password, credential, private, authorization, API key; also key, auth, salt or cookie when
-  the value looks random; the word must be what the name is, its last one: `AUTH_TOKEN`, `secret_key`, not
-  `TOKEN_PROGRAM` or `account_key`) in code, JSON, YAML, TOML, INI or env files, as an assignment, a keyword argument
-  or a `("NAME", "value")` pair, unless it is words or a name (`password123`, `PublicKey`), a placeholder, a URL or a
-  path, or the name says hash, signature, public, id or label. A random-looking string (hex or base64) is faked only where
-  such a name marks it: unnamed, it is a hash, a commit id, an address or a signature that tests compare. Lockfiles
-  and binary files are left alone. Each value is then
-  replaced wherever it appears in the snapshot, so no file keeps it and every file gets the same fake; the real
-  values never leave your machine. Setup names these files once. A test that checks a signature made with the real
-  value (a signed license key) fails with the fake. A private key with a body cannot get a stand-in: its file is
-  still left out (a header with no body anywhere in the file, such as a form's placeholder, is kept as it is).
-  `[review] stand_ins = false` in `.arnx/config.toml` turns stand-ins off: files with key-shaped text in code are left
-  out, and other values are sent as they are. A review's diff blanks comment lines the same
+  in the comment), and setup names the file and its lines. Everything else that may be a secret reaches a model only as
+  a stand-in, a fake of the same shape (its prefix such as `sk-`, `whsec_` or `AKIA` kept, then the same length and kinds
+  of characters, hex staying hex), in every request, whatever it holds: a file read, a search, a test's output.
+  What the tests run depends on how sure arnx is. Key-shaped text and a password in an address get the stand-in in the
+  snapshot too, wherever they appear, so no file keeps them and every file gets the same fake; the tests run with the
+  fake, and one that checks a signature made with the real value (a signed license key) fails. A guess stays as it is
+  in the snapshot, since a wrong guess must not change code that runs, and those runs have no network beyond the services
+  you declared. A guess is a literal given to a secret-looking name (token, secret, password, credential, private,
+  authorization, API key; also key, auth, salt or cookie when the value looks random; the word must be what the name is,
+  its last one: `AUTH_TOKEN`, `secret_key`, not `TOKEN_PROGRAM` or `account_key`) in code, JSON, YAML, TOML, INI or env
+  files, as an assignment, a keyword argument or a `("NAME", "value")` pair; on a command line or in a build file
+  (`export NAME=value`, `docker run -e`, `ENV`, a Makefile's `:=`, `Authorization: Bearer value`); or in a URL's query
+  (`?api_key=value`). Words or a name (`password123`, `PublicKey`), a placeholder, a URL or a path don't count, nor does a
+  value the name says is a hash, signature, public, id or label. A value in a `.env*` file at the top of the repository
+  counts wherever it appears: those files are read for this and copied nowhere. A random-looking string (hex or base64)
+  is a guess only where such a name marks it: unnamed, it is a hash, a commit id, an address or a signature that tests
+  compare.
+  Building an image has network, so it gets a second copy of the snapshot in which each guess is a stand-in too. A guess a
+  manifest or a lockfile holds is the exception: it stays in every file of both copies, as a stand-in there can break an
+  install. An install that copies the project elsewhere (`cp -a . /opt/app`, `pip install .`) copies that second copy, so tests
+  that run there see stand-ins for guesses. Lockfiles and binary files are left alone. The real values never leave your machine,
+  beyond what a manifest or a lockfile holds. Setup names the files whose snapshot has stand-ins once. A private key with
+  a body cannot get a stand-in: its file is still left out (a header with no body anywhere in the file, such as a form's
+  placeholder, is kept as it is).
+  `[review] stand_ins = false` in `.arnx/config.toml` turns stand-ins off in both copies: files with key-shaped text in code
+  are left out, and requests still hold stand-ins for the other values.
+  A review's diff blanks comment lines the same
   way and names them; a key in code in the diff still stops the review. When its key-shaped text
   is test fixtures (a secret detector's own tests), `arnx allow-secret PATH` pins each such string in
   `.arnx/review.yaml`, which is then proven again before the next review; a new key-shaped string in that file

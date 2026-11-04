@@ -2,12 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { bakedKey, commandPaths, differing, findCopies, onlyInCopies, packageName, reached, scopeFiles }
+import { bakedIn, bakedKey, commandPaths, differing, findCopies, onlyInCopies, packageName, reached, scopeFiles }
   from "../src/baked";
+import { takeSnapshot } from "../src/change";
 import { parseReviewConfig } from "../src/config";
 import { cacheRecords, sourceRecords } from "../src/envprune";
-import { dockerSteps, envKey, sandboxOptions } from "../src/sandbox";
+import { buildContextOf, dockerSteps, envKey, sandboxOptions } from "../src/sandbox";
 import { dockerSession } from "../src/testround";
+import { commit, initRepo } from "./helpers/gitutil";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -147,6 +149,82 @@ test("an image made from the code is marked with its tag and reused for the same
   }
 });
 
+/** A snapshot of a repository whose code holds a guess, and a docker whose image's copy of it came from `from`, at the
+ * key `key` (the snapshot's own when none). */
+function guessedSession(from: (snap: string) => string, key?: (snap: string) => string) {
+  const dir = tmp();
+  const repo = join(dir, "repo");
+  write(repo, { "app/requirements.txt": `# ${Date.now()}\n`, "app/a.py": `db_password = "Zq7xK2mP9vR4tY1w"\n`,
+    "app/b.py": "B\n", "app/c.py": "C\n" });
+  initRepo(repo);
+  commit(repo, "code");
+  const snap = join(dir, "snap");
+  takeSnapshot(repo, null, snap, []);
+  const cfg = parseReviewConfig(BAKED);
+  const copy = from(snap);
+  const hashes = ["a", "b", "c"].map((f) => `${sha(readFileSync(join(copy, "app", `${f}.py`), "utf8"))}  /opt/app/${f}.py`);
+  writeFileSync(join(dir, "docker"), `#!/bin/sh
+case "$1" in
+  info) echo 27;;
+  image) [ "$3" = 'arnx-env:${key?.(snap) ?? envKey(cfg, snap)}' ] || exit 1;;
+  build) echo "$*" >> '${join(dir, "builds")}'; cat > /dev/null;;
+  run) case "$*" in
+    *sha256sum*) cat > /dev/null; printf '%s\\n' ${hashes.map((h) => `'${h}'`).join(" ")};;
+    *) printf '/opt/app/a.py\\n/opt/app/b.py\\n/opt/app/c.py\\n';;
+  esac;;
+esac
+exit 0
+`);
+  chmodSync(join(dir, "docker"), 0o755);
+  sandboxOptions.docker = join(dir, "docker");
+  const builds = () => existsSync(join(dir, "builds")) ? readFileSync(join(dir, "builds"), "utf8").trim().split("\n") : [];
+  return { cfg, repo, snap, builds };
+}
+
+test("an image's copy from the build context is this code: its guesses' stand-ins cause no rebuild and no refusal", async () => {
+  const saved = { docker: sandboxOptions.docker, buildkit: sandboxOptions.buildkit };
+  try {
+    sandboxOptions.buildkit = false;
+    const { cfg, repo, snap, builds } = guessedSession((s) => buildContextOf(s));
+    expect(buildContextOf(snap)).not.toBe(snap);
+    expect(readFileSync(join(snap, "app/a.py"), "utf8")).toContain("Zq7xK2mP9vR4tY1w");
+    expect(bakedIn(cfg, `arnx-env:${envKey(cfg, snap)}`, snap)?.differ).toEqual([]);
+    await dockerSession(cfg, snap, join(tmp(), "build.log"), async () => null);
+    expect(builds()).toEqual([]);
+    // The same code copied in once the session is up, as the before/after check does: not refused.
+    const later = join(tmp(), "later");
+    await dockerSession(cfg, later, join(tmp(), "build.log"), async (s) => {
+      takeSnapshot(repo, null, later, []);
+      return s.run("true", 60);
+    }, snap);
+    expect(builds()).toEqual([]);
+  } finally {
+    Object.assign(sandboxOptions, saved);
+  }
+});
+
+test("an image's copy of other code is rebuilt from the build context, with the guess a stand-in", async () => {
+  const saved = { docker: sandboxOptions.docker, buildkit: sandboxOptions.buildkit };
+  try {
+    sandboxOptions.buildkit = false;
+    const { cfg, snap, builds } = guessedSession(() => {
+      const other = join(tmp(), "other");
+      return write(other, { "app/a.py": "older\n", "app/b.py": "B\n", "app/c.py": "C\n" });
+    });
+    const tag = bakedKey(envKey(cfg, snap), cfg, [{ root: "/opt/app", scope: "app", files: ["a.py", "b.py", "c.py"] }], snap);
+    await dockerSession(cfg, snap, join(tmp(), "build.log"), async () => null);
+    const [build] = builds();
+    expect(build).toContain(`arnx-env:${tag}`);
+    expect(build!.trim().endsWith(` ${buildContextOf(snap)}`)).toBe(true);
+    // Hashed as it is built: not the real value's hash.
+    const real = createHash("sha256");
+    real.update(readFileSync(join(snap, "app/a.py")));
+    expect(sha(readFileSync(join(buildContextOf(snap), "app/a.py"), "utf8"))).not.toBe(real.digest("hex"));
+  } finally {
+    Object.assign(sandboxOptions, saved);
+  }
+});
+
 test("files only the image's copy holds: those the output names first, then those beside the code", () => {
   const snap = write(tmp(), { "packages/core/index.js": "i", "packages/core/a.js": "a", "app/tests/gen/t.js": "t" });
   const copies = [{ root: "/opt/app", scope: "", files: ["packages/core/a.js", "packages/core/index.js"] }];
@@ -263,6 +341,29 @@ describe("the project's package installed outside /src", () => {
       dockerSteps.log = saved.log;
     }
   };
+
+  test("the package an image installed from the build context is this code: a guess's stand-in there asks for no rebuild", async () => {
+    const saved = { docker: sandboxOptions.docker, buildkit: sandboxOptions.buildkit };
+    try {
+      sandboxOptions.buildkit = false;
+      const cfg = parseReviewConfig(INSTALLED);
+      const repo = join(tmp(), `repo-${randomName()}`);
+      write(repo, { ...code(), "app/src/my_app/core.py": `db_password = "Zq7xK2mP9vR4tY1w"\n` });
+      initRepo(repo);
+      commit(repo, "code");
+      const snap = join(tmp(), `snap-${randomName()}`);
+      takeSnapshot(repo, null, snap, []);
+      const built = buildContextOf(snap);
+      expect(readFileSync(join(snap, "app/src/my_app/core.py"), "utf8")).toContain("Zq7xK2mP9vR4tY1w");
+      const hashed = Object.fromEntries(["__init__.py", "core.py", "data.json"].map((f) =>
+        [`${SITE}/my_app/${f}`, readFileSync(join(built, "app/src/my_app", f), "utf8")]));
+      const docker = probeDocker(`arnx-env:${envKey(cfg, snap)}`, `${SITE}/my_app/__init__.py`, hashed);
+      await dockerSession(cfg, snap, join(tmp(), "build.log"), async () => null);
+      expect(docker.builds()).toBe(0);
+    } finally {
+      Object.assign(sandboxOptions, saved);
+    }
+  });
 
   test("an older copy in site-packages that the project's Python imports: an image made from this code", async () => {
     const r = await open(`${SITE}/my_app/__init__.py`, { [`${SITE}/my_app/__init__.py`]: "",

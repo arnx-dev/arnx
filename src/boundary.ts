@@ -4,7 +4,7 @@
 // wrong guess costs an odd string in a prompt: nothing on disk changes. One Boundary serves a run: it starts empty and
 // is told each value before the text holding it can leave (a run's snapshots, both sides of its diff).
 import type { AgentModel, JsonModel } from "./llm";
-import { fake, hasSecretContent, type SecretPin, suspects } from "./secrets";
+import { fake, hasSecretContent, nameShaped, type SecretPin, suspects } from "./secrets";
 import { ValueIndex } from "./valueindex";
 
 /** The shortest piece of a value taken for that value: shorter ones are too often a piece of something else. */
@@ -31,34 +31,6 @@ function spread(s: string): boolean {
     if (/[A-Z]/.test(s)) alphabet += 26;
   }
   return bits > 0 && bits >= 0.65 * Math.log2(Math.min(s.length, alphabet));
-}
-
-/** A word or an abbreviation by its letters. A long unbroken run of letters proves nothing. */
-function readsAsWord(w: string): boolean {
-  if (w.length <= 5) return true;
-  if (w.length > 20 || /[^aeiouy]{5,}/i.test(w)) return false;
-  return w.length < 12 || (w.match(/[aeiouy]/gi)?.length ?? 0) * 4 >= w.length;
-}
-
-/** Whether `s` is proven a name or words: words joined by signs or case (`primaryKeyField]`, `old-signing-key`,
- * `oauth2Client`, `_v402_is_retry`). Random text breaks that: scraps of a letter or two beside digits and other letters,
- * digits inside words, a long run of letters no word has. */
-function nameShaped(s: string): boolean {
-  // Signs a password has and a name does not, past a mark at its end (`Password1!`).
-  if ((s.replace(/[^A-Za-z0-9]+$/, "").match(/[!#$%^&*]/g)?.length ?? 0) > 1) return false;
-  const parts = s.match(/[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+|[^A-Za-z0-9]+/g) ?? [];
-  const isWord = (p: string | undefined) => p !== undefined && /^[A-Za-z]/.test(p);
-  const isNumber = (p: string | undefined) => p !== undefined && /^[0-9]/.test(p);
-  let letters = 0, scraps = 0, inner = 0;
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i]!, before = parts[i - 1], after = parts[i + 1];
-    if (isWord(p)) {
-      if (!readsAsWord(p)) return false;
-      letters += p.length;
-      if (p.length < 3 && (isWord(before) || isNumber(before) || isWord(after) || isNumber(after))) scraps += p.length;
-    } else if (isNumber(p) && isWord(before) && isWord(after)) inner++;
-  }
-  return letters > 0 && scraps * 6 <= letters && inner <= 1;
 }
 
 /** Whether a piece of `value` counts as that value. Decided from all of it, as a piece on its own can read as anything.

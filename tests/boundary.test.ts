@@ -185,6 +185,32 @@ test("with stand-ins on, as by default, a value on a changed line still never re
   expect(agent.bodies[0]).toContain("+api_token");
 });
 
+test("a guess stays real in the run snapshot, and reaches no model through read_file, grep or run output", async () => {
+  const repo = leakyRepo({ standIns: true });
+  const agent = new RecordingAgent(TURNS());
+  let seen = "";
+  // A run sees the snapshot as it is: what it prints holds the real values of every file it read.
+  const realRun = (snap: () => string) => (): [string | null, string, boolean] => {
+    seen = ["settings.py", "other.py"].map((f) => readFileSync(join(snap(), f), "utf8")).join("");
+    return [junitXml([[GEN, "test_add", "failed", `assert "${seen}" == 5`]]), `E   ${seen}\n1 failed\n`, false];
+  };
+  const made: FakeSession[] = [];
+  const factory = fakeFactory(realRun(() => made[0]!.snap), made);
+  const judge = new RecordingJson("openai:x", VERDICT);
+  await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: judge, sessionFactory: factory });
+  // The snapshot held the real values, so this is the filter's work.
+  expect(seen).toContain(CANARY);
+  expect(seen).toContain(UNCHANGED);
+  const sent = agent.bodies.join("\n");
+  expectClean("every tool's result", sent);
+  expectClean("the second opinion", judge.bodies.join("\n"));
+  const faked = new Boundary(ALL);
+  // Each tool came back, with the stand-in where the value was.
+  expect(sent).toContain(`api_token = \\\"${faked.mask(CANARY)}`);
+  expect(sent).toContain(`db_password = \\\"${faked.mask(UNCHANGED)}`);
+  expect(sent).toContain(`E   api_token = \\\"${faked.mask(CANARY)}`);
+});
+
 // --- the review, on the user's own keys ---------------------------------------------------------------------------
 
 test("route: the reviewer's messages, with read_file, grep and run output in them", async () => {

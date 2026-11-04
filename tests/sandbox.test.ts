@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { python } from "../src/adapters/python";
 import { parseReviewConfig, parseReviewFile } from "../src/config";
 import { SetupRequired } from "../src/errors";
 import {
-  cleanupLiveSessions, DEFAULT_LIMITS, dockerfile, ensureEnv, envKey, requireDocker, runArgv, sandboxOptions, Session,
+  buildContextOf, cleanupLiveSessions, DEFAULT_LIMITS, dockerfile, ensureEnv, envKey, requireDocker, runArgv,
+  sandboxOptions, Session,
   dockerSteps, keptBox, networkRetry,
 } from "../src/sandbox";
 import { useTmp } from "./helpers/tmp";
@@ -73,6 +74,57 @@ test("ensureEnv builds with the cache mount only when Docker has BuildKit", asyn
       await withDockerAsync(fake, () => ensureEnv(cfg, tmp(), join(tmp(), "build.log")));
       expect(readFileSync(stdin, "utf8").includes("--mount=type=cache")).toBe(bk);
     }
+  } finally {
+    sandboxOptions.buildkit = saved;
+  }
+});
+
+test("the image is built from the build context", async () => {
+  const fake = join(tmp(), "docker");
+  const args = join(tmp(), "args");
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in image) exit 1;; build) printf '%s\\n' "$@" > '${args}'; cat > /dev/null;; esac\nexit 0\n`);
+  chmodSync(fake, 0o755);
+  const snap = join(tmp(), "snap");
+  mkdirSync(snap);
+  writeFileSync(join(snap, "a.py"), "real");
+  // With no build context of its own, the snapshot is the context: it holds no guess.
+  const saved = sandboxOptions.buildkit;
+  sandboxOptions.buildkit = false;
+  try {
+    await withDockerAsync(fake, () => ensureEnv(parseReviewConfig(CFG), snap, join(tmp(), "build.log")));
+    expect(readFileSync(args, "utf8").trim().split("\n").at(-1)).toBe(snap);
+    mkdirSync(`${snap}.build`);
+    expect(buildContextOf(snap)).toBe(`${snap}.build`);
+    await withDockerAsync(fake, () => ensureEnv(parseReviewConfig(CFG), snap, join(tmp(), "build.log")));
+    expect(readFileSync(args, "utf8").trim().split("\n").at(-1)).toBe(`${snap}.build`);
+  } finally {
+    sandboxOptions.buildkit = saved;
+  }
+});
+
+test("a build that keeps its output: the code that differs from what was built is newer than the build", async () => {
+  const fake = join(tmp(), "docker");
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in image) exit 1;; build) cat > /dev/null;; esac\nexit 0\n`);
+  chmodSync(fake, 0o755);
+  const snap = join(tmp(), "snap");
+  mkdirSync(snap);
+  mkdirSync(`${snap}.build`);
+  const old = new Date(Date.now() - 3_600_000);
+  for (const name of ["guess.rs", "same.rs"]) writeFileSync(join(snap, name), "real");
+  writeFileSync(join(`${snap}.build`, "guess.rs"), "stand-in");
+  linkSync(join(snap, "same.rs"), join(`${snap}.build`, "same.rs"));
+  for (const name of ["guess.rs", "same.rs"]) utimesSync(join(snap, name), old, old);
+  const saved = sandboxOptions.buildkit;
+  sandboxOptions.buildkit = false;
+  const mtime = (n: string) => statSync(join(snap, n)).mtimeMs;
+  try {
+    const rust = parseReviewConfig("version: 1\nimage: rust:1\nlanguage: rust\ntest_command: cargo nextest run {targets}\n");
+    const python = parseReviewConfig(CFG);
+    await withDockerAsync(fake, () => ensureEnv(python, snap, join(tmp(), "build.log")));
+    expect(mtime("guess.rs")).toBe(old.getTime());
+    await withDockerAsync(fake, () => ensureEnv(rust, snap, join(tmp(), "build.log")));
+    expect(mtime("guess.rs")).toBeGreaterThan(old.getTime());
+    expect(mtime("same.rs")).toBe(old.getTime());
   } finally {
     sandboxOptions.buildkit = saved;
   }

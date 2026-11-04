@@ -83,7 +83,8 @@ fields are in `skills/arnx/references/json.md` and `check-json.md`; `tests/json-
     review
       resolveChange        change.ts     uncommitted work, else the last commit, or --range A..B; no commits: every file
       testRound            testround.ts
-        snapshot           change.ts     copy of the code at the change's head, secrets removed
+        snapshot           change.ts     copy of the code at the change's head: secret files out, certain values
+                                         faked; guesses stay real, and get stand-ins in the build context beside it
         dockerSession      sandbox.ts    build the env image once, start services, internal network
           bakedIn          baked.ts      an older copy of the code in the image: use an image made from this code
                                          (keyed on the code, kept for later sessions; `env prune` removes it)
@@ -477,9 +478,9 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `secrets.ts` | What is never sent or copied: secret file names, key-like text, credential variable names; `scanKeys`: withhold a file, or blank its comment lines when its only key-like text is in comments |
 | `comments.ts` | Where a JavaScript, TypeScript, Rust or Python file's comments are (strings and literals skipped) |
 | `ignore.ts` | `.arnxignore` matching, and the proposal of data-like files for `init` |
-| `change.ts` | Resolve the change (diff lines with key-like text in comments blanked); build the snapshot |
-| `sandbox.ts` | Docker: env image, locked-down runs, services, timeouts, cleanup of live sessions; the container a Rust session's runs share |
-| `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, kept when runs reach them (a Python project's own package, from pyproject's or setup.cfg's name, when a probe run in the session imports it from outside `/src`: site-packages, an editable install of a copy; docker.jsonl step `package`), compared with the code to test; the key of an image made from the code (its files, not the tests or reports beside it); when a round's probe runs no test, the files only the copy holds (named in the stop message with `arnx setup --project NAME`) |
+| `change.ts` | Resolve the change (diff lines with key-like text in comments blanked); build the snapshot, and its build context beside it (`<snapshot>.build`: hard links, but for the files that hold a guess; none when no guess is left to replace). Certain values (`isCertainRule`: `key-shaped`, `address-password`) get stand-ins in both; guesses (`named-*`) only in the build context. A guess a manifest or a lockfile holds stays real in both, in every file. A `named-word` guess (`Summer2024`) that code uses as a name anywhere is dropped from the filter too. `.env*` files at the repository's top give values only |
+| `sandbox.ts` | Docker: env image (built from `buildContextOf(snapshot)`, never from what tests run: a build has network), locked-down runs, services, timeouts, cleanup of live sessions; the container a Rust session's runs share |
+| `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, kept when runs reach them (a Python project's own package, from pyproject's or setup.cfg's name, when a probe run in the session imports it from outside `/src`: site-packages, an editable install of a copy; docker.jsonl step `package`), compared with the code to test, as the build context holds it, since that is what the copy came from: tests that run on such a copy see stand-ins for guesses, while tests on `/src` see the real values, and `CopyDiffers` and the rebuild never fire on that difference; the key of an image made from the code (its files in the build context, not the tests or reports beside it); when a round's probe runs no test, the files only the copy holds (named in the stop message with `arnx setup --project NAME`) |
 | `outcomes.ts` | Run tests through the adapter; classify results across runs |
 | `before.ts` | The before/after check's comparison: a finding's runs on the code before the change against its failure |
 | `typecheck.ts` | The project's own type check: tsc's output read, errors on the change against those before it, in words |
@@ -545,6 +546,11 @@ before its Next line and lists the pair in `may_contradict` (`mayContradict`). N
 - Test containers get no network (or an internal one reaching only declared services), no host environment, no
   capabilities, CPU, memory and process limits, and a throwaway copy of the repo.
 - Model keys stay in the arnx process: never passed to Docker, written to a file, or logged.
+- A guess at a secret (`named-*`) never changes code that runs: it stays real where tests run, and every read a model has
+  goes through the filter (`boundary.ts`). Only the code tests run holds it: an image is built from the build context, which
+  has its stand-in, since a build has network. A manifest's or a lockfile's value is the one exception, as a stand-in there can
+  break an install. An install's copy of the project (`cp -a`, `pip install .`) comes from the build context, so tests that run there see the
+  stand-ins, and that difference from `/src` is not a changed copy (`baked.ts`).
 - arnx never edits the user's code. `review` writes under `.arnx/`; `accept` writes only to `.arnx/` (accepted tests in
   `.arnx/tests/`) and its local pins; `init` writes `.arnxignore` only when there is none; `skill install` writes only the skill
   folders.

@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { join } from "node:path";
 import { addToSandbox, SANDBOX_MARK, sandboxDir, stripSandbox, takeSnapshot, withSandboxFiles } from "../src/change";
 import { parseReviewConfig, parseReviewFile, sandboxOnlyOf } from "../src/config";
-import { DEFAULT_LIMITS, runArgv } from "../src/sandbox";
+import { buildContextOf, DEFAULT_LIMITS, runArgv } from "../src/sandbox";
 import { envValue, hasSecretContent, secretPins, standIn, suspects } from "../src/secrets";
 import { defaultSettings, loadSettings, writeSettings } from "../src/settings";
 import { approvalWarnings } from "../src/setupview";
@@ -320,30 +320,58 @@ test("a name marks a secret only when the secret word is what it names: its last
   expect(suspects("x.py", `TOKEN_PROGRAM = "${AWS_KEY}"\n`, [])).toEqual([AWS_KEY]);
 });
 
-test("a value one file marks secret gets the same stand-in in every file, also where nothing marks it", () => {
+test("a certain value one file holds gets the same stand-in in every file, also where nothing marks it", () => {
   const repo = gitRepo(tmp());
   mkdirSync(join(repo, "tests"), { recursive: true });
-  writeFileSync(join(repo, "settings.py"), `API_TOKEN = "Qx7mK2pL9zR4wT8v"\n`);
+  writeFileSync(join(repo, "settings.py"), `API_TOKEN = "${AWS_KEY}"\n`);
   writeFileSync(join(repo, "tests/test_auth.py"), `def test_login(client):\n    assert client.get("/", ` +
-    `headers=hdr("Qx7mK2pL9zR4wT8v")).ok\n`);
-  writeFileSync(join(repo, "package-lock.json"), `{"x": "Qx7mK2pL9zR4wT8v"}\n`);
-  writeFileSync(join(repo, "logo.bin"), Buffer.from([0, 1, 2, ...Buffer.from(`API_TOKEN = "Qx7mK2pL9zR4wT8v"`)]));
+    `headers=hdr("${AWS_KEY}")).ok\n`);
+  writeFileSync(join(repo, "logo.bin"), Buffer.from([0, 1, 2, 3]));
   commit(repo, "auth");
   const snap = join(tmp(), "snap");
   const r = takeSnapshot(repo, null, snap);
   expect(r.standIns).toEqual(["settings.py", "tests/test_auth.py"]);
   const fake = /API_TOKEN = "(\w+)"/.exec(readFileSync(join(snap, "settings.py"), "utf8"))![1]!;
-  expect(fake).not.toBe("Qx7mK2pL9zR4wT8v");
+  expect(fake).not.toBe(AWS_KEY);
   expect(readFileSync(join(snap, "tests/test_auth.py"), "utf8")).toContain(`hdr("${fake}")`);
-  // A lockfile is generated, and a binary file is not text: neither is rewritten.
-  expect(readFileSync(join(snap, "package-lock.json"), "utf8")).toContain("Qx7mK2pL9zR4wT8v");
   expect(readFileSync(join(snap, "logo.bin"))).toEqual(readFileSync(join(repo, "logo.bin")));
+});
+
+test("a guess one file marks stays real where tests run, and gets one stand-in in every file of the build", () => {
+  const repo = gitRepo(tmp());
+  mkdirSync(join(repo, "tests"), { recursive: true });
+  writeFileSync(join(repo, "settings.py"), `API_TOKEN = "Qx7mK2pL9zR4wT8v"\n`);
+  writeFileSync(join(repo, "tests/test_auth.py"), `def test_login(client):\n    assert client.get("/", ` +
+    `headers=hdr("Qx7mK2pL9zR4wT8v")).ok\n`);
+  writeFileSync(join(repo, "logo.bin"), Buffer.from([0, 1, 2, ...Buffer.from(`API_TOKEN = "Qx7mK2pL9zR4wT8v"`)]));
+  commit(repo, "auth");
+  const snap = join(tmp(), "snap");
+  const r = takeSnapshot(repo, null, snap);
+  expect(r.standIns).toEqual([]);
+  expect(readFileSync(join(snap, "tests/test_auth.py"), "utf8")).toContain(`hdr("Qx7mK2pL9zR4wT8v")`);
+  const ctx = buildContextOf(snap);
+  const fake = /API_TOKEN = "(\w+)"/.exec(readFileSync(join(ctx, "settings.py"), "utf8"))![1]!;
+  expect(fake).not.toBe("Qx7mK2pL9zR4wT8v");
+  expect(readFileSync(join(ctx, "tests/test_auth.py"), "utf8")).toContain(`hdr("${fake}")`);
+  // A binary file is not text: it is not rewritten.
+  expect(readFileSync(join(ctx, "logo.bin"))).toEqual(readFileSync(join(repo, "logo.bin")));
+});
+
+test("a guess a lockfile holds stays real in every file, in the build too", () => {
+  const repo = gitRepo(tmp());
+  writeFileSync(join(repo, "settings.py"), `API_TOKEN = "Qx7mK2pL9zR4wT8v"\n`);
+  writeFileSync(join(repo, "package-lock.json"), `{"x": "Qx7mK2pL9zR4wT8v"}\n`);
+  commit(repo, "auth");
+  const snap = join(tmp(), "snap");
+  takeSnapshot(repo, null, snap);
+  expect(buildContextOf(snap)).toBe(snap);
+  expect(readFileSync(join(snap, "settings.py"), "utf8")).toContain("Qx7mK2pL9zR4wT8v");
 });
 
 test("a sandbox copy gets the stand-ins the snapshot gave, for values nothing in it marks", () => {
   const repo = gitRepo(tmp());
-  writeFileSync(join(repo, "settings.py"), `API_TOKEN = "Qx7mK2pL9zR4wT8v"\n`);
-  writeFileSync(join(repo, "users.csv"), "alice,Qx7mK2pL9zR4wT8v\n");
+  writeFileSync(join(repo, "settings.py"), `API_TOKEN = "${AWS_KEY}"\n`);
+  writeFileSync(join(repo, "users.csv"), `alice,${AWS_KEY}\n`);
   writeFileSync(join(repo, ".arnxignore"), "*.csv\n");
   commit(repo, "data");
   const snap = join(tmp(), "snap");

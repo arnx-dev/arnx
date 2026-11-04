@@ -11,11 +11,10 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
 import { parse as parseToml } from "smol-toml";
-import { getAdapter, LANGUAGES } from "./adapters";
+import { getAdapter } from "./adapters";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
-import { DEFAULT_LIMITS, docker, dockerSteps, REPORT_DIR, runArgv } from "./sandbox";
-import { globRegex } from "./secrets";
+import { buildContextOf, DEFAULT_LIMITS, docker, dockerSteps, isManifest, REPORT_DIR, runArgv } from "./sandbox";
 import { randomHex, shQuote } from "./util";
 
 /** A copy of a snapshot folder (`scope`, relative to the repository; "" for the repository) at `root` in the image:
@@ -35,14 +34,6 @@ const FIND = `find / -xdev \\( ${[...PRUNED_PATHS.map((p) => `-path ${p}`), ...P
 /** Fewest files of a folder an image path must hold to count as its copy (a stray index.js is not one). */
 const MIN_FILES = 3;
 
-const manifestRx = LANGUAGES.flatMap((l) => {
-  try {
-    return getAdapter(l).manifests.map(globRegex);
-  } catch {
-    return []; // a language without an adapter yet
-  }
-});
-
 /** Files under `dir` of the snapshot (POSIX paths relative to it), without manifests (installs copy those on purpose,
  * and they key the image already), dependency folders, git data and the files below `skip` (relative to `dir`). */
 export function scopeFiles(snap: string, dir: string, skip: string[] = []): string[] {
@@ -56,7 +47,7 @@ export function scopeFiles(snap: string, dir: string, skip: string[] = []): stri
       const st = lstatSync(join(base, r));
       if (st.isDirectory()) {
         if (!PRUNED_NAMES.includes(name)) visit(r);
-      } else if (st.isFile() && !manifestRx.some((rx) => rx.test(name))) out.push(r);
+      } else if (st.isFile() && !isManifest(name)) out.push(r);
     }
   };
   visit("");
@@ -150,11 +141,13 @@ function notCode(cfg: ReviewConfig, snap: string, scope: string): string[] {
 
 const projectOf = (cfg: ReviewConfig) => posix.normalize(cfg.workdir).replace(/^\.$/, "").replace(/\/$/, "");
 
-/** The scopes a copy is looked for in: the project's folder (an install that copies `.`) and the repository's. */
+/** The scopes a copy is looked for in: the project's folder (an install that copies `.`) and the repository's. An image's
+ * copy comes from the snapshot's build context, so that is what it is compared with: its guesses are stand-ins. */
 function scopesOf(cfg: ReviewConfig, snap: string): { scope: string; files: string[] }[] {
   const project = projectOf(cfg);
-  const scopes = [{ scope: project, files: scopeFiles(snap, project, notCode(cfg, snap, project)) }];
-  if (project) scopes.push({ scope: "", files: scopeFiles(snap, "", notCode(cfg, snap, "")) });
+  const code = buildContextOf(snap);
+  const scopes = [{ scope: project, files: scopeFiles(code, project, notCode(cfg, snap, project)) }];
+  if (project) scopes.push({ scope: "", files: scopeFiles(code, "", notCode(cfg, snap, "")) });
   return scopes;
 }
 
@@ -303,7 +296,8 @@ function packageCopy(cfg: ReviewConfig, image: string, snap: string)
     return null;
   }
   const scope = "dir" in local ? local.dir : posix.dirname(local.module);
-  const wanted = "dir" in local ? scopeFiles(snap, scope, notCode(cfg, snap, scope)) : [`${name}.py`];
+  const code = buildContextOf(snap);
+  const wanted = "dir" in local ? scopeFiles(code, scope, notCode(cfg, snap, scope)) : [`${name}.py`];
   const hashes = imageHashes(image, wanted.map((f) => inRoot(root, f))) ?? new Map<string, string>();
   const files = wanted.filter((f) => hashes.has(inRoot(root, f)));
   if (!files.length) {
@@ -311,7 +305,7 @@ function packageCopy(cfg: ReviewConfig, image: string, snap: string)
     return null;
   }
   const copy = { root, scope, files };
-  log(root, { differ: differing([copy], hashes, snap).length });
+  log(root, { differ: differing([copy], hashes, code).length });
   return { copy, hashes };
 }
 
@@ -334,23 +328,24 @@ export function bakedIn(cfg: ReviewConfig, image: string, snap: string): Baked |
     for (const [p, h] of found) hashes.set(p, h);
   }
   if (pkg && !copies.some((c) => c.root === pkg.copy.root)) copies.push(pkg.copy);
-  return { copies, differ: differing(copies, hashes, snap) };
+  return { copies, differ: differing(copies, hashes, buildContextOf(snap)) };
 }
 
 /** The image key for the code in the snapshot: the environment's key and a hash of the code in the scopes the copies
- * came from. Tests and reports beside the code do not count, so every session on the same code (a round, its answer
- * rounds, a check) and every later review of it use one image. */
+ * came from, as the build context holds it (what such an image holds). Tests and reports beside the code do not count, so
+ * every session on the same code (a round, its answer rounds, a check) and every later review of it use one image. */
 export function bakedKey(key: string, cfg: ReviewConfig, copies: BakedCopy[], snap: string): string {
   const h = createHash("sha256");
+  const code = buildContextOf(snap);
   const wanted = new Set(copies.map((c) => c.scope));
   const known = scopesOf(cfg, snap);
   // A package's folder (packageCopy) is a scope of its own, after the project's and the repository's.
   const own = [...wanted].filter((w) => !known.some((s) => s.scope === w)).sort()
-    .map((scope) => ({ scope, files: scopeFiles(snap, scope, notCode(cfg, snap, scope)) }));
+    .map((scope) => ({ scope, files: scopeFiles(code, scope, notCode(cfg, snap, scope)) }));
   for (const { scope, files } of [...known.filter((s) => wanted.has(s.scope)), ...own]) {
     for (const f of files) {
       const rel = inScope(scope, f);
-      h.update(`${rel}\0`).update(readFileSync(join(snap, rel))).update("\0");
+      h.update(`${rel}\0`).update(readFileSync(join(code, rel))).update("\0");
     }
   }
   return `${key}-src-${h.digest("hex").slice(0, 12)}`;
