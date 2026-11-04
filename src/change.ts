@@ -7,14 +7,14 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync,
-  rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync,
+  closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync,
+  readSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve, sep } from "node:path";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
-import { excludePathspecs, firstUnpinned, hasKeyBody, isSecretPath, privateKeyBody, scanKeys, type SecretPin,
+import { excludePathspecs, firstUnpinned, hasKeyBody, isCertainRule, isSecretPath, privateKeyBody, scanKeys, type SecretPin,
   standInsFor, suspects } from "./secrets";
 import { REPORT_DIR, type Runner } from "./sandbox";
 import { standInsSetting } from "./settings";
@@ -23,8 +23,12 @@ import { splitLines } from "./util";
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 export const MAX_DIFF_BYTES = 200_000;
 export const SCAN_LIMIT = 1_000_000;
+/** The largest text file a snapshot keeps. read_file has no size limit, so one it cannot scan may not stay. Measured on
+ * the slowest shapes (a name on every line, one long line): about 0.25 s per MB and a few hundred MB of memory at this
+ * size; 64 MB takes twice the time and near 1 GB, on every snapshot of a review. */
+export const BIG_SCAN_LIMIT = 32_000_000;
 /** Mutable so tests can lower it. */
-export const changeLimits = { maxSnapshotFiles: 20_000 };
+export const changeLimits = { maxSnapshotFiles: 20_000, maxScanBytes: BIG_SCAN_LIMIT };
 const MAX_BUFFER = 1 << 30;
 
 export interface Change {
@@ -436,7 +440,14 @@ export interface Scrubbed { withheld: Withheld[]; blanked: Blanked[]; standIns: 
   secrets: ReadonlySet<string>;
   /** Every value that looks like a secret, in memory only: all of `secrets`, and those of files that get no stand-ins, of
    * secret files and of files left out, none of them changed. What leaves arnx is masked for each (boundary.ts). */
-  suspects: ReadonlySet<string> }
+  suspects: ReadonlySet<string>;
+  /** Text files left out because no scan reads them (over changeLimits.maxScanBytes). */
+  tooLarge: string[] }
+
+/** What a run says about `paths`, files left out of its snapshot for their size. */
+export const tooLargeText = (paths: readonly string[]) =>
+  `left out, too large to scan (over ${Math.round(changeLimits.maxScanBytes / 1_000_000)} MB): ${someNames(paths, 5)}; ` +
+  "if tests need one, list it in .arnxignore and sandbox_only";
 
 /** Where a snapshot's sandbox-only files are kept: beside it, so nothing that reads the snapshot sees them. */
 export const sandboxDir = (snap: string) => `${snap}.sandbox`;
@@ -543,7 +554,7 @@ export function addToSandbox(repo: string, snap: string, paths: readonly string[
   }
   mkdirSync(at, { recursive: true });
   const r = scrub(at, () => false, allow, { standIns: o.standIns ?? standInsSetting(repo), sandbox: new Set(),
-    known: o.known });
+    known: o.known, aside: true });
   const sandboxed: string[] = [];
   const move = (dir: string, prefix: string) => {
     for (const name of readdirSync(dir)) {
@@ -694,7 +705,9 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
  * its body), or, without `standIns`, when it holds key-shaped text in code. Returns those files, the files blanked,
  * given stand-ins and moved beside the tree, and the values replaced (in memory only: never logged or sent). */
 function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly SecretPin[],
-               o: { standIns: boolean; sandbox: ReadonlySet<string>; known?: ReadonlySet<string> }): Scrubbed {
+               o: { standIns: boolean; sandbox: ReadonlySet<string>; known?: ReadonlySet<string>;
+                 /** All of `root` goes beside a snapshot, where no model reads. */
+                 aside?: boolean }): Scrubbed {
   const realRoot = realpathSync(root);
   const removedFiles: Withheld[] = [];
   const blanked: Blanked[] = [];
@@ -709,7 +722,7 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   const seen = new Set<string>(o.known ?? []);
   /** A file about to be left out: its value may stand elsewhere with no name beside it. */
   const leaving = (p: string, rel: string) => {
-    const read = scrubText(p);
+    const read = scrubText(p, changeLimits.maxScanBytes);
     if (read && !read.binary) for (const v of suspects(rel, read.text, pinsOf(rel))) seen.add(v);
   };
   const walk = (dir: string, relDir: string, out: boolean) => {
@@ -758,8 +771,20 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   const values = new Set<string>(o.known ?? []);
   const blanks = new Map<string, number[]>();
   const scanned: { p: string; rel: string }[] = [];
+  const tooLarge: string[] = [];
   for (const f of kept) {
-    const read = scrubText(f.p);
+    const big = overScanLimit(f.p);
+    // No model reads a binary file: read_file says only its size, grep skips it.
+    if (big === "binary") continue;
+    if (big === "too large") {
+      // Beside the tree no model reads it either.
+      if (!sandboxed.has(f.rel) && !o.aside) {
+        unlinkSync(f.p);
+        tooLarge.push(f.rel);
+      }
+      continue;
+    }
+    const read = scrubText(f.p, changeLimits.maxScanBytes);
     if (read === null) continue;
     const { text, binary } = read;
     const pins = pinsOf(f.rel);
@@ -783,9 +808,11 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
     }
     const blank = scan && "blank" in scan ? scan : null;
     if (blank) blanks.set(f.rel, blank.blank);
-    for (const v of suspects(f.rel, blank ? blank.text : text, pins)) {
+    const why = new Map<string, string>();
+    for (const v of suspects(f.rel, blank ? blank.text : text, pins, why)) {
       seen.add(v);
-      if (fakes(f.rel)) values.add(v);
+      // A big file's guesses stay as they are: its data is more often a wrong guess, and the filter covers them.
+      if (fakes(f.rel) && (big === null || isCertainRule(why.get(v) ?? ""))) values.add(v);
     }
     scanned.push(f);
   }
@@ -794,7 +821,7 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   const replace = values.size ? standInsFor(values, made) : null;
   for (const f of scanned) {
     const lines = blanks.get(f.rel);
-    let text = scrubText(f.p)!.text;
+    let text = scrubText(f.p, changeLimits.maxScanBytes)!.text;
     if (lines) text = (scanKeys(f.rel, text, pinsOf(f.rel)) as { text: string }).text;
     const r = replace && fakes(f.rel) ? replace(text, pinsOf(f.rel)) : { text, count: 0 };
     if (!lines && !r.count) continue;
@@ -812,7 +839,7 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   }
   const byPath = (a: { path: string }, b: { path: string }) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
   return { withheld: removedFiles.sort(byPath), blanked: blanked.sort(byPath), standIns: standIns.sort(),
-    sandboxed: [...sandboxed].sort(), secrets: values, suspects: seen };
+    sandboxed: [...sandboxed].sort(), secrets: values, suspects: seen, tooLarge: tooLarge.sort() };
 }
 
 /** A text file's content (scrubText); null for a binary file. */
@@ -821,11 +848,30 @@ function textOf(p: string): string | null {
   return read && !read.binary ? read.text : null;
 }
 
-/** A file's content as UTF-8, and whether it is binary (a NUL in its first 8000 bytes); null when larger than
- * SCAN_LIMIT. */
-function scrubText(p: string): { text: string; binary: boolean } | null {
+/** How a snapshot treats a file over SCAN_LIMIT (null: it is not): text within the cap is scanned, text past it is left
+ * out, and a binary file stays unread. The place for a streamed look at a file that is not scanned whole. */
+function overScanLimit(p: string): "scan" | "binary" | "too large" | null {
   try {
-    if (statSync(p).size > SCAN_LIMIT) return null;
+    const { size } = statSync(p);
+    if (size <= SCAN_LIMIT) return null;
+    const head = Buffer.alloc(8000);
+    const fd = openSync(p, "r");
+    try {
+      const n = readSync(fd, head, 0, head.length, 0);
+      if (head.subarray(0, n).includes(0)) return "binary";
+    } finally {
+      closeSync(fd);
+    }
+    return size > changeLimits.maxScanBytes ? "too large" : "scan";
+  } catch {
+    return null;
+  }
+}
+
+/** A file's content as UTF-8, and whether it is binary (a NUL in its first 8000 bytes); null when larger than `limit`. */
+function scrubText(p: string, limit = SCAN_LIMIT): { text: string; binary: boolean } | null {
+  try {
+    if (statSync(p).size > limit) return null;
     const bytes = readFileSync(p);
     return { text: bytes.toString("utf8"), binary: bytes.subarray(0, 8000).includes(0) };
   } catch {

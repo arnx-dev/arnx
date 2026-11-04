@@ -14,7 +14,7 @@ import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type Be
   fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, newNames, notChecked, SKIP_REASONS, textBefore, textFix,
   vacuousBefore } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
-import { snapshot, takeSnapshot, withSandboxFiles } from "./change";
+import { snapshot, takeSnapshot, tooLargeText, withSandboxFiles } from "./change";
 import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
 import { clip, emit, testMessage } from "./events";
@@ -294,6 +294,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
     removed = taken.withheld.map((w) => w.path);
     // Before the brain hears anything from this snapshot.
     o.brain.boundary?.add(taken.suspects);
+    if (taken.tooLarge.length) say(tooLargeText(taken.tooLarge));
     // Clear earlier generated files only: for some languages the tests directory also holds the project's own tests.
     mkdirSync(join(snap, o.writeDir), { recursive: true });
     for (const rel of collect(snap, o.writeDir, adapter.writable)) rmSync(join(snap, rel), { force: true });

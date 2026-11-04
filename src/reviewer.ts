@@ -12,7 +12,7 @@ import { shallowKind } from "./shallow";
 import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, withRole } from "./events";
 import { added, type Change, describe, describeBlanked, EMPTY_TREE, filesAt, removed, resolveChange, sliceDiff,
   someNames, treeSuspects, untrackedLine } from "./change";
-import { configSuspects, loadReviewFile, type ReviewConfig, reviewConfigPath, secretPinsOf } from "./config";
+import { configSuspects, loadReviewFile, type ReviewConfig, reviewConfigPath, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
 import { huntParts } from "./hunt";
 import { projectIndex } from "./indexer";
@@ -316,7 +316,8 @@ export async function runReview(repo: string, o: { settings: Settings;
       boundary.addDiff(change.diff, pins);
       boundary.add(configSuspects(repo));
       if (resumed) {
-        boundary.add(treeSuspects(repo, change.head, pins, { untracked: !!change.withUntracked }));
+        boundary.add(treeSuspects(repo, change.head, pins, { untracked: !!change.withUntracked,
+          sandbox: sandboxOnlyOf(file.raw) }));
       }
     }
     let finished = false;

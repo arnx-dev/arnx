@@ -1,9 +1,30 @@
 // The one filter for what leaves arnx. Each value that looks like a secret gets its stand-in in every request to a model
-// (system text, messages, tool results, the diff), in a request's every string, in telemetry and in the event log. A
+// (system text, messages, tool results, the diff), in a request's every string, in telemetry and in the event log, and so
+// does a piece of one that a cut left at the edge of a line or of the text. A
 // wrong guess costs an odd string in a prompt: nothing on disk changes. One Boundary serves a run: it starts empty and
 // is told each value before the text holding it can leave (a run's snapshots, both sides of its diff).
 import type { AgentModel, JsonModel } from "./llm";
 import { fake, type SecretPin, standInsFor, suspects } from "./secrets";
+
+/** The shortest piece of a value taken for that value: shorter ones are too often a piece of something else. */
+const FRAGMENT_MIN = 12;
+
+/** A value as it reads in text that was made into JSON or into a URL. */
+function forms(v: string): string[] {
+  try {
+    return [v, JSON.stringify(v).slice(1, -1), encodeURIComponent(v)];
+  } catch {
+    return [v, JSON.stringify(v).slice(1, -1)]; // not valid text: no URL form
+  }
+}
+
+/** Whether text cut at `at` would end there: the text or its line ends, a mark of the cut follows, or the bracket that
+ * closes a clipped quote (`(${message.slice(0, 200)})`). */
+const endsAt = (text: string, at: number) => at === text.length || text[at] === "\n" || text[at] === "\r" ||
+  text[at] === "…" || text[at] === ")" || text.startsWith("...", at);
+/** Whether text cut at `at` would start there. */
+const startsAt = (text: string, at: number) => at === 0 || text[at - 1] === "\n" || text[at - 1] === "…" ||
+  text.startsWith("...", at - 3);
 
 export class Boundary {
   private values = new Set<string>();
@@ -20,10 +41,7 @@ export class Boundary {
   add(values: Iterable<string>): void {
     const before = this.values.size;
     for (const v of values) {
-      if (!v) continue;
-      this.values.add(v);
-      // As it reads inside text that was made into JSON.
-      this.values.add(JSON.stringify(v).slice(1, -1));
+      if (v) for (const form of forms(v)) this.values.add(form);
     }
     if (this.values.size === before) return;
     this.longest = [...this.values].sort((a, b) => b.length - a.length);
@@ -35,13 +53,42 @@ export class Boundary {
     this.add(diffSuspects(diff, allow));
   }
 
-  /** `text` without any of the values: each is replaced wherever it stands, inside a longer word too. */
+  /** `text` without any of the values, each replaced wherever it stands, inside a longer word too, and without the piece
+   * of one that text cut before the filter left: FRAGMENT_MIN characters or more at its start or end, at a cut's edge. */
   mask(text: string): string {
     const here = this.longest.filter((v) => text.includes(v));
-    if (!here.length) return text;
-    let out = this.whole(text).text;
+    let out = here.length ? this.whole(text).text : text;
     // What the matcher leaves: inside a longer word, after a slash, or a value `fake` cannot change.
     for (const v of here) if (out.includes(v)) out = out.replaceAll(v, this.standIn(v));
+    for (const v of this.longest) {
+      if (v.length <= FRAGMENT_MIN) break;
+      out = this.maskTail(this.maskHead(out, v), v);
+    }
+    return out;
+  }
+
+  /** `text` without the start of `v` where text was cut after it (a grep line, a clipped diff). */
+  private maskHead(text: string, v: string): string {
+    const head = v.slice(0, FRAGMENT_MIN);
+    let out = text;
+    for (let at = out.indexOf(head); at >= 0; at = out.indexOf(head, at + 1)) {
+      let n = FRAGMENT_MIN;
+      while (n < v.length && out[at + n] === v[n]) n++;
+      if (endsAt(out, at + n)) out = out.slice(0, at) + this.standIn(v).slice(0, n) + out.slice(at + n);
+    }
+    return out;
+  }
+
+  /** `text` without the end of `v` where text was cut before it (the tail of a run's output). */
+  private maskTail(text: string, v: string): string {
+    const tail = v.slice(-FRAGMENT_MIN);
+    let out = text;
+    for (let at = out.indexOf(tail); at >= 0; at = out.indexOf(tail, at + 1)) {
+      const end = at + FRAGMENT_MIN;
+      let n = FRAGMENT_MIN;
+      while (n < v.length && out[end - n - 1] === v[v.length - n - 1]) n++;
+      if (startsAt(out, end - n)) out = out.slice(0, end - n) + this.standIn(v).slice(-n) + out.slice(end);
+    }
     return out;
   }
 

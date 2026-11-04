@@ -4,8 +4,6 @@ import { createHash, scryptSync } from "node:crypto";
 import { posix } from "node:path";
 import { comments, commentStyle } from "./comments";
 
-export { Boundary } from "./boundary";
-
 export const SECRET_FILE_GLOBS: readonly string[] = [
   ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "*.jks", "id_rsa*", "id_ecdsa*",
   "id_ed25519*", ".netrc", ".npmrc", ".pypirc", "credentials*.json", "service-account*.json", "*.session",

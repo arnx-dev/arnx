@@ -1,7 +1,8 @@
 // The outbound filter: a value under a secret-looking name never leaves arnx by any route, whatever the snapshot holds.
 // One test per route, each recording at the outermost layer a request passes. A route added later belongs here, and the
 // last test fails until it is named.
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { makeAnswerRunner } from "../src/accept";
@@ -9,17 +10,21 @@ import { Boundary, boundaryOf, diffSuspects, isMasked, maskedAgent, maskedJson }
 import { CloudClient } from "../src/cloud";
 import { CloudBrain } from "../src/cloudbrain";
 import { loadReviewFile, parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
-import { takeSnapshot } from "../src/change";
+import { changeLimits, takeSnapshot, tooLargeText } from "../src/change";
 import { ModelError } from "../src/errors";
 import { EventLog } from "../src/events";
 import { jevModel } from "../src/jev";
 import { AnthropicJson, FallbackJson, type AgentModel, type Block, type JsonModel, type JsonReply, makeAgentModel,
   makeChallenger, makeJsonModel, makeSecondHunter, PRICES, type Reply, ResponsesJson } from "../src/llm";
 import { LocalBrain } from "../src/localbrain";
+import { describeRun } from "../src/outcomes";
+import { DEFAULT_PROMPTS, explainUser } from "../src/prompts";
 import { runReview } from "../src/reviewer";
-import { Boundary as FromSecrets, isCertainRule, suspects } from "../src/secrets";
+import type { ExecFactory } from "../src/sandbox";
+import { isCertainRule, suspects } from "../src/secrets";
 import { defaultSettings, parseModelRef, type Settings, writeSettings } from "../src/settings";
 import { runSetup } from "../src/setup";
+import { clipOutput } from "../src/setupexec";
 import { checkData, reportTelemetry } from "../src/telemetry";
 import { Cli } from "./helpers/cli";
 import { type FakeCloud, fakeCloud, type StepScript, TOKEN } from "./helpers/cloudfake";
@@ -27,6 +32,20 @@ import { fakeFactory, FakeSession, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
+
+// No test here may reach a provider: only this machine's own fake server gets past this.
+const realFetch = globalThis.fetch;
+const outside: string[] = [];
+globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+  const url = input instanceof Request ? input.url : String(input);
+  if (new URL(url).hostname === "localhost") return realFetch(input, init);
+  outside.push(url);
+  throw new Error(`a test tried to reach ${url}`);
+}) as typeof fetch;
+afterAll(() => {
+  globalThis.fetch = realFetch;
+  expect(outside).toEqual([]);
+});
 
 /** On a changed line, in a file read, and printed by a test. */
 const CANARY = "Zq7xK2mP9vR4tY1w";
@@ -238,6 +257,30 @@ test("route: a resumed review with every round saved knows the tree's values bef
   expect(judge.bodies.join("\n")).toContain(`assert \\\"`);
 });
 
+test("route: a resumed review knows the values of sandbox-only files too", async () => {
+  const repo = leakyRepo();
+  const yaml = stamp(parseReviewConfig(`${YAML}sandbox_only: [fixtures/seed.py]\n`), "Dev", "2026-11-04");
+  writeFileSync(reviewConfigPath(repo), yaml);
+  writeFileSync(join(repo, ".arnxignore"), "fixtures/\n");
+  mkdirSync(join(repo, "fixtures"));
+  writeFileSync(join(repo, "fixtures/seed.py"), `seed_token = "${IN_CONFIG}"\n`);
+  commit(repo, "a file only the tests read");
+  writeFileSync(join(repo, "settings.py"), `api_token = "${CANARY}"\n`);
+  const quoting = (): [string | null, string, boolean] => [junitXml([[GEN, "test_add", "failed",
+    `assert "${IN_CONFIG}" == 5`]]), "", false];
+  const cut = new RecordingJson("openai:x", VERDICT);
+  cut.completeJson = async () => {
+    throw new Error("the connection went");
+  };
+  await runReview(repo, { settings: SETTINGS, agentModel: new RecordingAgent(TURNS()), challenger: cut,
+    sessionFactory: fakeFactory(quoting) }).catch(() => null);
+  const judge = new RecordingJson("openai:x", VERDICT);
+  await runReview(repo, { settings: SETTINGS, agentModel: new RecordingAgent([]), challenger: judge,
+    sessionFactory: fakeFactory(quoting), resume: true });
+  expect(judge.bodies.length).toBeGreaterThan(0);
+  expect(judge.bodies.join("\n")).not.toContain(IN_CONFIG);
+});
+
 test("route: the review's event log", async () => {
   const repo = leakyRepo();
   const { rdir } = await runReview(repo, { settings: SETTINGS, agentModel: new RecordingAgent(TURNS()),
@@ -385,13 +428,25 @@ test("route: a fallback model gets the masked text, and stays what callers take 
 
 test("route: setup's agent, with read_file, grep and exec output", async () => {
   const repo = leakyRepo();
-  const agent = new RecordingAgent([[tool("read_file", { path: "other.py" }), tool("grep", { pattern: "db_password", path: "." })]],
-    "done");
-  const r = await runSetup(repo, SETTINGS, agent, { outDir: join(tmp(), "setup"), sessionFactory: fakeFactory(leakyRun) });
-  expect(r).toBeDefined();
+  const APP = "version: 1\nprojects:\n  app:\n    root: .\n    language: python\n    image: python:3.12-slim\n" +
+    "    test_command: python -m pytest -q {targets}\n";
+  const passing = (): [string | null, string, boolean] => [junitXml([["tests/test_a.py", "test_a", "passed", ""]]),
+    "1 passed", false];
+  const commands: string[] = [];
+  const box: ExecFactory = async () => ({
+    exec: (command) => {
+      commands.push(command);
+      return { exitCode: 0, output: `db_password=${UNCHANGED}\n`, timedOut: false, seconds: 0.1 };
+    },
+    close: () => {},
+  });
+  const agent = new RecordingAgent([[tool("read_file", { path: "other.py" }), tool("grep", { pattern: "db_password", path: "." })],
+    [tool("try_project", { yaml: APP, project: "app" })], [tool("exec", { project: "app", command: "env" })]], "done");
+  await runSetup(repo, SETTINGS, agent, { outDir: join(tmp(), "setup"), sessionFactory: fakeFactory(passing), execFactory: box });
+  expect(commands).toEqual(["env"]);
   const sent = agent.bodies.join("\n");
   expectClean("setup", sent);
-  expect(sent).toContain("db_password");
+  expect(sent).toContain("db_password=");
 });
 
 test("route: setup's event log", async () => {
@@ -643,6 +698,80 @@ test("a value inside a longer word, or after a slash, is still the value", () =>
   expect(b.unmask(b.mask(`x${CANARY}y`))).toBe(`x${CANARY}y`);
 });
 
+// What the prompts and tools cut before the filter sees the text.
+const LONG = Array.from({ length: 12 }, (_, i) => createHash("sha256").update(`long ${i}`).digest("base64url")).join("");
+
+test("the start of a value left by a cut goes: at the text's end, a line's end, or before a mark", () => {
+  const b = new Boundary([LONG]);
+  const start = LONG.slice(0, 170);
+  for (const text of [`key = "${start}`, `a:1: key = "${start}\nb:2: other`, `${start}\r\nnext`, `key ${start}…`,
+    `key ${start}...`, `could not run (${start}), 2 runs`, `${start}\n[diff truncated; read the changed files with the tools]\n`]) {
+    const masked = b.mask(text);
+    expect(masked).not.toContain(LONG.slice(0, 12));
+    expect(masked.length).toBe(text.length);
+  }
+});
+
+test("the end of a value left by a cut goes: at the text's start, a line's start, or after a mark", () => {
+  const b = new Boundary([LONG]);
+  const end = LONG.slice(-170);
+  for (const text of [`${end}" more`, `failed: boom\n${end}"\n`, `…${end}`, `...${end}`,
+    `head\n[… 500 characters left out …]\n${end}`]) {
+    expect(b.mask(text)).not.toContain(LONG.slice(-12));
+  }
+});
+
+test("a piece of a value away from a cut, or shorter than 12 characters, stays: a name can begin the same way", () => {
+  const value = "ResetPassword_Xy12Zq9";
+  const b = new Boundary([value]);
+  for (const text of ["ResetPassword_ok(user)", "x = ResetPasswo\n", "def ResetPassword_link():\n"]) {
+    expect(b.mask(text)).toBe(text);
+  }
+  expect(b.mask("y = ResetPassword_\n")).not.toContain("ResetPassword_");
+  // The same at its other end: its last characters mean a cut only at the start of a line or a mark.
+  expect(b.mask("before_word_Xy12Zq9(x)")).toBe("before_word_Xy12Zq9(x)");
+  expect(b.mask("word_Xy12Zq9(x)")).not.toContain("word_Xy12Zq9");
+});
+
+test("a value cut by what really cuts it: grep, the diff limits, a clipped output, a run's tail", async () => {
+  const b = new Boundary([LONG]);
+  const pad = (n: number) => "x".repeat(n - 30);
+  const failure = pad(4000) + LONG;
+  const cuts = {
+    second: DEFAULT_PROMPTS.challengeUser(`+${pad(30_000)}${LONG}`, "t.py", pad(40_000) + LONG, "t", failure, "e"),
+    grouping: explainUser(`+${pad(30_000)}${LONG}`, [{ id: "F1", testId: "t", message: pad(2000) + LONG, explanation: "e",
+      reason: "", verdict: null, file: "t.py" }], { "t.py": pad(20_000) + LONG }),
+    exec: clipOutput(`${LONG}${pad(60_000)}${LONG}`),
+    run: describeRun({ exitCode: 1, output: `${LONG}${pad(10_000)}`.slice(-4100), timedOut: false, seconds: 1 }, null, []),
+    tail: `failed: boom\n${`${LONG}${pad(6000)}`.slice(-6100)}`,
+  };
+  for (const [name, text] of Object.entries(cuts)) {
+    const masked = b.mask(text);
+    expect([name, masked.includes(LONG.slice(0, 12)) || masked.includes(LONG.slice(-12))]).toEqual([name, false]);
+  }
+});
+
+test("route: a long value on a grep line, which grep cuts at 200 characters", async () => {
+  const repo = leakyRepo();
+  writeFileSync(join(repo, "creds.py"), `private_key = "${LONG}"\n`);
+  commit(repo, "a long value");
+  writeFileSync(join(repo, "settings.py"), `api_token = "${CANARY}"\n`);
+  const agent = new RecordingAgent([[tool("grep", { pattern: "private_key", path: "." })]]);
+  await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson("openai:x", VERDICT),
+    sessionFactory: fakeFactory(leakyRun) });
+  const sent = agent.bodies.join("\n");
+  expect(sent).toContain("creds.py:1: private_key");
+  expect(sent).not.toContain(LONG.slice(0, 12));
+});
+
+test("a value in a URL goes in its encoded form too", () => {
+  const value = "Ab3/cd+Ef9=gh&Ij2";
+  const b = new Boundary([value]);
+  const masked = b.mask(`https://x.example/?t=${encodeURIComponent(value)}&n=1`);
+  expect(masked).not.toContain(encodeURIComponent(value));
+  expect(masked).toContain("&n=1");
+});
+
 test("a value made of signs alone, which keeps its shape, still goes", () => {
   const b = new Boundary(["%%%%--%%@"]);
   expect(b.mask("a://u:%%%%--%%@host")).not.toContain("%%%%--%%@");
@@ -707,6 +836,110 @@ test("a snapshot names every suspect, also with stand-ins off, in a lockfile and
   expect(readFileSync(join(tmp(), "off", "other.py"), "utf8")).toContain(IN_SECRET_FILE);
 });
 
+// --- files over the first scan limit ---------------------------------------------------------------------------------
+
+/** Past SCAN_LIMIT, built when run: no file here holds a key-shaped string. */
+const AWS = `AKIA${"IOSFODNN7EXAMPLE"}`;
+const padding = (bytes: number) => '  "note": "some ordinary data line",\n'.repeat(Math.ceil(bytes / 37));
+const bigJson = () => `{\n  "api_token": "${AWS}",\n  "db_password": "${UNCHANGED}",\n${padding(1_100_000)}  "end": 1\n}\n`;
+
+function bigRepo(name: string, text: string, standIns = true): string {
+  const repo = leakyRepo({ standIns });
+  writeFileSync(join(repo, name), text);
+  commit(repo, "a big file");
+  // The change under review is small: a big file in a diff is refused before any of this.
+  writeFileSync(join(repo, "settings.py"), `api_token = "${REMOVED}"\n`);
+  return repo;
+}
+
+test("a big file's values are found: the key-shaped one gets its stand-in, a guess stays and goes through the filter", () => {
+  const repo = bigRepo("big.json", bigJson());
+  const snap = join(tmp(), "snap");
+  const r = takeSnapshot(repo, null, snap, [], { standIns: true });
+  expect(r.withheld).toEqual([]);
+  expect(r.tooLarge).toEqual([]);
+  expect([...r.suspects]).toEqual(expect.arrayContaining([AWS, UNCHANGED]));
+  const kept = readFileSync(join(snap, "big.json"), "utf8");
+  expect(kept).not.toContain(AWS);
+  expect(kept).toContain('"api_token": "AKIA');
+  expect(r.secrets.has(AWS)).toBe(true);
+});
+
+test("a guess only a big file holds stays in it, and the filter has it", () => {
+  const guess = "Tr5wE1yU7iO3pA9s";
+  const repo = bigRepo("data.json", `{\n  "db_password": "${guess}",\n${padding(1_100_000)}}\n`);
+  const snap = join(tmp(), "snap");
+  const r = takeSnapshot(repo, null, snap, [], { standIns: true });
+  expect(r.suspects.has(guess)).toBe(true);
+  expect(r.secrets.has(guess)).toBe(false);
+  expect(readFileSync(join(snap, "data.json"), "utf8")).toContain(guess);
+});
+
+for (const standIns of [true, false]) {
+  test(`route: read_file and grep on a big file, whose values a snapshot once left unseen (stand-ins ${standIns ? "on" : "off"})`,
+    async () => {
+      const guess = "Tr5wE1yU7iO3pA9s";
+      const repo = bigRepo("big.json", `{\n  "db_password": "${guess}",\n${padding(1_100_000)}}\n`, standIns);
+      const agent = new RecordingAgent([[tool("read_file", { path: "big.json" }),
+        tool("grep", { pattern: "db_password", path: "big.json" })]]);
+      await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson("openai:x", VERDICT),
+        sessionFactory: fakeFactory(leakyRun) });
+      const sent = agent.bodies.join("\n");
+      expect(sent).toContain("big.json:2:");
+      expect(sent).toContain("db_password");
+      expect(sent).not.toContain(guess);
+    });
+}
+
+test("a private key with its body in a big text file leaves the file out", () => {
+  const header = `-----BEGIN ${"PRIVATE"} KEY-----`;
+  const body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj";
+  const repo = bigRepo("dump.txt", `${header}\n${body}\n-----END ${"PRIVATE"} KEY-----\n${padding(1_100_000)}`);
+  const r = takeSnapshot(repo, null, join(tmp(), "snap"), [], { standIns: true });
+  expect(r.withheld.map((w) => w.path)).toEqual(["dump.txt"]);
+  expect(existsSync(join(tmp(), "snap", "dump.txt"))).toBe(false);
+});
+
+test("a big binary file stays and is not scanned: no model can read it, and its bytes are not text", () => {
+  const repo = bigRepo("data.bin", `\0binary\n"api_token": "${AWS}"\n${padding(1_100_000)}`);
+  const r = takeSnapshot(repo, null, join(tmp(), "snap"), [], { standIns: true });
+  expect([r.withheld, r.tooLarge]).toEqual([[], []]);
+  expect(existsSync(join(tmp(), "snap", "data.bin"))).toBe(true);
+  expect(r.suspects.has(AWS)).toBe(false);
+});
+
+test("a text file past the higher cap is left out with a clear line; a binary one, and one beside the tree, stay", async () => {
+  const saved = changeLimits.maxScanBytes;
+  changeLimits.maxScanBytes = 1_200_000;
+  try {
+    const repo = bigRepo("huge.json", `"api_token": "${AWS}"\n${padding(1_300_000)}`);
+    writeFileSync(join(repo, "huge.bin"), `\0${padding(1_300_000)}`);
+    writeFileSync(join(repo, ".arnxignore"), "aside/\n");
+    mkdirSync(join(repo, "aside"));
+    writeFileSync(join(repo, "aside/seed.json"), padding(1_300_000));
+    commit(repo, "more big files");
+    const snap = join(tmp(), "snap");
+    const r = takeSnapshot(repo, null, snap, [], { standIns: true, sandbox: ["aside/seed.json"] });
+    expect(r.tooLarge).toEqual(["huge.json"]);
+    expect(existsSync(join(snap, "huge.json"))).toBe(false);
+    expect(existsSync(join(snap, "huge.bin"))).toBe(true);
+    expect(r.sandboxed).toEqual(["aside/seed.json"]);
+    expect(existsSync(join(`${snap}.sandbox`, "aside/seed.json"))).toBe(true);
+    expect(tooLargeText(r.tooLarge)).toBe("left out, too large to scan (over 1 MB): huge.json; if tests need one, list it in " +
+      ".arnxignore and sandbox_only");
+
+    writeFileSync(join(repo, "settings.py"), `api_token = "${REMOVED}"\n`);
+    const said: string[] = [];
+    const agent = new RecordingAgent([[tool("read_file", { path: "huge.json" })]]);
+    await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson("openai:x", VERDICT),
+      sessionFactory: fakeFactory(leakyRun), progress: (m) => said.push(m) });
+    expect(said.join("\n")).toContain("too large to scan");
+    expect(agent.bodies.join("\n")).not.toContain(AWS);
+  } finally {
+    changeLimits.maxScanBytes = saved;
+  }
+});
+
 test("masking touches no code on disk", async () => {
   const repo = leakyRepo();
   const before = readFileSync(join(repo, "settings.py"), "utf8");
@@ -721,13 +954,12 @@ test("masking touches no code on disk", async () => {
   expect(snaps[0]).toContain(CANARY); // stand-ins off: the snapshot holds the real value, only the requests do not
 });
 
-test("the rules a later step needs: certain or a guess, and what the scorecard imports", () => {
+test("a suspect's rule says whether it is certain or a guess", () => {
   expect(isCertainRule("key-shaped")).toBe(true);
   expect(isCertainRule("address-password")).toBe(true);
   expect(isCertainRule("named-strong")).toBe(false);
   expect(isCertainRule("named-weak")).toBe(false);
   expect(isCertainRule("")).toBe(false);
-  expect(FromSecrets).toBe(Boundary);
   const why = new Map<string, string>();
   suspects("a.py", `api_token = "${CANARY}"\n`, [], why);
   expect(isCertainRule(why.get(CANARY)!)).toBe(false);

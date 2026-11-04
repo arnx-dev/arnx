@@ -15,7 +15,7 @@ import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./event
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { AdapterId, TestResult } from "./adapters/types";
 import { addToSandbox, type Blanked, describeBlanked, filesAt, hasCommits, snapshot, snapshotDigest, someNames,
-  takeSnapshot, type Withheld, workingTreeFiles } from "./change";
+  takeSnapshot, tooLargeText, type Withheld, workingTreeFiles } from "./change";
 import { configSuspects,
   loadReviewFile, parseReviewFile, plainReviewYaml, projectDigest, readSecretPins, restDigest, runDigest, type ReviewConfig,
   reviewConfigPath,
@@ -1124,8 +1124,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     // Files .arnxignore leaves out that the tests need: in the sandbox only. A fresh setup finds them again.
     const sandbox = new Set(existing ? sandboxOnlyOf(existing.raw) : []);
     const sandboxKey = () => [...sandbox].sort().join("\n");
-    const { withheld, blanked, standIns, secrets: replaced, suspects: found } = takeSnapshot(repo, null, snap, pins,
+    const { withheld, blanked, standIns, secrets: replaced, suspects: found, tooLarge } = takeSnapshot(repo, null, snap, pins,
       { untracked, sandbox: [...sandbox] });
+    if (tooLarge.length) say(tooLargeText(tooLarge));
     boundary.add(found);
     boundary.add(configSuspects(repo));
     // The code every run of this setup sees, before any run writes into the snapshot (SetupRun).
