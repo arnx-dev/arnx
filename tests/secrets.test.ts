@@ -62,3 +62,9 @@ test("a file's key-shaped strings are pinned by short hashes; it is kept only wh
   expect(firstUnpinned(`${PRIVATE_KEY}\n`, [])).toEqual({ line: 1, label: "a private key" });
   expect(firstUnpinned("def key_for(user): return user.id", [])).toBeNull();
 });
+
+test("a port before an @ is not a password", () => {
+  for (const url of ["http://localhost:3000@evil.com/x", "https://example.org:8443@proxy.test"]) {
+    expect(hasSecretContent(url)).toBe(false);
+  }
+});

@@ -21,8 +21,8 @@ const QUICK = /-----BEGIN|AKIA|sk-|gh[pousr]_|xox[abpr]-/;
  * template (`{password}`, `${X}`, `<password>`) holds characters a password here may not, and an example's `u:p` is
  * too short for one. */
 const ADDRESS = /:\/\/[^\s:/@"'`]{0,128}:([^\s/@"'`<>{}$*\\()[\]]{4,256})@([A-Za-z0-9._-]*)/g;
-/** What a doc or a form writes in place of a password. */
-const NO_PASSWORD = /^(?:password|passwd|pass|pwd|secret|changeme|change_me|example|test|dummy|fake|none|null|x+|\.+)$|%[sd]/i;
+/** What a doc or a form writes in place of a password; a number of up to five digits is a port. */
+const NO_PASSWORD = /^(?:\d{1,5}|password|passwd|pass|pwd|secret|changeme|change_me|example|test|dummy|fake|none|null|x+|\.+)$|%[sd]/i;
 /** A host no real password is for: a machine's own name, a service's one word, the names kept for examples and tests.
  * A template host (none read) may be any. */
 const OWN_HOST = /^(?:[^.]+|127\..*|0\.0\.0\.0)$|(?:^|\.)(?:localhost|local|test|invalid|example|example\.(?:com|net|org))$/i;
