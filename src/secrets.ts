@@ -285,7 +285,8 @@ function secretName(name: string): "strong" | "weak" | null {
 /** A literal that may be a secret: 8 printable ASCII characters or more, no blanks, two of lower case, upper case and
  * digits; not words or a name (`PublicKey`, `password123`, `count_3mo`: each part letters and digits, one run each),
  * a placeholder, a URL, a path or a dotted name. Beside a weak name, or holding a /, it must also look random: 16
- * characters or more for a weak name. A value replaced everywhere it appears must never be a name in code. */
+ * characters or more for a weak name, and hold nothing a key does not (brackets, a version range). A value replaced
+ * everywhere it appears must never be a name in code. */
 function secretValue(value: string, strength: "strong" | "weak"): boolean {
   if (value.length < (strength === "strong" ? 8 : 16) || value.length > 4096 || !/^[\x21-\x7e]+$/.test(value)) {
     return false;
@@ -295,8 +296,14 @@ function secretValue(value: string, strength: "strong" | "weak"): boolean {
   if (/\$\{|\{\{|^\$|^<.*>$|%[(sd]/.test(value) || /^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
   if (/^[.~]?\//.test(value) || (value.includes("/") && /\.[A-Za-z0-9]{1,5}$/.test(value))) return false;
   if (/^[A-Za-z_]\w*(\.[A-Za-z_]\w*)+$/.test(value) || /^[0-9._:-]+$/.test(value)) return false;
+  if (CODE.test(value) || /^\[[A-Za-z ]+\]$/.test(value)) return false;
+  if (strength === "weak" && (/[[\](){}<>^|]/.test(value) || /@[~^<>=]*[0-9]+\.[0-9]/.test(value))) return false;
   return (strength === "strong" && !value.includes("/")) || random(value);
 }
+
+/** An expression, whole: a name with an index or a call (`row[keyField]`, `user.toString()`, `idFor(item)`), as a template
+ * binds to an attribute. */
+const CODE = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\[[A-Za-z_$][^\]]*\]|\([^()]*\))(?:\.[A-Za-z_$][\w$]*|\[[A-Za-z_$][^\]]*\]|\([^()]*\))*$/;
 
 /** Files whose unquoted `name = value` lines hold values (env files, YAML, TOML, INI, properties). */
 const CONFIG = /\.(ya?ml|toml|ini|cfg|conf|properties|env)$|(^|\/)\.env[^/]*$|(^|\/)[^/.]*\.env\.[^/]*$/i;
