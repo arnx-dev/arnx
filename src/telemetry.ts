@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import type { AcceptResult } from "./accept";
+import type { Boundary } from "./boundary";
 import type { ProjectCheck } from "./check";
 import { exitCode, type Marks, type Review } from "./report";
 import { isCustom, resolveProvider } from "./providers";
@@ -148,8 +149,8 @@ export const fetchSender: Sender = async (url, body, signal) => {
 /** When telemetry is on, build the event's data and send it: at most `timeoutMs`, once, every error
  * swallowed. Otherwise `data` is never called and nothing happens. `open` defaults to TELEMETRY_OPEN (tests set it). */
 export async function reportTelemetry(env: Env, event: TelemetryEvent, data: () => Record<string, unknown>,
-                                      o: { sender?: Sender; timeoutMs?: number; open?: boolean; configured?: boolean }
-                                        = {}): Promise<void> {
+                                      o: { sender?: Sender; timeoutMs?: number; open?: boolean; configured?: boolean;
+                                          boundary?: Boundary } = {}): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   if (!(o.open ?? TELEMETRY_OPEN)) return;
   try {
@@ -165,7 +166,8 @@ export async function reportTelemetry(env: Env, event: TelemetryEvent, data: () 
         resolve();
       }, o.timeoutMs ?? SEND_TIMEOUT_MS);
     });
-    const sent = Promise.resolve().then(() => (o.sender ?? fetchSender)(telemetryUrl(env), JSON.stringify(body),
+    const text = JSON.stringify(body);
+    const sent = Promise.resolve().then(() => (o.sender ?? fetchSender)(telemetryUrl(env), o.boundary?.mask(text) ?? text,
       ctrl.signal)).then(() => undefined, () => undefined);
     await Promise.race([sent, out]);
   } catch {

@@ -18,6 +18,7 @@ import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, che
   localPinsPath, TESTS_CHANGED } from "./check";
 import { colorFor, colorLines, paint } from "./color";
 import { applyMarks, type Key, markInteractive, terminalKeys } from "./mark";
+import { Boundary, maskedAgent } from "./boundary";
 import { jevKey, jevModel, jevStatus } from "./jev";
 import { type Next, whatNext } from "./next";
 import { CloudBrain } from "./cloudbrain";
@@ -276,6 +277,9 @@ export function jsonObject(command: string, result: string, exitCode: number, fi
 }
 
 class Commands {
+  /** This command's one filter: every model, arnx cloud, JEV and telemetry go through it. */
+  private readonly boundary = new Boundary();
+
   constructor(private d: CliDeps, private j: JsonOut | null = null) {}
 
   /** The proof this command ran first because review.yaml changed (reprove): added to its JSON object as `reproved`. */
@@ -582,7 +586,7 @@ class Commands {
   private async sendTelemetry(event: "setup" | "review" | "accept" | "check", data: () => Record<string, unknown>)
     : Promise<void> {
     await reportTelemetry(this.d.env, event, data, { open: this.telemetryOpen, configured: this.telemetrySetting(),
-      ...(this.d.telemetrySender ? { sender: this.d.telemetrySender } : {}) });
+      ...(this.d.telemetrySender ? { sender: this.d.telemetrySender } : {}), boundary: this.boundary });
   }
 
   /** init writes .arnxignore when the repository has none (data, dumps and images; test fixtures kept); false when
@@ -789,7 +793,7 @@ class Commands {
     const token = tokenFor(this.d.env, url);
     if (!token) throw notLoggedIn(url);
     const client = this.cloudClient(url, token, s, mode);
-    return (say) => new CloudBrain({ client, tier: s.cloud!.effort, progress: say });
+    return (say) => new CloudBrain({ client, tier: s.cloud!.effort, progress: say, boundary: this.boundary });
   }
 
   /** A client for `url`; with the repository's settings and models, an outage says how to use the user's own keys. */
@@ -915,7 +919,7 @@ class Commands {
     } else if (s.jev) {
       this.d.out("Experimental: JEV is on in .arnx/config.toml, but JEV_API_KEY is not set; setup runs without it.");
     }
-    const failureModel = jev ? jevModel(jev, join(outDir, "jev.jsonl")) : undefined;
+    const failureModel = jev ? jevModel(jev, join(outDir, "jev.jsonl"), this.boundary) : undefined;
     const started = this.clock();
     // One limit for setup and its proof, on the clock its progress shows.
     const limit: TimeLimit = { at: started + cap * 60_000, now: () => this.clock(), minutes: cap };
@@ -923,7 +927,8 @@ class Commands {
     if (cloud) this.cloudPrompts(repo);
     const unpriced = !cloud && this.unpriced(s, [setupRef(s)]);
     const result = await this.withProgress(a, (progress) => runSetup(repo, s,
-      cloud ? null : this.d.setupModel ?? makeAgentModel(setupSettings(s), this.d.env), { outDir, project, add, progress,
+      cloud ? null : maskedAgent(this.d.setupModel ?? makeAgentModel(setupSettings(s), this.d.env, this.boundary),
+        this.boundary), { outDir, project, add, progress,
         failureModel, untracked, localPins: localPinsPath(this.d.env, repo), timeLimit: limit,
         ...(quick ? { quick: { files: quick.files } } : {}),
         ...(this.d.setupSessions ? { sessionFactory: this.d.setupSessions } : {}),
@@ -1466,15 +1471,15 @@ class Commands {
       this.cloudPrompts(repo);
       return this.reviewWith(repo, s, a, cloud, untracked);
     }
-    const agentModel = makeAgentModel(s, this.d.env);
+    const agentModel = makeAgentModel(s, this.d.env, this.boundary);
     this.unpriced(s, [s.reviewer, s.challenger, s.challengerFallback, s.hunter, s.secondHunter]);
     // Verdict calls give up on a stalled attempt sooner than hunt calls (see makeChallenger).
-    const challenger = makeChallenger(s, this.d.env);
+    const challenger = makeChallenger(s, this.d.env, this.boundary);
     const progress = new Progress(this.progressLine, { quiet: a.values.quiet as boolean | undefined,
       live: this.d.live ?? null, cost: costSince() });
-    const hunter = makeJsonModel(s.hunter ?? s.reviewer, s, this.d.env);
-    const ranker = makeJsonModel(s.reviewer, s, this.d.env);
-    const secondHunter = makeSecondHunter(s, this.d.env);
+    const hunter = makeJsonModel(s.hunter ?? s.reviewer, s, this.d.env, this.boundary);
+    const ranker = makeJsonModel(s.reviewer, s, this.d.env, this.boundary);
+    const secondHunter = makeSecondHunter(s, this.d.env, this.boundary);
     // Stalls, lost connections and fallbacks show in the progress, so a slow model can be told from a dead line.
     for (const m of [agentModel, challenger, hunter, ranker, secondHunter]) if (m) m.notice = progress.say;
     progress.start();
@@ -1600,7 +1605,7 @@ class Commands {
         runner = makeAnswerRunner(repo, loadReviewFile(repo), s, null, dockerSession, progress.say, cloud(progress.say));
       } else {
         // Answer rounds use answer_model when set (a cheap model writes a test for a stated behaviour well).
-        const agent = makeAgentModel(s.answerModel ? { ...s, reviewer: s.answerModel } : s, this.d.env);
+        const agent = makeAgentModel(s.answerModel ? { ...s, reviewer: s.answerModel } : s, this.d.env, this.boundary);
         unpriced = this.unpriced(s, [s.answerModel ?? s.reviewer]);
         agent.notice = progress.say;
         runner = makeAnswerRunner(repo, loadReviewFile(repo), s, agent, dockerSession, progress.say);

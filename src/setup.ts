@@ -9,13 +9,14 @@ import { isMap as isYamlMap, isScalar, parseDocument, visit } from "yaml";
 import { type AgentResult, StopRound, Workspace } from "./agent";
 import { type Baseline, BASELINE_FILE, type BaselineTest, baselineDigest, describeBaselineChanges, entryOf, keysOf,
   readBaseline, testKey, writeBaseline } from "./baseline";
+import { Boundary, boundaryOf } from "./boundary";
 import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { AdapterId, TestResult } from "./adapters/types";
 import { addToSandbox, type Blanked, describeBlanked, filesAt, hasCommits, snapshot, snapshotDigest, someNames,
   takeSnapshot, type Withheld, workingTreeFiles } from "./change";
-import {
+import { configSuspects,
   loadReviewFile, parseReviewFile, plainReviewYaml, projectDigest, readSecretPins, restDigest, runDigest, type ReviewConfig,
   reviewConfigPath,
   type ReviewFile, sandboxOnlyOf, sandboxYaml, secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampFile,
@@ -1036,13 +1037,16 @@ export async function runSetup(repo: string, settings: Settings, agentModel: Age
   : Promise<SetupResult> {
   const id = new Date().toISOString().slice(0, 10).replaceAll("-", "") + "-" + randomHex(3);
   const log = new EventLog(join(o.outDir, id, EVENTS_FILE), id);
+  // The run's filter, before any event: the brain's, or the model's; takeSnapshot's values fill it below.
+  const boundary = o.brain?.boundary ?? (agentModel && boundaryOf(agentModel)) ?? new Boundary();
+  log.filter = boundary;
   const now = () => performance.now();
   const limit = o.timeLimit ?? { at: now() + settings.setupMinutes * 60_000, now, minutes: settings.setupMinutes };
-  return withEvents(log, () => withTimeLimit(limit, () => setupBody(repo, settings, agentModel, o, limit)));
+  return withEvents(log, () => withTimeLimit(limit, () => setupBody(repo, settings, agentModel, o, limit, boundary)));
 }
 
 async function setupBody(repo: string, settings: Settings, agentModel: AgentModel | null, o: SetupOptions,
-                         limit: TimeLimit): Promise<SetupResult> {
+                         limit: TimeLimit, boundary: Boundary): Promise<SetupResult> {
   const say = o.progress ?? (() => {});
   mkdirSync(o.outDir, { recursive: true });
   const existing = o.project || o.add ? loadReviewFile(repo, { requireApproved: false }) : null;
@@ -1120,8 +1124,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     // Files .arnxignore leaves out that the tests need: in the sandbox only. A fresh setup finds them again.
     const sandbox = new Set(existing ? sandboxOnlyOf(existing.raw) : []);
     const sandboxKey = () => [...sandbox].sort().join("\n");
-    const { withheld, blanked, standIns, secrets: replaced } = takeSnapshot(repo, null, snap, pins,
+    const { withheld, blanked, standIns, secrets: replaced, suspects: found } = takeSnapshot(repo, null, snap, pins,
       { untracked, sandbox: [...sandbox] });
+    boundary.add(found);
+    boundary.add(configSuspects(repo));
     // The code every run of this setup sees, before any run writes into the snapshot (SetupRun).
     const code = snapshotDigest(snap);
     // Image keys come from the manifests as they were before any run wrote into the snapshot.
@@ -1364,6 +1370,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         // Files .arnxignore leaves out go into the sandbox (scrubbed as the snapshot is), and the project runs again.
         if (e instanceof LeftOutNeeded && e.files.every((p) => !secret.has(p))) {
           const r = addToSandbox(repo, snap, e.files, pins, { known: replaced });
+          boundary.add(r.suspects);
           r.sandboxed.forEach((p) => sandbox.add(p));
           r.withheld.forEach((w) => secret.add(w.path));
           leftOut.paths = leftOut.paths.filter((p) => !sandbox.has(p));
@@ -1677,7 +1684,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       propose: [PROPOSE, noted(propose, false)], exec: [EXEC, noted((i) => shell.call(i))] } });
     const detection = detectReadable(repo, untracked);
     const brain: Brain = o.brain ?? new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings),
-      prompts: promptsFor(repo) });
+      prompts: promptsFor(repo), boundary });
     // The agent reading files is one milestone, said once until a project runs or a proposal goes in; which files it
     // read stays in the transcript.
     let reading = false;

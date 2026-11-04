@@ -4,6 +4,7 @@
 // LocalBrain (localbrain.ts) is the open harness used with the user's own keys; a remote brain answers the same
 // calls over HTTP.
 import type { AgentResult, ToolCall } from "./agent";
+import type { Boundary } from "./boundary";
 import type { Withheld } from "./change";
 import type { ReviewConfig } from "./config";
 import type { Detection } from "./detect";
@@ -198,6 +199,8 @@ export interface ReviewOpened { reviewId: string }
 export interface Billed { costUsd: number; byRole: Record<string, number> }
 
 export interface Brain {
+  /** What is kept from whoever this brain asks. The CLI tells it each value before it sends the text holding one. */
+  readonly boundary: Boundary;
   /** What decides what is found, recorded with each review: PROMPT_VERSION for the local brain. */
   readonly version: string;
   /** The name a remote brain's work goes by in usage lines and the report: its tier and harness, never a model name

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CloudClient, UNAVAILABLE } from "../src/cloud";
+import { Boundary } from "../src/boundary";
 import { CloudBrain, clipOutput, finishStop } from "../src/cloudbrain";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { SetupRequired } from "../src/errors";
@@ -66,7 +67,7 @@ const billed: CloudScript["billed"] = (_path, step) => step?.type === "actions" 
   : [{ role: "reviewer", calls: 1, cost_micro_usd: 20_000 }];
 
 function brainFor(c: FakeCloud, said: string[] = []): CloudBrain {
-  return new CloudBrain({ client: new CloudClient(c.url, { token: TOKEN, delays: [0] }), tier: "medium",
+  return new CloudBrain({ boundary: new Boundary(), client: new CloudClient(c.url, { token: TOKEN, delays: [0] }), tier: "medium",
     progress: (m) => said.push(m) });
 }
 

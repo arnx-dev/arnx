@@ -12,7 +12,7 @@ import { adapterFor, getAdapter } from "./adapters";
 import { type Adapter, DEFAULT_ACCEPTED_DIR } from "./adapters/types";
 import { TS_ACCEPTED_DIR } from "./adapters/typescript";
 import type { Brain } from "./brain";
-import { loadReviewFile, type ReviewFile } from "./config";
+import { configSuspects, loadReviewFile, type ReviewFile, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
 import { type AgentModel, allPrices } from "./llm";
 import { baseName, funcOf, ownerFile, type TestResult } from "./outcomes";
@@ -388,6 +388,8 @@ export function makeAnswerRunner(repo: string, file: ReviewFile, settings: Setti
     const changed = [...diff.matchAll(/^diff --git a\/(\S+) b\//gm)].map((m) => m[1]!);
     const mine = route(file, changed, file.projects.length).routed.find((r) => r.project.name === cfg.name);
     const part = mine ? sliceDiff(diff, [...mine.owned, ...mine.used]) || diff : diff;
+    brain.boundary?.addDiff(diff, secretPinsOf(cfg.raw));
+    brain.boundary?.add(configSuspects(repo));
     // Untracked files only when the config sends them (a one-off --untracked review leaves them out here).
     const rnd = await testRound(repo, null, cfg, { brain,
       ask: () => ({ kind: "answer", input: { cfg, question, answer, diff: part } }), writeDir: base,

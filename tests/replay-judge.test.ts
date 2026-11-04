@@ -91,6 +91,18 @@ const FILE_XY = "x_y-current";
 /** The value after a summary label in the output's mean line (or its only line). */
 const metric = (out: string, name: string) => new RegExp(`mean[^\\n]*\\b${name} ([\\d./%-]+)`).exec(out)?.[1];
 
+// ---- what leaves
+
+test("a value on either side of a review's diff never reaches the model", async () => {
+  const f = fixture();
+  writeFileSync(join(f.rdir, "change.diff"), DIFF.replace("-X = 1", '-api_token = "Hb3nW8sL5cT2jF6g"')
+    .replace("+X = 2", '+api_token = "Zq7xK2mP9vR4tY1w"'));
+  const model = new Recording([OK(), OK()]);
+  expect((await replay(f, model)).code).toBe(0);
+  expect(model.calls.join("\n")).toContain("+api_token");
+  for (const value of ["Hb3nW8sL5cT2jF6g", "Zq7xK2mP9vR4tY1w"]) expect(model.calls.join("\n")).not.toContain(value);
+});
+
 // ---- the prompt
 
 class Recording extends FakeJson {

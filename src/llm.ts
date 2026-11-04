@@ -2,6 +2,7 @@
 // OpenAI-compatible Responses API (OpenAI, and endpoints that copy it). Keys are read from the environment by the caller and never logged
 // or written anywhere.
 import Anthropic from "@anthropic-ai/sdk";
+import { type Boundary, maskedAgent, maskedJson } from "./boundary";
 import { spend } from "./spend";
 import { ModelError, NoCredits, type ProviderFault, SetupRequired, survivable } from "./errors";
 import { type Env, type ModelRef, type Prices, providerOfRef, refString, type Settings } from "./settings";
@@ -1122,7 +1123,11 @@ export class FallbackJson implements JsonModel {
 const AGENT_TOTAL = 600, AGENT_ATTEMPT = 300;
 
 /** The reviewer's agent model (or any role run as one: `s.reviewer` names it), from its provider's data. */
-export function makeAgentModel(s: Settings, env: Env): AgentModel {
+export function makeAgentModel(s: Settings, env: Env, b: Boundary): AgentModel {
+  return maskedAgent(agentModel(s, env), b);
+}
+
+function agentModel(s: Settings, env: Env): AgentModel {
   const ref = s.reviewer, prices = allPrices(s);
   const timing = { totalSeconds: AGENT_TOTAL, attemptSeconds: AGENT_ATTEMPT };
   const p = providerFor(ref, s);
@@ -1139,8 +1144,13 @@ export function makeAgentModel(s: Settings, env: Env): AgentModel {
 
 /** `effort`, when given, is sent as is (a role's own effort, such as second_hunter_effort); else `s.effort`, in the
  * provider's words. */
-export function makeJsonModel(ref: ModelRef, s: Settings, env: Env,
-                              opts: { attemptSeconds?: number; timeoutAttempts?: number; effort?: string } = {}): JsonModel {
+export function makeJsonModel(ref: ModelRef, s: Settings, env: Env, b: Boundary, opts: JsonOptions = {}): JsonModel {
+  return maskedJson(jsonModel(ref, s, env, opts), b);
+}
+
+type JsonOptions = { attemptSeconds?: number; timeoutAttempts?: number; effort?: string };
+
+function jsonModel(ref: ModelRef, s: Settings, env: Env, opts: JsonOptions): JsonModel {
   const prices = allPrices(s);
   const { effort: own, ...timing } = opts;
   const p = providerFor(ref, s);
@@ -1159,15 +1169,15 @@ export function makeJsonModel(ref: ModelRef, s: Settings, env: Env,
 /** The challenger: a second opinion per finding, with the configured fallback for any call the first model fails.
  * Both give up on a stalled attempt after VERDICT_ATTEMPT_TIMEOUT; the first model, when a fallback stands behind it,
  * after one timed-out attempt, so the fallback is asked at once. Without a fallback it retries as usual. */
-export function makeChallenger(s: Settings, env: Env): JsonModel {
+export function makeChallenger(s: Settings, env: Env, b: Boundary): JsonModel {
   const verdict = { attemptSeconds: VERDICT_ATTEMPT_TIMEOUT };
-  const first = makeJsonModel(s.challenger, s, env, s.challengerFallback ? { ...verdict, timeoutAttempts: 1 } : verdict);
-  return s.challengerFallback ? new FallbackJson(first, makeJsonModel(s.challengerFallback, s, env, verdict)) : first;
+  const first = jsonModel(s.challenger, s, env, s.challengerFallback ? { ...verdict, timeoutAttempts: 1 } : verdict);
+  return maskedJson(s.challengerFallback ? new FallbackJson(first, jsonModel(s.challengerFallback, s, env, verdict)) : first, b);
 }
 
 /** The configured second hunter, with its own effort when second_hunter_effort is set (a model that reasons
  * long at arnx's default effort can run past the attempt limit on a hunt). */
-export function makeSecondHunter(s: Settings, env: Env): JsonModel | undefined {
+export function makeSecondHunter(s: Settings, env: Env, b: Boundary): JsonModel | undefined {
   if (!s.secondHunter) return undefined;
-  return makeJsonModel(s.secondHunter, s, env, s.secondHunterEffort ? { effort: s.secondHunterEffort } : {});
+  return makeJsonModel(s.secondHunter, s, env, b, s.secondHunterEffort ? { effort: s.secondHunterEffort } : {});
 }

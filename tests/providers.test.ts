@@ -13,6 +13,9 @@ import { providersOf } from "../src/telemetry";
 import { Cli } from "./helpers/cli";
 import { gitRepo } from "./helpers/gitutil";
 import { useTmp } from "./helpers/tmp";
+import { Boundary } from "../src/boundary";
+
+const noValues = new Boundary();
 
 const tmp = useTmp();
 const SCHEMA = { type: "object", properties: { verdict: { type: "string" } }, required: ["verdict"],
@@ -196,13 +199,13 @@ async function sent(fn: () => Promise<unknown>): Promise<{ url: string; headers:
 test("a custom Responses provider is called at its URL with its own key, from the env object arnx is given", async () => {
   const s: Settings = { ...load(MYPROVIDER), prices: { m: [1, 1, 0, 0] } };
   const ref = parseModelRef("myprovider:m", s.providers);
-  expect(() => makeJsonModel(ref, s, {})).toThrow("missing MY_PROVIDER_KEY: export it");
-  const [req] = await sent(() => makeJsonModel(ref, s, { MY_PROVIDER_KEY: "mine" }).completeJson("s", "u", SCHEMA));
+  expect(() => makeJsonModel(ref, s, {}, noValues)).toThrow("missing MY_PROVIDER_KEY: export it");
+  const [req] = await sent(() => makeJsonModel(ref, s, { MY_PROVIDER_KEY: "mine" }, noValues).completeJson("s", "u", SCHEMA));
   expect(req!.url).toBe("https://llm.example.com/v1/responses");
   expect(req!.headers.get("authorization")).toBe("Bearer mine");
   const body = JSON.parse(req!.body) as Record<string, unknown>;
   expect([body.store, body.reasoning, body.background]).toEqual([false, { effort: "high" }, undefined]);
-  const [turn] = await sent(() => makeAgentModel({ ...s, reviewer: ref }, { MY_PROVIDER_KEY: "mine" }).create({
+  const [turn] = await sent(() => makeAgentModel({ ...s, reviewer: ref }, { MY_PROVIDER_KEY: "mine" }, noValues).create({
     system: "s", tools: [], messages: [{ role: "user", content: "u" }], maxTokens: 10 }));
   expect(JSON.parse(turn!.body)).toMatchObject({ store: false, include: ["reasoning.encrypted_content"] });
 });
@@ -214,11 +217,11 @@ test("a custom Messages provider gets its own base URL and key, never a token fr
   process.env.ANTHROPIC_AUTH_TOKEN = "process-token";
   try {
     const ref = parseModelRef("ds:m", s.providers);
-    const reqs = await sent(() => makeJsonModel(ref, s, { DS_KEY: "ds-key" }).completeJson("s", "u", SCHEMA));
+    const reqs = await sent(() => makeJsonModel(ref, s, { DS_KEY: "ds-key" }, noValues).completeJson("s", "u", SCHEMA));
     expect(reqs[0]!.url).toBe("https://llm2.example/anthropic/v1/messages");
     expect(reqs[0]!.headers.get("x-api-key")).toBe("ds-key");
     expect(reqs[0]!.headers.get("authorization")).toBeNull();
-    const agent = makeAgentModel({ ...s, reviewer: ref }, { DS_KEY: "ds-key" });
+    const agent = makeAgentModel({ ...s, reviewer: ref }, { DS_KEY: "ds-key" }, noValues);
     expect(agent.provider).toBe("ds");
   } finally {
     if (was === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;

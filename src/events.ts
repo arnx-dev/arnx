@@ -4,6 +4,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
+import type { Boundary } from "./boundary";
 import { hasSecretContent } from "./secrets";
 
 export const SCHEMA_VERSION = 1;
@@ -27,6 +28,8 @@ export class EventLog {
   private ready = false;
   /** The reopened file ended mid-line (a crash): the first new event starts on its own line. */
   private torn = false;
+  /** Set once a run has its boundary: from then on what an event says is masked. */
+  filter?: Boundary;
 
   /** Appends to `path`; a log reopened for a resumed review continues its numbering. */
   constructor(readonly path: string, readonly traceId: string, private now: () => Date = () => new Date()) {
@@ -45,7 +48,7 @@ export class EventLog {
 
   emit(type: EventType, data: Record<string, unknown>): void {
     const e: TraceEvent = { schema_version: SCHEMA_VERSION, trace_id: this.traceId, seq: ++this.seq,
-      at: this.now().toISOString(), type, data };
+      at: this.now().toISOString(), type, data: this.filter ? this.filter.maskValue(data) : data };
     try {
       // the directory appears with the first event, so a run that emits nothing leaves nothing behind
       if (!this.ready) mkdirSync(dirname(this.path), { recursive: true });

@@ -3,6 +3,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { Boundary } from "../src/boundary";
 import { parseReviewConfig } from "../src/config";
 import { JEV_MIN_CONFIDENCE, jevKey, jevModel, jevStatus } from "../src/jev";
 import { defaultSettings, loadSettings } from "../src/settings";
@@ -26,7 +27,7 @@ function fakeFetch(choice: string, confidence: number, sent: string[] = [], stat
 }
 
 test("an answer counts only at the minimum confidence, and unclear never does", async () => {
-  const at = (choice: string, c: number) => jevModel("k", null, fakeFetch(choice, c))("boom", cfg, ["app/"]);
+  const at = (choice: string, c: number) => jevModel("k", null, new Boundary(), fakeFetch(choice, c))("boom", cfg, ["app/"]);
   expect(await at("genuine-failure", JEV_MIN_CONFIDENCE)).toEqual({ kind: "genuine-failure", confidence: JEV_MIN_CONFIDENCE });
   expect(await at("genuine-failure", JEV_MIN_CONFIDENCE - 0.01)).toBeNull();
   expect(await at("unclear", 1)).toBeNull();
@@ -36,10 +37,10 @@ test("an answer counts only at the minimum confidence, and unclear never does", 
 test("errors give no hint, are logged, and a message that looks like it holds a key is never sent", async () => {
   const log = join(tmp(), "jev.jsonl");
   const sent: string[] = [];
-  expect(await jevModel("k", log, fakeFetch("x", 1, sent, 500))("boom", cfg, [])).toBeNull();
+  expect(await jevModel("k", log, new Boundary(), fakeFetch("x", 1, sent, 500))("boom", cfg, [])).toBeNull();
   const failing = (async () => { throw new Error("offline"); }) as unknown as typeof fetch;
-  expect(await jevModel("k", log, failing)("boom", cfg, [])).toBeNull();
-  expect(await jevModel("k", log, fakeFetch("genuine-failure", 1, sent))(
+  expect(await jevModel("k", log, new Boundary(), failing)("boom", cfg, [])).toBeNull();
+  expect(await jevModel("k", log, new Boundary(), fakeFetch("genuine-failure", 1, sent))(
     `token = ${"sk-ant-" + "x".repeat(40)}`, cfg, [])).toBeNull();
   expect(sent).toHaveLength(1); // only the first call went out
   expect(readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l).error)).toEqual(["HTTP 500", "Error"]);

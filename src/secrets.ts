@@ -4,6 +4,8 @@ import { createHash, scryptSync } from "node:crypto";
 import { posix } from "node:path";
 import { comments, commentStyle } from "./comments";
 
+export { Boundary } from "./boundary";
+
 export const SECRET_FILE_GLOBS: readonly string[] = [
   ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "*.jks", "id_rsa*", "id_ecdsa*",
   "id_ed25519*", ".netrc", ".npmrc", ".pypirc", "credentials*.json", "service-account*.json", "*.session",
@@ -177,7 +179,7 @@ export function scanKeys(path: string, text: string, pins: readonly string[]): K
  * its kind (a hex digit by a hex digit, in a value of hex digits and dashes: a hex key, a UUID), other characters
  * kept, so the shape (length, charset, separators) holds. Made from a slow hash of the original, so the same value
  * gets the same stand-in in every file and run, and the stand-in tells nothing about it. */
-function fake(original: string, made: Map<string, string>): string {
+export function fake(original: string, made: Map<string, string>): string {
   const known = made.get(original);
   if (known !== undefined) return known;
   // A token's own prefix stays too (`whsec_`, `sk_test_`): code may check it. So does a number literal's (`0x`, `0b`,
@@ -291,6 +293,10 @@ function namedLines(text: string): string {
   }
   return out.join("\n");
 }
+
+/** Whether a suspect's rule (`why` in suspects) is certain: the string's own shape says it is a secret. The other rules
+ * guess from a name beside it. */
+export const isCertainRule = (rule: string): boolean => rule === "key-shaped" || rule === "address-password";
 
 /** The strings of `text` (the file at `path`) that get stand-ins, `pins` aside: key-shaped strings (private key headers
  * aside) and literal values given to secret-looking names (a `Bearer`/`Basic` value: its token). A random-looking

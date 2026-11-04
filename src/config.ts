@@ -11,7 +11,7 @@ import { baselineDigest } from "./baseline";
 import { python } from "./adapters/python";
 import type { Adapter, AdapterId } from "./adapters/types";
 import { ArnxError, SetupRequired } from "./errors";
-import { GENERATED, isSecretEnvName, type SecretPin } from "./secrets";
+import { GENERATED, isSecretEnvName, type SecretPin, suspects } from "./secrets";
 import { purePosix, pyJson, pyStr, pyTruthy } from "./util";
 
 export const KEYS = new Set(["version", "image", "workdir", "install", "test_command", "services", "env", "notes",
@@ -614,6 +614,13 @@ function reportProblems(command: string, adapter: Adapter, runner: string): stri
 const writes = (part: string) => `test_command: must not delete or write files (rm, mv, cp, sed -i, tee, > file): ` +
   `\`${part}\` writes. Every run must see the repository as it is: move it to install (arnx writes its own tests), ` +
   "then run `arnx approve`";
+
+/** The values in .arnx/review.yaml that look like secrets: a snapshot leaves the folder out, and its env reaches the tests
+ * and their output. */
+export function configSuspects(repo: string): string[] {
+  const path = reviewConfigPath(repo);
+  return existsSync(path) ? suspects(path, readFileSync(path, "utf8"), []) : [];
+}
 
 export function loadReviewFile(repo: string, { requireApproved = true } = {}): ReviewFile {
   const path = reviewConfigPath(repo);

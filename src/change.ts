@@ -7,9 +7,10 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync,
+  copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync,
   rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve, sep } from "node:path";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
@@ -432,7 +433,10 @@ export interface SnapshotOptions { untracked?: boolean; standIns?: boolean; sand
  * files kept with stand-ins, and the sandbox-only files it holds beside it. */
 export interface Scrubbed { withheld: Withheld[]; blanked: Blanked[]; standIns: string[]; sandboxed: string[];
   /** The values given stand-ins: kept in memory for a later copy into the sandbox (addToSandbox), never logged. */
-  secrets: ReadonlySet<string> }
+  secrets: ReadonlySet<string>;
+  /** Every value that looks like a secret, in memory only: all of `secrets`, and those of files that get no stand-ins, of
+   * secret files and of files left out, none of them changed. What leaves arnx is masked for each (boundary.ts). */
+  suspects: ReadonlySet<string> }
 
 /** Where a snapshot's sandbox-only files are kept: beside it, so nothing that reads the snapshot sees them. */
 export const sandboxDir = (snap: string) => `${snap}.sandbox`;
@@ -486,6 +490,17 @@ export function takeSnapshot(repo: string, head: string | null, dest: string, al
     }
   }
   return scrub(dest, ignored, allow, { standIns: o.standIns ?? standInsSetting(repo), sandbox });
+}
+
+/** The suspects of the code at `head` (the working tree when null), from a snapshot taken only for them. */
+export function treeSuspects(repo: string, head: string | null, allow: readonly SecretPin[] = [],
+                             o: SnapshotOptions = {}): ReadonlySet<string> {
+  const dir = mkdtempSync(join(tmpdir(), "arnx-"));
+  try {
+    return takeSnapshot(repo, head, join(dir, "repo"), allow, o).suspects;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** A digest of what a snapshot holds: each path, a link's target, a file's executable bit and content. Two snapshots
@@ -690,6 +705,13 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   const holds = (dir: string) => [...o.sandbox].some((p) => p.startsWith(`${dir}/`));
   /** Regular files kept: where they are now, and their path in the repository. */
   const kept: { p: string; rel: string }[] = [];
+  const pinsOf = (rel: string) => allow.find((a) => a.path === rel)?.matches ?? [];
+  const seen = new Set<string>(o.known ?? []);
+  /** A file about to be left out: its value may stand elsewhere with no name beside it. */
+  const leaving = (p: string, rel: string) => {
+    const read = scrubText(p);
+    if (read && !read.binary) for (const v of suspects(rel, read.text, pinsOf(rel))) seen.add(v);
+  };
   const walk = (dir: string, relDir: string, out: boolean) => {
     for (const name of readdirSync(dir)) {
       const p = join(dir, name);
@@ -723,6 +745,7 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
         continue;
       }
       if (isSecretPath(name)) {
+        if (st.isFile()) leaving(p, rel);
         unlinkSync(p);
         continue;
       }
@@ -730,7 +753,6 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
     }
   };
   walk(root, "", false);
-  const pinsOf = (rel: string) => allow.find((a) => a.path === rel)?.matches ?? [];
   const fakes = (rel: string) => o.standIns && !isLockfile(rel);
   // First every file's suspects, and what each file needs: left out, or blanked lines.
   const values = new Set<string>(o.known ?? []);
@@ -753,6 +775,7 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
     if (binary) continue;
     // A file that gets no stand-ins (a lockfile, or stand-ins off) is left out, as is a private key's body.
     if (scan && "withhold" in scan && (!fakes(f.rel) || privateKeyBody(text, pins))) {
+      leaving(f.p, f.rel);
       unlinkSync(f.p);
       sandboxed.delete(f.rel);
       removedFiles.push({ path: f.rel, ...scan.withhold });
@@ -760,7 +783,10 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
     }
     const blank = scan && "blank" in scan ? scan : null;
     if (blank) blanks.set(f.rel, blank.blank);
-    if (fakes(f.rel)) for (const v of suspects(f.rel, blank ? blank.text : text, pins)) values.add(v);
+    for (const v of suspects(f.rel, blank ? blank.text : text, pins)) {
+      seen.add(v);
+      if (fakes(f.rel)) values.add(v);
+    }
     scanned.push(f);
   }
   // Then each value's stand-in, wherever it is.
@@ -786,7 +812,7 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   }
   const byPath = (a: { path: string }, b: { path: string }) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
   return { withheld: removedFiles.sort(byPath), blanked: blanked.sort(byPath), standIns: standIns.sort(),
-    sandboxed: [...sandboxed].sort(), secrets: values };
+    sandboxed: [...sandboxed].sort(), secrets: values, suspects: seen };
 }
 
 /** A text file's content (scrubText); null for a binary file. */

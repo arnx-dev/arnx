@@ -6,6 +6,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
+import { Boundary, maskedJson } from "../src/boundary";
 import { CONCURRENCY, inPool } from "../src/challenge";
 import { sliceDiff } from "../src/change";
 import { loadReviewFile } from "../src/config";
@@ -457,7 +458,7 @@ export function defaultModel(ref: string, env: Env): JsonModel {
   const settings = { ...s, challenger: parseModelRef(ref) };
   const unpriced = unpricedModels(settings, [settings.challenger]);
   if (unpriced.length) throw new ArnxError(`no price for ${unpriced[0]!.name}: its cost and --max-usd would be wrong`);
-  return makeChallenger(settings, env);
+  return makeChallenger(settings, env, new Boundary());
 }
 
 const positive = (name: string, v: string | undefined, fallback: number): number => {
@@ -503,7 +504,10 @@ export async function main(argv: string[], deps: Deps = { env: process.env, make
       log(`nothing sent: built ${ready.length} of ${grades.length}`);
       return 2;
     }
-    const model = deps.makeModel(values.model!, deps.env);
+    // What a prompt holds of the change's values, each review's own, never leaves; main does not read the clones' trees.
+    const boundary = new Boundary();
+    for (const c of new Set(ready.map((r) => r.c))) boundary.addDiff(c.diff);
+    const model = maskedJson(deps.makeModel(values.model!, deps.env), boundary);
     const label = values.model!.replace(/[^\w.-]+/g, "_");
     const paths = Array.from({ length: repeat }, (_, i) => join(values.out!, `${label}-${prompt}-${i + 1}.jsonl`));
     const spend: Spend = { spent: 0, knownCost: 0, knownCalls: 0, estimated: 0, estimatedCalls: 0, unreadable: 0, max, notSent: 0,

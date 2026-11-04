@@ -4,6 +4,7 @@
 // only at JEV_MIN_CONFIDENCE or above, an error or a timeout gives no hint, and a message that looks like it holds a
 // key is never sent. Each question and answer goes to jev.jsonl so the experiment can be judged.
 import { appendFileSync } from "node:fs";
+import type { Boundary } from "./boundary";
 import type { ReviewConfig } from "./config";
 import type { HintKind } from "./diagnose";
 import { clip, emitModelCall } from "./events";
@@ -46,13 +47,13 @@ export function jevStatus(s: Settings, env: Env): string | null {
   return env.JEV_API_KEY ? "off (`jev = true` under `[setup]` turns it on)" : null;
 }
 
-export function jevModel(key: string, log: string | null, fetcher: typeof fetch = fetch): FailureModel {
+export function jevModel(key: string, log: string | null, b: Boundary, fetcher: typeof fetch = fetch): FailureModel {
   return async (message, cfg, top) => {
     if (hasSecretContent(message)) return null;
     const services = cfg.services.map((s) => s.name);
-    const state = `Language: ${cfg.language}. The tests run in an offline Docker sandbox with no internet` +
+    const state = b.mask(`Language: ${cfg.language}. The tests run in an offline Docker sandbox with no internet` +
       (services.length ? `; only these services are reachable, by name: ${services.join(", ")}` : " and no services") +
-      `. Top-level entries of the repository: ${top.join(", ")}.\n\nFailure message of one test:\n${message}`;
+      `. Top-level entries of the repository: ${top.join(", ")}.\n\nFailure message of one test:\n${message}`);
     const started = performance.now();
     let answer: JevAnswer | null = null, error = "", responded = false;
     try {
@@ -74,7 +75,7 @@ export function jevModel(key: string, log: string | null, fetcher: typeof fetch 
       latency_ms: Math.round(performance.now() - started), unknown_usage: responded ? 1 : 0,
       timed_out: error === "TimeoutError" });
     if (log) {
-      appendFileSync(log, JSON.stringify({ at: new Date().toISOString(), project: cfg.name, message: message.slice(0, 300),
+      appendFileSync(log, JSON.stringify({ at: new Date().toISOString(), project: cfg.name, message: b.mask(message).slice(0, 300),
         answer, error: error || undefined, ms: Math.round(performance.now() - started) }) + "\n");
     }
     return answer && answer.confidence >= JEV_MIN_CONFIDENCE ? answer : null;

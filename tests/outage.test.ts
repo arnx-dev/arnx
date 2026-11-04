@@ -1,6 +1,7 @@
 // A provider that is down or refuses the key is named in the review's status, terminal summary and review.json,
 // instead of a bare "incomplete": which provider, why, how many calls, and what is missing. A call that recovers on a
 // retry is not an outage. arnx cloud's models are never named.
+import { Boundary } from "../src/boundary";
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -191,7 +192,7 @@ afterEach(() => {
 test("arnx cloud's models down: the status says so without naming a vendor", async () => {
   const c = fakeCloud({ rounds: { "*": [{ type: "done", stop: "api_error" }] } });
   clouds.push(c);
-  const brain = new CloudBrain({ client: new CloudClient(c.url, { token: TOKEN, delays: [0] }), tier: "medium" });
+  const brain = new CloudBrain({ boundary: new Boundary(), client: new CloudClient(c.url, { token: TOKEN, delays: [0] }), tier: "medium" });
   const { review, rdir } = await runReview(repo, { settings: SETTINGS, brain, sessionFactory: fakeFactory(runs) });
   const said = summary(review, "");
   expect(said.split("\n")[1]).toBe("Incomplete: `main` produced no tests: the reviewer's model call failed. " +

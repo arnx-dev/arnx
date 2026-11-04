@@ -1,5 +1,6 @@
 // model.call and agent.turn events: one per model call or agent turn, with the caller's role, from the real clients
 // (fed scripted models and injected fetch) and the agent loop.
+import { Boundary } from "../src/boundary";
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -202,7 +203,7 @@ test("jevModel emits a model.call with role jev, and nothing for a message withh
     choice: "genuine-failure", confidence: 0.95 } } }))) as unknown as typeof fetch;
   const cfg = parseReviewConfig(CFG);
   const { events } = await traced(async () => {
-    const ask = jevModel("k", null, answer);
+    const ask = jevModel("k", null, new Boundary(), answer);
     await withRole("setup", () => ask("boom", cfg, []));
     await ask(`token = ${"sk-ant-" + "x".repeat(40)}`, cfg, []); // built at runtime: no key-shaped literal in the tree
   });
@@ -213,7 +214,7 @@ test("jevModel emits a model.call with role jev, and nothing for a message withh
 
 test("jevModel marks an unanswered request as failed with no response counted", async () => {
   const offline = (async () => { throw new Error("offline"); }) as unknown as typeof fetch;
-  const { events } = await traced(() => jevModel("k", null, offline)("boom", parseReviewConfig(CFG), []));
+  const { events } = await traced(() => jevModel("k", null, new Boundary(), offline)("boom", parseReviewConfig(CFG), []));
   expect(events[0]!.data).toMatchObject({ role: "jev", ok: false, error: "Error", unknown_usage: 0, timed_out: false });
 });
 

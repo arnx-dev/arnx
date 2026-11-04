@@ -5,6 +5,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { runAgent, type ToolCall, ToolError } from "./agent";
+import { Boundary, boundaryOf, maskedAgent, maskedJson } from "./boundary";
 import type { AnswerInput, Billed, Brain, Facts, HuntRecord, Judged, JudgeOptions, ReviewInput, RoundHunt,
   RoundInputs, RoundKind, RoundResult, RoundTools, SetupInput, Totals } from "./brain";
 import { challenge, STALLED } from "./challenge";
@@ -56,6 +57,8 @@ export interface LocalModels {
   secondHuntWaitMs?: number;
   /** The prompts (default: arnx's own; with the user's keys, the repository's overrides: userprompts.ts). */
   prompts?: Prompts;
+  /** What is kept from every model (default: the reviewer's own boundary, when it has one). */
+  boundary?: Boundary;
 }
 
 /** The hunt of one review round: started once the sandbox has run a test, finished when the reviewer replies to it. */
@@ -71,8 +74,15 @@ export class LocalBrain implements Brain {
   readonly version = PROMPT_VERSION;
   readonly overrides?: { keys: string[]; hash: string };
   private readonly p: Prompts;
+  readonly m: LocalModels;
+  readonly boundary: Boundary;
 
-  constructor(readonly m: LocalModels) {
+  constructor(m: LocalModels) {
+    // Whoever made them, every model here goes through the one filter: one boundary, filled as the run finds its values.
+    const b = this.boundary = m.boundary ?? (m.agentModel && boundaryOf(m.agentModel)) ?? new Boundary();
+    const json = <T extends JsonModel | null | undefined>(x: T) => (x ? maskedJson(x, b) : x);
+    this.m = { ...m, agentModel: m.agentModel && maskedAgent(m.agentModel, b), challenger: json(m.challenger),
+      hunter: json(m.hunter), ranker: json(m.ranker), secondHunter: json(m.secondHunter) };
     this.p = m.prompts ?? DEFAULT_PROMPTS;
     const keys = this.p.overridden.filter(isModelKey); // the fix prompt's keys are no model's
     if (keys.length) this.overrides = { keys, hash: this.p.hash };
