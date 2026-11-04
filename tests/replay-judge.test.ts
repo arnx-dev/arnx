@@ -6,7 +6,7 @@ import { basename, dirname, join } from "node:path";
 import { CONCURRENCY } from "../src/challenge";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { ModelError, NoCredits, SetupRequired } from "../src/errors";
-import { FallbackJson, type JsonModel, type JsonReply } from "../src/llm";
+import { allPrices, FallbackJson, type JsonModel, type JsonReply } from "../src/llm";
 import { CHALLENGE_SCHEMA, DEFAULT_PROMPTS } from "../src/prompts";
 import { runReview } from "../src/reviewer";
 import type { SessionFactory } from "../src/sandbox";
@@ -87,6 +87,7 @@ async function replay(f: { root: string; grades: string; out: string }, model: J
 
 const rowsIn = (path: string) => readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Row);
 const FILE = "openai_gpt-5.5-2026-04-23-current";
+const FILE_XY = "x_y-current";
 /** The value after a summary label in the output's mean line (or its only line). */
 const metric = (out: string, name: string) => new RegExp(`mean[^\\n]*\\b${name} ([\\d./%-]+)`).exec(out)?.[1];
 
@@ -460,4 +461,160 @@ test("a review whose project is gone from review.yaml cannot be rebuilt", () => 
   const f = fixture();
   writeFileSync(join(f.repo, ".arnx", "review.yaml"), YAML.replace("main:", "other:"));
   expect(() => loadContext(f.repo, "r1")).toThrow("main");
+});
+
+// ---- a verdict that is missing
+
+test("an errored call on a review with nothing else firing shows apart from the failing runs", async () => {
+  const { text } = await replay(fixture(), new FakeJson([new ModelError("boom"), NO()]));
+  expect(metric(text, "runs_failing_no_defect")).toBe("0.0/1");
+  expect(metric(text, "unjudged_would_exit")).toBe("1.0");
+  expect(text).toMatch(/pass 1\b.*unjudged_would_exit 1\b/);
+});
+
+test("a review a wrong confirmation already fails is not counted as unjudged", async () => {
+  const { text } = await replay(fixture(), new FakeJson([new ModelError("boom"), OK()]));
+  expect(metric(text, "runs_failing_no_defect")).toBe("1.0/1");
+  expect(metric(text, "unjudged_would_exit")).toBe("0.0");
+});
+
+test("a review with a real defect confirmed is not counted as unjudged", async () => {
+  const { text } = await replay(fixture(), new FakeJson([OK(), new ModelError("boom")]));
+  expect(metric(text, "runs_failing_no_defect")).toBe("0.0/1");
+  expect(metric(text, "unjudged_would_exit")).toBe("0.0");
+});
+
+test("a missing verdict on a waiting finding sets no exit code", async () => {
+  const { text } = await replay(fixture({ linked: true }), new FakeJson([new ModelError("boom"), NO()]));
+  expect(metric(text, "unjudged_would_exit")).toBe("0.0");
+});
+
+test("a missing verdict on a pre-existing finding sets no exit code", async () => {
+  const { text } = await replay(fixture({ preExisting: true }), new FakeJson([NO(), new ModelError("boom")]));
+  expect(metric(text, "unjudged_would_exit")).toBe("0.0");
+});
+
+// ---- a spend the limit cannot read
+
+const scripted = (ref: string, ...replies: JsonReply[]) => {
+  const calls: string[] = [];
+  const model: JsonModel = { ref, completeJson: async (_s, user) => {
+    calls.push(user);
+    return replies.shift()!;
+  } };
+  return { model, calls };
+};
+
+test("an unreadable cost stops sending, and the run says why", async () => {
+  const { model, calls } = scripted("x:y", [OK(), Number.NaN]);
+  const { code, text } = await replay(fixture(), model, "--max-usd", "100");
+  expect(code).toBe(0);
+  expect(calls).toHaveLength(1);
+  expect(text).toContain("stopped: a call's cost could not be read (--max-usd 100): 1 not sent");
+  expect(text).toContain("total cost $0.00");
+});
+
+test("an unreadable cost on disk stops the next run too", async () => {
+  const f = fixture();
+  await replay(f, scripted("x:y", [OK(), Number.NaN]).model, "--max-usd", "100");
+  const { model, calls } = scripted("x:y");
+  const { text } = await replay(f, model, "--max-usd", "100");
+  expect(calls).toHaveLength(0);
+  expect(text).toContain("could not be read");
+});
+
+test("without a limit an unreadable cost is named and the run goes on", async () => {
+  const { model, calls } = scripted("x:y", [OK(), Number.NaN], [NO(), 0.25]);
+  const { text } = await replay(fixture(), model);
+  expect(calls).toHaveLength(2);
+  expect(text).toContain("total cost $0.25");
+  expect(text).toContain("calls whose cost could not be read 1");
+});
+
+test("a call with no usage counts toward the limit at the mean known cost, and its row stays as billed", async () => {
+  const f = fixture();
+  const { model, calls } = scripted("x:y", [OK(), 0.5], [NO(), 0, undefined, 1]);
+  const { text } = await replay(f, model, "--max-usd", "0.9", "--repeat", "2");
+  expect(calls).toHaveLength(2);
+  expect(text).toContain("stopped at $1.00 (--max-usd 0.9), $0.50 of it estimated: 2 not sent");
+  expect(text).toContain("total cost $0.50");
+  expect(rowsIn(join(f.out, `${FILE_XY}-1.jsonl`)).map((r) => [r.cost_usd, r.unknown_calls])).toEqual([[0.5, undefined], [0, 1]]);
+});
+
+test("the spend limit says when its figure holds an estimate, even if it never stops", async () => {
+  const { model } = scripted("x:y", [OK(), 0.5], [NO(), 0, undefined, 1]);
+  const { text } = await replay(fixture(), model, "--max-usd", "9");
+  expect(text).toContain("spend for --max-usd $1.00 includes $0.50 estimated for 1 calls with no usage");
+  expect(text).not.toContain("stopped");
+});
+
+test("with no known cost yet, the estimate is the prompt's size at the model's price", async () => {
+  const f = fixture();
+  const ref = "anthropic:claude-sonnet-5-5";
+  const unknown = (): JsonReply => [OK(), 0, undefined, 1];
+  // A first run, with no limit, to see the prompt the estimate is made from.
+  const first = scripted(ref, unknown(), unknown());
+  await replay(f, first.model);
+  const tokens = (first.calls[0]!.length + DEFAULT_PROMPTS.challengeSystem().length) / 4;
+  const estimate = tokens * allPrices(defaultSettings())["claude-sonnet-5-5"]![0] / 1_000_000;
+  // Just under it the first call ends the run; just over it the second is sent as well.
+  const under = scripted(ref, unknown(), unknown());
+  await replay({ ...f, out: join(f.root, "under") }, under.model, "--max-usd", String(estimate * 0.99));
+  expect(under.calls).toHaveLength(1);
+  const over = scripted(ref, unknown(), unknown());
+  await replay({ ...f, out: join(f.root, "over") }, over.model, "--max-usd", String(estimate * 1.01));
+  expect(over.calls).toHaveLength(2);
+  expect(rowsIn(join(f.root, "under", "anthropic_claude-sonnet-5-5-current-1.jsonl"))[0]!.cost_usd).toBe(0);
+});
+
+test("usage missing with no price to estimate from stops as an unreadable cost", async () => {
+  const { model, calls } = scripted("x:y", [OK(), 0, undefined, 1]);
+  const { text } = await replay(fixture(), model, "--max-usd", "100");
+  expect(calls).toHaveLength(1);
+  expect(text).toContain("could not be read");
+});
+
+test("estimates from rows on disk still count on the next run", async () => {
+  const f = fixture();
+  const row = (finding: string, cost: number, more = {}) => JSON.stringify({ repo: "alpha", commit: "abc", review: "r1", finding,
+    verdict: "disputed", reason: "r", seconds: 1, cost_usd: cost, ...more }) + "\n";
+  mkdirSync(f.out, { recursive: true });
+  writeFileSync(join(f.out, `${FILE_XY}-1.jsonl`), row("F2", 0, { unknown_calls: 1 }) + row("F1", 0.5));
+  const { model, calls } = scripted("x:y");
+  const { text } = await replay(f, model, "--max-usd", "0.9", "--repeat", "2");
+  expect(calls).toHaveLength(0);
+  expect(text).toContain("stopped at $1.00 (--max-usd 0.9), $0.50 of it estimated: 2 not sent");
+});
+
+// ---- verdicts that move between passes
+
+test("findings that changed verdict between passes are counted and listed", async () => {
+  const { text } = await replay(fixture(), new FakeJson([OK(), OK(), OK(), NO(), OK(), OK()]), "--repeat", "3");
+  expect(text).toContain("changed between passes 1/2");
+  expect(text).toContain("alpha abc r1 F2: confirmed disputed confirmed");
+  expect(text).not.toContain("alpha abc r1 F1:");
+});
+
+test("a pass with no verdict for a finding shows as a gap, and two verdicts are enough to differ", async () => {
+  const replies = [OK(), new ModelError("boom"), new ModelError("boom"), OK(), OK(), NO()];
+  const { text } = await replay(fixture(), new FakeJson(replies), "--repeat", "3");
+  expect(text).toContain("changed between passes 1/2");
+  expect(text).toContain("alpha abc r1 F2: - confirmed disputed");
+});
+
+test("no change between passes is said too", async () => {
+  const { text } = await replay(fixture(), new FakeJson([OK(), NO(), OK(), NO()]), "--repeat", "2");
+  expect(text).toContain("changed between passes 0/2");
+});
+
+test("one pass has no between-pass line", async () => {
+  const { text } = await replay(fixture(), new FakeJson([OK(), NO()]));
+  expect(text).not.toContain("changed between passes");
+});
+
+test("--compare says how many of the judged findings moved between passes", async () => {
+  const f = fixture({ judged: ["F2"] });
+  const { text } = await replay(f, new FakeJson([OK(), OK(), NO(), NO()]), "--repeat", "2", "--compare", "verdicts.json");
+  expect(text).toContain("changed between passes 2/2");
+  expect(text).toContain("of the judged, changed between passes 1/1");
 });

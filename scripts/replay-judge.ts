@@ -10,10 +10,10 @@ import { CONCURRENCY, inPool } from "../src/challenge";
 import { sliceDiff } from "../src/change";
 import { loadReviewFile } from "../src/config";
 import { ArnxError, survivable } from "../src/errors";
-import { type JsonModel, makeChallenger, unpricedModels } from "../src/llm";
+import { allPrices, costUsd, type JsonModel, makeChallenger, unpricedModels } from "../src/llm";
 import { baseName } from "../src/outcomes";
 import { CHALLENGE_SCHEMA, DEFAULT_PROMPTS, elsewhereNote } from "../src/prompts";
-import { confirmed, type Finding, load, parseReports, type Review } from "../src/report";
+import { confirmed, type Finding, load, notChecked, parseReports, type Review } from "../src/report";
 import { route } from "../src/route";
 import { defaultSettings, type Env, loadSettings, parseModelRef, settingsPath } from "../src/settings";
 
@@ -28,7 +28,8 @@ const USAGE = `usage: bun scripts/replay-judge.ts --grades FILE --root DIR --mod
   --repeat N           passes (default 1)
   --concurrency N      calls at once (default ${CONCURRENCY})
   --compare NAME       agreement with the stored verdicts file of that name in each review, e.g. verdicts.json
-  --max-usd X          stop sending when the spend reaches X, counting rows on disk; calls under way still finish
+  --max-usd X          stop sending when the spend reaches X, counting rows on disk and an estimate for calls with no
+                       usage; a cost that cannot be read also stops it; calls under way still finish
   --dump-prompts DIR   writes each prompt to a file and calls nothing
   --help`;
 
@@ -248,7 +249,31 @@ function writeRows(path: string, rows: Map<string, Row>): void {
   renameSync(`${path}.tmp`, path);
 }
 
-interface Spend { spent: number; max: number | null; notSent: number }
+/** What --max-usd checks. `spent` is what the rows say. A call no usage came back for reports nothing, so `estimated`
+ * stands in for it; a cost that cannot be read or estimated is `unreadable`, and ends the sending under a limit. */
+interface Spend { spent: number; knownCost: number; knownCalls: number; estimated: number; estimatedCalls: number;
+  unreadable: number; max: number | null; notSent: number; promptCost: (chars: number) => number | null }
+
+function addCost(spend: Spend, cost: number, unknown: number, chars: number): void {
+  if (!Number.isFinite(cost)) {
+    spend.unreadable++;
+    return;
+  }
+  spend.spent += cost;
+  if (!unknown) {
+    if (cost > 0) [spend.knownCost, spend.knownCalls] = [spend.knownCost + cost, spend.knownCalls + 1];
+    return;
+  }
+  const each = spend.knownCalls ? spend.knownCost / spend.knownCalls : spend.promptCost(chars);
+  if (each === null) {
+    spend.unreadable++;
+    return;
+  }
+  [spend.estimated, spend.estimatedCalls] = [spend.estimated + each * unknown, spend.estimatedCalls + unknown];
+}
+
+const overLimit = (s: Spend) => s.max !== null && (s.unreadable > 0 || s.spent + s.estimated >= s.max);
+const promptChars = (r: Ready) => r.prompt.system.length + r.prompt.user.length;
 
 /** Sends what is not finished. Rows go to disk as they arrive, so a stopped run loses no paid call. */
 async function runPass(ready: Ready[], model: JsonModel, path: string, concurrency: number, spend: Spend): Promise<Map<string, Row>> {
@@ -257,15 +282,18 @@ async function runPass(ready: Ready[], model: JsonModel, path: string, concurren
   const pending = ready.filter((r) => !rows.has(rowKey(r.g)) || rows.get(rowKey(r.g))!.error);
   const record = (r: Ready, seconds: number, cost: number, fields: Pick<Row, "verdict" | "reason" | "error" | "depends_on">, unknown = 0) => {
     const { repo, commit, review, finding } = r.g;
-    const row: Row = { repo, commit, review, finding, ...fields, seconds, cost_usd: (rows.get(rowKey(r.g))?.cost_usd ?? 0) + cost,
-      ...(r.neverJudged ? { never_judged: true as const } : {}), ...(unknown ? { unknown_calls: unknown } : {}) };
+    const before = rows.get(rowKey(r.g));
+    const unknowns = (before?.unknown_calls ?? 0) + unknown;
+    const row: Row = { repo, commit, review, finding, ...fields, seconds,
+      cost_usd: (Number.isFinite(before?.cost_usd) ? before!.cost_usd : 0) + cost,
+      ...(r.neverJudged ? { never_judged: true as const } : {}), ...(unknowns ? { unknown_calls: unknowns } : {}) };
     rows.set(rowKey(r.g), row);
-    spend.spent += cost;
+    addCost(spend, cost, unknown, promptChars(r));
     appendFileSync(path, JSON.stringify(row) + "\n");
   };
   if (pending.length) mkdirSync(dirname(path), { recursive: true });
   await inPool(pending, concurrency, async (r) => {
-    if (spend.max !== null && spend.spent >= spend.max) {
+    if (overLimit(spend)) {
       spend.notSent++;
       return;
     }
@@ -291,13 +319,14 @@ async function runPass(ready: Ready[], model: JsonModel, path: string, concurren
 }
 
 interface Score { answered: number; errors: number; confirmed: number; falseConfirms: number; realConfirmed: number;
-  gradedRealConfirmed: number; runsFailingNoDefect: number }
+  gradedRealConfirmed: number; runsFailingNoDefect: number; unjudgedWouldExit: number }
 
 /** What a pass's verdicts come to. A run fails with no defect when arnx would exit 1 on its confirmed findings (by the
- * report's own rule, so waiting and pre-existing ones do not count) and none of them holds. */
+ * report's own rule, so waiting and pre-existing ones do not count) and none of them holds. A review with nothing
+ * confirmed that still exits 1, because a verdict is missing, is counted apart: a failed call says nothing of the judge. */
 export function scorePass(rows: Map<string, Row>, ready: Ready[]): Score {
   const score: Score = { answered: 0, errors: 0, confirmed: 0, falseConfirms: 0, realConfirmed: 0, gradedRealConfirmed: 0,
-    runsFailingNoDefect: 0 };
+    runsFailingNoDefect: 0, unjudgedWouldExit: 0 };
   for (const { g } of ready) {
     const row = rows.get(rowKey(g));
     if (row?.error) score.errors++;
@@ -318,8 +347,16 @@ export function scorePass(rows: Map<string, Row>, ready: Ready[]): Score {
     }) as Finding[] };
     const firing = confirmed(replayed);
     if (firing.length && firing.every((f) => !REAL.has(mine.get(f.id)?.g.grade ?? ""))) score.runsFailingNoDefect++;
+    if (!firing.length && notChecked(replayed).length) score.unjudgedWouldExit++;
   }
   return score;
+}
+
+/** Findings with a verdict in at least two passes, and those whose verdict was not the same in all of them. */
+function changedBetween(ready: Ready[], rows: Map<string, Row>[]): { seen: Ready[]; changed: Ready[] } {
+  const given = (r: Ready) => rows.flatMap((p) => p.get(rowKey(r.g))?.verdict ?? []);
+  const seen = ready.filter((r) => given(r).length >= 2);
+  return { seen, changed: seen.filter((r) => new Set(given(r)).size > 1) };
 }
 
 const percent = (part: number, whole: number) => `${Math.round(100 * part / whole)}%`;
@@ -334,7 +371,8 @@ function printScores(scores: Score[], ready: Ready[], rows: Map<string, Row>[], 
     const precision = precisionOf(s);
     log(`pass ${i + 1}  answered ${s.answered}/${ready.length}  false_confirms ${s.falseConfirms}  ` +
       `real_confirmed ${s.realConfirmed}/${realAll}  graded_real_confirmed ${s.gradedRealConfirmed}/${gradedAll}  ` +
-      `precision ${precision === null ? "-" : percent(precision, 1)}  runs_failing_no_defect ${s.runsFailingNoDefect}/${runs}`);
+      `precision ${precision === null ? "-" : percent(precision, 1)}  runs_failing_no_defect ${s.runsFailingNoDefect}/${runs}  ` +
+      `unjudged_would_exit ${s.unjudgedWouldExit}`);
   });
   if (!scores.length) log("no verdicts yet");
   else {
@@ -343,23 +381,34 @@ function printScores(scores: Score[], ready: Ready[], rows: Map<string, Row>[], 
     log(`mean    false_confirms ${mean((s) => s.falseConfirms)}  real_confirmed ${mean((s) => s.realConfirmed)}/${realAll}  ` +
       `graded_real_confirmed ${mean((s) => s.gradedRealConfirmed)}/${gradedAll}  precision ` +
       `${precisions.length ? percent(precisions.reduce((a, b) => a + b, 0) / precisions.length, 1) : "-"}  ` +
-      `runs_failing_no_defect ${mean((s) => s.runsFailingNoDefect)}/${runs}`);
+      `runs_failing_no_defect ${mean((s) => s.runsFailingNoDefect)}/${runs}  unjudged_would_exit ${mean((s) => s.unjudgedWouldExit)}`);
   }
   if (rows.length > 1) {
     const both = ready.filter((r) => rows.every((p) => p.get(rowKey(r.g))?.verdict));
     const same = both.filter((r) => new Set(rows.map((p) => p.get(rowKey(r.g))!.verdict)).size === 1);
     if (both.length) log(`stability ${same.length}/${both.length} (${percent(same.length, both.length)})`);
+    const { seen, changed } = changedBetween(ready, rows);
+    log(`changed between passes ${changed.length}/${seen.length}`);
+    for (const r of changed) log(`  ${place(r.g)}: ${rows.map((p) => p.get(rowKey(r.g))?.verdict ?? "-").join(" ")}`);
   }
   const all = rows.flatMap((p) => [...p.values()]);
   if (all.length) log(`mean seconds per call ${(all.reduce((n, r) => n + r.seconds, 0) / all.length).toFixed(1)}`);
-  log(`total cost $${all.reduce((n, r) => n + r.cost_usd, 0).toFixed(2)}`);
+  log(`total cost $${all.reduce((n, r) => n + (Number.isFinite(r.cost_usd) ? r.cost_usd : 0), 0).toFixed(2)}`);
   const unknown = all.reduce((n, r) => n + (r.unknown_calls ?? 0), 0);
   if (unknown) log(`calls with no usage reported ${unknown}: the cost is short by those`);
+  if (o.spend.unreadable) log(`calls whose cost could not be read ${o.spend.unreadable}`);
   log(`never judged ${ready.filter((r) => r.neverJudged).length} (sent and scored)`);
   const errors = all.filter((r) => r.error).length;
   if (errors) log(`errors ${errors}: run again to retry them`);
   if (o.compare) printAgreement(o.compare, ready, rows, log);
-  if (o.spend.notSent) log(`stopped at $${o.spend.spent.toFixed(2)} (--max-usd ${o.spend.max}): ${o.spend.notSent} not sent`);
+  const { spent, estimated, estimatedCalls, max, notSent, unreadable } = o.spend;
+  const money = (n: number) => `$${n.toFixed(2)}`;
+  if (notSent && unreadable) log(`stopped: a call's cost could not be read (--max-usd ${max}): ${notSent} not sent`);
+  else if (notSent) {
+    log(`stopped at ${money(spent + estimated)} (--max-usd ${max})${estimated ? `, ${money(estimated)} of it estimated` : ""}: ${notSent} not sent`);
+  } else if (max !== null && estimated) {
+    log(`spend for --max-usd ${money(spent + estimated)} includes ${money(estimated)} estimated for ${estimatedCalls} calls with no usage`);
+  }
 }
 
 function printAgreement(name: string, ready: Ready[], rows: Map<string, Row>[], log: (l: string) => void): void {
@@ -382,6 +431,24 @@ function printAgreement(name: string, ready: Ready[], rows: Map<string, Row>[], 
   const mean = shares.reduce((a, b) => a + b, 0) / shares.length;
   log(`agreement ${passes.join(", ")}, mean ${percent(mean, 1)}` +
     `${mean * 100 < AGREEMENT_NEEDED ? `, below ${AGREEMENT_NEEDED}%` : ""}${missing ? `, ${missing} without a verdict` : ""}`);
+  if (rows.length > 1) {
+    const { seen, changed } = changedBetween(judged, rows);
+    log(`of the judged, changed between passes ${changed.length}/${seen.length}`);
+  }
+}
+
+/** A prompt's cost at the model's price, from its size (about 4 characters to the token), the reply left out. Null when
+ * the model has no price. */
+function promptCostOf(ref: string, env: Env): (chars: number) => number | null {
+  try {
+    const { model } = parseModelRef(ref);
+    const s = defaultSettings(env), prices = allPrices(s);
+    const tiered = `${model}@${s.openaiTier}`;
+    const name = s.openaiTier && prices[tiered] ? tiered : model;
+    return (chars) => costUsd(name, { input: chars / 4, output: 0, cacheRead: 0, cacheWrite: 0 }, prices);
+  } catch {
+    return () => null;
+  }
 }
 
 /** The model, through arnx's own factory: shipped timeouts and prices, the named model alone. */
@@ -439,7 +506,16 @@ export async function main(argv: string[], deps: Deps = { env: process.env, make
     const model = deps.makeModel(values.model!, deps.env);
     const label = values.model!.replace(/[^\w.-]+/g, "_");
     const paths = Array.from({ length: repeat }, (_, i) => join(values.out!, `${label}-${prompt}-${i + 1}.jsonl`));
-    const spend: Spend = { spent: paths.flatMap((p) => [...readRows(p).values()]).reduce((n, r) => n + r.cost_usd, 0), max, notSent: 0 };
+    const spend: Spend = { spent: 0, knownCost: 0, knownCalls: 0, estimated: 0, estimatedCalls: 0, unreadable: 0, max, notSent: 0,
+      promptCost: promptCostOf(model.ref, deps.env) };
+    const onDisk = paths.flatMap((p) => [...readRows(p).values()]);
+    const byKey = new Map(ready.map((r) => [rowKey(r.g), r]));
+    // Known costs first: they give the mean an estimate needs.
+    for (const r of onDisk.filter((x) => !x.unknown_calls)) addCost(spend, r.cost_usd, 0, 0);
+    for (const r of onDisk.filter((x) => x.unknown_calls)) {
+      const from = byKey.get(rowKey(r));
+      addCost(spend, r.cost_usd, r.unknown_calls!, from ? promptChars(from) : 0);
+    }
     const rows: Map<string, Row>[] = [];
     for (const path of paths) {
       const pass = await runPass(ready, model, path, concurrency, spend);
