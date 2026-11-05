@@ -368,7 +368,8 @@ test("a review cut under another review.yaml, model or prompt is run fresh, and 
   const r = huntRepo();
   const { cut } = await cutAfterHunt(r);
   expect(typeof stateOf(cut.rdir).stamp).toBe("string");
-  writeFileSync(reviewConfigPath(r), readFileSync(reviewConfigPath(r), "utf8") + "# edited\n");
+  writeFileSync(reviewConfigPath(r), stampFile(parseReviewFile(readFileSync(reviewConfigPath(r), "utf8")
+    .replace("python -m pytest", "python -m pytest -x")), "Dev", "2026-10-12"));
   const said: string[] = [];
   const agent = new ScriptedAgent([[text(HUNTED)], ...spreadTests()]);
   const { review } = await runReview(r, { settings: SETTINGS, agentModel: agent, challenger: new FakeJson([SECOND_SUSPECTS,
@@ -380,6 +381,40 @@ test("a review cut under another review.yaml, model or prompt is run fresh, and 
   expect(stateOf(cut.rdir).superseded).toBe(review.id);
   const diffSha = stateOf(cut.rdir).diff_sha256 as string;
   expect(resumable(r, diffSha)).toBeNull(); // the old one is not offered again, the new one finished
+});
+
+/** Resume a hunt cut after `edit` changed review.yaml; what it said, and whether it started a new review. */
+async function resumeAfter(edit: (text: string, r: string) => string) {
+  const r = huntRepo();
+  const { cut } = await cutAfterHunt(r);
+  writeFileSync(reviewConfigPath(r), edit(readFileSync(reviewConfigPath(r), "utf8"), r));
+  const said: string[] = [];
+  const { review } = await runReview(r, { settings: SETTINGS, agentModel: new ScriptedAgent([[text(HUNTED)], ...spreadTests()]),
+    challenger: new FakeJson([SECOND_SUSPECTS, { verdict: "confirmed", reason: "sign" }, { groups: [] }]),
+    sessionFactory: spreadSession, hunt: true, resume: true, progress: (m) => said.push(m) });
+  return { fresh: review.id !== cut.review.id, said };
+}
+const FRESH = "review.yaml, models or prompts changed since that review: running it fresh";
+
+test("a comment added to review.yaml does not make a resume run fresh", async () => {
+  const { fresh, said } = await resumeAfter((t) => `# a note\n${t}`);
+  expect([fresh, said.includes(FRESH)]).toEqual([false, false]);
+});
+
+test("approving review.yaml again does not make a resume run fresh", async () => {
+  const { fresh, said } = await resumeAfter((t) => stampFile(parseReviewFile(t), "Other", "2026-11-05"));
+  expect([fresh, said.includes(FRESH)]).toEqual([false, false]);
+});
+
+test("CRLF line ends in review.yaml do not make a resume run fresh", async () => {
+  const { fresh, said } = await resumeAfter((t) => t.replaceAll("\n", "\r\n"));
+  expect([fresh, said.includes(FRESH)]).toEqual([false, false]);
+});
+
+test("a changed value anywhere in review.yaml, a top-level key too, makes a resume run fresh", async () => {
+  const top = await resumeAfter((t) => stampFile(parseReviewFile(
+    t.replace("version: 1\n", "version: 1\nallow_env_names:\n  - SOME_NAME\n")), "Dev", "2026-10-12"));
+  expect([top.fresh, top.said.includes(FRESH)]).toEqual([true, true]);
 });
 
 test("a round an outage cut says so, not that the reviewer gave no report", async () => {

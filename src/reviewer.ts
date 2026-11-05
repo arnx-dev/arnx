@@ -13,7 +13,7 @@ import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, with
 import { added, type Change, describe, describeBlanked, describeWithheld, EMPTY_TREE, filesAt, removed, resolveChange, sliceDiff,
   someNames, treeSuspects, untrackedLine } from "./change";
 import { maskedCopy } from "./boundary";
-import { configSuspects, loadReviewFile, type ReviewConfig, reviewConfigPath, sandboxOnlyOf, secretPinsOf } from "./config";
+import { configSuspects, fileDigest, loadReviewFile, parseReviewFile, type ReviewConfig, reviewConfigPath, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
 import { huntParts } from "./hunt";
 import { projectIndex } from "./indexer";
@@ -321,10 +321,10 @@ export async function runReview(repo: string, o: { settings: Settings;
   // A review saves each finished project round and each verdict as it goes, so `--resume` continues one that was cut
   // off (a dropped connection, a closed laptop) without paying again for what was done.
   const diffSha = createHash("sha256").update(change.diff).digest("hex");
-  // What decides the work a resume would reuse: the project file, the models and the prompts. A review cut under others is
-  // not continued.
+  // What decides the work a resume would reuse: what the project file says (not its comments, line ends or approval),
+  // the models and the prompts. A review cut under others is not continued.
   const stamp = createHash("sha256").update(JSON.stringify([
-    (() => { try { return readFileSync(reviewConfigPath(repo), "utf8"); } catch { return ""; } })(),
+    (() => { try { return fileDigest(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8"))); } catch { return ""; } })(),
     o.brain ? [o.brain.label ?? "", o.brain.version] : [refString(s.reviewer), o.challenger?.ref ?? "", o.hunter?.ref ?? "",
       o.ranker?.ref ?? "", o.secondHunter?.ref ?? "", PROMPT_VERSION, o.agentModel ? promptsFor(repo).hash : ""]])).digest("hex");
   const found = o.resume ? resumable(repo, diffSha) : null;
