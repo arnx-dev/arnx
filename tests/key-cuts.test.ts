@@ -82,6 +82,11 @@ for (const n of [0, 500, 2000, 2500, 3000, 3500, 3900, 5000]) {
   }
 }
 
+test("a header with no END, its head cut off: masked before the cut, so its body goes too", () => {
+  const output = `start\n${HDR}\n${bodyLines(random).join("\n")}\n${ORDINARY.repeat(140)}`;
+  clean("the run_tests answer", new Boundary().mask(describeRun(run(output), [], [])), bodyLines(random));
+});
+
 test("a failure's message goes on its own: a header in one takes no other test's result with it", () => {
   const results = [
     { testId: "t.py::a", fileAttr: "t.py", name: "a", outcome: "failed", message: `assert pem.startswith("${HDR}")` },
@@ -217,9 +222,10 @@ test("a pinned file with a bare header in a doc comment reads as it is, but for 
   expect(sent).not.toContain(HDR);
   expect(sent).toContain("+export const a = 2;");
   // The file read: all but the header's line. The search: the other hits.
-  const read = agent.bodies[1]!;
+  const read = agent.bodies[1]!.slice(agent.bodies[1]!.indexOf("tool_result"));
   expect(read).toContain("export const version = 2;");
-  expect(read).toContain("import { getSignedUrl } from './cred'");
+  expect(read).toContain("cred.ts:8:");
+  expect(read).toContain("other.ts:1:");
   for (const name of ["clientEmail", "getSignedUrl", "projectId"]) expect(sent).toContain(name);
 });
 
