@@ -182,17 +182,22 @@ async function apartRuns(session: Runner, snap: string, cfg: ReviewConfig, targe
   const out = [output];
   let seconds = spent, seen = carried.length > 0;
   for (const [k, target] of targets.entries()) {
-    // A file always gets its whole time, or is not run.
-    if (bounds.total - used < bounds.file) {
+    // A file gets its whole time, or what is left of the budget; one that times out on less is not run, not hung.
+    const left = bounds.total - used;
+    if (left <= 0) {
       notRun.push(target);
       results.push(notRunError(target));
       continue;
     }
-    const [run, parsed] = await runTests(session, snap, cfg, [target], report.replace(/\.xml$/, `-${k + 1}.xml`), bounds.file);
-    used += run.timedOut ? bounds.file : run.seconds;
+    const limit = Math.min(bounds.file, left);
+    const [run, parsed] = await runTests(session, snap, cfg, [target], report.replace(/\.xml$/, `-${k + 1}.xml`), limit);
+    used += run.timedOut ? limit : run.seconds;
     seconds += run.seconds;
     out.push(`== ${target} ==\n${run.output}`);
-    if (run.timedOut) {
+    if (run.timedOut && limit < bounds.file) {
+      notRun.push(target);
+      results.push(notRunError(target));
+    } else if (run.timedOut) {
       hung[target] = bounds.file;
       results.push(hungError(target, bounds.file));
     } else if (parsed) {

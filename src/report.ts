@@ -356,10 +356,13 @@ function statusOf(r: Review): { problems: string[]; notes: string[] } {
         : `\`${p.name}\` produced no tests: ${why(stop, r)}`);
     } else if (p.noReport) {
       problems.push(`\`${p.name}\`: ${noReportWhy(p, r)}`);
-    } else if (p.hungFiles?.length) {
-      problems.push(`\`${p.name}\`: ${plural(p.hungFiles.length, "test file")} did not finish (${someNames(p.hungFiles, 3)}); their tests have no result`);
-    } else if (p.notRunFiles?.length) {
-      problems.push(`\`${p.name}\`: ${plural(p.notRunFiles.length, "test file")} not run, out of time (${someNames(p.notRunFiles, 3)}); their tests have no result`);
+    } else if (p.hungFiles?.length || p.notRunFiles?.length) {
+      if (p.hungFiles?.length) {
+        problems.push(`\`${p.name}\`: ${plural(p.hungFiles.length, "test file")} did not finish (${someNames(p.hungFiles, 3)}); their tests have no result`);
+      }
+      if (p.notRunFiles?.length) {
+        problems.push(`\`${p.name}\`: ${plural(p.notRunFiles.length, "test file")} not run, out of time (${someNames(p.notRunFiles, 3)}); their tests have no result`);
+      }
     } else if (p.missingRuns) {
       problems.push(`\`${p.name}\`: ${plural(p.missingRuns, "run")} gave no report (timed out or crashed)`);
     } else if (!p.tests) {

@@ -98,9 +98,9 @@ test("the whole repeat stays within its limits: today's run limit, then the apar
   const got = await runBounded(s, tmp(), cfg, FILES, "final-1.xml", LIMITS);
   const asked = s.calls.reduce((sum, c) => sum + c.timeout, 0);
   expect(asked).toBeLessThanOrEqual(600 + 600);
-  expect(s.calls.slice(1).every((c) => c.timeout === 180)).toBe(true);
-  // every file ends as an error; the ones the budget reached are hung, the others are not run
-  expect(s.calls.length).toBe(1 + 3);
+  expect(s.calls.slice(1).map((c) => c.timeout)).toEqual([180, 180, 180, 60]);
+  // every file ends as an error; the ones that had their whole time are hung, the others are not run
+  expect(s.calls.length).toBe(1 + 4);
   expect(Object.keys(got.hung).length).toBe(3);
   expect(got.notRun.length).toBe(5);
   expect(got.results!.filter((t) => t.outcome === "error").length).toBe(FILES.length);
@@ -185,4 +185,37 @@ test("a round keeps the files that ran, names the one that hung, saves the log a
   expect(readFileSync(join(out, "final-1.log"), "utf8")).toContain("stuck");
   // the second repeat has nothing left to run
   expect(commands.filter((c) => c.includes("final-2"))).toEqual([]);
+});
+
+test("a quick file still runs in the time left, and one that times out under its full limit reads as not run", async () => {
+  const names = Array.from({ length: 5 }, (_, i) => `${dir}/test_q${i}.py`);
+  const limits: number[] = [];
+  const s: Runner = { run: (command, timeout) => {
+    const files = names.filter((f) => command.includes(`${f}'`) || command.includes(`${f} `) || command.endsWith(f));
+    limits.push(timeout);
+    // 0 and 1 take 170 s, 2 is quick (10 s), 3 takes 170 s
+    const cost = files[0] === names[2] ? 10 : 170;
+    if (files.length > 1 || cost > timeout) return { exitCode: null, output: "slow", timedOut: true, seconds: timeout };
+    const m = /--junitxml=\/src\/(\S+)/.exec(command)!;
+    mkdirSync(dirname(join(tmp(), m[1]!)), { recursive: true });
+    writeFileSync(join(tmp(), m[1]!), junitXml(files.map((f) => [f, "test_x", "passed", ""] as [string, string, string, string])));
+    return { exitCode: 0, output: "", timedOut: false, seconds: cost };
+  } };
+  const order = [names[0]!, names[1]!, names[3]!, names[4]!, names[2]!];
+  const got = await runBounded(s, tmp(), cfg, order, "final-1.xml", LIMITS);
+  expect(Object.keys(got.hung)).toEqual([]);
+  // 170 + 170 + 170 = 510 used; the fourth gets the 90 s left and cannot finish: not run; nothing is left for the quick one
+  expect(limits.slice(1)).toEqual([180, 180, 180, 90]);
+  expect(got.notRun).toEqual([names[4]!, names[2]!]);
+  expect(got.results!.filter((t) => t.message.includes("did not finish")).length).toBe(0);
+});
+
+test("the status line names hung files and not-run files together", async () => {
+  const { render } = await import("../src/report");
+  const { sampleReview } = await import("./helpers/review");
+  const r = sampleReview({ projectStats: [{ name: "main", testFiles: 4, tests: 2, passed: 2, missingRuns: 0,
+    hungFiles: ["t/hung_one.py"], notRunFiles: ["t/late_one.py"], sawResults: true, stop: "end_turn" }] });
+  const md = render(r).replace(/\s+/g, " ");
+  expect(md).toContain("hung_one.py");
+  expect(md).toContain("late_one.py");
 });
