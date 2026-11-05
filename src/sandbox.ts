@@ -430,9 +430,18 @@ function hasNoGateway(config: string): boolean {
 
 const live = new Set<Session>();
 
-/** Tear down every running session; the interrupt handler calls this before exiting. */
+/** Tear down every running session, for an interrupt and for any exit (main.ts): the process is going. Each is closed
+ * whatever another's close does; the first failure is thrown after. */
 export function cleanupLiveSessions(): void {
-  for (const s of [...live]) s.close(true);
+  const failed: unknown[] = [];
+  for (const s of [...live]) {
+    try {
+      s.close(true);
+    } catch (e) {
+      failed.push(e);
+    }
+  }
+  if (failed.length) throw failed[0];
 }
 
 // The first process of a container that runs share: it sleeps, reaps what runs leave behind (a shell waits for its
@@ -766,16 +775,23 @@ function removeStarting(name: string): void {
   }
 }
 
+/** How long a command that has exited gets to finish its output at its limit, ms. */
+const EXITED_GRACE = 1000;
+
 /** A command's exit and the ends of its output, without blocking; `started` gets what stops it at once. Output is read
  * as text across reads, so a character split between two stays whole, and each stream keeps at least OUTPUT_LIMIT
  * characters, all a run's answer uses, however much it prints. Past `ms` the command is killed. A killed command answers
- * as soon as it has gone, even if something it started still holds its output open. */
+ * as soon as it has gone, even if something it started still holds its output open.
+ *
+ * After the process was blocked (another project's step), a timer fires before what happened meanwhile is seen. So the
+ * limit is judged one turn later: a command that had exited by then is not timed out, and its output has been read. */
 function spawned(bin: string, args: string[], ms: number, started: (stop: () => void) => void)
   : Promise<{ status: number | null; stdout: string; stderr: string; timedOut: boolean; stopped: boolean; notFound: boolean }> {
   return new Promise((resolve) => {
     const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "", status: number | null = null, exited = false, cut = false, timedOut = false,
       stopped = false, notFound = false, done = false;
+    let grace: ReturnType<typeof setTimeout> | undefined;
     const tail = (s: string) => (s.length > 2 * OUTPUT_LIMIT ? s.slice(-OUTPUT_LIMIT) : s);
     child.stdout.setEncoding("utf8").on("data", (t: string) => { stdout = tail(stdout + t); });
     child.stderr.setEncoding("utf8").on("data", (t: string) => { stderr = tail(stderr + t); });
@@ -783,6 +799,7 @@ function spawned(bin: string, args: string[], ms: number, started: (stop: () => 
       if (done) return;
       done = true;
       clearTimeout(timer);
+      clearTimeout(grace);
       resolve({ status, stdout, stderr, timedOut, stopped, notFound });
     };
     const kill = () => {
@@ -792,10 +809,15 @@ function spawned(bin: string, args: string[], ms: number, started: (stop: () => 
       child.stderr.destroy();
       if (exited) finish();
     };
-    const timer = setTimeout(() => {
+    const timer = setTimeout(() => setImmediate(() => {
+      if (done) return;
+      if (exited) {
+        grace = setTimeout(kill, EXITED_GRACE);
+        return;
+      }
       timedOut = true;
       kill();
-    }, ms);
+    }), ms);
     child.on("error", (e: NodeJS.ErrnoException) => {
       notFound = e.code === "ENOENT";
       finish();

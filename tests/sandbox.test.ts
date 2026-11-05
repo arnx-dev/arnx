@@ -315,6 +315,80 @@ console.log("the run answered");
     }
   }, 300_000);
 
+  /** arnx itself (main.ts) running `args`, in a folder with no repository, after `preload` has set up what it says. No
+   * keys reach it. Answers with its exit code, what it printed, and the sessions it named with `session <id>`. */
+  const arnxAfter = async (preload: string, args: string[]) => {
+    const repoRoot = join(import.meta.dir, "..");
+    const dir = join(tmp(), `arnx-${Math.random().toString(16).slice(2)}`);
+    mkdirSync(dir);
+    const file = join(dir, "preload.ts");
+    const source = snap();
+    writeFileSync(file, `
+import { spawnSync } from "node:child_process";
+import { closers } from ${JSON.stringify(join(repoRoot, "src/interrupt"))};
+import { inPool } from ${JSON.stringify(join(repoRoot, "src/challenge"))};
+import { parseReviewConfig } from ${JSON.stringify(join(repoRoot, "src/config"))};
+import { Session } from ${JSON.stringify(join(repoRoot, "src/sandbox"))};
+const cfg = parseReviewConfig(${JSON.stringify(CFG.replace("workdir: app", "workdir: ."))});
+const open = async () => {
+  const s = await new Session("python:3.12-slim", cfg, ${JSON.stringify(source)}).start();
+  console.log("session " + s.id);
+  void s.run("sleep 120", 600);
+  const up = () => spawnSync("docker", ["ps", "-q", "--filter", "name=arnx-" + s.id + "-"], { encoding: "utf8" }).stdout.trim();
+  for (let i = 0; i < 300 && !up(); i++) await new Promise((r) => setTimeout(r, 100));
+  console.log(up() ? "container up" : "container never came up");
+};
+void [closers, inPool, open];
+${preload}
+`);
+    const child = spawn(process.execPath, ["--preload", file, join(repoRoot, "src/main.ts"), ...args], { cwd: dir,
+      stdio: ["ignore", "pipe", "pipe"], env: { PATH: process.env.PATH, HOME: dir,
+        DOCKER_CONFIG: process.env.DOCKER_CONFIG ?? join(process.env.HOME ?? "", ".docker") } });
+    let said = "";
+    for (const out of [child.stdout, child.stderr]) out.setEncoding("utf8").on("data", (d: string) => { said += d; });
+    const code = await new Promise<number | null>((r) => child.on("close", (c) => r(c)));
+    const ids = [...said.matchAll(/^session (\w+)$/gm)].map((m) => m[1]!);
+    const left = ids.flatMap((id) => spawnSync("docker", ["ps", "-a", "--filter", `name=arnx-${id}-`, "--format", "{{.Names}}"],
+      { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean));
+    // Only if the test fails: this run's own containers, by their names.
+    for (const name of left) spawnSync("docker", ["rm", "-fv", name]);
+    return { code, said, ids, left };
+  };
+
+  // Up to 3 rounds side by side, as accept's answers run; a review runs 2. Any way out goes through the same exit.
+  test("a project failing while others run: arnx exits and no container stays up", async () => {
+    const r = await arnxAfter(`
+await inPool(["run", "run", "fails"], 3, async (item) => {
+  if (item === "run") return open();
+  while (!(globalThis as { up?: number }).up) await new Promise((r) => setTimeout(r, 50));
+  throw new Error("the other project failed");
+}).catch((e) => console.log(e.message));
+`.replace("return open();", "{ void (async () => { await open(); const g = globalThis as { up?: number }; g.up = (g.up ?? 0) + 1; })(); return; }"),
+    ["review"]);
+    expect(r.said).toContain("the other project failed");
+    expect(r.said).toContain("container up");
+    expect(r.ids).toHaveLength(2);
+    expect(r.code).not.toBe(0);
+    expect(r.left).toEqual([]);
+  }, 300_000);
+
+  test("a session opened after an interrupt's cleanup leaves no container either", async () => {
+    // Opened by a closer, so after the interrupt's cleanup and before its exit, as a model's reply in that wait can.
+    const r = await arnxAfter(`
+closers.add(open);
+const on = process.on.bind(process);
+(process as { on: unknown }).on = (event: string, fn: () => void) => {
+  on(event as "SIGINT", fn);
+  if (event === "SIGINT") queueMicrotask(() => process.emit("SIGINT"));
+  return process;
+};
+`, ["--version"]);
+    expect(r.said).toContain("container up");
+    expect(r.ids).toHaveLength(1);
+    expect(r.code).toBe(130);
+    expect(r.left).toEqual([]);
+  }, 300_000);
+
   test("test_service_reachable_internet_not", async () => {
     const cfg = parseReviewConfig(SVC);
     const image = await ensureEnv(cfg, snap(), join(tmp(), "build.log"));
@@ -543,6 +617,75 @@ test("a run with no Docker binary says so, as before", async () => {
     await expect(Promise.resolve().then(() => s.run("pytest -q", 60))).rejects.toThrow(SetupRequired);
   });
 });
+
+test("every session is closed even when closing one fails, and the first failure is still told", async () => {
+  const fake = loggingDocker(tmp());
+  const cfg = parseReviewConfig(`${CFG}services:\n  db: {image: postgres:16-alpine}\n`);
+  await withDockerAsync(fake.path, async () => {
+    const first = await new Session("img", cfg, tmp()).start();
+    const second = await new Session("img", cfg, tmp()).start();
+    first.close = () => { throw new Error("docker did not answer"); };
+    expect(() => cleanupLiveSessions()).toThrow("docker did not answer");
+    expect(fake.calls().map((c) => c.join(" "))).toContain(`network rm ${second.network}`);
+    delete (first as { close?: unknown }).close;
+    first.close();
+  });
+});
+
+/** What a run answers with a fake docker doing `body`, limit 1 s, the process blocked `blockMs` right after it starts: run by
+ * `runtime`, Bun as the binary is and Node as the npm package is. */
+function afterBlock(runtime: "bun" | "node", body: string, blockMs: number) {
+  const repoRoot = join(import.meta.dir, "..");
+  const dir = join(tmp(), `${runtime}-${Math.random().toString(16).slice(2)}`);
+  mkdirSync(dir);
+  const fake = join(dir, "docker");
+  writeFileSync(fake, `#!/bin/sh\n${body}\n`);
+  chmodSync(fake, 0o755);
+  const script = join(dir, "run.ts");
+  writeFileSync(script, `
+import { parseReviewConfig } from ${JSON.stringify(join(repoRoot, "src/config"))};
+import { sandboxOptions, Session } from ${JSON.stringify(join(repoRoot, "src/sandbox"))};
+sandboxOptions.docker = ${JSON.stringify(fake)};
+const cfg = parseReviewConfig("version: 1\\nimage: i\\ntest_command: pytest -q {targets}\\n");
+const t0 = Date.now();
+const run = new Session("img", cfg, ${JSON.stringify(dir)}).run("pytest -q", 1);
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${blockMs});
+const r = await run;
+console.log(JSON.stringify({ timedOut: r.timedOut, exitCode: r.exitCode, output: r.output, ms: Date.now() - t0 }));
+process.exit(0);
+`);
+  let argv = [process.execPath, script];
+  if (runtime === "node") {
+    const built = join(dir, "run.mjs");
+    const b = spawnSync(process.execPath, ["build", "--target=node", script, "--outfile", built], { encoding: "utf8" });
+    expect(b.status).toBe(0);
+    argv = ["node", built];
+  }
+  const r = spawnSync(argv[0]!, argv.slice(1), { encoding: "utf8", timeout: 25_000 });
+  expect(r.stderr).toBe("");
+  return JSON.parse(r.stdout) as { timedOut: boolean; exitCode: number | null; output: string; ms: number };
+}
+const hasNode = spawnSync("node", ["--version"]).status === 0;
+
+for (const runtime of ["bun", "node"] as const) {
+  describe.skipIf(runtime === "node" && !hasNode)(`limits, on ${runtime}`, () => {
+    test("a run that ended inside its limit does not read as timed out after the process was blocked", () => {
+      expect(afterBlock(runtime, 'case "$1" in run) sleep 0.2; echo ran; exit 3;; esac\nexit 0', 3000))
+        .toMatchObject({ timedOut: false, exitCode: 3, output: "ran\n" });
+    }, 30_000);
+
+    test("a run still going at its limit after the process was blocked is timed out", () => {
+      expect(afterBlock(runtime, 'case "$1" in run) echo partial; exec sleep 20;; esac\nexit 0', 2000))
+        .toMatchObject({ timedOut: true, exitCode: null, output: "partial\n\n[timed out]" });
+    }, 30_000);
+
+    test("a run that ended, with something it started holding its output open, comes back soon after its limit", () => {
+      const r = afterBlock(runtime, 'case "$1" in run) echo ran; sleep 15 & exit 3;; esac\nexit 0', 0);
+      expect(r).toMatchObject({ timedOut: false, exitCode: 3, output: "ran\n" });
+      expect(r.ms).toBeLessThan(8000);
+    }, 30_000);
+  });
+}
 
 /** A runner that answers later, as Session does, and records what the snapshot held when its run ended. */
 const lateRunner = (seen: (command: string) => void, output = "ok") => ({ run: async (command: string) => {
