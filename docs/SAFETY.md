@@ -25,7 +25,8 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   Files you committed are left for the `git rm` it prints, so the removal shows in a commit. Accepted tests are your
   tests by then: kept unless `--tests`. Your arnx cloud login and the arnx program itself are not touched.
 - Your model keys stay in the arnx process. Files that usually hold secrets, and text that looks like a key, are
-  never sent to a model. A file left out this way is named at setup and in each review. When every key-shaped
+  not sent to a model, except the forms listed below. A file left out this way is named at setup and in each review.
+  When every key-shaped
   string in a JavaScript, TypeScript, Python or Rust file is inside a comment that has its lines to itself (a doc
   example), the file is sent with those comment lines blanked instead (a private key's whole block too, when it lies
   in the comment), and setup names the file and its lines. Everything else that may be a secret gets a stand-in, a
@@ -61,6 +62,12 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   not pick as a secret is not masked; a cut piece of a word-like value can still leave; a dotted username with a
   1-5 digit address password (`user.name:12345@host`) reads as a host and is not masked; a file over 32 MB is not
   scanned and is left out.
+- A private key is found by its header: OpenSSL and OpenSSH blocks, PGP's `PRIVATE KEY BLOCK`, SSH2's four dashes,
+  and a label with digits or hyphens (`ED25519`, `RSA-PSS`). A `.ppk` file is a secret file by its name. A key header
+  in code in a diff stops the review. A key with no header is not found as a key. A key whose lines are under 40
+  characters is not found as a body, so beside a header it reads as a placeholder and the file is kept. What can still
+  reach a model: a key a test prints (the output of the tests goes to the model), a key whose lines are under 40
+  characters, a key as a JWK, a key as hex, and any other form without a header.
 - A variable whose name looks like a secret (KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL, …) is refused in
   `.arnx/review.yaml` unless listed under `allow_env_names` or set to `arnx:generated` (64 hex digits arnx makes) or
   `arnx:generated:base64` (32 bytes, URL-safe base64): throwaway values, the same in every run.
