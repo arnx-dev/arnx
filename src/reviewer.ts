@@ -23,7 +23,7 @@ import { addUsage, type AgentModel, allPrices, FallbackJson, type JsonModel, typ
 import { LocalBrain } from "./localbrain";
 import { changeEditsPrompts, PROMPTS_EDITED, promptsFor } from "./userprompts";
 import { changeEditsAccepted } from "./check";
-import { baseName, funcOf, ownerFile } from "./outcomes";
+import { funcOf, ownerFile, testKey } from "./outcomes";
 import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, resumes, withCalls } from "./outage";
 import { CONTEXT_LIMIT, contextPack } from "./context";
 import { elsewhereNote, leftOutNote, PROMPT_VERSION, type Suspect } from "./prompts";
@@ -153,6 +153,9 @@ export function suspectOutcomes(project: string, suspects: { id: string; file: s
     if (unsure.length) return { ...base, outcome: "inconclusive" as const, tests: unsure.map((t) => t.testId) };
     const passed = has(c.passed, funcs);
     if (passed.length) return { ...base, outcome: "not reproduced" as const, tests: passed.map((t) => t.testId) };
+    if (has(c.skippedTests ?? [], funcs).length) {
+      return { ...base, outcome: "not tested" as const, tests: [], reason: "its test was skipped" };
+    }
     return { ...base, outcome: "not tested" as const, tests: [],
       ...(reasons.get(s.id) ? { reason: reasons.get(s.id)! } : {}) };
   });
@@ -162,7 +165,7 @@ export function newReviewId(now: Date): string {
   return now.toISOString().slice(0, 10).replaceAll("-", "") + "-" + randomHex(3);
 }
 
-const funcOfId = (test: string) => baseName(test.split("::").at(-1) ?? "").trim();
+const funcOfId = testKey;
 /** Two uses of the same model in one review, added up. */
 /** Why the code before the change has nothing to compare a finding against: the change is the first commit, or its
  * base holds none of the changed source files (all new: an empty first commit, or files not committed yet). Null
@@ -203,7 +206,7 @@ export function buildChecked(rnd: Round, report: AgentReport, project: string): 
     if (!byFunc.has(funcOfId(id))) byFunc.set(funcOfId(id), expects);
   }
   return rnd.classified.passed.map((t) => ({ project, test: t.testId,
-    expects: byId.get(t.testId) ?? byFunc.get(funcOf(t)) ?? "" }));
+    expects: byId.get(t.testId) ?? byFunc.get(testKey(t.testId)) ?? "" }));
 }
 
 export function buildFindings(rnd: Round, report: AgentReport): Finding[] {
@@ -218,7 +221,7 @@ export function buildFindings(rnd: Round, report: AgentReport): Finding[] {
   }
   return rnd.classified.findings.map((t, i) => ({ id: `F${i + 1}`, testId: t.testId, func: funcOf(t),
     file: ownerFile(t.fileAttr, Object.keys(rnd.files)), message: t.message,
-    explanation: explanations.get(funcOf(t)) ?? "", verdict: null, reason: "", project: "main",
+    explanation: explanations.get(testKey(t.testId)) ?? "", verdict: null, reason: "", project: "main",
     ...(rnd.before?.tests[t.testId] ? { before: rnd.before.tests[t.testId] } : {}) }));
 }
 
@@ -630,7 +633,7 @@ export async function runReview(repo: string, o: { settings: Settings;
         const linked = new Set(isObject(q) && Array.isArray(q.tests) ? q.tests.map((t) => funcOfId(text(t))) : []);
         const named = new Set(questions.at(-1)!.match(/\bS\d+\b/g) ?? []);
         for (const f of projectFindings) {
-          if (!f.dependsOn && (linked.has(f.func) || (f.suspect && named.has(f.suspect)))) {
+          if (!f.dependsOn && (linked.has(testKey(f.testId)) || (f.suspect && named.has(f.suspect)))) {
             f.dependsOn = `Q${questions.length}`;
           }
         }

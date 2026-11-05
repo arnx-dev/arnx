@@ -15,6 +15,15 @@ export type { TestResult };
  * pays", from describe.each), so a name with anything but a bare identifier before its "[" is kept whole. */
 export const baseName = (name: string): string => /^[\w.:]+\[[^]*\]$/.test(name) ? name.split("[")[0]! : name;
 
+/** The key that links a reported test to its result: a test id's name without its file, its parameters or its
+ * describe blocks. `file::test_ip[2001:0db8::1]` is `test_ip` (a parameter may hold "::"), `file::pays > charges once`
+ * is `charges once`, and a title alone is itself. A parametrised case and its siblings share a key. */
+export function testKey(id: string): string {
+  const param = /^.*?::(\w+)\[[^]*\]\s*$/s.exec(id);
+  const name = param ? param[1]! : id.split("::").at(-1)!;
+  return name.split(" > ").at(-1)!.trim();
+}
+
 export const funcOf = (t: TestResult) => baseName(t.name);
 
 export interface Classified {
@@ -24,6 +33,8 @@ export interface Classified {
   passed: TestResult[];
   /** Tests every run skipped. */
   skipped: number;
+  /** Those tests (absent in rounds saved before they were kept). */
+  skippedTests?: TestResult[];
   missingRuns: number;
   totalRuns: number;
 }
@@ -45,7 +56,7 @@ export function classify(runs: (TestResult[] | null)[]): Classified {
   const complete = runs.filter((r): r is TestResult[] => r !== null).map((run) => run.map(asError));
   const byId = new Map<string, TestResult[]>();
   for (const run of complete) for (const t of run) byId.set(t.testId, [...(byId.get(t.testId) ?? []), t]);
-  const c: Classified = { findings: [], flaky: [], errors: [], passed: [], skipped: 0, missingRuns: runs.length - complete.length,
+  const c: Classified = { findings: [], flaky: [], errors: [], passed: [], skipped: 0, skippedTests: [], missingRuns: runs.length - complete.length,
     totalRuns: runs.length };
   for (const id of [...byId.keys()].sort()) {
     const results = byId.get(id)!;
@@ -54,7 +65,7 @@ export function classify(runs: (TestResult[] | null)[]): Classified {
     if (outcomes.includes("error")) c.errors.push(results.find((t) => t.outcome === "error")!);
     else if (results.length === runs.length && outcomes.every((o) => o === "failed")) c.findings.push(last);
     else if (outcomes.includes("failed")) c.flaky.push(results.find((t) => t.outcome === "failed")!);
-    else if (outcomes.every((o) => o === "skipped")) c.skipped++;
+    else if (outcomes.every((o) => o === "skipped")) { c.skipped++; c.skippedTests!.push(results[results.length - 1]!); }
     else c.passed.push(last);
   }
   return c;

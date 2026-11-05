@@ -16,7 +16,7 @@ import type { Brain } from "./brain";
 import { configSuspects, loadReviewFile, type ReviewFile, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
 import { type AgentModel, allPrices } from "./llm";
-import { baseName, funcOf, ownerFile, type TestResult } from "./outcomes";
+import { baseName, funcOf, ownerFile, testKey, type TestResult } from "./outcomes";
 import { fixPrompt } from "./fixprompt";
 import { LocalBrain } from "./localbrain";
 import { isModelKey } from "./prompts";
@@ -203,7 +203,7 @@ export function findAccepted(repo: string): string {
   return found.reduce((a, b) => (at(b) > at(a) ? b : a));
 }
 
-const funcOfId = (testId: string) => baseName(testId.split("::").at(-1) ?? "");
+const funcOfId = testKey;
 /** A finding's test as the adapter's skip names it: its func, read again from its test id, since an older arnx cut a
  * JavaScript name at its first "[" ("topup generated [memory] > S1: pays" saved as "topup generated "). */
 function funcOfFinding(f: { testId: string; func: string }): string {

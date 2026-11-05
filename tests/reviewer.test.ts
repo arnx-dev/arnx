@@ -7,7 +7,7 @@ import { ArnxError, ModelError, SetupRequired } from "../src/errors";
 import { closeOpen, closers } from "../src/interrupt";
 import { LocalBrain } from "../src/localbrain";
 import { exitCode, incomplete, render, summary } from "../src/report";
-import { newReviewId, runReview } from "../src/reviewer";
+import { newReviewId, runReview, suspectOutcomes } from "../src/reviewer";
 import { defaultSettings, type Settings } from "../src/settings";
 import { PRICES, type Reply } from "../src/llm";
 import type { SessionFactory } from "../src/sandbox";
@@ -312,4 +312,36 @@ test("a file named only by a test that could not load is not reached", async () 
   const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
     sessionFactory: sess });
   expect(review.untested![0]!.files.sort()).toEqual(["app.py", "other.py"]);
+});
+
+const suspectOf = (id: string) => ({ id, file: "a.py", line: 1, claim: "c", by: "x" });
+const result = (testId: string, outcome: string) => ({ testId, fileAttr: "", name: testId, outcome, message: "" });
+const roundWith = (c: Record<string, unknown>) => ({ classified: { findings: [], flaky: [], errors: [], passed: [], skipped: 0,
+  missingRuns: 0, totalRuns: 1, ...c } }) as never;
+const reportOf = (tests: unknown[], notTested: unknown[] = []) => ({ tests, suspected_defects: [], questions: [],
+  suspects_not_tested: notTested });
+
+test("a parametrised case with :: in its value still links to its suspect", () => {
+  const id = "tests/t.py::test_ip[2001:0db8::1]";
+  const f = { id: "F1", testId: id, func: "test_ip", suspect: undefined as string | undefined };
+  const out = suspectOutcomes("main", [suspectOf("S1")], roundWith({ findings: [result(id, "failed")] }),
+    reportOf([{ suspect: "S1", test: "tests/t.py::test_ip" }]), [f] as never);
+  expect(out[0]!.outcome).toBe("failed");
+  expect(out[0]!.tests).toEqual([id]);
+});
+
+test("a reported title links to its describe > title result", () => {
+  const id = "tests/a.test.ts::pays > charges once";
+  const out = suspectOutcomes("main", [suspectOf("S1")], roundWith({ passed: [result(id, "passed")] }),
+    reportOf([{ suspect: "S1", test: "charges once" }]), []);
+  expect(out[0]!.outcome).toBe("not reproduced");
+  expect(out[0]!.tests).toEqual([id]);
+});
+
+test("a suspect whose test was skipped says so", () => {
+  const id = "tests/t.py::test_db";
+  const out = suspectOutcomes("main", [suspectOf("S1")], roundWith({ skippedTests: [result(id, "skipped")] }),
+    reportOf([{ suspect: "S1", test: id }]), []);
+  expect(out[0]!.outcome).toBe("not tested");
+  expect(out[0]!.reason).toBe("its test was skipped");
 });
