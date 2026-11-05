@@ -3,7 +3,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { caseGroups } from "../src/challenge";
+import { caseGroups, shareVerdict } from "../src/challenge";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import type { JsonModel } from "../src/llm";
 import { render } from "../src/report";
@@ -107,4 +107,38 @@ test("caseGroups: same first line only, never across a fallback image or a data 
   expect(caseGroups(cases("a", "b"), { [FILE]: `${HEAD}# @pytest.mark.parametrize\n${BODY}` })).toHaveLength(1);
   expect(caseGroups(cases("a", "b"), { [FILE]: OWN_PARAMS })).toHaveLength(2);
   expect(caseGroups(cases("a", "b"), {})).toHaveLength(2);
+});
+
+const SHAPES: Record<string, string> = {
+  "class-level parametrize": "import pytest\n@pytest.mark.parametrize('n',[1,2])\nclass TestK:\n    def test_add(self, n):\n        assert n==2\n",
+  "pytestmark": "import pytest\npytestmark = pytest.mark.parametrize('n',[1,2])\ndef test_add(n):\n    assert n==2\n",
+  "pytest_generate_tests": "def pytest_generate_tests(metafunc):\n    metafunc.parametrize('n',[1,2])\ndef test_add(n):\n    assert n==2\n",
+  "metafunc.parametrize": "def hook(metafunc):\n    metafunc.parametrize('n',[1,2])\ndef test_add(n):\n    assert n==2\n",
+  "fixture with ** params": "import pytest\n@pytest.fixture(**{'params':[1,2]})\ndef n(request): return request.param\ndef test_add(n):\n    assert n==2\n",
+  "rust values": "#[rstest]\nfn test_add(#[values(1,2)] n: i32) { assert_eq!(n,2) }\n",
+};
+test("caseGroups: data that lives in the file, outside the test's own decorators, is not merged", () => {
+  for (const [name, source] of Object.entries(SHAPES)) {
+    const file = name === "rust values" ? "tests/t.rs" : FILE;
+    const fs = cases("a", "b").map((f) => ({ ...f, file }));
+    expect([name, caseGroups(fs, { [file]: source }).length]).toEqual([name, 2]);
+  }
+});
+
+test("a case keeps its own dependsOn, and carries sameAs only with a verdict", async () => {
+  const [a, b] = cases("a", "b");
+  a!.verdict = "confirmed"; a!.reason = "r"; a!.dependsOn = "Q1"; b!.dependsOn = "Q2";
+  shareVerdict(a!, b!);
+  expect([b!.dependsOn, b!.sameAs]).toEqual(["Q2", "a"]);
+  const [c, d] = cases("c", "d");
+  shareVerdict(c!, d!);
+  expect(d!.sameAs).toBeUndefined();
+});
+
+test("a case that took another's verdict says so in the report", async () => {
+  const model = new FakeJson([{ verdict: "confirmed", reason: "real", depends_on: "" }, { issues: [] }]);
+  const { review } = await run(FIXTURE, model);
+  const id = review.findings[0]!.id;
+  expect(render(review)).toContain(`Same call as ${id}`);
+  expect(render(review).split(`Same call as ${id}`).length).toBe(2);
 });

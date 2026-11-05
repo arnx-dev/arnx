@@ -511,6 +511,7 @@ function findingLines(r: Review, f: Finding, marked = true): string[] {
     out.push(marked ? `- Depends on: ${f.dependsOn} (the test assumes one answer; answer ${f.dependsOn} before marking)`
       : `- Depends on: ${f.dependsOn} (the test assumes one answer)`);
   }
+  if (f.sameAs) out.push(`- Same call as ${f.sameAs}`);
   // arnx cloud's judge goes unnamed: its label carries the harness.
   if (f.reason) out.push(billedByCloud(r) ? `- Second opinion: ${f.reason}`
     : `- Second opinion (${f.judge ?? r.challenger}): ${f.reason}`);

@@ -219,6 +219,7 @@ export async function markInteractive(review: Review, md: string, io: MarkIO): P
       lines.push(`${head(`${f.id}`)} · ${color(state)}${f.project !== "main" ? p.dim(` · ${f.project}`) : ""}${f.fallback ? p.dim(` · ${FALLBACK_LABEL}`) : ""}  ${pos}`, "");
       lines.push(...wrapTo(f.explanation || f.message.split("\n")[0]!, io.width));
       lines.push("", p.dim(`Test: ${f.testId}`), p.dim(`Failure: ${f.message.split("\n")[0]!.slice(0, io.width - 9)}`));
+      if (f.sameAs) lines.push(p.dim(`Same call as ${f.sameAs}`));
       if (f.reason) lines.push(...wrapTo(`Second opinion: ${f.reason}`, io.width).map((l) => p.dim(l)));
       lines.push("");
     }

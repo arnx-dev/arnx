@@ -29,6 +29,10 @@ export async function inPool<T>(items: T[], limit: number, work: (item: T) => Pr
 /** Cases of one test that differ only by something outside it share one judgment; cases it receives as data do not. */
 const DATA_CASES = /parametrize|\.each\b|#\[\s*case\b|\btest_case\b/;
 const FIXTURE_PARAMS = /\bfixture\s*\([^)]*\bparams\s*=/;
+/** Data that lives in the file, outside the test's own decorators: a module mark, a hook, a class-level parametrize,
+ * a fixture given its params in a mapping, Rust's `#[values]`. */
+const FILE_DATA = /\bpytestmark\b|\bpytest_generate_tests\b|\bmetafunc\s*\.\s*parametrize\b|#\[\s*values\b|\bfixture\s*\(\s*\*\*|\bparametrize\b(?:(?!\bdef\s)[\s\S])*?\n\s*class\b/;
+const fileData = (code: string) => FIXTURE_PARAMS.test(code) || FILE_DATA.test(code);
 
 /** The findings split into groups judged once: the first of a group is judged, the others take its verdict. Findings
  * are grouped only when they are cases of one test (same project, file, image and first failure line) whose own
@@ -39,7 +43,7 @@ export function caseGroups(findings: Finding[], sources: Record<string, string>)
   for (const f of findings) {
     const source = f.file ? sources[f.file] : undefined;
     let key: string | null = null;
-    if (source !== undefined && !FIXTURE_PARAMS.test(codeText(source, f.file!))) {
+    if (source !== undefined && !fileData(codeText(source, f.file!))) {
       const decorators = testDecorators(source, f.func, f.file!);
       if (decorators !== null && !DATA_CASES.test(decorators)) {
         key = [sameTest(f), f.file, f.fallback ? "fallback" : "", firstLine(f.message)].join("\u0000");
@@ -59,9 +63,9 @@ export function caseGroups(findings: Finding[], sources: Record<string, string>)
 /** The verdict of `from` onto `to`, a case judged by the same call. */
 export function shareVerdict(from: Finding, to: Finding): void {
   [to.verdict, to.reason] = [from.verdict, from.reason];
-  if (from.dependsOn) to.dependsOn = from.dependsOn;
+  if (from.dependsOn && !to.dependsOn) to.dependsOn = from.dependsOn;
   if (from.judge) to.judge = from.judge;
-  to.sameAs = from.id;
+  if (from.verdict !== null) to.sameAs = from.id;
 }
 
 export async function challenge(findings: Finding[], o: { model: JsonModel; diff: string;
