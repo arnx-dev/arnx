@@ -3,6 +3,7 @@
 // verdicts and exit codes are unchanged.
 import { expect, test } from "bun:test";
 import { defaultMarks, exitCode, neededQuestions, nextSteps, parseMarks, rankGroups, render, sameCause, summary,
+  summaryStatus,
   type SuspectOutcome, yourCall }
   from "../src/report";
 import { finding, sampleReview, blankMarks } from "./helpers/review";
@@ -213,4 +214,55 @@ test("a suspect proven only by tests grouped under another suspect's cause is 's
   const md = render(sampleReview({ findings, groups, suspects: sus }));
   expect(md).toContain("proven only together with S3: its tests fail for the same cause (one fix makes both pass)");
   expect(md).toContain("4 suspected · 3 proven · 1 same cause");
+});
+
+const SRC = (n: number) => Array.from({ length: n }, (_, i) => `src/m${i}.py`);
+
+test("the status never says complete above changed source files nobody tested", () => {
+  // Declared under uncovered (a root project reviewed them, but review.yaml says its tests do not run there).
+  const declared = sampleReview({ sourceFiles: 3, uncovered: [{ path: "src/a.py", reason: "needs several services" }] });
+  const md = render(declared);
+  expect(md).not.toContain("Complete:");
+  expect(md).toContain("Partly covered: arnx saw no test reach 1 of the 3 changed source files below, so finding " +
+    "nothing there says nothing about them. Check them yourself, or review them on their own with `arnx review --range`.");
+  expect(md).toContain("Not covered (needs several services): `src/a.py`.");
+  expect(summary(declared, "review.md")).toContain("Partly covered: no test seen reaching 1 of 3 changed source files, " +
+    "so finding nothing there says nothing about them.");
+  expect(summary(declared, "review.md")).toContain("  Not tested (needs several services): src/a.py");
+  // A file that is not source (a README, a manifest) leaves the status as it was.
+  const doc = sampleReview({ sourceFiles: 1, uncovered: [{ path: "README.md", reason: "no project covers it" }] });
+  expect(render(doc)).toContain("Complete:");
+  // Listed by the text match and uncovered at once: counted once each.
+  const both = sampleReview({ sourceFiles: 3, uncovered: [{ path: "src/a.py", reason: "r" }],
+    untested: [{ project: "main", files: ["src/b.py", "src/a.py"], of: 2 }] });
+  expect(render(both)).toContain("reach 2 of the 3 changed");
+  // A test file in an older review's list is not a source file.
+  const old = sampleReview({ sourceFiles: 3, untested: [{ project: "main", files: ["src/b.py", "tests/test_b.py"], of: 3 }] });
+  expect(render(old)).toContain("reach 1 of the 3 changed");
+  // The terminal list is capped.
+  const many = sampleReview({ sourceFiles: 20, uncovered: SRC(10).map((path) => ({ path, reason: "web UI tests" })) });
+  expect(summary(many, "x")).toContain("  Not tested (web UI tests): " + SRC(10).slice(0, 8).join(", ") + ", … (+2 more)");
+});
+
+test("no changed source file reached reads not tested", () => {
+  const none = sampleReview({ findings: [], sourceFiles: 2, untested: [{ project: "main", files: ["a.py", "b.py"], of: 2 }] });
+  expect(render(none)).toContain("Not tested: arnx saw no test reach any of the 2 changed source files, so finding " +
+    "nothing says nothing about this change.");
+  expect(render(none)).not.toContain("Complete:");
+  expect(summary(none, "x")).toContain("Not tested: no test seen reaching any of 2 changed source files, so finding " +
+    "nothing says nothing.");
+  expect(summaryStatus(none)).toMatchObject({ problems: [], untested: 2, of: 2, none: true });
+  expect(exitCode(none)).toBe(0);
+  // A real fix proof means a test reached the change: partly covered.
+  const proof = sampleReview({ sourceFiles: 2, untested: [{ project: "main", files: ["a.py", "b.py"], of: 2 }],
+    fixProof: [{ testId: "t::x", project: "main", file: "t.py", beforeStatus: "fixed", beforeRuns: ["failed"],
+      beforeDetail: "d" }] });
+  expect(render(proof)).toContain("Partly covered: arnx saw no test reach 2 of the 2");
+  // Incomplete stays first and says its own thing.
+  const inc = sampleReview({ sourceFiles: 1, stop: "budget", untested: [{ project: "main", files: ["a.py"], of: 1 }] });
+  expect(render(inc)).toContain("Incomplete:");
+  expect(render(inc)).not.toContain("Not tested: arnx");
+  // Reviews saved before sourceFiles existed: the total comes from the files changed, so it never reads as none.
+  const older = sampleReview({ filesChanged: 4, uncovered: [{ path: "a.py", reason: "r" }] });
+  expect(render(older)).toContain("Partly covered: arnx saw no test reach 1 of the 4");
 });

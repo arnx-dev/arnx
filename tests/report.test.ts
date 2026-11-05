@@ -180,12 +180,17 @@ test("terminal colours: marks and status coloured on a terminal, plain otherwise
   expect(colorFor({ isTTY: true }, { NO_COLOR: "" })).toBe(false);
   expect(colorFor({ isTTY: false }, { FORCE_COLOR: "1" })).toBe(true);
   expect(colorFor({ isTTY: false }, {})).toBe(false);
-  const text = "Status: complete.\n  ✗ F1 confirmed\n  ? Q1 x\n  · F2 disputed";
+  const text = "Not tested: no test seen.\n  ✗ F1 confirmed\n  ? Q1 x\n  · F2 disputed";
   expect(colorLines(text, paint(false))).toBe(text);
   const on = colorLines(text, paint(true));
   expect(on).toContain("\x1b[31m✗\x1b[0m");
   expect(on).toContain("\x1b[33m?\x1b[0m");
-  expect(on).toContain("\x1b[32mStatus: complete.\x1b[0m");
+  // The status lines arnx prints (not a "Status:" label it never prints) are yellow.
+  expect(on).toContain("\x1b[33mNot tested: no test seen.\x1b[0m");
+  for (const head of ["Incomplete: x.", "Partly covered: 1 of 2."]) {
+    expect(colorLines(head, paint(true))).toBe(`\x1b[33m${head}\x1b[0m`);
+  }
+  expect(colorLines("Status: complete.", paint(true))).toBe("Status: complete.");
 });
 
 test("confirmed findings come marked real; disputed and question-bound ones do not", () => {

@@ -132,8 +132,8 @@ Every command takes `--json`: one JSON object on stdout, the text on stderr, not
 ## The report
 
 review.md opens with a status: what was tested, and what was not and why. Changed source files that no arnx test refers
-to are listed by name, and the review then says "partly covered" instead of "complete": finding nothing in a file no
-test touched says nothing about it. Findings that share one cause are grouped into an issue and explained as input,
+to are listed by name, and the review then says "partly covered" instead of "complete", or "not tested" when no test
+was seen reaching any changed source file: finding nothing in a file no test touched says nothing about it. Findings that share one cause are grouped into an issue and explained as input,
 actual, expected and why it matters (written by the second model after the verdicts), with a severity estimate that puts
 the most severe issues first and minor ones (leftover debug output, logging, test helpers) last. Each issue has one mark
 for all its tests: an issue backed by a confirmed test comes pre-marked real, so `arnx accept` can follow straight away

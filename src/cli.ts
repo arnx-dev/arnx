@@ -2094,12 +2094,15 @@ export function reviewJson(r: Review, reviewMd: string, reviewJsonPath: string)
   const st = summaryStatus(r);
   const rows = summaryRows(r);
   const needed = neededQuestions(r);
-  const problems = st.problems.length ? st.problems : st.untested ? [`no test was seen reaching ${st.untested} of ${st.of} ` +
-    "changed source files, so finding nothing there says nothing about them"] : [];
+  const problems = st.problems.length ? st.problems
+    : st.none ? [`no test was seen reaching any of ${st.of} changed source files, so finding nothing says nothing`]
+    : st.untested ? [`no test was seen reaching ${st.untested} of ${st.of} changed source files, so finding nothing ` +
+      "there says nothing about them"] : [];
   return [code === 1 ? "findings" : code === 2 ? "incomplete" : "clean", code, {
     review_id: r.id, review_md: reviewMd, review_json: reviewJsonPath, change: r.change, files_changed: r.filesChanged,
     added: r.added, removed: r.removed,
-    status: st.problems.length ? "incomplete" : st.untested ? "partly-covered" : "complete",
+    status: st.problems.length ? "incomplete" : st.none ? "not-tested" : st.untested ? "partly-covered" : "complete",
+    ...(r.sourceFiles !== undefined ? { source_files: r.sourceFiles } : {}),
     issues: rows.length, findings: rows.map((row) => ({ ids: row.ids, state: row.state, confirmed: row.mark === "✗",
       regression: row.regression, projects: row.projects, title: row.title, severity: row.severity ?? null,
       ...(row.fallback ? { fallback: true } : {}) })),
@@ -2108,7 +2111,7 @@ export function reviewJson(r: Review, reviewMd: string, reviewJsonPath: string)
       project: r.questionProjects[i] ?? r.projects[0] ?? "main", optional: !needed.has(`Q${i + 1}`) })),
     tests_written: r.testsWritten, cost_usd: r.costUsd, seconds: r.seconds, untracked_left_out: r.untrackedLeftOut ?? 0,
     problems, provider_failures: (r.providerFailures ?? []).map(failureLine),
-    not_tested: [...(r.untested ?? []).flatMap((u) => u.files), ...r.uncovered.map((u) => u.path)],
+    not_tested: [...new Set([...(r.untested ?? []).flatMap((u) => u.files), ...r.uncovered.map((u) => u.path)])],
     your_call: yourCall(r, rows) || null, next: nextSteps(r, rows),
   }];
 }

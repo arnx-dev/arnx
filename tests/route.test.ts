@@ -182,3 +182,25 @@ test("an entry naming a project's root stays a dependency even when that root ho
   expect(routed(r)).toEqual(["api", "top"]);
   expect(r.checkOnly).toEqual([]);
 });
+
+// A root project that owns everything (`**`) while review.yaml lists a path as uncovered (its tests do not run there):
+// the file is still routed, but the report must not call it tested.
+const broad = (extra: string) => parseReviewFile([
+  "version: 1", "projects:", "  top:", "    root: .", "    language: typescript", "    image: i",
+  "    test_command: npx vitest run {targets}", "    owns:", "      - \"**\"", extra,
+  "uncovered:", "  - {path: /packages/, reason: needs several services}", ""].join("\n"));
+
+test("a file a root project owns only by ** stays listed when review.yaml lists it as uncovered", () => {
+  const f = broad("");
+  const r = route(f, ["packages/db/index.ts", "tools/x.ts"], 4);
+  expect(r.routed.map((x) => [x.project.name, x.owned])).toEqual([["top", ["packages/db/index.ts", "tools/x.ts"]]]);
+  expect(r.declared).toEqual([{ path: "packages/db/index.ts", reason: "needs several services" }]);
+  expect(r.uncovered).toEqual([]);
+});
+
+test("a project's own root beats a broad uncovered entry", () => {
+  const f = broad("  env:\n    root: packages/env\n    language: typescript\n    image: i\n" +
+    "    test_command: npx vitest run {targets}\n    owns: [packages/env/]");
+  const r = route(f, ["packages/env/src/a.ts", "packages/db/index.ts"], 4);
+  expect(r.declared).toEqual([{ path: "packages/db/index.ts", reason: "needs several services" }]);
+});

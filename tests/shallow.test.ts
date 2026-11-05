@@ -200,6 +200,24 @@ test("checks the read itself", () => {
   expect(shallowKind(py, "test_other", () => true)).toBeNull();
 });
 
+test("a test that greps a stylesheet, or an or-chain over read text, is source-text", () => {
+  const css = "def test_theme():\n    text = open('web/theme.css').read()\n    assert '.dark' in text\n";
+  expect(shallowKind(css, "test_theme")).toBe("source-text");
+  const less = "def test_vars():\n    t = Path('web/vars.less').read_text()\n    assert '@a' in t\n";
+  expect(shallowKind(less, "test_vars")).toBe("source-text");
+  const orChain = "def test_any():\n    t = Path('app/x.py').read_text()\n    assert 'a' in t or 'b' in t or \"c\" in t\n";
+  expect(shallowKind(orChain, "test_any")).toBe("source-text");
+  // A loop variable over code paths: each file is read as text.
+  const loop = "def test_each():\n    for p in sorted(Path('web').glob('**/*.less')):\n        t = p.read_text()\n" +
+    "        assert 'x' in t or 'y' in t\n";
+  expect(shallowKind(loop, "test_each")).toBe("source-text");
+  const direct = "def test_each2():\n    for p in [Path('a.scss'), Path('b.vue')]:\n        assert 'x' in p.read_text()\n";
+  expect(shallowKind(direct, "test_each2")).toBe("source-text");
+  // Reading a fixture or running what was read is still behaviour.
+  const run = "def test_run():\n    t = open('web/theme.css').read()\n    exec(t)\n    assert 'x' in t\n";
+  expect(shallowKind(run, "test_run")).toBeNull();
+});
+
 test("a review's kept tests carry a suffix test runners do not match; older reviews are renamed, both read", () => {
   const repo = tmp();
   const old = join(repo, ".arnx", "reviews", "20261021-2a4a65", "projects", "app", "tests", "__tests__", "gen");

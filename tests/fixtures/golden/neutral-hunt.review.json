@@ -64,6 +64,7 @@
   ],
   "not_reviewed": [],
   "uncovered": [],
+  "source_files": 1,
   "question_projects": [
     "svc"
   ],

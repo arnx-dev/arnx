@@ -50,7 +50,7 @@ function full(): Record<string, unknown> {
     acceptedTestsEdited: [".arnx/tests/tests/arnx/r1/test_a.py"], findings: [{ ...f, dependsOn: "Q1", suspect: "S1", judge: "openai:x", sameAs: "F0", shallow: "existence",
     before: { status: "regression", detail: "passes before", runs: ["passed", "passed", "passed"] } }],
   groups: [{ findings: ["F1"], title: "t", input: "i", actual: "a", expected: "e", consequence: "c", severity: "high" }],
-  untested: [{ project: "main", files: ["a.py"], of: 2 }],
+  sourceFiles: 2, untested: [{ project: "main", files: ["a.py"], of: 2 }],
   // Never both in one review (one is opted in, the other not); here only to see each written.
   untrackedIncluded: ["notes.md"], untrackedLeftOut: 1,
   leftOutFiles: [{ path: "k.ts", line: 1, label: "a private key" }], couldNotRun: [{ test: "t.py::a", needs: "k.ts" }], fakedKeys: ["f.ts"], skippedTests: 1, leftOutTouched: ["k.ts"],

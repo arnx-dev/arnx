@@ -221,7 +221,8 @@ A summary of the review, as the terminal shows it. The whole review is `review_j
 | `review_md`, `review_json` | string | The review for people and for programs, relative to the repository. |
 | `change` | string | What was reviewed, such as `uncommitted (base 1a2b3c4)`. |
 | `files_changed`, `added`, `removed` | number | Files in the change; lines added and removed. |
-| `status` | string | `complete`, `incomplete` (see `problems`), or `partly-covered` (changed source files no test refers to: `not_tested`). |
+| `status` | string | `complete`, `incomplete` (see `problems`), `partly-covered` (some changed source files no test was seen reaching: `not_tested`), or `not-tested` (none of them was; the exit code stays 0, so CI decides on `status`). |
+| `source_files` | number | Optional. Unique changed source files in the change; absent in older reviews. |
 | `issues` | number | Entries in `findings`: the summary's numbered rows. |
 | `findings` | array | One entry per issue the change may have caused, as the summary groups and orders them (most severe first): `{ ids, state, confirmed, regression, projects, title, severity }`. `ids`: the findings (`F1`) with this cause; `state`: their verdicts in words (`confirmed`, `disputed`, `not challenged`, `depends on Q1`, or counts such as `1 confirmed, 1 disputed`); `confirmed`: one of them is confirmed (exit 1); `regression`: one passed before the change; `title`: the problem in a few words; `severity`: `high`, `medium`, `low` or `null` (the grouping model's estimate). |
 | `pre_existing` | array of strings | Findings that fail with the same message before the change; never the exit code. |
@@ -232,7 +233,7 @@ A summary of the review, as the terminal shows it. The whole review is `review_j
 | `untracked_left_out` | number | Untracked files not sent (0 when none). |
 | `problems` | array of strings | Why the review is incomplete or only partly covered, in words; empty when complete. |
 | `provider_failures` | array of strings | A sentence per model provider that was down or refused its key; empty when none. |
-| `not_tested` | array of strings | Changed files no arnx test refers to, and files no project covers. |
+| `not_tested` | array of strings | Changed files no arnx test was seen reaching, and files no project covers or whose tests review.yaml says do not run. |
 | `your_call` | string or null | What only the user can decide, as the summary says it: issues not proven (disputed, or waiting on a question) and the questions an issue waits on; or that every issue comes marked real. `null` when findings are marked one by one (not grouped) or there are none. |
 | `next` | array of strings | `arnx accept` alone when every issue comes marked real and no issue waits on a question; else `arnx triage`, `arnx accept` when there are findings or questions (the user's); else empty. |
 

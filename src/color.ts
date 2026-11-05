@@ -29,8 +29,7 @@ export function colorLines(text: string, p: Paint): string {
     if (/^\s*✓/.test(l)) return l.replace("✓", p.green("✓"));
     if (/^\s*·/.test(l)) return p.dim(l);
     if (/^(arnx review |Next:|Then:|All accepted tests pass)/.test(l)) return p.bold(l);
-    if (/^Status: complete/.test(l)) return p.green(l);
-    if (/^Status: (partly|incomplete)/.test(l)) return p.yellow(l);
+    if (/^(Incomplete|Partly covered|Not tested):/.test(l)) return p.yellow(l);
     if (/^\S[^:]*: \d+ passed, 0 failing/.test(l)) return p.green(l);
     if (/^\S[^:]*: \d+ passed, \d+ failing/.test(l)) return p.red(l);
     return l;

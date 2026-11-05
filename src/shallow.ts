@@ -10,7 +10,7 @@ import { codeText } from "./codetext";
 
 export type Shallow = "source-text" | "existence";
 
-const CODE_EXT = String.raw`\.(?:[cm]?[jt]sx?|py|rs|go|java|kt|rb|php|cs)`;
+const CODE_EXT = String.raw`\.(?:[cm]?[jt]sx?|py|rs|go|java|kt|rb|php|cs|less|css|scss|html|vue|svelte)`;
 const CODE_FILE = new RegExp(String.raw`['"\`]([^'"\`\n]*${CODE_EXT})['"\`]`);
 const CODE_NAME = new RegExp(`${CODE_EXT}$`);
 /** A call that reads a file by its path: Node's readFile, Python's open (not Popen, urlopen or a method named open),
@@ -31,6 +31,8 @@ const EXISTS_JS = /^expect\s*\(\s*typeof\b[^\n]*\)\s*\.toBe\s*\(\s*['"]function[
 const EXISTS_PY = /^assert\s+(?:hasattr|callable)\s*\(/;
 /** A name given a value at the start of a line: `const src = …`, `SOURCE = …`. */
 const ASSIGNS = /^\s*(?:export\s+)?(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*(?::[^=\n]*)?=(?!=)/;
+/** Python's `for p in …:`. */
+const FOR_IN = /^\s*for\s+([A-Za-z_]\w*)\s+in\b/;
 /** Python's `with open(...) as f:`: the file it names is read through `f.read()`. */
 const WITH_OPEN = /\bwith\b[^\n]*\bas\s+([A-Za-z_]\w*)\s*:/;
 
@@ -237,6 +239,12 @@ export function shallowKind(source: string | undefined, func: string, isSource?:
   // A name given part of a text name (`src.slice(0, 80)`, `src.split("\n")`) is text too.
   const derived = (rhs: string) => names.some((n) => new RegExp(String.raw`^${esc(n)}(?![\w$])(?:\s*\.\s*\w+\s*\([^()]*\))+$`).test(rhs));
   for (const l of scope) {
+    // A loop variable over code paths (`for p in Path("web").glob("*.less")`) is a path.
+    const loop = FOR_IN.exec(l);
+    if (loop && !READ_CALL.test(l) && !FIXTURE_DIR.test(l)) {
+      const p = codePathIn(l);
+      if (p !== null && (isSource ? isSource(p) : true)) paths.push(loop[1]!);
+    }
     const w = WITH_OPEN.exec(l);
     if (w && reads(l)) handles.push(w[1]!);
     const m = ASSIGNS.exec(l);

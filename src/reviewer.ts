@@ -27,7 +27,7 @@ import { baseName, funcOf, ownerFile } from "./outcomes";
 import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, resumes, withCalls } from "./outage";
 import { CONTEXT_LIMIT, contextPack } from "./context";
 import { elsewhereNote, leftOutNote, PROMPT_VERSION, type Suspect } from "./prompts";
-import { changedSources, databaseEnv, framed, framesIn, loadedTests, notReached, untestedFiles } from "./untested";
+import { changedSources, databaseEnv, framed, framesIn, isSourcePath, loadedTests, notReached, untestedFiles } from "./untested";
 import { type AgentReport, type Checked, type Finding, type FixProof, hasReport, parseReports, type ProjectStat, type Review,
   save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause } from "./report";
 import { dockerSteps, type SessionFactory } from "./sandbox";
@@ -390,6 +390,8 @@ export async function runReview(repo: string, o: { settings: Settings;
     const projectStats: ProjectStat[] = [];
     const checked: Checked[] = [];
     const untested: Untested[] = [];
+    const sourceSet = new Set<string>();
+    const declaredPaths = new Set(routing.declared.map((d) => d.path));
     const diffs: Record<string, string> = {};
     const suspects: SuspectOutcome[] = [];
     const local = (): LocalBrain => {
@@ -635,7 +637,9 @@ export async function runReview(repo: string, o: { settings: Settings;
       }
       Object.assign(sources, rnd.files);
       const ownedNow = file.legacy ? change.files : owned;
-      const of = changedSources(ownedNow, adapterFor(cfg)).length;
+      const ownSources = changedSources(ownedNow, adapterFor(cfg));
+      const of = ownSources.length;
+      for (const f of ownSources) sourceSet.add(f);
       if (of) {
         const adapter = adapterFor(cfg);
         // What a test is shown to reach: its stack frames, and the names its code uses. A file whose tests did not load,
@@ -652,7 +656,9 @@ export async function runReview(repo: string, o: { settings: Settings;
         const named = (report.not_tested ?? []).flatMap((n) => !isObject(n) ? [] :
           sources.filter((x) => x === text(n.file) || x.endsWith(`/${text(n.file)}`)));
         const shown = new Set(framed(sources, frames));
-        const files = [...new Set([...missed, ...named.filter((f) => !shown.has(f)), ...(rnd.dbUntested ?? []).filter((f) => !shown.has(f))])];
+        // A file review.yaml lists as uncovered is reported there, once.
+        const files = [...new Set([...missed, ...named.filter((f) => !shown.has(f)), ...(rnd.dbUntested ?? []).filter((f) => !shown.has(f))])]
+          .filter((f) => !declaredPaths.has(f));
         for (const f of files) if ((rnd.dbUntested ?? []).includes(f)) reasons[f] = "it holds SQL, and no test that connects to the database was seen reaching it (arnx checks names, not what ran)";
         for (const n of report.not_tested ?? []) {
           if (!isObject(n)) continue;
@@ -837,7 +843,9 @@ export async function runReview(repo: string, o: { settings: Settings;
       language: first.language, projects: routing.routed.map((r) => r.project.name), notReviewed: routing.notReviewed,
       ...(routing.checkOnly.length && !file.legacy ? { typecheckOnly: routing.checkOnly.map((c) => ({
         project: c.project.name, by: c.by })) } : {}),
-      uncovered: routing.uncovered, questionProjects: questionProjects.slice(0, s.maxQuestions), writeDirs,
+      uncovered: [...routing.uncovered, ...routing.declared],
+      sourceFiles: new Set([...sourceSet, ...[...routing.uncovered, ...routing.declared].map((u) => u.path)
+        .filter(isSourcePath)]).size, questionProjects: questionProjects.slice(0, s.maxQuestions), writeDirs,
       projectStats,
       groups, checked, ...(untested.some((u) => u.files.length) ? { untested } : {}),
       ...(suspects.length ? { suspects } : {}),

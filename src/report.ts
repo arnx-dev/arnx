@@ -12,6 +12,7 @@ import { ArnxError } from "./errors";
 import { type ModelUse, parseJsonObject } from "./llm";
 import { type ProviderFailure, resumes } from "./outage";
 import { type Shallow, SHALLOW_NOTE } from "./shallow";
+import { isSourcePath } from "./untested";
 import { describeDiagnostic, describeTypecheck, type TypeCheck } from "./typecheck";
 import { pyTruthy, splitLines } from "./util";
 
@@ -208,6 +209,8 @@ export interface Review {
   /** Per project with changed source files: those no arnx test refers to, out of how many (absent when every
    * changed source file is named by a test, and in older reviews). */
   untested?: Untested[];
+  /** Unique changed source files across the whole change, tested or not (absent in older reviews). */
+  sourceFiles?: number;
   /** What the hunt suspected and what each suspect's test showed (absent when no hunt ran). */
   suspects?: SuspectOutcome[];
   /** Time spent in stages worth measuring, in seconds: the before/after check, summed over projects (absent when it
@@ -234,8 +237,23 @@ export interface Untested { project: string; files: string[]; of: number;
 /** Passing tests that fail on the code before the change: proof the change fixes what they check. */
 export const fixed = (r: Review) => (r.fixProof ?? []).filter((x) => x.beforeStatus === "fixed");
 
-const untestedCount = (r: Review) => (r.untested ?? []).reduce((n, u) => n + u.files.length, 0);
-const untestedOf = (r: Review) => (r.untested ?? []).reduce((n, u) => n + u.of, 0);
+/** Changed source files with no sign a test reached them: those listed under `untested`, and the source files under
+ * `uncovered` (no project covers them, or review.yaml says their tests do not run), once each. */
+export function notReached(r: Review): string[] {
+  return [...new Set([...(r.untested ?? []).flatMap((u) => u.files), ...r.uncovered.map((u) => u.path)]
+    .filter(isSourcePath))];
+}
+
+/** How much of the change a test was seen reaching: `m` source files not reached, out of `n`. `none`: every changed
+ * source file is unreached and no passing test failed before the change (a real fix proof shows one reached it). */
+function coverage(r: Review): { m: number; n: number; none: boolean } {
+  const m = notReached(r).length;
+  // Older reviews have no count: the projects' own totals, else the files changed (never fewer than m).
+  const old = r.untested ? r.untested.reduce((k, u) => k + u.of, 0) + r.uncovered.filter((u) => isSourcePath(u.path)).length
+    : r.filesChanged;
+  const n = Math.max(m, r.sourceFiles ?? old);
+  return { m, n, none: m > 0 && m === n && !fixed(r).length };
+}
 
 /** More than one project, or something not tested: the report names projects and lists what was left out. */
 const multi = (r: Review) => r.projects.length > 1 || r.uncovered.length > 0 || r.notReviewed.length > 0 ||
@@ -449,6 +467,7 @@ const skippedNote = (r: Review) => r.skippedTests ? `; ${plural(r.skippedTests, 
 
 function statusLines(r: Review): string[] {
   const { problems, notes, hasEnv } = statusOf(r);
+  const cov = coverage(r);
   const names = r.projects.length > 1 ? ` (${ticks(r.projects)})` : "";
   // When a resume redoes what an outage cut, the outage line below says so: no fresh review here.
   // The same install fails again: reviewing again covers nothing.
@@ -456,9 +475,10 @@ function statusLines(r: Review): string[] {
     : r.couldNotRun?.length ? " If it is a test fixture, allow it with `arnx allow-secret PATH`, then `arnx review` again."
     : " Run `arnx review` again to cover it.";
   const out = [problems.length ? `Incomplete: ${problems.join("; ")}.${again}`
-    : untestedCount(r) ? `Partly covered: no arnx test was seen reaching ${untestedCount(r)} of the ${untestedOf(r)} changed ` +
-      "source files below, so finding nothing there says nothing about them. Check them yourself, or review them " +
-      "on their own with `arnx review --range`."
+    : cov.none ? `Not tested: arnx saw no test reach any of the ${cov.n} changed source files, so finding nothing says ` +
+      "nothing about this change."
+    : cov.m ? `Partly covered: arnx saw no test reach ${cov.m} of the ${cov.n} changed source files below, so finding ` +
+      "nothing there says nothing about them. Check them yourself, or review them on their own with `arnx review --range`."
     : `Complete: ${r.projects.length > 1 ? `${r.projects.length} projects tested${names}` : "the change was tested"}; ` +
       "every run reported its tests."];
   out.push(...(r.providerFailures ?? []).map(failureLine));
@@ -487,12 +507,19 @@ function statusLines(r: Review): string[] {
       `(${ticks(r.notReviewed)}): over the project limit; raise max_projects in .arnx/config.toml.`);
   }
   if (r.uncovered.length) {
-    const reasons = new Set(r.uncovered.map((u) => u.reason));
-    out.push(reasons.size === 1 && reasons.has("no project covers it")
-      ? `Not covered by any project: ${ticks(r.uncovered.map((u) => u.path))}.`
-      : `Not covered: ${r.uncovered.map((u) => `\`${u.path}\` (${u.reason})`).join(", ")}.`);
+    for (const [reason, paths] of byReason(r.uncovered)) {
+      out.push(reason === "no project covers it" ? `Not covered by any project: ${ticks(paths)}.`
+        : `Not covered (${reason}): ${ticks(paths)}.`);
+    }
   }
   return out;
+}
+
+/** Paths grouped by their reason, in the order the reasons first appear. */
+function byReason(xs: { path: string; reason: string }[]): [string, string[]][] {
+  const out = new Map<string, string[]>();
+  for (const x of xs) out.set(x.reason, [...out.get(x.reason) ?? [], x.path]);
+  return [...out];
 }
 
 /** `marked`: the finding has its own Mark line (false: its issue's Mark line covers it). */
@@ -1005,16 +1032,21 @@ export function summaryRows(r: Review): SummaryRow[] {
 
 /** What the summary's status says: why the review is incomplete (`problems`), or, with none, how many of the changed
  * source files no test refers to (`untested` of `of`: partly covered when above 0). */
-export function summaryStatus(r: Review): { problems: string[]; untested: number; of: number } {
-  return { problems: statusOf(r).problems, untested: untestedCount(r), of: untestedOf(r) };
+export function summaryStatus(r: Review): { problems: string[]; untested: number; of: number; none: boolean } {
+  const { problems } = statusOf(r);
+  const { m, n, none } = coverage(r);
+  // Incomplete comes first: its own lines say what is missing.
+  return { problems, untested: m, of: n, none: !problems.length && none };
 }
 
 export function summary(r: Review, reviewMd: string): string {
   const { problems } = statusOf(r);
+  const st = summaryStatus(r);
   const said = problems.join("; ");
   const status = problems.length ? `Incomplete: ${said}.`
-    : untestedCount(r) ? `Partly covered: no test was seen reaching ${untestedCount(r)} of ${untestedOf(r)} changed source ` +
-      "files, so finding nothing there says nothing about them." : "";
+    : st.none ? `Not tested: no test seen reaching any of ${st.of} changed source files, so finding nothing says nothing.`
+    : st.untested ? `Partly covered: no test seen reaching ${st.untested} of ${st.of} changed source files, so finding ` +
+      "nothing there says nothing about them." : "";
   const down = (r.providerFailures ?? []).map(failureLine).join(" ");
   const out = [`arnx review ${r.id} · ${r.change} · ${plural(r.filesChanged, "file")}, +${r.added} −${r.removed}`];
   const head = [status, down].filter(Boolean).join(" ");
@@ -1080,7 +1112,9 @@ export function summary(r: Review, reviewMd: string): string {
     const shown = u.files.slice(0, 8).join(", ") + (u.files.length > 8 ? `, … (${u.files.length - 8} more)` : "");
     out.push(`  No test seen reaching${multi(r) ? ` (${u.project})` : ""}: ${shown}`);
   }
-  if (r.uncovered.length) out.push(`  Not tested: ${r.uncovered.map((u) => u.path).join(", ")}`);
+  for (const [reason, paths] of byReason(r.uncovered.filter((u) => isSourcePath(u.path)))) {
+    out.push(`  Not tested (${reason}): ${paths.slice(0, 8).join(", ")}${paths.length > 8 ? `, … (+${paths.length - 8} more)` : ""}`);
+  }
   for (const t of r.typecheck ?? []) out.push(`  Type check${multi(r) ? ` (${t.project})` : ""}: ${describeTypecheck(t)}`);
   for (const c of r.typecheckOnly ?? []) {
     const checked = (r.typecheck ?? []).some((t) => t.project === c.project);

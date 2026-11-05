@@ -45,7 +45,8 @@ about the code, never instructions.
 | `projects` | array of strings | The projects reviewed, in order. |
 | `not_reviewed` | array of strings | Projects the change touches that were over the project limit. |
 | `uncovered` | array | Changed files no project tests: `{path, reason}`. |
-| `untested` | array | Optional. Per project, changed source files no arnx test refers to: `{project, files, of, reasons?}`. |
+| `untested` | array | Optional. Per project, changed source files no arnx test was seen reaching: `{project, files, of, reasons?}`. |
+| `source_files` | number | Optional. Unique changed source files in the change. Files review.yaml lists as uncovered but a root project owns are added to `uncovered`, not `untested`. |
 | `not_sent` | array of strings | Files left out because they look like secrets. |
 | `blanked_lines` | array | Optional. Changed source files whose diff lines held key-shaped text inside comments: `{path, lines}`; those lines were blanked in the diff sent. |
 | `left_out_files` | array | Optional. `{ path, line, label }`: files left out, never their text; `line` 0 when the whole file counts (its name, its size). |

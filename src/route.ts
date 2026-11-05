@@ -13,6 +13,9 @@ export interface Routed { project: ReviewConfig; owned: string[]; used: string[]
 /** A project reached only through entries that hold other projects, its changed files reviewed by their owners. */
 export interface CheckOnly { project: ReviewConfig; used: string[]; by: string[] }
 export interface Routing { routed: Routed[]; notReviewed: string[]; uncovered: { path: string; reason: string }[];
+  /** Files routed to a project that owns them only by `**` while review.yaml lists them as uncovered: reviewed with
+   * the rest, but not tested, and reported so. `uncovered` keeps its meaning (no project covers it). */
+  declared: { path: string; reason: string }[];
   checkOnly: CheckOnly[] }
 
 export const NO_PROJECT = "no project covers it";
@@ -36,6 +39,9 @@ export function route(file: ReviewFile, changed: string[], maxProjects: number):
   });
   const reasons = file.uncovered.map((u) => ({ test: matcher(u.path), reason: u.reason }));
   const uncovered: Routing["uncovered"] = [];
+  const declared: Routing["declared"] = [];
+  // A project that owns all by `**` does not own a path in particular: the entry under uncovered says what it is.
+  const broad = (p: { project: ReviewConfig }) => p.project.owns.some((o) => bare(o) === "**");
   for (const path of changed) {
     let covered = false;
     for (const p of projects) {
@@ -49,6 +55,11 @@ export function route(file: ReviewFile, changed: string[], maxProjects: number):
       }
     }
     if (!covered) uncovered.push({ path, reason: reasons.find((r) => r.test(path))?.reason ?? NO_PROJECT });
+    else {
+      const listed = reasons.find((r) => r.test(path));
+      // A project's own root (owns without `**`) wins over a broad entry.
+      if (listed && !projects.some((p) => p.owns(path) && !broad(p))) declared.push({ path, reason: listed.reason });
+    }
   }
   const hit = projects.filter((p) => p.owned.length || p.used.length)
     .sort((a, b) => b.owned.length - a.owned.length || (a.project.name < b.project.name ? -1 : 1));
@@ -71,7 +82,7 @@ export function route(file: ReviewFile, changed: string[], maxProjects: number):
   return {
     routed: routed.map(({ project, owned, used }) => ({ project, owned, used })),
     notReviewed: notReviewed.map((p) => p.project.name),
-    uncovered, checkOnly,
+    uncovered, declared, checkOnly,
   };
 }
 

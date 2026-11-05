@@ -127,6 +127,11 @@ test("review --json: the summary's findings, questions, status and next, from th
   expect(partly.slice(0, 2)).toEqual(["clean", 0]);
   expect(partly[2]).toMatchObject({ status: "partly-covered", not_tested: ["app/x.py"],
     problems: ["no test was seen reaching 1 of 3 changed source files, so finding nothing there says nothing about them"] });
+  const none = reviewJson(sampleReview({ findings: [], questions: [], sourceFiles: 2,
+    untested: [{ project: "main", files: ["app/x.py", "app/y.py"], of: 2 }] }), "m", "j");
+  expect(none.slice(0, 2)).toEqual(["clean", 0]);
+  expect(none[2]).toMatchObject({ status: "not-tested", source_files: 2, not_tested: ["app/x.py", "app/y.py"],
+    problems: ["no test was seen reaching any of 2 changed source files, so finding nothing says nothing"] });
 });
 
 test("triage --json draws nothing and changes nothing: the marks and answers as review.md holds them", async () => {

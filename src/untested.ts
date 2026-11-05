@@ -56,9 +56,12 @@ function referredTo(path: string, tests: Record<string, string>): boolean {
   return INDEX.includes(stem) && Object.entries(tests).some(([t, body]) => loadsRelatively(path, t, body));
 }
 
+/** Whether a path is a source file a review must cover: not a test or a test folder's file. */
+export const isSourcePath = (p: string) => SOURCE.test(p) && !isTestPath(p) && !TEST_DIR.test(p);
+
 /** Changed source files owned by the project, without its own tests and test helpers. */
 export function changedSources(owned: string[], adapter: Adapter): string[] {
-  return owned.filter((p) => SOURCE.test(p) && !isTestPath(p) && !TEST_DIR.test(p) &&
+  return owned.filter((p) => isSourcePath(p) &&
     !adapter.isTestFile(posix.basename(p)) && !adapter.isSupportFile(posix.basename(p)));
 }
 
