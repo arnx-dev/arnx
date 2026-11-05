@@ -1995,8 +1995,8 @@ const SHOWN_FAILING = 5;
 /** Why a setup failed, told apart: the environment never ran, or it runs and the current code fails tests. */
 /** What lets in the files a stopped setup needs: secret-looking ones are allowed, .arnxignore'd ones excepted. */
 export function neededSteps(needed: NeededFile[]): string[] {
-  const secret = needed.filter((f) => f.secret).map((f) => f.path);
-  const ignored = needed.filter((f) => !f.secret).map((f) => `!${f.path}`);
+  const secret = needed.filter((f) => f.secret || f.faked).map((f) => f.path);
+  const ignored = needed.filter((f) => !f.secret && !f.faked).map((f) => `!${f.path}`);
   return [...secret.length ? [`arnx allow-secret ${secret.join(" ")}`] : [],
     ...ignored.length ? [`add ${ignored.join(" ")} to .arnxignore`] : []];
 }
