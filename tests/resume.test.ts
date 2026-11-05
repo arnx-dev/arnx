@@ -1,12 +1,13 @@
 // A review cut off halfway (a dropped connection) continues with --resume: finished project rounds and verdicts are
 // kept, not paid for again.
 import { beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { generateKeyPairSync } from "node:crypto";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { ModelError } from "../src/errors";
-import { nextSteps } from "../src/report";
+import { nextSteps, render } from "../src/report";
 import { resumable, roundCut, runReview } from "../src/reviewer";
 import type { SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
@@ -196,7 +197,7 @@ test("a model call failing right after the hunt is redone on resume, reusing the
   expect(second.calls).toHaveLength(1); // the second hunter
   const agent = new ScriptedAgent(spreadTests());
   const judge = new FakeJson([{ verdict: "confirmed", reason: "sign" }, { groups: [] }]);
-  const { review } = await runReview(r, { settings: SETTINGS, agentModel: agent, challenger: judge, hunter: judge,
+  const { review } = await runReview(r, { settings: SETTINGS, agentModel: agent, challenger: judge,
     sessionFactory: spreadSession, hunt: true, resume: true });
   expect(review.id).toBe(cut.review.id);
   // no hunter ran: the only calls to the second model judge the test
@@ -333,4 +334,61 @@ test("a resume gives the model no route to a real private key, whatever the save
   const sent = JSON.stringify(agent.calls) + judge.calls.join("\n");
   expect(sent).toContain("S1 `svc/calc.py:2`");
   for (const l of body.filter((x) => x.length >= 16)) expect(sent).not.toContain(l);
+});
+
+// --- a folder a real outage cut, from an earlier arnx: no outage in its report, no stamp ------------------------------------
+
+/** The saved cut folder of tests/fixtures/cut-folder as `r`'s review of its current change. */
+function planted(r: string): string {
+  const diffSha = createHash("sha256").update(spawnSync("git", ["diff", "HEAD"], { cwd: r, encoding: "utf8" }).stdout).digest("hex");
+  const rdir = join(r, ".arnx/reviews/20261104-aaaaaa");
+  cpSync(join(import.meta.dir, "fixtures/cut-folder"), rdir, { recursive: true });
+  renameSync(join(rdir, "projects/main"), join(rdir, "projects/svc"));
+  writeFileSync(join(rdir, "state.json"), JSON.stringify({ change: "uncommitted changes", diff_sha256: diffSha }) + "\n");
+  return rdir;
+}
+
+test("a review an earlier arnx cut, whose report names no outage, resumes: nothing is hunted again", async () => {
+  const r = huntRepo();
+  const rdir = planted(r);
+  expect(existsSync(join(rdir, "review.json"))).toBe(true);
+  expect(JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")).provider_failures).toBeUndefined();
+  const agent = new ScriptedAgent(spreadTests());
+  const judge = new FakeJson([{ verdict: "confirmed", reason: "sign" }, { groups: [] }]);
+  const { review } = await runReview(r, { settings: SETTINGS, agentModel: agent, challenger: judge, hunt: true,
+    sessionFactory: spreadSession, resume: true });
+  expect(review.id).toBe("20261104-aaaaaa");
+  expect(String(agent.calls[0]!.messages[0]!.content)).toContain("S1 `svc/calc.py:2`: spread is negative");
+  expect(judge.calls.some((c) => c.includes("Look for defects"))).toBe(false);
+  expect(review.findings.map((f) => f.verdict)).toEqual(["confirmed"]);
+  expect(review.costUsd).toBeGreaterThan(0.12); // the cut attempt and its second hunter stay in the cost
+});
+
+test("a review cut under another review.yaml, model or prompt is run fresh, and says so", async () => {
+  const r = huntRepo();
+  const { cut } = await cutAfterHunt(r);
+  expect(typeof stateOf(cut.rdir).stamp).toBe("string");
+  writeFileSync(reviewConfigPath(r), readFileSync(reviewConfigPath(r), "utf8") + "# edited\n");
+  const said: string[] = [];
+  const agent = new ScriptedAgent([[text(HUNTED)], ...spreadTests()]);
+  const { review } = await runReview(r, { settings: SETTINGS, agentModel: agent, challenger: new FakeJson([SECOND_SUSPECTS,
+    { verdict: "confirmed", reason: "sign" }, { groups: [] }]), sessionFactory: spreadSession, hunt: true, resume: true,
+    progress: (m) => said.push(m) });
+  expect(said).toContain("review.yaml, models or prompts changed since that review: running it fresh");
+  expect(review.id).not.toBe(cut.review.id);
+  expect(String(agent.calls[0]!.messages[0]!.content)).toContain("Do not write or run tests yet"); // it hunted
+  expect(stateOf(cut.rdir).superseded).toBe(review.id);
+  const diffSha = stateOf(cut.rdir).diff_sha256 as string;
+  expect(resumable(r, diffSha)).toBeNull(); // the old one is not offered again, the new one finished
+});
+
+test("a round an outage cut says so, not that the reviewer gave no report", async () => {
+  const r = huntRepo();
+  const { cut } = await cutAfterHunt(r);
+  const review = { ...cut.review, projectStats: cut.review.projectStats!.map((p) => ({ ...p, stop: "end_turn",
+    noReport: true as const })) };
+  const md = render(review);
+  expect(md).toContain("a model call failed before the reviewer gave its report");
+  expect(md).not.toContain("the reviewer gave no report");
+  expect(nextSteps(cut.review)).toEqual(["arnx review --resume"]);
 });

@@ -347,7 +347,7 @@ function statusOf(r: Review): { problems: string[]; notes: string[] } {
       problems.push(p.tests ? `\`${p.name}\`: ${why(stop, r)} before it finished; the tests it wrote ran`
         : `\`${p.name}\` produced no tests: ${why(stop, r)}`);
     } else if (p.noReport) {
-      problems.push(`\`${p.name}\`: the reviewer gave no report`);
+      problems.push(`\`${p.name}\`: ${noReportWhy(p, r)}`);
     } else if (p.missingRuns) {
       problems.push(`\`${p.name}\`: ${plural(p.missingRuns, "run")} gave no report (timed out or crashed)`);
     } else if (!p.tests) {
@@ -717,7 +717,7 @@ export function render(r: Review): string {
   const stats = r.projectStats ?? [];
   if (stats.length && (multi(r) || stats.some(troubled))) {
     out.push("", "## Projects", "");
-    for (const p of stats) out.push(`- \`${p.name}\`: ${projectLine(p)}`);
+    for (const p of stats) out.push(`- \`${p.name}\`: ${projectLine(p, r)}`);
   }
   const checked = r.checked ?? [];
   if (checked.length) {
@@ -787,8 +787,12 @@ export function sameCause(sus: SuspectOutcome[], groups: Group[], findings: Find
 const troubled = (p: ProjectStat) => p.missingRuns > 0 || !p.sawResults || !!p.noReport;
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-function projectLine(p: ProjectStat): string {
-  if (p.noReport) return "the reviewer gave no report";
+/** Why a round has no report: a provider outage cut it, or the reviewer gave none. */
+const noReportWhy = (p: ProjectStat, r: Review) => p.stop?.startsWith("api_error") || (r.providerFailures ?? []).some(resumes)
+  ? "a model call failed before the reviewer gave its report" : "the reviewer gave no report";
+
+function projectLine(p: ProjectStat, r: Review): string {
+  if (p.noReport) return noReportWhy(p, r);
   const ran = p.tests ? `${plural(p.tests, "test")}, ${p.passed} passing in every run`
     : `${plural(p.testFiles, "test file")}, no run reported its tests`;
   const missing = p.missingRuns ? ` (${plural(p.missingRuns, "run")} without a report)` : "";

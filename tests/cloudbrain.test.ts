@@ -2,7 +2,7 @@
 // session: the same findings and report as LocalBrain gives for the same script, usage named by tier and harness and
 // never by model, the contract's requests (ids, turns, facts after a final, finish), and what each failure means.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CloudClient, UNAVAILABLE } from "../src/cloud";
 import { Boundary } from "../src/boundary";
@@ -133,7 +133,7 @@ test("a scripted review through arnx cloud: the same findings and report as the 
   // The review's id on arnx cloud is kept with the review (the local brain has none to keep).
   expect(JSON.parse(readFileSync(join(rdir, "state.json"), "utf8")).cloud_review_id).toBe("rev_test00000001");
   expect(Object.keys(JSON.parse(readFileSync(join(local.rdir, "state.json"), "utf8")))).toEqual(["change",
-    "diff_sha256", "seconds"]);
+    "diff_sha256", "stamp", "seconds"]);
   expect((create.body as { resume_of: unknown }).resume_of).toBeNull();
   expect(typeof (start.body as { context_pack: string }).context_pack).toBe("string");
   const steps = c.seen.filter((x) => x.path.endsWith("/agent/steps")).map((x) => x.body as Record<string, unknown>);
@@ -440,4 +440,29 @@ test("the stand-in sentence reaches the cloud setup agent as comment lines at th
   expect(re.draft).toBeNull();
   expect(re.existing_yaml.startsWith("# ")).toBe(true);
   expect(re.existing_yaml.endsWith("\nversion: 1\n")).toBe(true);
+});
+
+test("a cloud resume of a cut round hunts again and says that costs a new hunt; it never tests with no suspects", async () => {
+  const c = cloud = fakeCloud({ rounds: { "*": ROUND.map((s) => ({ ...s })) }, billed });
+  const first = await runReview(repo, { settings: SETTINGS, brain: brainFor(c), hunt: true, sessionFactory: fakeFactory(runs) });
+  // The review as an earlier arnx left it when a failed call cut the round: the saved hunt, a transcript ending on the
+  // failed call, no stamp, no outage in the report.
+  const fixture = join(import.meta.dir, "fixtures/cut-folder/projects/main");
+  for (const f of ["round.json", "hunt.json", "transcript.jsonl"]) copyFileSync(join(fixture, f), join(first.rdir, f));
+  rmSync(join(first.rdir, "verdicts.json"), { force: true });
+  const state = JSON.parse(readFileSync(join(first.rdir, "state.json"), "utf8"));
+  delete state.stamp;
+  writeFileSync(join(first.rdir, "state.json"), JSON.stringify(state) + "\n");
+  const second = fakeCloud({ rounds: { "*": ROUND.map((s) => ({ ...s })) }, billed });
+  cloud = second;
+  c.stop();
+  const said: string[] = [];
+  const { review } = await runReview(repo, { settings: SETTINGS, brain: brainFor(second, said), hunt: true,
+    sessionFactory: fakeFactory(runs), resume: true, progress: (m) => said.push(m) });
+  expect(review.id).toBe(first.review.id);
+  expect(said.some((m) => /hunting again, which costs a new hunt/.test(m))).toBe(true);
+  const start = second.seen.find((x) => x.path.endsWith("/agent"))!;
+  expect(start.body).toMatchObject({ hunt: true });
+  expect(typeof (start.body as { context_pack: string }).context_pack).toBe("string");
+  expect(review.suspects!.map((x) => x.id)).toEqual(["S1"]);
 });

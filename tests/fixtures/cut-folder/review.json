@@ -1,0 +1,1 @@
+{"schema_version": 1, "id": "ID", "cost_usd": 0.123, "stop": "end_turn", "projects": ["main"], "project_stats": [{"name": "main", "tests": 0, "passed": 0, "missing_runs": 0, "test_files": 0, "saw_results": true, "stop": "end_turn"}], "findings": []}

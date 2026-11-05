@@ -73,6 +73,7 @@ interface Hunt {
 
 export class LocalBrain implements Brain {
   readonly version = PROMPT_VERSION;
+  readonly reusesHunt = true;
   readonly overrides?: { keys: string[]; hash: string };
   private readonly p: Prompts;
   readonly m: LocalModels;

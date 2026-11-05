@@ -211,6 +211,8 @@ export interface Brain {
   /** The name a remote brain's work goes by in usage lines and the report: its tier and harness, never a model name
    * (absent for the local brain, whose models are named). */
   readonly label?: string;
+  /** Whether a resumed round can be given the suspects of its cut hunt (`ReviewInput.prior`); a remote brain hunts again. */
+  readonly reusesHunt?: boolean;
   /** The repository's own prompts this brain runs (.arnx/prompts.toml): the keys and the hash of every template in
    * use, recorded with the review. Absent when it runs arnx's defaults, or its own (arnx cloud). */
   readonly overrides?: { keys: string[]; hash: string };

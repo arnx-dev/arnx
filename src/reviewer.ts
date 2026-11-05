@@ -26,7 +26,7 @@ import { changeEditsAccepted } from "./check";
 import { baseName, funcOf, ownerFile } from "./outcomes";
 import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, resumes, withCalls } from "./outage";
 import { CONTEXT_LIMIT, contextPack } from "./context";
-import { elsewhereNote, leftOutNote, type Suspect } from "./prompts";
+import { elsewhereNote, leftOutNote, PROMPT_VERSION, type Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
 import { type AgentReport, type Checked, type Finding, type FixProof, hasReport, parseReports, type ProjectStat, type Review,
   save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause, sameTest } from "./report";
@@ -63,14 +63,34 @@ export function cutByOutage(rdir: string): boolean {
   }
 }
 
+/** Whether a finished-looking review has a project round a failed model call cut (`roundCut`): reviews of 0.1.7 and
+ * 0.1.8 recorded no outage for it. Not once its findings were accepted. */
+function cutRounds(rdir: string): boolean {
+  if (existsSync(join(rdir, "accepted.json"))) return false;
+  const dirs = [rdir];
+  try {
+    dirs.push(...readdirSync(join(rdir, "projects")).map((p) => join(rdir, "projects", p)));
+  } catch {
+    // no project folders
+  }
+  return dirs.some((d) => {
+    try {
+      return roundCut(JSON.parse(readFileSync(join(d, "round.json"), "utf8")), d);
+    } catch {
+      return false;
+    }
+  });
+}
+
 /** The newest review of this same change (same diff) that has no report yet, or whose report a provider outage cut. */
 export function resumable(repo: string, diffSha: string): string | null {
   const dir = join(repo, ".arnx", "reviews");
   if (!existsSync(dir)) return null;
   const open = readdirSync(dir).map((d) => join(dir, d)).filter((d) => existsSync(join(d, "state.json")) &&
-    (!existsSync(join(d, "review.json")) || cutByOutage(d))).filter((d) => {
+    (!existsSync(join(d, "review.json")) || cutByOutage(d) || cutRounds(d))).filter((d) => {
     try {
-      return (JSON.parse(readFileSync(join(d, "state.json"), "utf8")) as { diff_sha256?: string }).diff_sha256 === diffSha;
+      const st = JSON.parse(readFileSync(join(d, "state.json"), "utf8")) as { diff_sha256?: string; superseded?: string };
+      return st.diff_sha256 === diffSha && !st.superseded;
     } catch {
       return false;
     }
@@ -301,15 +321,34 @@ export async function runReview(repo: string, o: { settings: Settings;
   // A review saves each finished project round and each verdict as it goes, so `--resume` continues one that was cut
   // off (a dropped connection, a closed laptop) without paying again for what was done.
   const diffSha = createHash("sha256").update(change.diff).digest("hex");
-  const resumed = o.resume ? resumable(repo, diffSha) : null;
-  if (o.resume && !resumed) throw new ArnxError("nothing to resume: no unfinished review of this change");
+  // What decides the work a resume would reuse: the project file, the models and the prompts. A review cut under others is
+  // not continued.
+  const stamp = createHash("sha256").update(JSON.stringify([
+    (() => { try { return readFileSync(reviewConfigPath(repo), "utf8"); } catch { return ""; } })(),
+    o.brain ? [o.brain.label ?? "", o.brain.version] : [refString(s.reviewer), o.challenger?.ref ?? "", o.hunter?.ref ?? "",
+      o.ranker?.ref ?? "", o.secondHunter?.ref ?? "", PROMPT_VERSION, o.agentModel ? promptsFor(repo).hash : ""]])).digest("hex");
+  const found = o.resume ? resumable(repo, diffSha) : null;
+  if (o.resume && !found) throw new ArnxError("nothing to resume: no unfinished review of this change");
+  const was = found ? (() => { try { return (JSON.parse(readFileSync(join(found, "state.json"), "utf8")) as { stamp?: string }).stamp; } catch { return undefined; } })() : undefined;
+  const changed = !!found && typeof was === "string" && was !== stamp;
+  const resumed = changed ? null : found;
+  if (changed) o.progress?.("review.yaml, models or prompts changed since that review: running it fresh");
   const rid = resumed ? posix.basename(resumed) : newReviewId(o.now ?? new Date());
   const rdir = join(repo, ".arnx", "reviews", rid);
   if (resumed) o.progress?.(`resuming review ${rid}`);
   else {
     mkdirSync(rdir, { recursive: true });
-    writeFileSync(join(rdir, "state.json"), JSON.stringify({ change: describe(change), diff_sha256: diffSha,
+    writeFileSync(join(rdir, "state.json"), JSON.stringify({ change: describe(change), diff_sha256: diffSha, stamp,
       ...(change.untrackedIncluded ? { untracked: true } : {}) }) + "\n");
+    // The review it replaces is not offered again.
+    if (found) {
+      try {
+        const old = join(found, "state.json");
+        writeFileSync(old, JSON.stringify({ ...JSON.parse(readFileSync(old, "utf8")), superseded: rid }) + "\n");
+      } catch {
+        // it stays as it was
+      }
+    }
   }
   const log = new EventLog(join(rdir, EVENTS_FILE), rid);
   const stateFile = join(rdir, "state.json");
@@ -459,7 +498,10 @@ export async function runReview(repo: string, o: { settings: Settings;
           calls: saved!.round.agent.calls, unknownCalls: saved!.round.agent.unknownCalls ?? 0,
           costUsd: saved!.round.agent.costUsd } : null;
       // The hunt of the cut attempt, when its reply came: its suspects and what the hunters cost are not paid for again.
-      const prior = cutRound && saved!.hunted ? saved! : null;
+      const prior = cutRound && saved!.hunted && brain.reusesHunt ? saved! : null;
+      if (cutRound && saved!.hunted && !prior) {
+        o.progress?.(`${cfg.name}: the hunt cannot be reused here; hunting again, which costs a new hunt`);
+      }
       const reusedCost = !prior ? 0 : (prior.second?.costUsd ?? 0) + prior.extras.reduce((a, u) => a + u.costUsd, 0);
       const opts = { brain, budgetUsd: Math.max(0, projectBudget - (cutUse?.costUsd ?? 0) - reusedCost), writeDir, runs: s.runs, outDir,
         sessionFactory: o.sessionFactory ?? dockerSession, progress: o.progress, coverage: scope.owned,
@@ -517,6 +559,8 @@ export async function runReview(repo: string, o: { settings: Settings;
           if (hunt.late) projSecond = await hunt.late();
         }
         if (cutUse) projExtras.push(cutUse);
+        // A hunt done again was paid for before: that cost stays in the review.
+        if (cutRound && saved && !prior) projExtras.push(...saved.second ? [saved.second] : [], ...saved.extras);
         if (prior) {
           projSecond = prior.second;
           projExtras.push(...prior.extras);
