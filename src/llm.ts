@@ -1236,6 +1236,7 @@ function jsonModel(ref: ModelRef, s: Settings, env: Env, opts: JsonOptions): Jso
   if (p.api === "messages") {
     return new AnthropicJson(ref, new AnthropicAgent(ref.model, effort, key, undefined,
       { ...(timing.timeoutAttempts ? { timeoutAttempts: timing.timeoutAttempts } : {}),
+        ...(timing.attemptSeconds ? { attemptSeconds: timing.attemptSeconds } : {}),
         ...(timing.idleSeconds ? { idleSeconds: timing.idleSeconds } : {}),
         ...(timing.downDelays ? { downDelays: timing.downDelays } : {}), ...messagesOpts(p, url) }),
       prices);
@@ -1248,8 +1249,10 @@ function jsonModel(ref: ModelRef, s: Settings, env: Env, opts: JsonOptions): Jso
 /** The challenger: a second opinion per finding, with the configured fallback for any call the first model fails.
  * Both give up on a stalled attempt after VERDICT_ATTEMPT_TIMEOUT; the first model, when a fallback stands behind it,
  * after one timed-out attempt, so the fallback is asked at once. Without a fallback it retries as usual. */
-export function makeChallenger(s: Settings, env: Env, b: Boundary): JsonModel {
-  const verdict = { attemptSeconds: VERDICT_ATTEMPT_TIMEOUT, idleSeconds: VERDICT_IDLE_TIMEOUT };
+export function makeChallenger(s: Settings, env: Env, b: Boundary,
+  limits: { attemptSeconds: number; idleSeconds: number } = { attemptSeconds: VERDICT_ATTEMPT_TIMEOUT,
+    idleSeconds: VERDICT_IDLE_TIMEOUT }): JsonModel {
+  const verdict = limits;
   // With a fallback standing behind it, the first model waits out [2, 8] of an outage only: the fallback is asked next.
   const first = jsonModel(s.challenger, s, env,
     s.challengerFallback ? { ...verdict, timeoutAttempts: 1, downDelays: OUTAGE_DELAYS.slice(0, 2) } : verdict);

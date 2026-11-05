@@ -12,7 +12,8 @@ const CUT = "not challenged: review budget reached";
 
 test("a finding with no verdict is not confirmed: its own mark and count, and the summary says why", () => {
   const r = sampleReview({ findings: [f("F1", "test_a", "confirmed", "real"), f("F2", "test_b", null, CUT)], questions: [],
-    questionProjects: [], groups: [{ title: "a", findings: ["F1"] }, { title: "b", findings: ["F2"] }] as never });
+    questionProjects: [], groups: [{ title: "a", findings: ["F1"], input: "", actual: "", expected: "", consequence: "" },
+    { title: "b", findings: ["F2"], input: "", actual: "", expected: "", consequence: "" }] as never });
   expect(summaryRows(r).map((row) => row.mark)).toEqual(["✗", "!"]);
   const text = summary(r, "review.md");
   expect(text).toContain("1 issue confirmed, 1 not checked (2 findings)");
@@ -82,7 +83,8 @@ test("failing the same way says nothing when the test uses what the change adds"
 const disputedWithQuestion = () => sampleReview({
   findings: [{ ...f("F1", "test_a", "disputed", "no"), dependsOn: "Q1" }, f("F2", "test_b", "confirmed", "real")],
   questions: ["Round up?"], questionProjects: ["main"],
-  groups: [{ title: "a", findings: ["F1"] }, { title: "b", findings: ["F2"] }] as never });
+  groups: [{ title: "a", findings: ["F1"], input: "", actual: "", expected: "", consequence: "" },
+    { title: "b", findings: ["F2"], input: "", actual: "", expected: "", consequence: "" }] as never });
 
 test("a disputed finding with a question is disputed in status, row and summary count", () => {
   const r = disputedWithQuestion();
@@ -109,4 +111,20 @@ test("an optional question says which assumed finding the mark covers", () => {
   const md = render(r);
   expect(md).toContain("Optional: Issue 1's mark covers F2, which assumed an answer.");
   expect(md).not.toContain("no issue waits on it");
+});
+
+test("a disputed finding that had a question says nothing of depending on it", () => {
+  const md = render(disputedWithQuestion());
+  expect(md).not.toContain("Depends on");
+});
+
+test("an optional question names each issue that covers a finding assuming it, and the summary agrees", () => {
+  const dep = (id: string, t: string) => ({ ...f(id, t, "confirmed", "real"), dependsOn: "Q1" });
+  const g = (title: string, ids: string[]) => ({ findings: ids, title, input: "", actual: "", expected: "", consequence: "" });
+  const r = sampleReview({
+    findings: [f("F1", "test_a", "confirmed", "r"), dep("F2", "test_b"), f("F3", "test_c", "confirmed", "r"), dep("F4", "test_d")],
+    questions: ["Round up?"], questionProjects: ["main"],
+    groups: [g("a", ["F1", "F2"]), g("b", ["F3", "F4"])] as never });
+  expect(render(r)).toContain("Optional: Issue 1's mark covers F2; Issue 2's mark covers F4, which assumed an answer.");
+  expect(summary(r, "review.md")).toContain("in review.md (a proven issue's mark covers the findings that assumed it)");
 });

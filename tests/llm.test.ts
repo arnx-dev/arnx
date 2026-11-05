@@ -1464,18 +1464,23 @@ test("the wait shows in the terminal and costs no budget", async () => {
 
 // A verdict call is cut by silence (VERDICT_IDLE_TIMEOUT), not by a short wall clock: a stream still sending lives to
 // VERDICT_ATTEMPT_TIMEOUT.
-const verdictLimits = () => {
-  const env = { ...COMPAT_ENV, OPENAI_API_KEY: "o" };
+const limitsOf = (m: object) => {
+  const j = m as { attemptLimit?: number; idle?: number; agent?: object };
+  const t = (j.agent ?? j) as { attemptLimit: number; idle: number };
+  return [t.attemptLimit, t.idle];
+};
+const verdictLimits = (challenger = "compat:some-model") => {
+  const env = { ...COMPAT_ENV, OPENAI_API_KEY: "o", ANTHROPIC_API_KEY: "a" };
   const s = { ...defaultSettings(), providers: TABLES, prices: PRICED,
-    challenger: parseModelRef("compat:some-model", TABLES), challengerFallback: parseModelRef("openai:gpt-6.1-sol") };
+    challenger: parseModelRef(challenger, TABLES), challengerFallback: parseModelRef("openai:gpt-6.1-sol") };
   const fb = makeChallenger(s, env, noValues) as unknown as { first: object; second: object };
-  const of = (m: object) => [(m as { attemptLimit: number }).attemptLimit, (m as { idle: number }).idle];
-  return [of(fb.first), of(fb.second)];
+  return [limitsOf(fb.first), limitsOf(fb.second)];
 };
 
 test("a verdict call still streaming past the old limit is not cut", async () => {
   expect([VERDICT_ATTEMPT_TIMEOUT, VERDICT_IDLE_TIMEOUT]).toEqual([150, 30]);
   expect(verdictLimits()).toEqual([[150, 30], [150, 30]]);
+  expect(verdictLimits("anthropic:claude-sonnet-5-5")).toEqual([[150, 30], [150, 30]]);
   // Alive for 0.3 s, past a 0.2 s attempt limit's worth of the old kind, never silent for 0.1 s.
   const slow = (init: RequestInit) => {
     let timer: ReturnType<typeof setInterval>;
@@ -1508,3 +1513,71 @@ test("a silent verdict call is cut at the idle limit and falls back", async () =
   expect(reply[4]).toBe("openai:gpt-6.1-sol");
   expect(verdictLimits()[0]![1]).toBe(30);
 }, 10_000);
+
+// makeChallenger with a stand-in fetch and scaled limits (attempt 0.6 s, idle 0.1 s), on each API path.
+const SCALED = { attemptSeconds: 0.6, idleSeconds: 0.1 };
+const JSON_OK = '{"verdict": "confirmed"}';
+const withFetch = async (h: (url: string, init: RequestInit) => Response, run: () => Promise<void>) => {
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (u: string | URL | Request, init?: RequestInit) => h(String(u), init ?? {})) as typeof fetch;
+  try { await run(); } finally { globalThis.fetch = real; }
+};
+/** Bytes every 10 ms for `ms`, then the whole reply: a slow stream that is never silent. */
+const trickle = (init: RequestInit, head: string, ping: string, rest: string[], ms: number) => {
+  let timer: ReturnType<typeof setInterval>;
+  return new Response(new ReadableStream({ start(c) {
+    c.enqueue(enc.encode(head));
+    timer = setInterval(() => { try { c.enqueue(enc.encode(ping)); } catch { clearInterval(timer); } }, 10);
+    setTimeout(() => { clearInterval(timer); try { for (const e of rest) c.enqueue(enc.encode(e)); c.close(); } catch { /* aborted */ } }, ms);
+    init.signal?.addEventListener("abort", () => { clearInterval(timer); try { c.error(new DOMException("aborted", "AbortError")); } catch { /* done */ } });
+  }, cancel() { clearInterval(timer); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+};
+const PATHS = [
+  { name: "messages", challenger: "anthropic:claude-sonnet-5-5", host: "api.anthropic.com",
+    silent: (init: RequestInit) => stalledResponse(init), endless: (init: RequestInit) => { const [h] = anthropicEvents(JSON_OK);
+      return trickle(init, h!, sseEvent("ping", {}), [], 60_000); },
+    slow: (init: RequestInit) => { const [h, ...r] = anthropicEvents(JSON_OK);
+      return trickle(init, h!, sseEvent("ping", {}), r, 300); } },
+  { name: "responses", challenger: "compat:some-model", host: "llm.example.com",
+    silent: (init: RequestInit) => stalledStream(init), endless: (init: RequestInit) => trickle(init,
+      "event: response.created\ndata: " + JSON.stringify({ type: "response.created", response: { status: "in_progress" } }) + "\n\n",
+      ": keepalive\n\n", [], 60_000),
+    slow: (init: RequestInit) => trickle(init, "event: response.created\ndata: " + JSON.stringify({ type: "response.created",
+      response: { status: "in_progress" } }) + "\n\n", ": keepalive\n\n", [sse(responsesBody(JSON_OK))], 300) },
+];
+const scaled = (challenger: string, fallback: boolean) => makeChallenger({ ...defaultSettings(), providers: TABLES,
+  prices: PRICED, openaiTransport: "stream", challenger: parseModelRef(challenger, TABLES),
+  ...(fallback ? { challengerFallback: parseModelRef("openai:gpt-6.1-sol") } : {}) },
+  { ...COMPAT_ENV, OPENAI_API_KEY: "o", ANTHROPIC_API_KEY: "a" }, noValues, SCALED);
+
+for (const path of PATHS) {
+  test(`${path.name}: a silent verdict call fails over to the fallback well before the attempt limit`, async () => {
+    let first = 0, second = 0;
+    await withFetch((url, init) => url.includes(path.host) ? (first++, path.silent(init)) : (second++, okReply()), async () => {
+      const t0 = performance.now();
+      const reply = await scaled(path.challenger, true).completeJson("s", "u", SCHEMA);
+      expect(performance.now() - t0).toBeLessThan(450);
+      expect([first, second]).toEqual([1, 1]);
+      expect(reply[4]).toBe("openai:gpt-6.1-sol");
+    });
+  }, 10_000);
+
+  test(`${path.name}: a stream that keeps sending but never finishes is cut at the attempt limit`, async () => {
+    await withFetch((url, init) => url.includes(path.host) ? path.endless(init) : okReply(), async () => {
+      const t0 = performance.now(), reply = await scaled(path.challenger, true).completeJson("s", "u", SCHEMA);
+      const took = performance.now() - t0;
+      expect(took).toBeGreaterThan(500);
+      expect(took).toBeLessThan(1500);
+      expect(reply[4]).toBe("openai:gpt-6.1-sol");
+    });
+  }, 10_000);
+
+  test(`${path.name}: a stream quiet for less than the idle limit survives past it, under the attempt limit`, async () => {
+    let calls = 0;
+    await withFetch((_url, init) => (calls++, path.slow(init)), async () => {
+      const reply = await scaled(path.challenger, false).completeJson("s", "u", SCHEMA);
+      expect(reply[0]).toEqual({ verdict: "confirmed" });
+      expect(calls).toBe(1);
+    });
+  }, 10_000);
+}

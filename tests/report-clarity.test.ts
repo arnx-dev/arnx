@@ -116,7 +116,7 @@ test("an issue's one mark covers its disputed tests and those that assumed an an
   expect(defaultMarks(r)).toEqual({ F1: "real", F2: "real", F3: "real", F4: null });
   const s = summary(r, "review.md");
   expect(s).toContain("  ✗ 1  errors become 500  F1, F2, F3\n  Minor:\n  ? 2  debug log left in  ");
-  expect(s).toContain("  ? Q2  Should d hold?\n  1 optional question in review.md (no issue waits on it)");
+  expect(s).toContain("  ? Q2  Should d hold?\n  1 optional question in review.md (a proven issue's mark covers the findings that assumed it)");
   expect(s).toContain("Your call: issue 2 (waits on a question), Q2.");
   expect(nextSteps(r)).toEqual(["arnx triage", "arnx accept"]);
   // every issue proven and no question an issue waits on: straight to accept

@@ -119,7 +119,7 @@ export function fixPrompt(r: Pick<AcceptResult, "review" | "marks" | "answers" |
         } else if (by) {
           out.push(`- ${f.id}: its test assumed an answer the owner gave differently (${by}); the answer's test ` +
             "replaces it.");
-        } else if (f.dependsOn) {
+        } else if (f.dependsOn && f.verdict !== "disputed") {
           out.push(`- ${f.id} assumed an answer to ${f.dependsOn}; see the owner's answer below.`);
         }
       }

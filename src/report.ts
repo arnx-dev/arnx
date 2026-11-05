@@ -505,7 +505,7 @@ function findingLines(r: Review, f: Finding, marked = true): string[] {
   if (f.before && !said) out.push(`- Before the change (${f.before.status}): ${f.before.detail}`);
   if (multi(r)) out.push(`- Project: ${f.project}`);
   if (f.shallow) out.push(`- Note: ${SHALLOW_NOTE[f.shallow]}.`);
-  if (f.dependsOn) {
+  if (f.dependsOn && f.verdict !== "disputed") {
     out.push(marked ? `- Depends on: ${f.dependsOn} (the test assumes one answer; answer ${f.dependsOn} before marking)`
       : `- Depends on: ${f.dependsOn} (the test assumes one answer)`);
   }
@@ -545,10 +545,27 @@ export function defaultMarks(r: Review): Record<string, string | null> {
 }
 
 /** Why a question is optional: no issue waits on it, or a proven issue's mark covers the findings that assumed it. */
-function optionalWhy(c: [number, string[]] | undefined): string {
+function optionalWhy(c: [number, string[]][] | undefined): string {
   if (!c) return "no issue waits on it";
-  const [n, ids] = c;
-  return `Issue ${n}'s mark covers ${ids.join(", ")}, which assumed an answer`;
+  return `${c.map(([n, ids]) => `Issue ${n}'s mark covers ${ids.join(", ")}`).join("; ")}, which assumed an answer`;
+}
+
+/** For each question a proven issue's mark covers: the issues (by number in review.md) and the findings of each that
+ * assumed an answer to it. */
+export function coveredQuestions(r: Review): Map<string, [number, string[]][]> {
+  const out = new Map<string, [number, string[]][]>();
+  if (!marksIssues(r)) return out;
+  groupsOf(r, active(r)).forEach(({ findings }, i) => {
+    if (!proven(findings)) return;
+    for (const f of findings) {
+      if (!f.dependsOn || f.verdict === "disputed" || defaultMark(f) === "real") continue;
+      const list = out.get(f.dependsOn) ?? [];
+      const entry = list.find(([n]) => n === i + 1);
+      if (entry) entry[1].push(f.id); else list.push([i + 1, [f.id]]);
+      out.set(f.dependsOn, list);
+    }
+  });
+  return out;
 }
 
 /** Questions an answer decides an issue for: a finding waits on it in an issue no other test proves. The rest are
@@ -659,8 +676,7 @@ export function render(r: Review): string {
       "failed before it (below)." : "No test failed in every run.", "");
   }
   const grouped = (r.groups ?? []).length > 0;
-  // Optional questions a proven issue's mark covers: question -> [issue number, the findings that assumed an answer].
-  const covers = new Map<string, [number, string[]]>();
+  const covers = coveredQuestions(r);
   if (grouped) {
     const parts = groupsOf(r, caused);
     if (parts.length) out.push(`${plural(parts.length, "issue")} from ${plural(caused.length, "failing test")}, most severe first.`, "");
@@ -681,10 +697,6 @@ export function render(r: Review): string {
         const assumed = findings.filter((f) => f.dependsOn && f.verdict !== "disputed" && defaultMark(f) !== "real");
         const disputed = findings.filter((f) => f.verdict === "disputed");
         const qs = [...new Set(assumed.map((f) => f.dependsOn!))].join(", ");
-        for (const f of assumed) {
-          const c = covers.get(f.dependsOn!);
-          if (c) c[1].push(f.id); else covers.set(f.dependsOn!, [i + 1, [f.id]]);
-        }
         if (assumed.length) out.push(`- ${ids(assumed)} assumed an answer to ${qs}; this issue's mark covers them.`);
         if (disputed.length) out.push(`- The second opinion disputed ${ids(disputed)}; this issue's mark covers them.`);
       }
@@ -1040,8 +1052,10 @@ export function summary(r: Review, reviewMd: string): string {
   r.questions.forEach((q, i) => {
     if (needed.has(`Q${i + 1}`)) out.push(`  ? Q${i + 1}  ${q}`);
   });
+  const covered = r.questions.filter((_q, i) => !needed.has(`Q${i + 1}`) && coveredQuestions(r).has(`Q${i + 1}`)).length;
   if (optional) out.push(`  ${optional === 1 ? "1 optional question" : `${optional} optional questions`} in review.md ` +
-    `(no issue waits on ${optional === 1 ? "it" : "them"})`);
+    `(${covered ? "a proven issue's mark covers the findings that assumed " + (optional === 1 ? "it" : "them")
+      : `no issue waits on ${optional === 1 ? "it" : "them"}`})`);
   if (!r.findings.length && !r.questions.length && !r.couldNotRun?.length) out.push("  No findings and no questions.");
   if (r.notSent.length) {
     // A file the change touches or a failure names; the rest as a count, with the list in review.md.
