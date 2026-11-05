@@ -36,6 +36,12 @@ const body = pem.split("\n").filter((l) => l && !l.startsWith("-----")).join("")
 const der = body;
 const wrapped = (w: number) => `${HDR}\n${body.match(new RegExp(`.{1,${w}}`, "g"))!.join("\n")}\n${END}\n`;
 const piecesOf = (w: number) => body.match(new RegExp(`.{1,${w}}`, "g"))!;
+// The final line of a wrapped key is short. When it has no digit, `+` or `/` it reads as a name: the sandbox keeps it,
+// and the view fakes it (a name-like line between an intact header and END, as ruled above).
+const lastLine = "AbCdEfGhIjKlMnOpQrStUvWx";
+const withLastLine = (last: string) => `${HDR}\n${[...piecesOf(64).slice(0, -1), last].join("\n")}\n${END}\n`;
+// A last line that holds a digit never reads as a name, so a test of the same fake everywhere does not hang on a random key.
+const fixedKey = withLastLine("AbCdEfGhIjKlMnOpQrStUv7x");
 const put = (repo: string, path: string, content: string | Buffer) => {
   mkdirSync(dirname(join(repo, path)), { recursive: true });
   writeFileSync(join(repo, path), content);
@@ -194,7 +200,7 @@ for (const w of [64, 32, 20, 16, 7]) {
 }
 
 test("the same fake in the sandbox, the view and the diff, on both sides of a change", async () => {
-  const repo = project({ "k.txt": `${wrapped(64)}# one\n` }, { "k.txt": `${wrapped(64)}# two\n` });
+  const repo = project({ "k.txt": `${fixedKey}# one\n` }, { "k.txt": `${fixedKey}# two\n` });
   const snap = (rev: string) => {
     const dest = join(mkdtempSync(join(tmp(), "s-")), "s");
     takeSnapshot(repo, rev, dest, [], { standIns: true });
@@ -458,4 +464,28 @@ test("arnx cloud is given a line of 1 or more for a file left out by its name", 
   } finally {
     cloud.stop();
   }
+});
+
+
+test("a key's short last line with no digit, + or / is kept in the sandbox and faked in the view", () => {
+  const text = withLastLine(lastLine);
+  expect(fakeKeys(text).text).toContain(lastLine);
+  expect(fakeKeys(text, { view: true }).text).not.toContain(lastLine);
+  const digit = withLastLine("AbCdEfGhIjKlMnOpQrStUv7x");
+  expect(fakeKeys(digit).text).not.toContain("AbCdEfGhIjKlMnOpQrStUv7x");
+});
+
+test("the diff shows a faked last line the sandbox keeps, when the line reads as a name (the flaky case, built)", () => {
+  const key = withLastLine(lastLine);
+  const repo = project({ "k.txt": `${key}# one\n` }, { "k.txt": `${key}# two\n` });
+  const dest = join(mkdtempSync(join(tmp(), "s-")), "s");
+  takeSnapshot(repo, "HEAD", dest, [], { standIns: true });
+  const sandbox = readFileSync(join(dest, "k.txt"), "utf8");
+  const diff = resolveChange(repo).diff;
+  const context = diff.slice(diff.indexOf("k.txt")).split("\n").filter((l) => l.startsWith(" ") && l.length > 8 && !l.includes("-----"))
+    .map((l) => l.slice(1));
+  expect(context.length).toBeGreaterThan(0);
+  expect(sandbox).toContain(lastLine);
+  expect(context).not.toContain(lastLine);
+  expect(context.filter((l) => !sandbox.includes(l))).toHaveLength(1);
 });
