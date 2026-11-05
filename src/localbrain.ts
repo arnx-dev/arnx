@@ -102,9 +102,9 @@ export class LocalBrain implements Brain {
     const { cfg } = x;
     const say = (m: string) => x.progress?.(`${cfg.name}: ${m}`);
     // The tool-less hunters start now, beside the reviewer's own hunt.
-    const hunt = x.hunt ? this.hunt(x, x.hunt) : null;
+    const hunt = x.prior ? this.prior(x, x.prior) : x.hunt ? this.hunt(x, x.hunt) : null;
     const t = await tools;
-    let hunting = hunt !== null;
+    let hunting = hunt !== null && !x.prior;
     say(hunting ? "looking for defects" : "writing tests");
     let asked = false, askedSuspects = false;
     const decide = async (reply: string, turn: number): Promise<string | null> => {
@@ -308,19 +308,31 @@ export class LocalBrain implements Brain {
       return { message: prompts.proveTask(cfg, hunted, x.maxQuestions),
         spent: (theirs?.use.costUsd ?? 0) + (split?.use.costUsd ?? 0) + rankUse.costUsd };
     };
-    const afterTests = (reply: string) => {
-      const r = parseReports([reply]);
-      const tested = new Set(r.tests.filter(isObject).map((t) => text(t.suspect ?? "").trim()).filter(Boolean));
-      const reasons = new Map((r.suspects_not_tested ?? []).filter(isObject)
-        .map((n) => [text(n.suspect ?? "").trim(), text(n.reason ?? "")] as const));
-      const left = (state.suspects ?? []).filter((s) => !tested.has(s.id))
-        .map((s) => ({ id: s.id, ...(reasons.get(s.id) ? { reason: reasons.get(s.id)! } : {}) }));
-      if (!left.length) return null;
-      x.progress?.(`${cfg.name}: ${left.length} suspect${left.length === 1 ? "" : "s"} without a test; ` +
-        "asking the reviewer to test them or say why they cannot run here");
-      return prompts.untestedSuspectsTask(left);
-    };
+    const afterTests = (reply: string) => this.untestedAsk(x, state.suspects ?? [], reply);
     return { user: prompts.huntTask(cfg, diff, h.context, scopeTold(x.scoped, scope)), afterHunt, afterTests, state };
+  }
+
+  /** A resumed round: the hunt is over, its suspects are given with the task, and the tests are asked for at once. */
+  private prior(x: ReviewInput, p: NonNullable<ReviewInput["prior"]>): Hunt {
+    const state: RoundHunt = { suspects: p.suspects, second: null, extras: [], late: null, record: p.record };
+    return { user: `${this.p.reviewTask(x.cfg, x.diff, x.maxQuestions, scopeTold(x.scoped, x.scope))}\n\n` +
+      this.p.proveTask(x.cfg, p.suspects, x.maxQuestions),
+    afterHunt: () => Promise.reject(new Error("a resumed round has no hunt")),
+    afterTests: (reply) => this.untestedAsk(x, p.suspects, reply), state };
+  }
+
+  /** The message about suspects the reply left without a test or a reason, or null when none is left. */
+  private untestedAsk(x: ReviewInput, suspects: Suspect[], reply: string): string | null {
+    const r = parseReports([reply]);
+    const tested = new Set(r.tests.filter(isObject).map((t) => text(t.suspect ?? "").trim()).filter(Boolean));
+    const reasons = new Map((r.suspects_not_tested ?? []).filter(isObject)
+      .map((n) => [text(n.suspect ?? "").trim(), text(n.reason ?? "")] as const));
+    const left = suspects.filter((s) => !tested.has(s.id))
+      .map((s) => ({ id: s.id, ...(reasons.get(s.id) ? { reason: reasons.get(s.id)! } : {}) }));
+    if (!left.length) return null;
+    x.progress?.(`${x.cfg.name}: ${left.length} suspect${left.length === 1 ? "" : "s"} without a test; ` +
+      "asking the reviewer to test them or say why they cannot run here");
+    return this.p.untestedSuspectsTask(left);
   }
 
   /** The second hunter, arrived after the tests started: its cost counts; its suspects are kept in hunt.json, not

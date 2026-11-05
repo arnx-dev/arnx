@@ -133,7 +133,7 @@ test("a scripted review through arnx cloud: the same findings and report as the 
   // The review's id on arnx cloud is kept with the review (the local brain has none to keep).
   expect(JSON.parse(readFileSync(join(rdir, "state.json"), "utf8")).cloud_review_id).toBe("rev_test00000001");
   expect(Object.keys(JSON.parse(readFileSync(join(local.rdir, "state.json"), "utf8")))).toEqual(["change",
-    "diff_sha256"]);
+    "diff_sha256", "seconds"]);
   expect((create.body as { resume_of: unknown }).resume_of).toBeNull();
   expect(typeof (start.body as { context_pack: string }).context_pack).toBe("string");
   const steps = c.seen.filter((x) => x.path.endsWith("/agent/steps")).map((x) => x.body as Record<string, unknown>);

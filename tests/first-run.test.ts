@@ -226,6 +226,15 @@ test("the review's last progress line says what came of the things it checked", 
   expect(checkedLine([s("proven")])).toBe("Checked 1: 1 proven");
 });
 
+test("suspects an outage left untested are not called dropped", async () => {
+  const { checkedLine } = await import("../src/reviewer");
+  const s = (outcome: string) => ({ project: "svc", id: "S1", outcome }) as never;
+  expect(checkedLine([s("not tested"), s("not tested"), s("not tested")], 0, "Anthropic unavailable"))
+    .toBe("Checked 3: 0 proven, 3 not tested: Anthropic unavailable");
+  expect(checkedLine([s("proven"), s("not tested"), s("not reproduced")], 0, "Anthropic unavailable"))
+    .toBe("Checked 3: 1 proven, 1 not tested: Anthropic unavailable, 1 dropped");
+});
+
 test("a root project in the quick draft owns what the other drafted projects leave", () => {
   const repo = twoProjects();
   writeFileSync(join(repo, "pyproject.toml"), "[project]\nname = \"top\"\nversion = \"0.1\"\n");

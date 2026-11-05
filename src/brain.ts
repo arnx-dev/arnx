@@ -85,6 +85,9 @@ export interface ReviewInput extends RoundBase {
    * given what the hunters would read from it instead: `changedDefinitions` for the second hunter and `parts` for
    * the part hunters (hunt.ts huntParts builds both); given, they are used and `root` is not read. */
   hunt?: { context: string; root?: string; searchDirs: string[]; changedDefinitions?: string; parts?: HuntPart[] };
+  /** A resumed round's suspects from the hunt a failed call cut off, and that hunt's record: no hunter runs, and the
+   * round opens with the task and these suspects. The remote brain ignores it. */
+  prior?: { suspects: Suspect[]; record: HuntRecord };
 }
 
 /** One part of a big change, as a part hunter is asked about it: its files, its context pack and its changed

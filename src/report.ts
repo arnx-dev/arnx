@@ -1035,6 +1035,8 @@ export function yourCall(r: Review, rows: SummaryRow[] = summaryRows(r)): string
 
 /** The commands after a review: accept straight away when nothing needs the developer, else triage first. */
 export function nextSteps(r: Review, rows: SummaryRow[] = summaryRows(r)): string[] {
+  // An outage cut the review: finishing it comes before judging what it found.
+  if ((r.providerFailures ?? []).some(resumes)) return ["arnx review --resume"];
   if (!r.findings.length && !r.questions.length) return [];
   // Findings that already failed before the change are not the change's issues: they need no mark to accept.
   const settled = marksIssues(r) && rows.length > 0 && rows.every((row) => row.mark === "✗") &&

@@ -253,7 +253,12 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   `provider_failures` and the sentence after the review's status. A review with an `unavailable` failure of the
   reviewer or the judging (`cutByOutage`, not once accepted) resumes like an interrupted one: `--resume` tests again
   the project rounds a failed call stopped (their verdicts dropped), keeps the others and judges again. Its status
-  line and `arnx next` then name `arnx review --resume`.
+  line, `arnx next` and the summary's next step then name `arnx review --resume`. A round counts as stopped by a failed call
+  per `roundCut` (reviewer.ts): its stop is `api_error`; or its `agent.cut` is one and a suspect has neither test nor
+  reason; or (folders of 0.1.7 and 0.1.8, which wrote that stop as a normal end) the transcript's last turn is a failed
+  call and no test was written. The new attempt gets the hunt's suspects (`ReviewInput.prior`, the local brain only): no
+  hunter runs, the hunters' costs and the cut attempt's are kept, and usage.jsonl logs only what it did not hold for the
+  id. `state.json` keeps `seconds`, which a resume adds to.
 - `agent.turn` (`agent.ts`): one agent turn: stop reason, tools called, `paths` (the path argument of each `read_file`,
   `list_dir` and `grep` call, in order; never contents), tool errors, writes, test runs.
 - `hunt.list`, `hunt.suspect`, `hunt.merged`, `hunt.dropped` (`localbrain.ts`): each hunter's list, the ranked

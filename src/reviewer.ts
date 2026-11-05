@@ -6,7 +6,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statS
 import { join, posix } from "node:path";
 import { adapterFor } from "./adapters";
 import { isPreExisting } from "./before";
-import type { Billed, Brain, Totals } from "./brain";
+import type { Billed, Brain, HuntRecord, Totals } from "./brain";
 import { inPool, oneVerdict } from "./challenge";
 import { shallowKind } from "./shallow";
 import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, withRole } from "./events";
@@ -38,7 +38,7 @@ import { isSecretPath } from "./secrets";
 import { cloudModels, modelRefs, refString, type Settings } from "./settings";
 import { collect, dockerSession, ownTestsInWriteDir, ownTestsProblem, type Round, testRound, typecheckRound,
   writeDirOf } from "./testround";
-import { logUsage } from "./usage";
+import { logUsage, unlogged } from "./usage";
 import { randomHex } from "./util";
 import { buildInfo, VERSION } from "./version";
 
@@ -77,6 +77,29 @@ export function resumable(repo: string, diffSha: string): string | null {
   });
   return open.sort((a, b) => statSync(join(a, "state.json")).mtimeMs - statSync(join(b, "state.json")).mtimeMs)
     .at(-1) ?? null;
+}
+
+/** Whether a project round kept from a cut review (round.json's content, `outDir` its folder) was stopped by a failed
+ * model call and is done again on resume: it ended on one; or a failed follow-up left a suspect with neither a test nor
+ * a reason; or (reviews of 0.1.7 and 0.1.8, which wrote such a stop as a normal end) its transcript's last turn is a
+ * failed call and no test was written. A round cut only while asking about files or suspects it had covered stays kept. */
+export function roundCut(saved: { round: Round; hunted?: Suspect[] | null }, outDir: string): boolean {
+  const agent = saved.round.agent;
+  if (agent.stop.startsWith("api_error")) return true;
+  if (agent.cut?.startsWith("api_error")) {
+    const report = parseReports([...agent.earlierTexts ?? [], agent.finalText]);
+    const tested = new Set(report.tests.filter(isObject).map((t) => text(t.suspect ?? "").trim()));
+    const reasons = new Set((report.suspects_not_tested ?? []).filter(isObject)
+      .filter((n) => n.reason).map((n) => text(n.suspect ?? "").trim()));
+    if ((saved.hunted ?? []).some((x) => !tested.has(x.id) && !reasons.has(x.id))) return true;
+  }
+  if (Object.keys(saved.round.files ?? {}).length) return false;
+  try {
+    const lines = readFileSync(join(outDir, "transcript.jsonl"), "utf8").split("\n").filter((l) => l.trim());
+    return (JSON.parse(lines.at(-1) ?? "{}") as { stop_reason?: string }).stop_reason === "api_error";
+  } catch {
+    return false;
+  }
 }
 
 const vendor = (ref: string) => ref.split(":")[0];
@@ -129,6 +152,17 @@ function emptyBase(repo: string, change: Change, sources: string[]): "first-comm
   if (!sources.length) return null;
   const atBase = new Set(filesAt(repo, change.base));
   return sources.some((p) => atBase.has(p)) ? null : "new-files";
+}
+
+/** hunt.json of a round folder, or (without one) a record of the suspects alone. */
+function readHuntRecord(outDir: string, suspects: Suspect[]): HuntRecord {
+  try {
+    const r = JSON.parse(readFileSync(join(outDir, "hunt.json"), "utf8")) as HuntRecord;
+    if (Array.isArray(r.tested)) return r;
+  } catch {
+    // no record: the suspects themselves
+  }
+  return { reviewer: suspects, parts: [], second: null, tested: suspects };
 }
 
 function mergeUse(a: ModelUse, b: ModelUse): ModelUse {
@@ -278,6 +312,17 @@ export async function runReview(repo: string, o: { settings: Settings;
       ...(change.untrackedIncluded ? { untracked: true } : {}) }) + "\n");
   }
   const log = new EventLog(join(rdir, EVENTS_FILE), rid);
+  const stateFile = join(rdir, "state.json");
+  const state = (): Record<string, unknown> => {
+    try {
+      return JSON.parse(readFileSync(stateFile, "utf8")) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  };
+  // The time of the sessions before this one: a resumed review counts them.
+  const earlier = Number(state().seconds) || 0;
+  const elapsed = () => Math.round(earlier * 10 + (performance.now() - started) / 100) / 10;
   // The brain hears how the review ended whatever ends it (a remote brain settles its hold then): completed, failed,
   // or interrupted (interrupt.ts closes it). The totals count the project rounds that finished.
   const soFar: Totals = { stop: "", projectsReviewed: 0, testsWritten: 0, passed: 0, findings: 0, flaky: 0, seconds: 0 };
@@ -336,19 +381,17 @@ export async function runReview(repo: string, o: { settings: Settings;
       if (finished) return null;
       finished = true;
       closers.delete(interrupted);
-      return brain.finish(totals ?? { ...soFar, stop: end, seconds: Math.round((performance.now() - started) / 100) / 10 });
+      // However the review ended, its time is kept for a resume.
+      try {
+        writeFileSync(stateFile, JSON.stringify({ ...state(), seconds: totals?.seconds ?? elapsed() }) + "\n");
+      } catch {
+        // the time is a courtesy
+      }
+      return brain.finish(totals ?? { ...soFar, stop: end, seconds: elapsed() });
     };
     closers.add(interrupted);
     // A remote brain opens the review here (its budget hold; 402 stops before any work, exit 3). Its id there is kept
     // in state.json, so a `--resume` names the review it continues.
-    const stateFile = join(rdir, "state.json");
-    const state = (): Record<string, unknown> => {
-      try {
-        return JSON.parse(readFileSync(stateFile, "utf8")) as Record<string, unknown>;
-      } catch {
-        return {};
-      }
-    };
     const resumeOf = resumed && brain.start ? state().cloud_review_id : undefined;
     const opened = await brain.start?.({ files: change.files, added: added(change), removed: removed(change),
       diffSha256: diffSha, budgetUsd: s.reviewBudgetUsd,
@@ -404,7 +447,21 @@ export async function runReview(repo: string, o: { settings: Settings;
       const leftOut = change.withheld ? { leftOut: change.withheld } : {};
       const scope = file.legacy ? { owned: change.files, used: [], ...leftOut } : { owned, used, elsewhere, ...leftOut };
       const projectBudget = s.reviewBudgetUsd * AGENT_SHARE / n;
-      const opts = { brain, budgetUsd: projectBudget, writeDir, runs: s.runs, outDir,
+      const roundFile = join(outDir, "round.json");
+      type SavedRound = { round: Round; hunted: Suspect[] | null; second: ModelUse | null; extras: ModelUse[] };
+      const saved = resumed && existsSync(roundFile) ? JSON.parse(readFileSync(roundFile, "utf8")) as SavedRound : null;
+      // A round a failed model call stopped (a provider outage) is tested again; its verdicts are dropped below.
+      const cutRound = !!saved && roundCut(saved, outDir);
+      if (cutRound) redone.add(cfg.name);
+      // What the cut attempt cost is spent: it counts in the review, and the new attempt has that much less.
+      const cutUse: ModelUse | null = cutRound && saved!.round.agent.costUsd + saved!.round.agent.calls +
+        (saved!.round.agent.unknownCalls ?? 0) > 0 ? { ...newUse(agentUse.model), ...saved!.round.agent.usage,
+          calls: saved!.round.agent.calls, unknownCalls: saved!.round.agent.unknownCalls ?? 0,
+          costUsd: saved!.round.agent.costUsd } : null;
+      // The hunt of the cut attempt, when its reply came: its suspects and what the hunters cost are not paid for again.
+      const prior = cutRound && saved!.hunted ? saved! : null;
+      const reusedCost = !prior ? 0 : (prior.second?.costUsd ?? 0) + prior.extras.reduce((a, u) => a + u.costUsd, 0);
+      const opts = { brain, budgetUsd: Math.max(0, projectBudget - (cutUse?.costUsd ?? 0) - reusedCost), writeDir, runs: s.runs, outDir,
         sessionFactory: o.sessionFactory ?? dockerSession, progress: o.progress, coverage: scope.owned,
         untracked: !!change.withUntracked,
         // The code before the change: its base (HEAD for uncommitted work); a first commit has none, nor has a
@@ -421,6 +478,14 @@ export async function runReview(repo: string, o: { settings: Settings;
         ask: async (snap: string) => {
           const searchDirs = [cfg.workdir, ...new Set(used.map((u) => posix.dirname(u)))];
           let index = null;
+          if (prior) {
+            // From the saved hunt, masked as the model sees this snapshot (the filter knows its values by now).
+            const record = readHuntRecord(outDir, prior.hunted!);
+            const reused = boundary ? boundary.maskValue({ suspects: prior.hunted!, record }) : { suspects: prior.hunted!, record };
+            return { kind: "review" as const, input: { cfg, diff, scope, scoped: !file.legacy,
+              envTests: envTests(snap, cfg), maxQuestions: s.maxQuestions, dbNames: databaseEnv(cfg.env, cfg.services),
+              prior: reused } };
+          }
           if (o.hunt && s.context === "precise") {
             o.progress?.(`${cfg.name} (${i + 1}/${n}): indexing the code`);
             const r = await (o.indexer ?? projectIndex)(cfg, snap, outDir);
@@ -434,14 +499,9 @@ export async function runReview(repo: string, o: { settings: Settings;
               root: snap, searchDirs, ...(index ? { parts: huntParts(snap, cfg, diff, scope.owned, searchDirs, index) }
                 : {}) } } : {}) } };
         } };
-      const roundFile = join(outDir, "round.json");
       let rnd: Round, kept = false, hunted: Suspect[] | null = null, projSecond: ModelUse | null = null;
       const projExtras: ModelUse[] = [];
-      const saved = resumed && existsSync(roundFile) ? JSON.parse(readFileSync(roundFile, "utf8")) as { round: Round;
-        hunted: Suspect[] | null; second: ModelUse | null; extras: ModelUse[] } : null;
-      // A round a failed model call stopped (a provider outage) is tested again; its verdicts are dropped below.
-      if (saved?.round.agent.stop.startsWith("api_error")) redone.add(cfg.name);
-      if (saved && !redone.has(cfg.name)) {
+      if (saved && !cutRound) {
         kept = true;
         [rnd, hunted, projSecond] = [saved.round, saved.hunted, saved.second];
         projExtras.push(...saved.extras);
@@ -455,6 +515,11 @@ export async function runReview(repo: string, o: { settings: Settings;
           projExtras.push(...hunt.extras);
           // A hunter still out when the tests started: its cost counts once it returns.
           if (hunt.late) projSecond = await hunt.late();
+        }
+        if (cutUse) projExtras.push(cutUse);
+        if (prior) {
+          projSecond = prior.second;
+          projExtras.push(...prior.extras);
         }
         writeFileSync(roundFile, JSON.stringify({ round: rnd, hunted, second: projSecond, extras: projExtras }) + "\n");
       }
@@ -658,7 +723,11 @@ export async function runReview(repo: string, o: { settings: Settings;
     const second = huntSecond;
     adjudicate(suspects, findings);
     sameCause(suspects, groups, findings);
-    if (suspects.length) o.progress?.(checkedLine(suspects, shown));
+    // arnx cloud's models fail on its side: only a round's stop says so, and its vendor is never named.
+    const failures = label ? [cloudFailure(projectStats.map((p) => p.stop ?? "end_turn"))].filter((f) => f !== null)
+      : providerFailures(calls, s);
+    const outage = failures.find(resumes);
+    if (suspects.length) o.progress?.(checkedLine(suspects, shown, outage ? `${outage.name} unavailable` : undefined));
     for (const x of suspects) {
       emit("suspect.outcome", { project: x.project, hyp_id: hypId(x.project, x.id), outcome: x.outcome, tests: x.tests,
         findings: x.findings, ...x.reason ? { reason: clip(x.reason) } : {} });
@@ -677,9 +746,6 @@ export async function runReview(repo: string, o: { settings: Settings;
       for (const u of usage) if (unpriced.has(u.model)) u.unpriced = true;
     }
     const first = routing.routed[0]!.project;
-    // arnx cloud's models fail on its side: only a round's stop says so, and its vendor is never named.
-    const failures = label ? [cloudFailure(projectStats.map((p) => p.stop ?? "end_turn"))].filter((f) => f !== null)
-      : providerFailures(calls, s);
     const baseEmpty = findings.some((f) => f.before) ? emptyBase(repo, change, routing.routed.flatMap(
       ({ project: cfg, owned }) => changedSources(file.legacy ? change.files : owned, adapterFor(cfg)))) : null;
     const review: Review = {
@@ -700,7 +766,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       ...(change.untrackedIncluded ? { untrackedIncluded: change.untrackedIncluded } : {}),
       ...(change.untrackedLeftOut ? { untrackedLeftOut: change.untrackedLeftOut.length } : {}),
       costUsd: Math.round(usage.reduce((a, u) => a + u.costUsd, 0) * 10_000) / 10_000, usage,
-      seconds: Math.round((performance.now() - started) / 100) / 10, stop, writeDir: writeDirs[first.name]!,
+      seconds: elapsed(), stop, writeDir: writeDirs[first.name]!,
       language: first.language, projects: routing.routed.map((r) => r.project.name), notReviewed: routing.notReviewed,
       ...(routing.checkOnly.length && !file.legacy ? { typecheckOnly: routing.checkOnly.map((c) => ({
         project: c.project.name, by: c.by })) } : {}),
@@ -725,7 +791,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     const toSave: Review = masked.shown || done.some((d) => d.rnd.standInsShown)
       ? { ...masked.value, standInsShown: true } : masked.value;
     save(toSave, rdir, change.diff);
-    logUsage(repo, "review", usage, o.now ?? new Date(), rid);
+    logUsage(repo, "review", unlogged(repo, rid, usage), o.now ?? new Date(), rid);
     const byOutcome: Record<string, number> = {};
     for (const x of suspects) byOutcome[x.outcome] = (byOutcome[x.outcome] ?? 0) + 1;
     emit("report.done", { findings: findings.length, questions: review.questions.length, checked: checked.length,
@@ -750,16 +816,18 @@ export async function runReview(repo: string, o: { settings: Settings;
 
 /** What came of the things a review checked, said once they are judged: proven, waiting on an answer, failing the same
  * way before the change, and the rest dropped (a test that passed, did not run, or the second opinion disputed). */
-export function checkedLine(sus: SuspectOutcome[], shown = 0): string {
+export function checkedLine(sus: SuspectOutcome[], shown = 0, down?: string): string {
   const n = (...o: SuspectOutcome["outcome"][]) => sus.filter((x) => o.includes(x.outcome)).length;
   const proven = n("proven", "same cause");
   const answer = n("pending answer");
   const before = n("pre-existing");
   const disputed = n("disputed");
-  const dropped = sus.length - proven - answer - before - disputed;
+  // With a provider down, the suspects that got no test were not tested: that is no verdict on the code.
+  const untested = down ? n("not tested") : 0;
+  const dropped = sus.length - proven - answer - before - disputed - untested;
   // One thing checked can prove more than one issue: the count matches the "✓ proven" lines shown.
   const issues = shown > proven ? ` (${shown} issues)` : "";
   return [`Checked ${sus.length}: ${proven} proven${issues}`, ...answer ? [`${answer} need${answer === 1 ? "s" : ""} your answer`]
     : [], ...before ? [`${before} failing before this change too`] : [], ...disputed ? [`${disputed} disputed`] : [],
-    ...dropped ? [`${dropped} dropped`] : []].join(", ");
+    ...untested ? [`${untested} not tested: ${down}`] : [], ...dropped ? [`${dropped} dropped`] : []].join(", ");
 }
