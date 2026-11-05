@@ -272,8 +272,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
   };
   const said = (t: string) => boundary ? boundary.mask(t) : t;
   // From a run on, what a test says is the stand-in's, ids too: the baseline is committed, and is compared with these.
-  const kept = (results: TestResult[] | null) => boundary && results ? results.map((t) =>
-    ({ ...t, testId: boundary.mask(t.testId), name: boundary.mask(t.name), message: boundary.mask(t.message) })) : results;
+  const kept = (results: TestResult[] | null) => boundary ? boundary.maskValue(results) : results;
   const [ok, summary, tail, skips, failing, hints, counts] = await sessionFactory(cfg, snap, buildLog, async (session) => {
     type Out = [boolean, string, string, string[], string[], string, SuiteCounts];
     // A project with no tests of its own has nothing to list: its run below is quick.
@@ -1485,7 +1484,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       state.runs.set(name, { name, digest: ranWith, env, snapshot: withSandbox(code, sandbox), untracked, summary,
         skips, counts, after: summary.startsWith(counted) ? summary.slice(counted.length) : "" });
       state.proofs.set(name, { name, summary, skips,
-        failed: counts.failed.map((t) => boundary.maskValue(entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined))),
+        failed: counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined)),
         ...(gap ? { gap: gap.line } : {}) });
       // A TypeScript project that can be type checked and has no typecheck yet: say so while the agent is here.
       const typed = cfg.language === "typescript" && !cfg.typecheck && typeCheckable(readSnap, cfg.workdir)
@@ -1937,7 +1936,7 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
       if (ok) summaries.push(f.legacy ? summary : `${cfg.name}: ${summary}`);
       const left = new Set(counts.left);
       const joined = prior ? counts.failed.filter((t) => counts.flaky.includes(t.testId))
-        .map((t) => ({ ...boundary.maskValue(entryOf(t)), flaky: true as const })) : [];
+        .map((t) => ({ ...entryOf(t), flaky: true as const })) : [];
       next.set(cfg.name, [...mine.filter((b) => !left.has(b.id)), ...joined]);
     }
     const failed = suites.filter((s) => !s.ok);
@@ -2012,7 +2011,7 @@ export async function rerecordBaseline(repo: string, o: { by: string; at: string
         summary = `${summary}; most of the suite fails (${counts.failed.length} failing, ${counts.passed} passing), ` +
           "which points to the environment, not the code: fix it, then record again";
       }
-      const tests = counts.failed.map((t) => boundary.maskValue(entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined)));
+      const tests = counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined));
       const failingIds = new Set(tests.map((t) => t.id));
       const guarded = cfg.knownFailing.length ? counts.all.filter((t) => t.outcome === "passed" && !failingIds.has(t.testId) &&
         cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))).length : 0;

@@ -968,3 +968,29 @@ test("a service that is not ready is named with the stand-in its check holds", a
     readyWait.seconds = saved.seconds;
   }
 });
+
+test("a test that fails, then passes when run again, is flaky whatever its id holds", async () => {
+  const repo = setupRepo();
+  write(repo, { ".arnx/review.yaml": APP() });
+  const flaky = runningFactory((_snap, command) => command.includes("again.xml")
+    ? [junitXml([["tests/test_a.py", `test_b[${GUESS}]`, "passed", ""]]), "1 passed", false]
+    : [junitXml([["tests/test_a.py", "test_a", "passed", ""], ["tests/test_a.py", "test_d", "passed", ""],
+      ["tests/test_a.py", `test_b[${GUESS}]`, "failed", "boom"]]), "1 failed", false]);
+  const [ok, , suites] = await approveFile(repo, { by: "Dev", at: "2026-11-04", sessionFactory: flaky });
+  expect(ok).toBe(true);
+  expect(suites[0]!.flaky).toEqual([`tests/test_a.py::test_b[${SHOWN}]`]);
+});
+
+test("a baseline entry's file and cause go too: a test file can be named after a value, and a failure can name one", async () => {
+  const repo = setupRepo();
+  write(repo, { ".arnx/review.yaml": APP() });
+  const rows: [string, string, string, string][] = [["tests/test_a.py", "test_a", "passed", ""], ["tests/test_a.py", "test_d", "passed", ""],
+    ["tests/test_a.py", "test_e", "passed", ""], [`tests/test_${GUESS}.py`, "test_b", "failed", `ModuleNotFoundError: No module named '${GUESS}'`]];
+  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: runningFactory(() => [junitXml(rows), "1 failed", false]) });
+  expect(await cli.run("setup", "--baseline")).toBe(0);
+  const text = readFileSync(join(repo, BASELINE_FILE), "utf8");
+  expect(text).toContain(`tests/test_${SHOWN}.py`);
+  // And its cause, whose detail comes from the failure.
+  expect(text).toContain(`"cause":"missing-package: ${SHOWN}"`);
+  expectNoReal("baseline.json", text);
+});
