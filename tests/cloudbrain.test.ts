@@ -182,6 +182,14 @@ test("a final, then a follow-up the budget cut: a budget stop, said in the repor
     "`review_usd` under [budget] in .arnx/config.toml, or top up: arnx credits, then run arnx review again)");
 });
 
+test("a cloud round that ends with an empty report and no test run is incomplete", async () => {
+  const c = cloud = fakeCloud({ rounds: { "*": [ROUND[0]!, { type: "final", report: {} }, { type: "done", stop: "end_turn" }] } });
+  const { review } = await runReview(repo, { settings: SETTINGS, brain: brainFor(c), sessionFactory: fakeFactory(runs) });
+  expect(review.projectStats?.[0]?.noReport).toBe(true);
+  expect(exitCode(review)).toBe(2);
+  expect(summary(review, "review.md")).toContain("the reviewer gave no report");
+});
+
 test("409 turn_conflict sends the same turn once more", async () => {
   const c = cloud = fakeCloud({ rounds: { "*": ROUND.map((s) => ({ ...s })) },
     fail: { "POST /v1/reviews/*/projects/*/agent/steps": [{ status: 409, body: { code: "turn_conflict",

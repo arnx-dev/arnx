@@ -6,7 +6,7 @@ import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { ArnxError, ModelError, SetupRequired } from "../src/errors";
 import { closeOpen, closers } from "../src/interrupt";
 import { LocalBrain } from "../src/localbrain";
-import { exitCode } from "../src/report";
+import { exitCode, render, summary } from "../src/report";
 import { newReviewId, runReview } from "../src/reviewer";
 import { defaultSettings, type Settings } from "../src/settings";
 import { PRICES, type Reply } from "../src/llm";
@@ -245,9 +245,26 @@ test("a completed review closes its brain with the agent's stop", async () => {
 });
 
 test("no report at all is incomplete", async () => {
-  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: new ScriptedAgent([[text("looked around, nothing to say")], [text("still nothing")]]),
-    challenger: new FakeJson([]), sessionFactory: fakeFactory(runs) });
+  const silent = new ScriptedAgent([[text("looked around, nothing to say")], [text("still nothing")]]);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: silent, challenger: new FakeJson([]),
+    sessionFactory: fakeFactory(runs) });
   expect(review.stop).toBe("end_turn");
   expect(review.projectStats[0]!.noReport).toBe(true);
   expect(exitCode(review)).toBe(2);
+  const said = summary(review, "review.md");
+  expect(said).toContain("the reviewer gave no report");
+  expect(said).not.toContain("0 runs gave no report");
+  expect(render(review)).toContain("- `main`: the reviewer gave no report");
+});
+
+test("tests that ran, then a reply in prose: not incomplete", async () => {
+  const prose = new ScriptedAgent([
+    [tool("write_file", { path: GEN, content: "from app import add\n\ndef test_zero():\n    assert add(0, 0) == 0\n" })],
+    [text("all done, tests written")], [text("nothing more")]]);
+  const ok = (): [string | null, string, boolean] => [junitXml([[GEN, "test_zero", "passed", ""]]), "", false];
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: prose, challenger: new FakeJson([]),
+    sessionFactory: fakeFactory(ok) });
+  expect(review.projectStats[0]!.tests).toBe(1);
+  expect(review.projectStats[0]!.noReport).toBeUndefined();
+  expect(exitCode(review)).toBe(0);
 });

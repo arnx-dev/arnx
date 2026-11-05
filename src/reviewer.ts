@@ -557,8 +557,8 @@ export async function runReview(repo: string, o: { settings: Settings;
       projectStats.push({ name: cfg.name, tests, passed: c.passed.length, missingRuns: c.missingRuns,
         testFiles: Object.keys(rnd.files).filter((p) => adapterFor(cfg).isTestFile(posix.basename(p))).length,
         sawResults: rnd.sawResults, stop: rnd.agent.stop,
-        // A round that never gave a report (an empty one still counts) is not a finished one.
-        ...(hasReport([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]) ? {} : { noReport: true }) });
+        // A round with no report and no test that ran is not a finished one (tests that ran speak for themselves).
+        ...(tests === 0 && !hasReport([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]) ? { noReport: true } : {}) });
       agentCost += rnd.agent.costUsd;
       Object.assign(agentUse, addUsage(agentUse, rnd.agent.usage));
       agentUse.calls += rnd.agent.calls;

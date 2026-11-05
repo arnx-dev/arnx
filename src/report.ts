@@ -346,6 +346,8 @@ function statusOf(r: Review): { problems: string[]; notes: string[] } {
     if (stop !== "end_turn") {
       problems.push(p.tests ? `\`${p.name}\`: ${why(stop, r)} before it finished; the tests it wrote ran`
         : `\`${p.name}\` produced no tests: ${why(stop, r)}`);
+    } else if (p.noReport) {
+      problems.push(`\`${p.name}\`: the reviewer gave no report`);
     } else if (p.missingRuns) {
       problems.push(`\`${p.name}\`: ${plural(p.missingRuns, "run")} gave no report (timed out or crashed)`);
     } else if (!p.tests) {
@@ -782,10 +784,11 @@ export function sameCause(sus: SuspectOutcome[], groups: Group[], findings: Find
   }
 }
 
-const troubled = (p: ProjectStat) => p.missingRuns > 0 || !p.sawResults;
+const troubled = (p: ProjectStat) => p.missingRuns > 0 || !p.sawResults || !!p.noReport;
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 function projectLine(p: ProjectStat): string {
+  if (p.noReport) return "the reviewer gave no report";
   const ran = p.tests ? `${plural(p.tests, "test")}, ${p.passed} passing in every run`
     : `${plural(p.testFiles, "test file")}, no run reported its tests`;
   const missing = p.missingRuns ? ` (${plural(p.missingRuns, "run")} without a report)` : "";
