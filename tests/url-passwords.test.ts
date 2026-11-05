@@ -6,7 +6,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { dirname, join } from "node:path";
 import { Boundary } from "../src/boundary";
 import { resolveChange, takeSnapshot } from "../src/change";
-import { hasSecretContent, secretHits, secretPins, standIn, suspects } from "../src/secrets";
+import { hasSecretContent, secretHits, secretPins, suspects } from "../src/secrets";
+import { standIn } from "./helpers/standin";
 import { defaultSettings, writeSettings } from "../src/settings";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { useTmp } from "./helpers/tmp";

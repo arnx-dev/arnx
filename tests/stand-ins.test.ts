@@ -8,7 +8,8 @@ import { join } from "node:path";
 import { addToSandbox, SANDBOX_MARK, sandboxDir, stripSandbox, takeSnapshot, withSandboxFiles } from "../src/change";
 import { parseReviewConfig, parseReviewFile, sandboxOnlyOf } from "../src/config";
 import { buildContextOf, DEFAULT_LIMITS, runArgv } from "../src/sandbox";
-import { envValue, hasSecretContent, secretPins, standIn, suspects } from "../src/secrets";
+import { envValue, hasSecretContent, secretPins, suspects } from "../src/secrets";
+import { standIn } from "./helpers/standin";
 import { defaultSettings, loadSettings, writeSettings } from "../src/settings";
 import { approvalWarnings } from "../src/setupview";
 import { AWS_KEY, AWS_KEY_2, PRIVATE_KEY, PRIVATE_KEY_BLOCK, SLACK_TOKEN } from "./helpers/fakekeys";
@@ -83,10 +84,8 @@ test("an allowed (pinned) key stays as it is; only the others get stand-ins", ()
   expect(r.text).not.toContain(SK);
 });
 
-test("a private key gets no stand-in, with a body or without", () => {
-  expect(standIn(`K = """${PRIVATE_KEY_BLOCK}"""\n`, [])).toBeNull();
-  expect(standIn(`H = "${PRIVATE_KEY}"\nB = "${AWS_SECRET}"\n`, [])).toBeNull();
-  expect(standIn(`placeholder = "${PRIVATE_KEY}\\n...\\n"\nT = '${AWS_KEY}'\n`, [])).toBeNull();
+test("a private key gets no stand-in of its own: its fake is another thing", () => {
+  expect(standIn(`K = """${PRIVATE_KEY_BLOCK}"""\n`, []).count).toBe(0);
 });
 
 test("a snapshot keeps a file with stand-ins and says so; the real key reaches neither the snapshot nor its sandbox " +

@@ -372,7 +372,7 @@ export class Workspace {
     if (!existsSync(full) || !statSync(full).isFile()) throw new ToolError(`not a file: ${path}`);
     const data = readFileSync(full);
     if (isBinary(data)) return `(binary file, ${data.length} bytes)`;
-    const lines = splitLines(fakeKeys(data.toString("utf8")).text);
+    const lines = splitLines(fakeKeys(data.toString("utf8"), { view: true }).text);
     const n = startLine === undefined || startLine === null || startLine === 0 ? 1 : Number(startLine);
     if (!Number.isFinite(n)) throw new ToolError("start_line: a number is required");
     const start = Math.max(1, Math.trunc(n));
@@ -441,7 +441,7 @@ export class Workspace {
         continue;
       }
       if (isBinary(data)) continue;
-      batch.push({ fp, lines: splitLines(fakeKeys(data.toString("utf8")).text) });
+      batch.push({ fp, lines: splitLines(fakeKeys(data.toString("utf8"), { view: true }).text) });
       size += data.length;
       if (size >= GREP_BATCH_BYTES && await send()) return end();
     }

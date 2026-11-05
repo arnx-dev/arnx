@@ -126,6 +126,8 @@ const word = (s: string) => new RegExp(`(?<![\\w$])${escaped(s)}(?![\\w$])`);
 
 // A line saying a module or a file is not there, in the words of pytest, node, vitest and the OS.
 const MISSING = /Cannot find (?:module|package)|Failed to (?:resolve import|load url)|Could not resolve|No module named|ModuleNotFoundError|ENOENT|FileNotFoundError|No such file or directory|does not exist/;
+/** And a line saying a file would not open. */
+const OPEN_FAILED = /(?:could not|couldn't|cannot|can't|unable to|failed to) (?:open|read|load)|Permission denied|EACCES/i;
 const CODE = /\.(?:py|[cm]?[jt]sx?)$/;
 const escaped = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -149,8 +151,8 @@ export function missingLeftOut(texts: string[], leftOut: string[], all: string[]
   });
 }
 
-/** The files of `files` a text names, by their whole name on any line. A name that another file of `all` shares counts only
- * with its folder in front. */
+/** The files of `files` a text names, by their whole name. A name that another file of `all` shares counts only with its folder
+ * in front. */
 function namedIn(text: string, files: string[], all: string[]): string[] {
   const count = new Map<string, number>();
   for (const p of all) count.set(posix.basename(p), (count.get(posix.basename(p)) ?? 0) + 1);
@@ -161,19 +163,39 @@ function namedIn(text: string, files: string[], all: string[]): string[] {
   });
 }
 
-/** What a private key failing to parse says, in the words of the common libraries: a fake is no key. */
-const KEY_PARSE = /could not (?:deserialize|parse|load|decode|read)[^\n]{0,60}key|(?:invalid|malformed|bad|unsupported|unable to (?:load|parse|read|decode)|failed to (?:load|parse|read|decode)|not a valid)[^\n]{0,60}\b(?:key|pem|der|asn\.?1)\b|\bPEM\b|\bASN\.?1\b|\bPKCS ?#?\d|InvalidKey|DECODER routines|ERR_OSSL|OSSL_|MalformedFraming|secretOrPrivateKey|base64|binascii/i;
+/** What a private key failing to parse says on its exception's line, in the words of the common libraries: a fake is no key. */
+const KEY_PARSE = /could not (?:deserialize|parse|load|decode|read)[^\n]{0,60}key|(?:invalid|malformed|bad|unsupported|unable to (?:load|parse|read|decode)|failed to (?:load|parse|read|decode)|not a valid)[^\n]{0,60}\b(?:key|der|asn\.?1)\b|key[^\n]{0,40}not supported|asn\.?1|\bPKCS ?#?\d|InvalidKey|DECODER routines|ERR_OSSL|OSSL_|MalformedFraming|secretOrPrivateKey/i;
+const PEM_WORD = /\bPEM\b/;
+/** The start of an exception's line, in any language's words. */
+const EXCEPTION = /^(?:[\w$.]*(?:Error|Exception|Warning)\b|error\b|called `|[\w$.]*InvalidKey)/;
 
-/** `results` with each failure that says nothing about the project marked. It names a file of `leftOut`: it could not run,
- * however the runner reports it (an import inside a test is a plain failure). It names a file of `fakedKeys`, or reads as a key
- * that does not parse while the snapshot holds a fake: it may need the real key. */
+/** The line that says what a failure was, not its source lines or its traceback: pytest's last `E` exception, or a
+ * message's last exception line, else the last `E` line or the first line. */
+export function exceptionLine(message: string): string {
+  const lines = message.split("\n").map((l) => l.trim());
+  const marked = lines.filter((l) => /^E(?:\s|$)/.test(l)).map((l) => l.replace(/^E\s*/, "")).filter(Boolean);
+  const pool = marked.length ? marked : lines.filter((l) => l && !/^at\s/.test(l));
+  return pool.filter((l) => EXCEPTION.test(l)).at(-1) ?? (marked.length ? marked.at(-1)! : pool[0] ?? "");
+}
+
+/** What an unproven failure says when it cannot tell which fake it read. */
+export const A_FAKED_FILE = "a faked file";
+
+/** `results` with each failure that says nothing about the project marked. A missing-file or open-failure line names a file of
+ * `leftOut`: it could not run, however the runner reports it (an import inside a test is a plain failure). Such a line names a
+ * file of `fakedKeys`, or the exception reads as a key that does not parse while the snapshot holds a fake: it may need the real
+ * key, of the file its text shows, or of a file it cannot tell. */
 export function markUnproven(results: TestResult[], o: { leftOut: string[]; fakedKeys: string[]; all: string[] }): TestResult[] {
   if (!o.leftOut.length && !o.fakedKeys.length) return results;
   return results.map((t) => {
     if (!failed(t)) return t;
-    const needs = missingLeftOut([t.message], o.leftOut, o.all)[0] ?? namedIn(t.message, o.leftOut, o.all)[0];
+    const failing = t.message.split("\n").filter((l) => MISSING.test(l) || OPEN_FAILED.test(l)).join("\n");
+    const needs = missingLeftOut([t.message], o.leftOut, o.all)[0] ?? namedIn(failing, o.leftOut, o.all)[0];
     if (needs) return { ...t, outcome: "error", needs, message: `needs ${needs}, left out as secret-looking: ${t.message}` };
-    const key = namedIn(t.message, o.fakedKeys, o.all)[0] ?? (o.fakedKeys.length && KEY_PARSE.test(t.message) ? o.fakedKeys[0] : undefined);
+    if (!o.fakedKeys.length) return t;
+    const line = exceptionLine(t.message);
+    const key = namedIn(failing, o.fakedKeys, o.all)[0] ?? (KEY_PARSE.test(line) || PEM_WORD.test(line)
+      ? namedIn(t.message, o.fakedKeys, o.all)[0] ?? A_FAKED_FILE : undefined);
     return key ? { ...t, outcome: "error", needs: key, fakedKey: true, message: `may need the real key in ${key}, a fake in the sandbox: ${t.message}` } : t;
   });
 }
@@ -184,7 +206,7 @@ export function unprovenText(n: number, items: readonly { needs: string; faked?:
   const out = of(false), real = of(true);
   const they = (one: string, many: string) => n === 1 ? one : many;
   return [...out.length ? [`could not run: ${they("it needs", "they need")} ${names(out)}, left out as secret-looking`] : [],
-    ...real.length ? [`${out.length ? "or " : ""}unproven: ${they("it may need", "they may need")} the real key in ${names(real)}, a fake in the sandbox`] : []].join(", ");
+    ...real.length ? [`${out.length ? "or " : ""}unproven: ${they("it may need", "they may need")} the real key in ${names(real)}${real.every((p) => p === A_FAKED_FILE) ? "" : ", a fake in the sandbox"}`] : []].join(", ");
 }
 
 /** The package npx tried to download because it is not installed where the command ran ("@scope/name" decoded), or

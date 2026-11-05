@@ -409,7 +409,8 @@ test("the review and setup line names a faked key and the way to the real one, w
 });
 
 for (const [name, message, unproven] of [
-  ["names the file", "E   open('tests/data/fixture.txt') gave nothing", true],
+  ["names the file in an open failure", "E   OSError: could not open tests/data/fixture.txt", true],
+  ["names the file in an assert", "E   assert 'tests/data/fixture.txt' == 'x'", false],
   ["a key that does not parse", "ValueError: Could not deserialize key data", true],
   ["openssl's words", "ssl.SSLError: [SSL] PEM lib (_ssl.c:3862)", true],
   ["a plain failure", "assert 1 == 5", false],
@@ -437,7 +438,7 @@ test("a file left out by its name: named, models told, and a failure naming it i
   const repo = project({ "tests/data/ca.pem": "not a key\n", ".env.example": "A=1\n" });
   const agent = new RecordingAgent(WRITE(), REPORT);
   const { review: r, rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson(), progress: () => {},
-    sessionFactory: fakeFactory(() => [junitXml([[GEN, "test_add", "failed", "E   open('tests/data/ca.pem') failed"]]), "1 failed\n", false]) });
+    sessionFactory: fakeFactory(() => [junitXml([[GEN, "test_add", "failed", "E   OSError: could not open tests/data/ca.pem"]]), "1 failed\n", false]) });
   expect(r.findings).toEqual([]);
   expect(exitCode(r)).toBe(2);
   expect(r.notSent).toEqual([".env.example", "tests/data/ca.pem"]);

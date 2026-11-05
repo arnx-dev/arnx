@@ -181,7 +181,7 @@ test("a --range review's diff and snapshot are byte-identical to before (b838807
     for (const untracked of [undefined, false, true]) {
       const c = resolveChange(repo, "HEAD~1..HEAD", [], untracked === undefined ? {} : { untracked });
       // The same Change as before: no new key (withUntracked, untrackedIncluded, untrackedLeftOut) on a range.
-      expect(c).toEqual({ kind: "range", base, head, diff: DIFF, files: ["app.py", "lib/util.py"],
+      expect(c).toEqual({ kind: "range", base, head, diff: DIFF, files: ["app.py", "lib/util.py"], namedOut: [".env"],
         ignored: ["data/dump.csv"] });
       const dest = join(tmp(), `snap-${untracked}`);
       expect(snapshot(repo, c.head, dest, [], { untracked: !!untracked })).toEqual([{ path: ".env", line: 0, label: "named like a secret" }]);

@@ -16,7 +16,7 @@ import { dirname, join, posix, resolve, sep } from "node:path";
 import { configSuspects, loadReviewFile, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
-import { BIG_KEYS_MOST, excludePathspecs, fakeKeys, filePin, holdsPrivateKey, isCertainRule, isCodePath, isKeyFileName, isSecretPath,
+import { BIG_KEYS_MOST, excludePathspecs, fakeKeys, filePin, holdsOnlyPublicPem, holdsPrivateKey, isCertainRule, isCodePath, isKeyFileName, isSecretPath,
   type KeyScan, keyTokens, MAY_HOLD_KEY, mayShowPrivateKey, privateKeyIn, scanKeys, type SecretPin, standInsFor, suspects, usedAsName,
   WORD_RULE } from "./secrets";
 import { buildContextDir, manifestRule, REPORT_DIR, type Runner } from "./sandbox";
@@ -67,6 +67,8 @@ export interface Change {
   blanked?: Blanked[];
   /** Changed files a snapshot leaves out for what they hold, on either side: not in `files`, no section in `diff`. */
   withheld?: Withheld[];
+  /** Changed files left out by their name. */
+  namedOut?: string[];
 }
 
 /** A path `arnx accept` writes: an `r<review id>/` folder (Python, TypeScript) or an `arnx_<review id>_` file (Rust). */
@@ -164,12 +166,12 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
   const ex = excludePathspecs();
   const ours = [":(exclude).arnx", ":(exclude).arnxignore"];
   const ignored = loadIgnore(repo);
-  const ignoredOut = new Set<string>(), lockOut = new Set<string>();
+  const ignoredOut = new Set<string>(), lockOut = new Set<string>(), namedOut = new Set<string>();
   const standIns = standInsSetting(repo);
   /** Whether a snapshot keeps this side of a file named like a secret (scrub). */
   const namedSideStays = (path: string, side: FileSide) => !!side && !("label" in side) && (
-    (allow.find((a) => a.path === path)?.matches ?? []).includes(filePin(side.text)) ||
-    (standIns && isKeyFileName(path) && !side.binary && holdsPrivateKey(side.text, [])));
+    (allow.find((a) => a.path === path)?.matches ?? []).includes(filePin(side.text)) || (!side.binary && (
+      holdsOnlyPublicPem(path, side.text) || (standIns && isKeyFileName(path) && holdsPrivateKey(side.text, [])))));
   /** The section of a changed file named like a secret, when a snapshot keeps it on each side it has. */
   const namedSection = (path: string, revs: string[]): string | null => {
     const section = git(repo, ["diff", ...DIFF_FORM, ...revs, "--", `:(literal)${path}`]);
@@ -188,6 +190,7 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
     const named = names(git(repo, ["diff", "-z", "--name-only", ...revs, "--", ".", ...ours]))
       .filter((p) => isSecretPath(p) && !out(p)).flatMap((p) => {
         const section = namedSection(p, revs);
+        if (!section) namedOut.add(p);
         return section ? [[p, section] as const] : [];
       });
     return [git(repo, ["diff", ...DIFF_FORM, ...revs, "--", ".", ...ex, ...skip]) + named.map(([, section]) => section).join(""),
@@ -293,12 +296,13 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
   if (standIns && !mayShowPrivateKey(diff)) notTooLarge(diff);
   const atRev = blobSides(repo, diff);
   const sealed = sealDiff(diff, allow, (path) => base === EMPTY_TREE ? null : atRev(base, path),
-    (path) => head === null ? fileSide(repo, path) : atRev(head, path), standIns);
+    (path) => head === null ? fileSide(repo, path, allow.find((a) => a.path === path)?.matches) : atRev(head, path), standIns);
   if (!sealed.diff.trim()) {
     // A range is within reach only from HEAD to the commit before it, or to where its branch left.
     const allowable = kind !== "range" || (head === commitOf(repo, "HEAD") &&
       [git(repo, ["rev-parse", "--verify", "-q", "HEAD^"], [0, 1]).trim(), branchBase(repo)?.base].includes(base));
-    throw new ArnxError(secretStop(sealed.withheld, sealed.beforeOnly, allowable));
+    const allowedAlready = (p: string) => !!allow.find((a) => a.path === p)?.matches.length;
+    throw new ArnxError(secretStop(sealed.withheld, sealed.beforeOnly, allowable, allowedAlready));
   }
   notTooLarge(sealed.diff);
   diff = sealed.diff;
@@ -310,17 +314,22 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
     ...(born && included.length ? { untrackedIncluded: included.sort() } : {}),
     ...(notSent.length ? { untrackedLeftOut: notSent.sort() } : {}),
     ...(sealed.files.length ? { blanked: sealed.files } : {}),
-    ...(sealed.withheld.length ? { withheld: sealed.withheld } : {}) };
+    ...(sealed.withheld.length ? { withheld: sealed.withheld } : {}), ...(namedOut.size ? { namedOut: [...namedOut].sort() } : {}) };
 }
 
 /** What a change refuses to send, and the way out. `allow-secret` takes a file as it stands, at HEAD, before the last commit
  * and where its branch left, so a range may hold a copy it cannot reach (`allowable`), and a file gone has no way but another
  * range (`beforeOnly`: a key only the code before the change holds). */
 function secretStop(files: readonly { path: string; label: string }[], beforeOnly: ReadonlySet<string> = new Set(),
-                    allowable = true): string {
+                    allowable = true, allowed: (path: string) => boolean = () => false): string {
   const one = files.length === 1;
   const named = someNames(files.map((f) => `${f.path} (${f.label})`), 5);
   const start = `the change contains text that looks like a secret (a key or token) in ${named}`;
+  // Allowing frees neither a file no scan can read for its diff, nor one that cannot be read.
+  if (files.every((f) => allowed(f.path) || f.label === UNREADABLE.label)) {
+    return `${start}; arnx will not send it to a model. It is too large to read for a diff, or could not be read, so allowing it does not ` +
+      "help: review another with `--range A..B`";
+  }
   const command = `\`arnx allow-secret ${one ? files[0]!.path : "PATH"}\``;
   if (!allowable) return `${start}; arnx will not send it to a model. It cannot be allowed in this range, only as it stands at HEAD: review another with \`--range A..B\``;
   if (files.every((f) => beforeOnly.has(f.path))) {
@@ -354,7 +363,7 @@ function leftOutReason(rel: string, read: { text: string; binary: boolean }, sca
 export type FileSide = { text: string; binary: boolean } | { line: number; label: string } | null;
 
 /** The working tree's side, what a snapshot of it copies. A link is its target's path: nothing here follows it. */
-export function fileSide(repo: string, path: string): FileSide {
+export function fileSide(repo: string, path: string, pins: readonly string[] = []): FileSide {
   const p = join(repo, path);
   try {
     if (!lstatSync(p).isFile()) return null;
@@ -362,6 +371,7 @@ export function fileSide(repo: string, path: string): FileSide {
     return UNREADABLE;
   }
   const big = overScanLimit(p);
+  if (big === "binary" && pins.includes(pinOfFile(p) ?? "")) return null; // allowed, and no diff shows a binary's bytes
   return big === "binary" || big === "too large" ? keyInStream(p) : scrubText(p, changeLimits.maxScanBytes);
 }
 
@@ -524,7 +534,8 @@ export function sealDiff(diff: string, allow: readonly SecretPin[], before: (pat
         for (const n of scan.blank) blank.set(n, lines[n - 1]!);
       }
       const plain = got.text.replaceAll("\0", "");
-      const faked = fakeKeys(plain);
+      // What is only read: a page of the diff shows no key, whatever its wrap.
+      const faked = fakeKeys(plain, { view: true });
       if (faked.count) {
         const real = plain.split("\n");
         faked.text.split("\n").forEach((line, i) => {
@@ -641,8 +652,20 @@ export interface Blanked { path: string; lines: number[] }
 
 /** What a file left out holds and where, for a person. Never the text. Line 0: the whole file counts (its name, its size). */
 export const withheldWhat = (w: Withheld) => w.line ? `${w.label}, line ${w.line}` : w.label;
+/** Files left out, for a person: those left out by their name go last, with the label once. */
+export function namesLeftOut(paths: readonly string[], files: readonly Withheld[] = [], name: (p: string) => string): string {
+  const of = (p: string) => files.find((x) => x.path === p);
+  const byName = paths.filter((p) => of(p)?.label === NAMED_OUT).map(name);
+  return [...paths.filter((p) => of(p)?.label !== NAMED_OUT).map((p) => `${name(p)}${of(p) ? ` (${withheldWhat(of(p)!)})` : ""}`),
+    ...byName.length ? [`${byName.join(", ")} (${NAMED_OUT})`] : []].join(", ");
+}
 /** Files left out, for a person. */
-export const describeWithheld = (w: readonly Withheld[]) => w.map((x) => `${x.path} (${withheldWhat(x)})`).join(", ");
+export const describeWithheld = (w: readonly Withheld[]) => namesLeftOut(w.map((x) => x.path), w, (p) => p);
+/** The same at setup, with no change to go by: what files hold is named, and files left out by their name are a count. */
+export function leftOutBrief(w: readonly Withheld[]): string {
+  const held = w.filter((x) => x.label !== NAMED_OUT), byName = w.length - held.length;
+  return [...held.length ? [describeWithheld(held)] : [], ...byName ? [`${byName} file${byName === 1 ? "" : "s"} by name`] : []].join("; ");
+}
 /** What setup says of files holding a key's fake. */
 export const fakedKeysText = (paths: readonly string[]) =>
   `private keys faked in the sandbox: ${someNames(paths, 5)}; a test that parses one needs \`arnx allow-secret PATH\``;
@@ -1033,12 +1056,14 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   const pinsOf = (rel: string) => allow.find((a) => a.path === rel)?.matches ?? [];
   /** A pin of the whole file, read a piece at a time: only for a file a pin may keep although no scan reads it. */
   const pinnedWhole = (p: string, rel: string) => !!pinsOf(rel).length && pinsOf(rel).includes(pinOfFile(p) ?? "");
-  /** A file named like a secret stays only when allowed, or when it is a key file holding a key, which gets its fake. */
+  /** A file named like a secret stays only when allowed, when it is a key file holding a key, which gets its fake, or when it
+   * is a `.pem` of what is no secret. */
   const namedStays = (p: string, rel: string) => {
     if (pinnedWhole(p, rel)) return true;
-    if (!o.standIns || !isKeyFileName(rel)) return false;
+    if (!isKeyFileName(rel)) return false;
     const read = scrubText(p, changeLimits.maxScanBytes);
-    return !!read && !read.binary && holdsPrivateKey(read.text, []);
+    if (!read || read.binary) return false;
+    return holdsOnlyPublicPem(rel, read.text) || (o.standIns && holdsPrivateKey(read.text, []));
   };
   const seen = new Set<string>(o.known ?? []);
   const guesses = new Set<string>();

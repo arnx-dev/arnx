@@ -402,7 +402,7 @@ test("allow-secret marks the file and says it may be sent from now on", async ()
   expect(await cli.run("allow-secret", "detect.py")).toBe(0);
   expect(cli.stdout).toBe(["! detect.py: 1 key-like string (AKIA… line 1)",
     "✓ Allowed in .arnx/review.yaml.",
-    "  Model calls and the sandbox may hold it. A new key-like string in it withholds the file again.", "Next: arnx setup"].join("\n"));
+    "  Model calls and the sandbox may hold it. A new key-like string in it gets a stand-in.", "Next: arnx setup"].join("\n"));
 });
 
 test("init's banner: first init at a terminal only, coloured with colour; never again, in a pipe or with --json", async () => {

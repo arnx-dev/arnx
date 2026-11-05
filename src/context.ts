@@ -132,7 +132,7 @@ export function sourceFiles(root: string, dirs: string[]): Map<string, string> {
       if (st.isDirectory()) {
         if (!SKIP_DIRS.has(name) && !name.startsWith(".")) visit(r);
       } else if (st.isFile() && SOURCE.test(name) && st.size <= MAX_FILE_BYTES && !isSecretPath(name)) {
-        out.set(r, fakeKeys(readFileSync(join(root, r), "utf8")).text);
+        out.set(r, fakeKeys(readFileSync(join(root, r), "utf8"), { view: true }).text);
       }
     }
   };
@@ -208,7 +208,7 @@ export function contextPack(root: string, diff: string, owned: string[], searchD
       let body = files.get(file) ?? null;
       if (body === null && SOURCE.test(file) && !isSecretPath(file)) {
         try {
-          body = fakeKeys(readFileSync(join(root, file), "utf8")).text;
+          body = fakeKeys(readFileSync(join(root, file), "utf8"), { view: true }).text;
         } catch {
           body = null;
         }
@@ -282,7 +282,7 @@ export function changedDefinitions(root: string, diff: string, owned: string[], 
     if (!SOURCE.test(path) || isSecretPath(path) || added.has(path)) continue;
     let body: string;
     try {
-      body = fakeKeys(readFileSync(join(root, path), "utf8")).text;
+      body = fakeKeys(readFileSync(join(root, path), "utf8"), { view: true }).text;
     } catch {
       continue;
     }

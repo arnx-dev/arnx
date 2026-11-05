@@ -22,6 +22,8 @@ export interface Classified {
   flaky: TestResult[];
   errors: TestResult[];
   passed: TestResult[];
+  /** Tests every run skipped. */
+  skipped: number;
   missingRuns: number;
   totalRuns: number;
 }
@@ -43,7 +45,7 @@ export function classify(runs: (TestResult[] | null)[]): Classified {
   const complete = runs.filter((r): r is TestResult[] => r !== null).map((run) => run.map(asError));
   const byId = new Map<string, TestResult[]>();
   for (const run of complete) for (const t of run) byId.set(t.testId, [...(byId.get(t.testId) ?? []), t]);
-  const c: Classified = { findings: [], flaky: [], errors: [], passed: [], missingRuns: runs.length - complete.length,
+  const c: Classified = { findings: [], flaky: [], errors: [], passed: [], skipped: 0, missingRuns: runs.length - complete.length,
     totalRuns: runs.length };
   for (const id of [...byId.keys()].sort()) {
     const results = byId.get(id)!;
@@ -52,7 +54,7 @@ export function classify(runs: (TestResult[] | null)[]): Classified {
     if (outcomes.includes("error")) c.errors.push(results.find((t) => t.outcome === "error")!);
     else if (results.length === runs.length && outcomes.every((o) => o === "failed")) c.findings.push(last);
     else if (outcomes.includes("failed")) c.flaky.push(results.find((t) => t.outcome === "failed")!);
-    else if (outcomes.every((o) => o === "skipped")) continue;
+    else if (outcomes.every((o) => o === "skipped")) c.skipped++;
     else c.passed.push(last);
   }
   return c;

@@ -8,7 +8,7 @@ import { CloudClient } from "../src/cloud";
 import { CloudBrain } from "../src/cloudbrain";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { recheckReview, recheckSummary } from "../src/recheck";
-import { exitCode, load, summary } from "../src/report";
+import { exitCode, load, render, summary } from "../src/report";
 import { runReview } from "../src/reviewer";
 import { defaultSettings, type Settings, writeSettings } from "../src/settings";
 import { type FakeCloud, fakeCloud, type StepScript, TOKEN } from "./helpers/cloudfake";
@@ -98,15 +98,15 @@ test("the second opinion is told what was left out, as a finding beside it may r
   expect(summary(r, "review.md")).toContain("lib.py");
 });
 
-test("a left-out file no test needs: the review is as it was, and the terminal still names it", async () => {
+test("a left-out file no test needs: the review is as it was, and the terminal counts it, for review.md to name", async () => {
   const repo = repoWith();
   const agent = new RecordingAgent(WRITE(), JSON.stringify({ tests: [{ test: `${GEN}::test_add`, expects: "x" }], suspected_defects: [], questions: [] }));
   const { review: r } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson(), progress: () => {},
     sessionFactory: fakeFactory(() => [junitXml([[GEN, "test_add", "passed", ""]]), "1 passed\n", false]) });
   expect(exitCode(r)).toBe(0);
   const said = summary(r, "review.md");
-  expect(said).toContain("lib.py (a private key, line 2)");
-  expect(said).toContain("arnx allow-secret");
+  expect(said).toContain("1 file left out (review.md)");
+  expect(render(r).replace(/\s+/g, " ")).toContain("`lib.py` (a private key, line 2)");
 });
 
 test("a run with no report beside a left-out file names it", async () => {

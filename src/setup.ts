@@ -14,7 +14,7 @@ import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { AdapterId, TestResult } from "./adapters/types";
-import { addToSandbox, type Blanked, describeBlanked, describeWithheld, fakedKeysText, filesAt, hasCommits, snapshotDigest, someNames,
+import { addToSandbox, type Blanked, describeBlanked, describeWithheld, fakedKeysText, filesAt, leftOutBrief, hasCommits, snapshotDigest, someNames,
   takeSnapshot, type Withheld, workingTreeFiles } from "./change";
 import { configSuspects,
   loadReviewFile, parseReviewFile, plainReviewYaml, projectDigest, readSecretPins, restDigest, runDigest, type ReviewConfig,
@@ -25,7 +25,7 @@ import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPL
 import { draftYaml, NOT_SET_UP, quickDraft } from "./draft";
 import { route } from "./route";
 import { MANY_SERVICES, manyServices, manyServicesReason } from "./facts";
-import { classify, describeHints, diagnose, firstErrors, firstLine, type Hint, missingLeftOut, npxDownload, npxText,
+import { A_FAKED_FILE, classify, describeHints, diagnose, firstErrors, firstLine, type Hint, markUnproven, missingLeftOut, npxDownload, npxText,
   loadFailure, passingApart, unexplainedFiles } from "./diagnose";
 import type { FailureModel } from "./jev";
 import { ArnxError } from "./errors";
@@ -64,6 +64,8 @@ export const OUTPUT_TAIL = 6000;
  * again (`flaky`, ids), and every failure (accepted ones aside), for setup to record. */
 export interface SuiteCounts { acceptedFailing: number; unexpected: string[]; baselineFailing: number; left: string[];
   flaky: string[]; failed: TestResult[]; passed: number;
+  /** Tests that failed for a file left out or a key's fake: no failure of the project, and in no baseline. */
+  unproven?: Unproven[];
   /** Every test the run reported. */
   all: TestResult[];
   /** What the failures point to (diagnose, the run apart, JEV), when the suite's failures were looked at. */
@@ -73,6 +75,9 @@ export interface SuiteCounts { acceptedFailing: number; unexpected: string[]; ba
 
 const noCounts = (): SuiteCounts => ({ acceptedFailing: 0, unexpected: [], baselineFailing: 0, left: [], flaky: [],
   failed: [], passed: 0, all: [] });
+
+/** A test that needs a file left out, or a private key (`faked`) the sandbox holds as a fake. */
+export interface Unproven { testId: string; needs: string; faked?: true }
 
 /** The accepted files of this project (`accepted`, acceptedPins) that match their pin, and those changed since. */
 function acceptedOf(cfg: ReviewConfig, accepted: AcceptedPins, dir?: string): AcceptedPins {
@@ -111,9 +116,15 @@ export function suiteOk(results: TestResult[] | null, cfg: ReviewConfig, accepte
   const unexpected: string[] = [];
   const failed: TestResult[] = [];
   const failing = new Set<string>();
+  const unproven: Unproven[] = [];
   let acceptedFailing = 0;
   let baselineFailing = 0;
   for (const t of results) {
+    if (t.needs) {
+      unproven.push({ testId: t.testId, needs: t.needs, ...(t.fakedKey ? { faked: true as const } : {}) });
+      counts.set("unproven", (counts.get("unproven") ?? 0) + 1);
+      continue;
+    }
     counts.set(t.outcome, (counts.get(t.outcome) ?? 0) + 1);
     if (!failedTest(t) || cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))) continue;
     if (ownerFile(t.fileAttr, mine.pinned) !== null) {
@@ -134,7 +145,7 @@ export function suiteOk(results: TestResult[] | null, cfg: ReviewConfig, accepte
       `${acceptedFailing === 1 ? "s" : ""})` : "") +
     (baselineFailing && !record ? ` (${baselineFailing} in the baseline)` : "");
   const c: SuiteCounts = { acceptedFailing, unexpected, baselineFailing, left, flaky: [], failed,
-    passed: counts.get("passed") ?? 0, all: results };
+    passed: counts.get("passed") ?? 0, all: results, ...(unproven.length ? { unproven } : {}) };
   if (mine.changed.length) {
     return [false, `${summary}; accepted test changed since \`arnx accept\`: ${mine.changed.map((x) =>
       `${x.change} ${x.path}`).join(", ")} (see \`arnx check\`)`, c];
@@ -304,7 +315,9 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     } finally {
       for (const c of canary) rmSync(c.path, { force: true });
     }
-    const all = kept(ran);
+    // A test failing for a file left out, or a key's fake, is no failure of the project.
+    const reported = kept(ran);
+    const all = reported && leftOut ? markUnproven(reported, { leftOut: leftOut.secret, fakedKeys: leftOut.fakedKeys, all: leftOut.all }) : reported;
     if ((all ?? []).some((t) => [t.fileAttr, t.testId].some((x) => x && /(?:^|\/)\.arnx\//.test(x)))) {
       return [false, "the project's test run collects files under .arnx/ (a test arnx placed in .arnx/tests/ ran). " +
         "arnx keeps its accepted tests there so your own run never runs them: make the runner leave .arnx/ out " +
@@ -352,12 +365,15 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     // While setup records the baseline, a suite that runs gets the same look at its failures as one that does not:
     // those that look like the environment go back to the agent before they are recorded.
     if (!ok || (baseline === "record" && counts.failed.length)) {
-      // A failure that names a file the snapshot left out: nothing in review.yaml brings it back, only the user can.
+      // A failure that names a file the snapshot left out: nothing in review.yaml brings it back, only the user can. One
+      // .arnxignore leaves out goes into the sandbox; for a secret-looking one or a fake, setup stops only when no test can run.
       const needed = leftOut?.paths.length ? missingLeftOut([result.output,
-        ...(results ?? []).filter(failedTest).map((t) => t.message)], leftOut.paths, leftOut.all) : [];
-      if (needed.length) {
+        ...(results ?? []).filter((t) => failedTest(t) || t.needs).map((t) => t.message)], leftOut.paths, leftOut.all) : [];
+      const named = (counts.unproven ?? []).map((u) => u.needs).filter((p) => p !== A_FAKED_FILE);
+      const guessed = (counts.unproven ?? []).some((u) => u.needs === A_FAKED_FILE) ? leftOut?.fakedKeys ?? [] : [];
+      if (needed.some((p) => !leftOut!.secret.includes(p)) || (!counts.passed && (needed.length || named.length || guessed.length))) {
         tailOf(result.output);
-        throw new LeftOutNeeded(needed);
+        throw new LeftOutNeeded([...new Set([...needed, ...named, ...guessed])]);
       }
       const hints = diagnose(results, cfg, snap);
       // Failing files with no other explanation run once more, together and without the rest of the suite: those
@@ -491,6 +507,8 @@ const withSandbox = (digest: string, sandbox: Iterable<string>) => [digest, ...[
 /** One project's proof: its suite counts, why tests were skipped, and the tests it fails today (recorded as its
  * baseline; absent for a project proved earlier). */
 export interface ProjectProof { name: string; summary: string; skips: string[]; failed?: BaselineTest[];
+  /** Tests that need a file left out or a real key: in no baseline. */
+  unproven?: Unproven[];
   /** Tests its test_command leaves out, kept by the agent (coverageGap). */
   gap?: string }
 
@@ -550,12 +568,19 @@ export interface SetupResult {
   runs: SetupRun[];
 }
 
-/** A file left out of the snapshot that a run's failure names: `secret`, left out as secret-looking; otherwise
+/** A file a run's failure needs: `secret`, left out as secret-looking; `faked`, in the sandbox with a fake for its key; otherwise
  * matched by .arnxignore. */
-export interface NeededFile { path: string; secret: boolean }
+export interface NeededFile { path: string; secret: boolean; faked?: true }
 
-/** The files the snapshot left out, and the repository's files (to tell a shared name apart), for runSuite. */
-export interface LeftOut { paths: string[]; all: string[] }
+/** The files the snapshot left out (`secret`, those left out as secret-looking), those with a key's fake, and the repository's
+ * files (to tell a shared name apart), for runSuite. */
+export interface LeftOut { paths: string[]; secret: string[]; fakedKeys: string[]; all: string[] }
+
+/** What a later proof's snapshot lacks: what its runs may need and no change to review.yaml brings. */
+const lackingOf = (taken: { withheld: Withheld[]; fakedKeys: string[] }, all: string[]): LeftOut => {
+  const secret = taken.withheld.map((w) => w.path);
+  return { paths: secret, secret, fakedKeys: taken.fakedKeys, all };
+};
 
 /** A run's failure names files the snapshot left out (repository paths). */
 class LeftOutNeeded extends ArnxError {
@@ -567,9 +592,11 @@ class LeftOutNeeded extends ArnxError {
 /** Why setup stopped, for a person and the agent: which files the tests need, and what left each one out. */
 export function neededText(files: NeededFile[]): string {
   const secret = files.filter((f) => f.secret).map((f) => f.path);
-  const ignored = files.filter((f) => !f.secret).map((f) => f.path);
+  const faked = files.filter((f) => f.faked).map((f) => f.path);
+  const ignored = files.filter((f) => !f.secret && !f.faked).map((f) => f.path);
   return "the tests need " + [secret.length ? `${secret.join(", ")}, which arnx left out as secret-looking (not sent, ` +
-    "not in the sandbox)" : "", ignored.length ? `${ignored.join(", ")}, which .arnxignore leaves out` : ""]
+    "not in the sandbox)" : "", faked.length ? `the real key in ${faked.join(", ")}, a fake in the sandbox` : "",
+    ignored.length ? `${ignored.join(", ")}, which .arnxignore leaves out` : ""]
     .filter(Boolean).join(", and ");
 }
 
@@ -1156,7 +1183,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const ignoredFile = loadIgnore(repo);
     const secret = new Set(withheld.map((w) => w.path));
     const leftOut: LeftOut = { paths: [...secret, ...files.filter((p) => ignoredFile(p) && !secret.has(p) &&
-      !sandbox.has(p))], all: files };
+      !sandbox.has(p))], secret: [...secret], fakedKeys, all: files };
     // Suites that run in a browser are never set up: listed under uncovered as browser tests.
     const readSnap = (rel: string) => {
       try {
@@ -1170,7 +1197,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const stopped = () => new StopRound(`stopped: ${state.problem}. Only the user can let ` +
       `${state.needed!.length === 1 ? "it" : "them"} in, so setup ends here; do not work around it.`);
     if (withheld.length) {
-      say(`left out as secret-looking: ${describeWithheld(withheld)}; if one is a test fixture, not a secret, allow ` +
+      say(`left out as secret-looking: ${leftOutBrief(withheld)}; if one is a test fixture, not a secret, allow ` +
         "it with `arnx allow-secret PATH` and run setup again");
     }
     if (blanked.length) say(`comment lines blanked as secret-looking: ${describeBlanked(blanked)}`);
@@ -1380,7 +1407,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           throw e;
         }
         // Files .arnxignore leaves out go into the sandbox (scrubbed as the snapshot is), and the project runs again.
-        if (e instanceof LeftOutNeeded && e.files.every((p) => !secret.has(p))) {
+        if (e instanceof LeftOutNeeded && e.files.every((p) => !secret.has(p) && !fakedKeys.includes(p))) {
           const r = addToSandbox(repo, snap, e.files, pins, { known: replaced });
           boundary.addScrubbed(r);
           r.sandboxed.forEach((p) => sandbox.add(p));
@@ -1402,7 +1429,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           }
         }
         if (e instanceof LeftOutNeeded) {
-          state.needed = e.files.map((path) => ({ path, secret: secret.has(path) }));
+          state.needed = e.files.map((path) => ({ path, secret: secret.has(path), ...(fakedKeys.includes(path) ? { faked: true as const } : {}) }));
           state.failing = [];
           state.failingProject = null;
           state.problem = `${name}: ${neededText(state.needed)}`;
@@ -1484,6 +1511,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         skips, counts, after: summary.startsWith(counted) ? summary.slice(counted.length) : "" });
       state.proofs.set(name, { name, summary, skips,
         failed: counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined)),
+        ...(counts.unproven ? { unproven: counts.unproven } : {}),
         ...(gap ? { gap: gap.line } : {}) });
       // A TypeScript project that can be type checked and has no typecheck yet: say so while the agent is here.
       const typed = cfg.language === "typescript" && !cfg.typecheck && typeCheckable(readSnap, cfg.workdir)
@@ -1891,6 +1919,7 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
     const snap = join(tmp, "repo");
     const untracked = o.untracked ?? settings?.untracked ?? false;
     const taken = takeSnapshot(repo, null, snap, secretPinsOf(f.raw), { sandbox: sandboxOnlyOf(f.raw), untracked });
+    const lacking = lackingOf(taken, filesAt(repo, null, untracked));
     // The file may hold a guess's stand-in, which runs read as the value; the logs keep neither.
     const boundary = new Boundary(configSuspects(repo));
     boundary.addScrubbed(taken);
@@ -1922,7 +1951,7 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
       if (stands) rmSync(join(repo, output), { force: true });
       const [ok, summary, , skips, , , counts] = stands ?? await runSuite(cfg, snap, log, {
         sessionFactory: o.sessionFactory, key: envKey(cfg, join(tmp, "manifests")), acceptedTestsDir: accepted,
-        accepted: trusted, outputLog: join(repo, output), baseline: mine, rerun: true, passedBefore: !!prior,
+        accepted: trusted, outputLog: join(repo, output), baseline: mine, rerun: true, passedBefore: !!prior, leftOut: lacking,
         ...(quick.has(cfg.name) ? { precheck: true, quick: true } : {}), boundary, swap });
       const moved = [counts.left.length ? `${counts.left.length} left the baseline (they pass now)` : "",
         counts.flaky.length ? `${plural(counts.flaky.length, "test")} failed, then passed when run again (flaky): ` +
@@ -1992,8 +2021,10 @@ export async function rerecordBaseline(repo: string, o: { by: string; at: string
   try {
     const snap = join(tmp, "repo");
     const boundary = new Boundary(configSuspects(repo));
-    boundary.addScrubbed(takeSnapshot(repo, null, snap, secretPinsOf(f.raw), { sandbox: sandboxOnlyOf(f.raw),
-      untracked: o.untracked ?? settings?.untracked ?? false }));
+    const untracked = o.untracked ?? settings?.untracked ?? false;
+    const taken = takeSnapshot(repo, null, snap, secretPinsOf(f.raw), { sandbox: sandboxOnlyOf(f.raw), untracked });
+    boundary.addScrubbed(taken);
+    const lacking = lackingOf(taken, filesAt(repo, null, untracked));
     const swap = swapIn(boundary, snap);
     copyManifests(snap, join(tmp, "manifests"));
     for (const cfg of f.projects) {
@@ -2002,7 +2033,7 @@ export async function rerecordBaseline(repo: string, o: { by: string; at: string
       const all = { ...cfg, knownFailing: [] };
       let [ok, summary, , , , , counts] = await runSuite(all, snap, log, { sessionFactory: o.sessionFactory,
         key: envKey(cfg, join(tmp, "manifests")), acceptedTestsDir: accepted, accepted: trusted,
-        outputLog: join(repo, output), baseline: "record", boundary, swap });
+        outputLog: join(repo, output), baseline: "record", leftOut: lacking, boundary, swap });
       // Most of the suite failing is the environment, not today's code: nothing is recorded from it.
       const most = ok && counts.failed.length > counts.passed;
       if (most) {

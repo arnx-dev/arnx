@@ -1,5 +1,5 @@
-// What arnx never sends to a model or copies into a sandbox: files that usually hold secrets, text that looks like a
-// key, and environment variable names that look like credentials.
+// What arnx sends and copies only as stand-ins or not at all: files that usually hold secrets, text that looks like a key, and
+// environment variable names that look like credentials.
 import { createHash, scryptSync } from "node:crypto";
 import { posix } from "node:path";
 import { type Comment, comments, commentStyle } from "./comments";
@@ -88,6 +88,8 @@ const contentMatches = (text: string): Hit[] => {
 
 /** The shortest run taken for a key known by how it starts. */
 const KEY_RUN_MIN = 64;
+/** The shortest later piece of such a run, padding aside. */
+const RUN_PIECE_MIN = 16;
 const isRunChar = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 43 || c === 47 ||
   c === 61 || c === 45 || c === 95;
 const CLOSING = "\"'`,;+)] \t";
@@ -130,6 +132,8 @@ function runAt(text: string, at: number): { end: number; count: number } {
       } else if (text[j] === "\\" && text[j + 1] === "/") j++;
       else break;
     }
+    // A short piece after a key's first line is a name or an option, unless padding closes it.
+    if (!first && held && held < RUN_PIECE_MIN && text[j - 1] !== "=") break;
     const next = j < text.length ? pastLineEnd(text, j) : -1;
     // Or a closing quote: the string's last line.
     if (!first && j < text.length && next < 0 && !/^\\?["'`]/.test(text.slice(j, j + 2))) break;
@@ -196,14 +200,14 @@ function pastSeparators(text: string, from: number): { at: number; closed: boole
 
 /** The end of the tokens of KEY_TOKEN_MIN or more after `from`, with only separators among them; `from` when none stands
  * there. It stops at a name (looksLikeName), and tokens sharing a line with anything else (a name assigned or called) are no key's. */
-function tokenRun(text: string, from: number): number {
+function tokenRun(text: string, from: number, noHeader = false): number {
   let end = from, at = pastSeparators(text, from).at;
   for (;;) {
     const n = tokenLength(text, at);
     if (n < KEY_TOKEN_MIN) return end;
     let past = at;
     while (past < text.length && (isRunChar(text.charCodeAt(past)) || (text[past] === "\\" && text[past + 1] === "/"))) past++;
-    if (looksLikeName(text.slice(at, past))) return end;
+    if (looksLikeName(text.slice(at, past)) || (noHeader && n < RUN_PIECE_MIN && text[past - 1] !== "=")) return end;
     const next = pastSeparators(text, past);
     if (next.at >= text.length || next.closed) end = past;
     else if (tokenLength(text, next.at) < KEY_TOKEN_MIN) return end;
@@ -245,7 +249,7 @@ function strayStart(text: string, end: number, floor: number): number {
 }
 
 /** Private-key text in a text. `body` to `bodyEnd`: what may hold its tokens. `end`: a stray END, and what it closes. */
-interface KeySpan { from: number; to: number; kind: "header" | "start" | "end"; body: number; bodyEnd: number }
+interface KeySpan { from: number; to: number; kind: "header" | "start" | "end"; body: number; bodyEnd: number; closed?: boolean }
 
 /** Where `text` holds private-key text, first to last: from a header to its END line, or with no END to the end of its run of
  * tokens (tokenRun); a run of KEY_RUN_MIN or more that starts as a key, with such a run after it; an END with no header, and
@@ -274,14 +278,14 @@ function privateKeySpans(text: string, sections = false): KeySpan[] {
       }
       const closed = end && (!file || end.index < file.index);
       const to = closed ? end!.index + end![0].length : tokenRun(text, stop);
-      span = { from: m.index, to, kind: "header", body: stop, bodyEnd: closed ? end!.index : to };
+      span = { from: m.index, to, kind: "header", body: stop, bodyEnd: closed ? end!.index : to, closed: !!closed };
     } else {
       const run = runAt(text, m.index);
       if (run.count < KEY_RUN_MIN) {
         KEY_ANY.lastIndex = Math.max(run.end, m.index + 1);
         continue;
       }
-      const to = tokenRun(text, run.end);
+      const to = tokenRun(text, run.end, true);
       span = { from: m.index, to, kind: "start", body: m.index, bodyEnd: to };
     }
     out.push(span);
@@ -316,12 +320,23 @@ export function maskPrivateKeys(text: string): string {
 
 /** In a key's text, what is no token: a header inside it, a written escape, and what a template fills in. */
 const KEY_TOKEN = new RegExp(`(${KEY_HEADER}|\\\\+[^]|%[0-9A-Fa-f]{2}|\\$?\\{[^{}\\n]{0,200}\\}|<[^<>\\n]{0,200}>)|[A-Za-z0-9+/=_-]{${KEY_TOKEN_MIN},}`, "g");
+/** For what is only read: every token of any length or shape, between an intact header and END. */
+const VIEW_TOKEN = new RegExp(`(${KEY_HEADER}|\\\\+[^]|%[0-9A-Fa-f]{2})|[A-Za-z0-9+/=_-]+`, "g");
 /** Past this many tokens a file with an unallowed key is left out: each fake takes a slow hash. */
 export const BIG_KEYS_MOST = 2000;
 /** Each token's fake, for the life of this process. A fake is its own fake, so a text that holds fakes reads the same. */
 const KEY_FAKES = new Map<string, string>();
+const BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+/** A token's fake: of its length, each letter or digit a base64 character from a slow hash of the token, its other characters
+ * kept. Unlike `fake`, it keeps no character's kind, which tells about a key's encoding. */
 function keyFake(token: string): string {
-  const out = fake(token, KEY_FAKES);
+  const known = KEY_FAKES.get(token);
+  if (known !== undefined) return known;
+  const seed = scryptSync(token, "arnx key fake", 32, { N: 1024 });
+  const bytes: number[] = [];
+  for (let i = 0; bytes.length < token.length; i++) bytes.push(...createHash("sha256").update(seed).update(`${i}`).digest());
+  const out = [...token].map((c, i) => /[A-Za-z0-9]/.test(c) ? BASE64[bytes[i]! % 64]! : c).join("");
+  KEY_FAKES.set(token, out);
   KEY_FAKES.set(out, out);
   return out;
 }
@@ -338,16 +353,23 @@ function tokensIn(text: string, spans: readonly KeySpan[]): Set<string> {
 
 /** `text` with each token of its private keys given a fake of the same length: all else stays, names, a header and an END too, so it
  * still reads as a key and its lines do not move. `count`: the tokens replaced. The same token gets the same fake anywhere.
+ * `view`, for what is only read and never runs: between an intact header and END every token goes, of any length or shape, so
+ * a page or a search of the result shows no key whatever its wrap. Take it on the whole file, before any page or search.
  * Past BIG_KEYS_MOST, in an allowed file that only a tool shows, letters do for a fake. */
-export function fakeKeys(text: string): { text: string; count: number } {
+export function fakeKeys(text: string, o: { view?: boolean } = {}): { text: string; count: number } {
   const spans = privateKeySpans(text).filter((s) => s.kind !== "end");
   if (!spans.length) return { text, count: 0 };
-  const many = tokensIn(text, spans).size > BIG_KEYS_MOST;
+  const all = (s: KeySpan) => !!o.view && !!s.closed;
+  const distinct = new Set<string>(tokensIn(text, spans));
+  for (const s of spans.filter(all)) {
+    for (const m of text.slice(s.body, s.bodyEnd).matchAll(VIEW_TOKEN)) if (m[1] === undefined) distinct.add(m[0]);
+  }
+  const many = distinct.size > BIG_KEYS_MOST;
   const parts: string[] = [];
   let from = 0, count = 0;
   for (const s of spans) {
-    parts.push(text.slice(from, s.body), text.slice(s.body, s.bodyEnd).replace(KEY_TOKEN, (m: string, skip: string | undefined) => {
-      if (skip !== undefined || looksLikeName(m)) return m;
+    parts.push(text.slice(from, s.body), text.slice(s.body, s.bodyEnd).replace(all(s) ? VIEW_TOKEN : KEY_TOKEN, (m: string, skip: string | undefined) => {
+      if (skip !== undefined || (!all(s) && looksLikeName(m))) return m;
       const out = many ? m.replace(/[A-Za-z0-9]/g, "x") : keyFake(m);
       if (out !== m) count++;
       return out;
@@ -377,6 +399,14 @@ export function isSecretPath(rel: string): boolean {
 
 const KEY_FILE_NAMES = KEY_FILES.map(globRegex);
 export const isKeyFileName = (rel: string) => KEY_FILE_NAMES.some((r) => r.test(posix.basename(rel)));
+/** The armour labels of what a `.pem` holds that is no secret. */
+const PUBLIC_BLOCK = /^(?:(?:TRUSTED |X509 |ATTRIBUTE )?CERTIFICATE|X509 CRL|(?:NEW )?CERTIFICATE REQUEST|(?:RSA )?PUBLIC KEY|(?:DH|DSA|EC|X9\.42 DH) PARAMETERS|PKCS7|CMS)$/;
+/** A `.pem` whose blocks are all known, and none a private key. */
+export function holdsOnlyPublicPem(rel: string, text: string): boolean {
+  if (!rel.endsWith(".pem")) return false;
+  const blocks = [...text.matchAll(/-----BEGIN ([^-\n]{1,64})-----/g)].map((m) => m[1]!);
+  return blocks.length > 0 && blocks.every((b) => PUBLIC_BLOCK.test(b)) && !holdsPrivateKey(text, []);
+}
 
 export function hasSecretContent(text: string): boolean {
   return CONTENT.test(text) || addressPasswords(text).length > 0 || headerlessKeys(text).length > 0;
@@ -424,9 +454,10 @@ function lastAtOrBefore<T>(sorted: readonly T[], key: (item: T) => number, x: nu
   return lo - 1;
 }
 
-/** What a snapshot does with a file's key-shaped strings that `pins` does not allow: `withhold` the file (naming a private
- * key first, wherever it stands, or else the first such string in code), or, when each one is inside a comment of a source file (a key in a doc example),
- * `blank` those comment lines: `text` is the file with them blanked, its line count kept. */
+/** What a file's key-shaped strings that `pins` does not allow come to: `withhold` names one not in a comment (a private key
+ * first, wherever it stands), which leaves the file out only where no stand-in or fake may go (leftOutReason); or, when each one
+ * is inside a comment of a source file (a key in a doc example), `blank` those comment lines: `text` is the file with them
+ * blanked, its line count kept. */
 export type KeyScan = { withhold: { line: number; label: string } } | { blank: number[]; text: string };
 
 export function scanKeys(path: string, text: string, pins: readonly string[]): KeyScan | null {
@@ -882,21 +913,13 @@ export function fakeAll(text: string, values: Iterable<string>, pins: readonly s
   return standInsFor(values, made)(text, pins);
 }
 
-/** A private key in `text` that `pins` does not allow: a header, whatever is under it, or a run that starts as a key. No
- * stand-in can keep it out. */
+/** A private key in `text` that `pins` does not allow: a header, whatever is under it, or a run that starts as a key. */
 export function holdsPrivateKey(text: string, pins: readonly string[]): boolean {
   return unpinned(text, contentMatches(text), pins).some(isKey);
 }
 
 /** Where a piece of a file holds private-key text; -1 when it holds none. */
 export const privateKeyIn = (text: string) => privateKeySpans(text).find((s) => s.kind !== "end")?.from ?? -1;
-
-/** `text` (the file at `path`) with a stand-in for each of its suspects, or null when no stand-in can keep the real
- * value out: a private key. `count`: the strings replaced. */
-export function standIn(text: string, pins: readonly string[], path = ""): { text: string; count: number } | null {
-  if (holdsPrivateKey(text, pins)) return null;
-  return fakeAll(text, suspects(path, text, pins), pins);
-}
 
 /** Every key-shaped string in `text`, by line and label (never the string itself). */
 export function secretHits(text: string): { line: number; label: string }[] {

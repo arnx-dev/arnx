@@ -9,7 +9,7 @@ import { adapterFor } from "./adapters";
 import { Boundary, STAND_INS_NOTE } from "./boundary";
 import { filesAt, takeSnapshot } from "./change";
 import { configSuspects, loadReviewFile, sandboxOnlyOf, secretPinsOf } from "./config";
-import { markUnproven, unprovenText } from "./diagnose";
+import { A_FAKED_FILE, markUnproven, unprovenText } from "./diagnose";
 import { SetupRequired } from "./errors";
 import { asError, ownerFile, runTests, type TestResult } from "./outcomes";
 import type { Say } from "./progress";
@@ -40,12 +40,13 @@ function generated(rdir: string, project: string, writable: RegExp): Record<stri
 }
 
 /** A finding's outcome in one run: its own result, else the load error of its file, else absent. */
-function outcomeIn(run: TestResult[] | null, f: Finding): { outcome: string; message: string; needs?: string } {
+function outcomeIn(run: TestResult[] | null, f: Finding): { outcome: string; message: string; needs?: string; fakedKey?: true } {
   if (run === null) return { outcome: "missing", message: "" };
   const own = run.find((t) => t.testId === f.testId);
-  if (own) return { outcome: own.outcome, message: own.message, ...(own.needs ? { needs: own.needs } : {}) };
+  const need = (t: TestResult) => ({ ...(t.needs ? { needs: t.needs } : {}), ...(t.fakedKey ? { fakedKey: t.fakedKey } : {}) });
+  if (own) return { outcome: own.outcome, message: own.message, ...need(own) };
   const load = f.file ? run.find((t) => t.outcome === "error" && ownerFile(t.fileAttr, [f.file!]) !== null) : undefined;
-  return load ? { outcome: "error", message: load.message, ...(load.needs ? { needs: load.needs } : {}) } : { outcome: "absent", message: "" };
+  return load ? { outcome: "error", message: load.message, ...need(load) } : { outcome: "absent", message: "" };
 }
 
 /** Run the review's confirmed tests `settings.runs` times at most: a test that fails once is still failing and its file
@@ -165,13 +166,12 @@ export function recheckSummary(r: ReviewRecheck): [string, number] {
   if (r.standInsShown) lines.push(STAND_INS_NOTE);
   if (r.couldNotRun) {
     lines.push(`${unprovenText(r.couldNotRun.length, r.couldNotRun, (p) => p.join(", ")).replace(/^./, (c) => c.toUpperCase())}. If it is a test fixture: \`arnx allow-secret ` +
-      `${r.couldNotRun.length === 1 ? r.couldNotRun[0]!.needs : "PATH"}\`, then run this again.`);
+      `${r.couldNotRun.length === 1 && r.couldNotRun[0]!.needs !== A_FAKED_FILE ? r.couldNotRun[0]!.needs : "PATH"}\`, then run this again.`);
   } else if (code !== 0) {
     if (r.leftOut) lines.push(`Left out as secret-looking, which these tests may need: ${r.leftOut.join(", ")}. If one is a test fixture: \`arnx allow-secret PATH\`.`);
-    if (r.fakedKeys) lines.push(`A fake private key is in the sandbox, which these tests may need real: ${r.fakedKeys.join(", ")}. If one is a test fixture: \`arnx allow-secret PATH\`.`);
   }
   lines.push(code === 0 ? "Every confirmed test passes now."
-    : code === 1 ? "Fix the code (not the tests) and run `arnx check --review` again."
+    : code === 1 ? `${r.fakedKeys ? "Fix the code; if this test needs a real key: `arnx allow-secret PATH`. " : "Fix the code (not the tests) and "}${r.fakedKeys ? "Run" : "run"} \`arnx check --review\` again.`
     : r.couldNotRun ? "These tests say nothing about the code until it is." : "Some tests did not report; see above.");
   return [lines.join("\n"), code];
 }

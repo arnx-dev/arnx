@@ -300,6 +300,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     const leftOutFiles = new Map((change.withheld ?? []).map((w) => [w.path, w]));
     const couldNotRun: { test: string; needs: string; faked?: boolean }[] = [];
     const fakedKeys = new Set<string>();
+    let skippedTests = 0;
     const projectStats: ProjectStat[] = [];
     const checked: Checked[] = [];
     const untested: Untested[] = [];
@@ -567,6 +568,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       for (const w of rnd.leftOut ?? []) leftOutFiles.set(w.path, w);
       for (const t of c.errors) if (t.needs) couldNotRun.push({ test: t.testId, needs: t.needs, ...(t.fakedKey ? { faked: true } : {}) });
       rnd.fakedKeys?.forEach((p) => fakedKeys.add(p));
+      skippedTests += c.skipped;
       if (stop === "end_turn" && rnd.agent.stop !== "end_turn") stop = rnd.agent.stop;
     }
     findings.forEach((f, i) => { f.id = `F${i + 1}`; });
@@ -690,7 +692,8 @@ export async function runReview(repo: string, o: { settings: Settings;
       ...(change.lockfiles ? { lockfilesChanged: change.lockfiles } : {}),
       ...(change.blanked ? { blankedLines: change.blanked } : {}),
       ...(leftOutFiles.size ? { leftOutFiles: [...leftOutFiles.values()].sort((a, b) => a.path < b.path ? -1 : 1) } : {}),
-      ...(couldNotRun.length ? { couldNotRun } : {}), ...(fakedKeys.size ? { fakedKeys: [...fakedKeys].sort() } : {}),
+      ...(couldNotRun.length ? { couldNotRun } : {}), ...(fakedKeys.size ? { fakedKeys: [...fakedKeys].sort(), ...(skippedTests ? { skippedTests } : {}) } : {}),
+      ...(change.withheld?.length || change.namedOut?.length ? { leftOutTouched: [...change.withheld?.map((w) => w.path) ?? [], ...change.namedOut ?? []].sort() } : {}),
       ...(change.untrackedIncluded ? { untrackedIncluded: change.untrackedIncluded } : {}),
       ...(change.untrackedLeftOut ? { untrackedLeftOut: change.untrackedLeftOut.length } : {}),
       costUsd: Math.round(usage.reduce((a, u) => a + u.costUsd, 0) * 10_000) / 10_000, usage,

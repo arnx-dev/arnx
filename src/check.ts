@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
 import { Boundary, maskedCopy, STAND_INS_NOTE } from "./boundary";
-import { markUnproven, unprovenText } from "./diagnose";
+import { A_FAKED_FILE, markUnproven, unprovenText } from "./diagnose";
 import { filesAt, git, hasCommits, takeSnapshot, type Withheld } from "./change";
 import { configSuspects, loadReviewFile, type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
@@ -25,6 +25,8 @@ export const CHECK_TIMEOUT = 900;
 /** `accepted`: the ids among passed and failed that are accepted tests (behind findings marked real; absent: all are).
  * `reason` and `log`, with noReport: why there is no report, and the runner's output (repository-relative).
  * `reviews`: a failed test → the review that accepted its file, when known. */
+const FIX_WITH_FAKE = "Fix the code; if this test needs a real key: `arnx allow-secret PATH`";
+
 export interface ProjectCheck { /** Something in it was masked. */ standInsShown?: boolean;
   /** Files the snapshot left out as secret-looking; tests that failed for one, which could not run. */
   leftOut?: Withheld[]; fakedKeys?: string[]; couldNotRun?: { testId: string; needs: string; faked?: boolean }[]; project: string; files: string[];
@@ -443,7 +445,7 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
   }
   // A file left out or a key faked: what could not run for it says so, and whatever else went wrong may have it for a cause.
   const blocked = results.flatMap((r) => r.couldNotRun ?? []);
-  const allowFile = (paths: string[]) => `\`arnx allow-secret ${paths.length === 1 ? paths[0] : "PATH"}\``;
+  const allowFile = (paths: string[]) => `\`arnx allow-secret ${paths.length === 1 && paths[0] !== A_FAKED_FILE ? paths[0] : "PATH"}\``;
   if (blocked.length) {
     const needs = [...new Set(blocked.map((x) => x.needs))];
     lines.push(`✗ ${count(blocked.length, "test")} ${unprovenText(blocked.length, blocked, (p) => p.slice(0, 5).join(", "))}. ` +
@@ -455,9 +457,10 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
       `If one is a test fixture: ${allowFile(leftOut)}.`);
   }
   const fakedKeys = [...new Set(results.flatMap((r) => r.fakedKeys ?? []))];
-  if (fakedKeys.length && !blocked.length && (missing.length || failed.length)) {
-    lines.push(`A fake private key is in the sandbox, which these tests may need real: ${fakedKeys.slice(0, 5).join(", ")}${fakedKeys.length > 5 ? ", …" : ""}. ` +
-      `If one is a test fixture: ${allowFile(fakedKeys)}.`);
+  const skips = results.reduce((n, r) => n + r.skipped, 0);
+  if (fakedKeys.length && !blocked.length && (missing.length || failed.length || skips)) {
+    lines.push(`A fake private key is in the sandbox: ${fakedKeys.slice(0, 5).join(", ")}${fakedKeys.length > 5 ? ", …" : ""}. ` +
+      (failed.length ? FIX_WITH_FAKE : `A test ${skips && !missing.length ? "skipped " : ""}may need the real one: ${allowFile(fakedKeys)}`) + ".");
   }
   if (missing.length) {
     const timeout = missing.every((r) => r.reason?.startsWith("the tests timed out"));

@@ -27,7 +27,7 @@ import { type Account, byokHint, CloudClient, credentialsPath, deleteCredentials
   type Fetch, tokenFor, usd } from "./cloud";
 import { dockerSession, suffixReviewCopies } from "./testround";
 import type { SessionFactory } from "./sandbox";
-import { branchBase, changeLimits, describe, describeBlanked, describeWithheld, fakedKeysText, git, hasCommits, pinOfFile, repoRoot, resolveChange } from "./change";
+import { branchBase, changeLimits, describe, describeBlanked, fakedKeysText, git, hasCommits, leftOutBrief, pinOfFile, repoRoot, resolveChange } from "./change";
 import { NOT_SET_UP } from "./draft";
 import { route } from "./route";
 import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, readSecretPins, type ReviewFile,
@@ -934,7 +934,7 @@ class Commands {
         ...(this.d.setupSessions ? { sessionFactory: this.d.setupSessions } : {}),
         ...(cloud ? { brain: cloud(progress) } : {}) }), { cost: true, since: started });
     if (result.withheld.length) {
-      this.d.out(`Left out as secret-looking (not sent, not in the sandbox): ${describeWithheld(result.withheld)}. ` +
+      this.d.out(`Left out as secret-looking (not sent, not in the sandbox): ${leftOutBrief(result.withheld)}. ` +
         "If one is a test fixture, not a secret: `arnx allow-secret PATH`, then run setup again.");
     }
     if (result.fakedKeys.length) this.d.out(fakedKeysText(result.fakedKeys));
@@ -1285,7 +1285,7 @@ class Commands {
       const rel = relative(repo, full).split(sep).join("/");
       // A file left out whatever it holds, by its name or its size, is pinned as it stands.
       const tooBig = statSync(full).size > changeLimits.maxScanBytes;
-      const whole = isSecretPath(rel) || tooBig;
+      const whole = isSecretPath(rel) || tooBig || readFileSync(full).subarray(0, 8000).includes(0);
       const text = tooBig ? "" : readFileSync(full, "utf8");
       const hits = secretHits(text);
       if (!hits.length && !whole) throw new ArnxError(`${rel} holds nothing that looks like a key; nothing to allow`);
@@ -1308,7 +1308,7 @@ class Commands {
     this.d.out(pins.some((p) => p.hits.some((h) => h.label === "a private key"))
       ? "  The sandbox keeps the real key, so tests that parse it run. Models still read `[private key]`. Any edit ends this."
       : pins.some((p) => p.whole) ? "  The sandbox and model calls may hold it as it is. Any edit leaves it out again."
-      : "  Model calls and the sandbox may hold it. A new key-like string in it withholds the file again.");
+      : "  Model calls and the sandbox may hold it. A new key-like string in it gets a stand-in.");
     this.d.out(`Next: ${seed ? "arnx setup" : "arnx review"}`);
     // Never the matched text, nor its pins: where each key-like string is, and what kind it looks like.
     this.emit("ok", 0, { files: pins.map((p) => ({ path: p.path, matches: p.hits.length,
@@ -1317,8 +1317,7 @@ class Commands {
     return 0;
   }
 
-  /** allow-secret --remove: the paths' pins out of review.yaml, so their files are withheld again. The files need not
-   * exist any more. A seed left with nothing allowed is removed. */
+  /** allow-secret --remove: the paths' pins out of review.yaml. The files need not exist any more. A seed left with nothing allowed is removed. */
   private disallowSecret(repo: string, paths: string[]): number {
     if (!paths.length) throw new ArnxError("name the files to stop allowing: arnx allow-secret --remove PATH...");
     const rels = paths.map((p) => {
