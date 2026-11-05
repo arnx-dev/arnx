@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { someNames, takeSnapshot } from "./change";
 import { type ReviewFile, sandboxOnlyOf, secretPinsOf } from "./config";
 import { buildContextOf } from "./sandbox";
+import { wholeAt } from "./secrets";
 
 /** One place a stand-in stands: line 0 when the line is not known. `rule` is the secrets.ts rule, or "private key". */
 export interface StandInRow { path: string; line: number; rule: string }
@@ -46,10 +47,8 @@ export const standInsLine = (files: readonly string[], list: string): string =>
 export const namesStandIn = (text: string, values: Iterable<string>): boolean => {
   for (const v of values) {
     if (!v) continue;
-    // Whole, not inside a longer word.
-    for (let at = text.indexOf(v); at >= 0; at = text.indexOf(v, at + 1)) {
-      if (!/[A-Za-z0-9]/.test(text[at - 1] ?? "") && !/[A-Za-z0-9]/.test(text[at + v.length] ?? "")) return true;
-    }
+    // Whole, not inside a longer word: the rule that put it there.
+    for (let at = text.indexOf(v); at >= 0; at = text.indexOf(v, at + 1)) if (wholeAt(text, at, v)) return true;
   }
   return false;
 };
@@ -66,8 +65,13 @@ export function withRepoHolds<T>(repo: string, file: ReviewFile, untracked: bool
       if (!inner) {
         dir = mkdtempSync(join(tmpdir(), "arnx-"));
         const snap = join(dir, "repo");
-        takeSnapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw), untracked: !!untracked });
-        inner = holdsIn(buildContextOf(snap));
+        try {
+          takeSnapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw), untracked: !!untracked });
+          inner = holdsIn(buildContextOf(snap));
+        } catch {
+          // A warning must not stop approval: with no snapshot, nothing is named stale.
+          inner = () => true;
+        }
       }
       return inner(text);
     });

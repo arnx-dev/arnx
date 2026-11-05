@@ -883,6 +883,13 @@ export function suspects(path: string, text: string, pins: readonly string[], wh
 
 const MANY_VALUES = 64;
 
+/** Whether `v` stands whole at `at` in `text`, by the rule of matcherOf: no word character, `+` or `/` before it, and none after
+ * it unless it ends in `@`. */
+export function wholeAt(text: string, at: number, v: string): boolean {
+  if (/[A-Za-z0-9+/]/.test(text[at - 1] ?? "")) return false;
+  return v.endsWith("@") || !/[A-Za-z0-9]/.test(text[at + v.length] ?? "");
+}
+
 /** Whole occurrences of `values`, longest first. A password with its @ has a host right after it; anything else ends where
  * a word would. */
 function matcherOf(values: readonly string[]): RegExp {

@@ -426,4 +426,10 @@ test("the stand-in sentence reaches the cloud setup agent as comment lines at th
   }
   expect(bodies[1]!.draft.endsWith("\nversion: 1\n")).toBe(true);
   expect(bodies[0]!.draft.split("\n").every((l) => l === "" || l.startsWith("# "))).toBe(true);
+  // A re-proof or an add has the current file: no draft, the sentence comes as comment lines ahead of it.
+  await setup({ standIns: ["detect.py"], project: "svc", current: "version: 1\n" });
+  const re = c.seen.filter((x) => x.path === "/v1/setup").at(-1)!.body as { draft: unknown; existing_yaml: string };
+  expect(re.draft).toBeNull();
+  expect(re.existing_yaml.startsWith("# ")).toBe(true);
+  expect(re.existing_yaml.endsWith("\nversion: 1\n")).toBe(true);
 });

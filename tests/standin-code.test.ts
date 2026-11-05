@@ -581,3 +581,48 @@ test("the approval warnings of a real repository name a stale sed from the build
   expect(warn("gonehost.example").join("\n")).toContain("arnx setup --project shop");
   expect(warn("livehost.example").join("\n")).not.toContain("setup --project");
 });
+
+test("an address password's stand-in is named though the host follows it; a longer word or a + before it is not", async () => {
+  const { namesStandIn } = await import("../src/standins");
+  const { fakeAll, suspects } = await import("../src/secrets");
+  const url = "postgres://user:" + "qT7vN2xK9mRw4Zs8" + "@db.example/x";
+  const values = suspects("a.py", `URL = '${url}'`, []);
+  const made = fakeAll(url, values).text;
+  const standIn = made.slice(made.indexOf(":", 11) + 1, made.indexOf("@") + 1);
+  expect(standIn.endsWith("@")).toBe(true);
+  expect(standIn).not.toContain("qT7vN2");
+  expect(namesStandIn(`DB: ${made}`, [standIn])).toBe(true);
+  expect(namesStandIn(`DB: x${standIn}host`, [standIn])).toBe(false);
+  expect(namesStandIn(`DB: +${standIn}host`, [standIn])).toBe(false);
+});
+
+test("a snapshot that fails gives no stale warning and does not throw", async () => {
+  const { withRepoHolds } = await import("../src/standins");
+  const { approvalWarnings } = await import("../src/setupview");
+  const { parseReviewFile } = await import("../src/config");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const notRepo = mkdtempSync(join(tmpdir(), "arnx-nr-"));
+  const f = parseReviewFile("version: 1\nprojects:\n  shop:\n    root: .\n    language: python\n    image: python:3.12\n" +
+    "    install: [\"sed -i 's/gone.example/new/' cfg.txt\"]\n    test_command: pytest {targets}\n");
+  const warnings = withRepoHolds(notRepo, f, undefined, (h) => approvalWarnings(f, [], h));
+  expect(warnings.join("\n")).not.toContain("setup --project");
+});
+
+test("with untracked files on, a sed text found only in an untracked file is not stale", async () => {
+  const { withRepoHolds } = await import("../src/standins");
+  const { approvalWarnings } = await import("../src/setupview");
+  const { parseReviewFile } = await import("../src/config");
+  const { initRepo, commit: commitIn } = await import("./helpers/gitutil");
+  const { mkdtempSync, writeFileSync: write } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const repo = initRepo(join(mkdtempSync(join(tmpdir(), "arnx-u-")), "r"));
+  write(join(repo, "a.txt"), "x\n");
+  commitIn(repo, "c");
+  write(join(repo, "new.txt"), "host=freshhost.example\n");
+  const f = parseReviewFile("version: 1\nprojects:\n  shop:\n    root: .\n    language: python\n    image: python:3.12\n" +
+    "    install: [\"sed -i 's/freshhost.example/new/' new.txt\"]\n    test_command: pytest {targets}\n");
+  const warn = (u: boolean) => withRepoHolds(repo, f, u, (h) => approvalWarnings(f, [], h)).join("\n");
+  expect(warn(true)).not.toContain("setup --project");
+  expect(warn(false)).toContain("setup --project");
+});

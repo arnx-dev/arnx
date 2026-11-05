@@ -1457,7 +1457,7 @@ class Commands {
     const st = proofState(repo, file);
     const changes = st.proven ? null : this.sayChanges(st);
     const r = await this.approveRun(repo, a, a.values.project as string | undefined, undefined,
-      { warnings: warningsOf(repo, file, [], undefined), changes, quick: lastProof(repo)?.quick ?? [] });
+      { warnings: warningsOf(repo, file, [], untrackedSetting(repo)), changes, quick: lastProof(repo)?.quick ?? [] });
     if (r.code === 0) this.provenEnd(repo, file, r.projects, { untracked });
     else this.d.out(`Not proven:\n${r.detail}`);
     this.emit(r.code === 0 ? "ok" : "fail", r.code, { approved: r.code === 0, projects: r.projects,
