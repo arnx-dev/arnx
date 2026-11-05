@@ -34,8 +34,9 @@ export const BIG_KEYS_MOST = 2000;
 /** Mutable so tests can lower it. */
 export const changeLimits = { maxSnapshotFiles: 20_000, maxScanBytes: BIG_SCAN_LIMIT };
 const MAX_BUFFER = 1 << 30;
-/** A diff arnx can read, whatever the owner's git settings. */
-const DIFF_FORM = ["--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"];
+/** A diff arnx can read, of what git holds, whatever the owner's git settings: no outside tool or text conversion (a
+ * decrypting driver), none of a submodule's files. */
+const DIFF_FORM = ["--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "--src-prefix=a/", "--dst-prefix=b/"];
 /** What a search of file contents needs, whatever the owner's git settings: bytes, plain output. */
 const SEARCH = (repo: string) => ["--literal-pathspecs", "-C", repo, "grep", "--no-color", "-a", "-E"];
 const SEARCH_ENV = { ...process.env, LC_ALL: "C" };

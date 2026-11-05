@@ -372,6 +372,44 @@ test("a path git quotes or ends with a tab is read all the same, under any prefi
   }
 });
 
+test("a diff shows what git holds, whatever a text conversion, a submodule setting or an outside tool would show", () => {
+  const body = PRIVATE_KEY_BLOCK.split("\n")[1]!;
+  // The shape of a decrypting driver: the file in git says nothing, the driver prints the secret.
+  for (const how of ["local", "global attributes"]) {
+    const repo = gitRepo(join(tmp(), `conv-${how.replace(" ", "-")}`));
+    const attrs = join(repo, "..", "attrs");
+    if (how === "local") writeFileSync(join(repo, ".gitattributes"), "*.sec diff=dec\n");
+    else {
+      writeFileSync(attrs, "*.sec diff=dec\n");
+      runGit(repo, "config", "core.attributesFile", attrs);
+    }
+    runGit(repo, "config", "diff.dec.textconv", `sh -c 'echo ${body}'`);
+    writeFileSync(join(repo, "v.sec"), "ciphertext\n");
+    editApp(repo);
+    commit(repo, "a value only a driver can read");
+    const c = resolveChange(repo);
+    expect(c.diff).not.toContain(body);
+    expect(c.diff).toContain("+ciphertext");
+    // An outside diff tool, by setting and by attribute, likewise.
+    runGit(repo, "config", "diff.external", `sh -c 'echo ${body}'`);
+    runGit(repo, "config", "diff.dec.command", `sh -c 'echo ${body}'`);
+    expect(resolveChange(repo).diff).not.toContain(body);
+  }
+  // A submodule's own files are not this repository's change.
+  const sub = gitRepo(join(tmp(), "sub"));
+  const repo = gitRepo(join(tmp(), "super"));
+  runGit(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", join(sub), "sm");
+  commit(repo, "add the submodule");
+  writeFileSync(join(repo, "sm/f.txt"), `${body}\n`);
+  commit(join(repo, "sm"), "a value in the submodule");
+  editApp(repo);
+  commit(repo, "bump");
+  runGit(repo, "config", "diff.submodule", "diff");
+  const c = resolveChange(repo);
+  expect(c.diff).not.toContain(body);
+  expect(c.diff).toContain("Subproject commit");
+});
+
 test("bytes that are not text beside a key do not hide it from the search", () => {
   const repo = gitRepo(tmp());
   const latin = Buffer.concat([Buffer.from([0xe9, 0xff, 0x20]), Buffer.from(PRIVATE_KEY_BLOCK), Buffer.from("\n")]);
