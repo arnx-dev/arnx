@@ -24,8 +24,8 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   with the build cache of the images made from your code (as `arnx env prune` removes it).
   Files you committed are left for the `git rm` it prints, so the removal shows in a commit. Accepted tests are your
   tests by then: kept unless `--tests`. Your arnx cloud login and the arnx program itself are not touched.
-- Your model keys stay in the arnx process. Files named like secrets are not sent to a model. A file left out for what it
-  holds is named at setup and in each review. When every key-shaped string in a JavaScript, TypeScript, Python or Rust file,
+- Your model keys stay in the arnx process. Files named like secrets are not sent to a model, a key file with a key in it aside
+  (below). A file left out is named at setup and in each review. When every key-shaped string in a JavaScript, TypeScript, Python or Rust file,
   a private key aside, is inside a comment that has its lines to itself (a doc example), the file is sent with those comment
   lines blanked instead, and setup names the file and its lines. Everything else that may be a secret reaches a model as a
   stand-in, a fake of the same shape (its prefix such as `sk-`, `whsec_` or `AKIA` kept, then the same length and kinds
@@ -43,7 +43,7 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   base32, wrapped base64 (`base64 -w8`), a dump of swapped words (plain `hexdump`, `od -x`), an upper-case dump (`xxd -u`),
   `xxd -i`, `od -c`, `%XX` of every byte, `list()`, compressed or hashed, nor one written with escapes in the source
   (`"ab\x55c"`).
-  Local files arnx writes for itself keep what they saw: `change.diff` (minus the files left out and a pinned file's key) and image build logs,
+  Local files arnx writes for itself keep what they saw: `change.diff` (minus the files left out, a private key's tokens as fakes) and image build logs,
   neither of which `arnx init`'s `.arnx/.gitignore` lets git take. What a commit of `.arnx/` takes (`review.yaml`, `baseline.json`, accepted tests) holds
   stand-ins, apart from a value you wrote into `review.yaml` yourself.
   What the tests run depends on how sure arnx is. Key-shaped text and a password in an address get the stand-in in the
@@ -82,35 +82,45 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   `[review] stand_ins = false` in `.arnx/config.toml` turns stand-ins off in both copies: files with key-shaped text in code
   are left out, and requests still hold stand-ins for the other values.
   A review's diff blanks comment lines the same way and names them.
-  **Private keys.** A key with an intact header (PEM, PGP's block, SSH2's four dashes, any label), or a run of 64 or more
-  base64 characters in either alphabet that starts as a key's encoding (a whole PEM in base64, an OpenSSH body, private DER),
-  does not reach a model, within the limits below. The file holding one, on either side of a change, is left out of the diff
-  and the snapshot: the review names it with a label and a line, and the rest is reviewed. A file whose key is only on its
-  removed side keeps its clean copy in the snapshot. arnx does not read what is under a header, so a placeholder (`...` in a
-  doc or a form, a bare header in a comment) leaves its file out until you allow it.
-  The filter replaces the same text with `[private key]` in what leaves arnx, test and `exec` output too, before arnx cuts it:
-  from a header to its END line, or with no END for 16 KB; and from the start of a text to an END with no header before it,
-  which covers a page or a cut that starts inside a key. A model's own test keeps what it wrote where it is saved to run, so
-  an accepted test stays whole; a model reads it masked. A model told to write `[private key]` is refused, and so is a
-  `review.yaml` holding it: a test that needs a key reads the file at run time.
-  A test that needs a file left out could not run, and reads so: it is no finding, models are told the file is left out, a
-  review exits as incomplete (2) and `arnx check` too, and both name the file and `arnx allow-secret`. A file over 1 MB that is binary, or over
-  32 MB, is searched a piece at a time and left out on a hit, whatever a pin says. A path that cannot be read counts as a hit.
-  A change of only such files stops, naming what can free it: `arnx allow-secret`, `--range`, or that a range cannot be allowed.
-  **These get past it:** JWK; hex; PKCS12 and PBES1 encrypted keys; lower-case or altered armour; a header broken up in the
-  source (`"...PRIV" + "ATE KEY"`) over a body with another start; with no header, a body with another start, one with spaces
-  or other marks inside its lines, one wrapped too short to hold the start, or one glued to a word before it (`rsaMII...`); a
-  key in a file name; a key longer than the 16 KB limit with no END; in text arnx did not cut, what follows a stray END inside
-  a body; a line a tool cuts at 200 columns, which can leave under 64 characters of a no-header run. Other text that may be a
-  secret goes through the filter below, and a value it does not recognise goes out.
-  **Allowing a file.** When a file's key-shaped text is test fixtures (a secret detector's own tests), `arnx allow-secret PATH`
-  pins it in `.arnx/review.yaml`, which is then proven again before the next review. Other key-shaped strings are pinned one by
-  one, and a new one withholds the file again. A file holding a private key is pinned by the hash of its whole text: as it
-  stands, as committed, before the last commit and where its branch left, beside those pinned before. It stays in the diff and the sandbox, so its
-  tests run, and a model sees `[private key]` on each of its lines in a diff, a read or a search; test output that prints it is masked as above. A header with no END covers its own line and the all-base64 lines right after it, so the rest of the file reads as it is. Each piece of 8 characters or more in both cases also gets a stand-in; a key wrapped shorter, or a piece in one case, does not. A pin sends no key:
-  any edit withholds the file until you allow it again, and a string pin from before this rule holds no private key. `arnx allow-secret`
-  takes only the working tree's file: one deleted cannot be allowed. `arnx allow-secret --remove PATH` takes a file off the list (proven again too). Setup lists
-  allowed files under "Worth a look".
+  **Private keys.** A key with an intact header and END (PEM, PGP's block, SSH2's four dashes, any label) does not reach a
+  model, however it is wrapped: the filter replaces it with `[private key]` in all that leaves arnx, test and `exec` output too,
+  before arnx cuts it. So does a run of 64 or more base64 characters in either alphabet that starts as a key's encoding (a whole
+  PEM in base64, an OpenSSH body, private DER), with the run after it.
+  Its file stays in the diff and the sandbox, whether code, fixture, `.pem` or `.key`, and only the key is replaced. Between a
+  header and its END, each token of 8 or more base64 characters gets a fake of the same length, the same on both sides of a change
+  and in the saved diff. All else stays, the header and END too, so code that looks for them runs. Tokens inside `${...}`,
+  `{...}`, `<...>` stay. arnx does not read what is under a header: a placeholder keeps its file, and long names in code between a
+  header and an END get fakes too. With no END, the header line stays and the run after it gets the fake, tokens of 8 or more
+  separated only by blanks, `\n` or `\r` written out, quotes, commas, `+` or `.`; the filter hides that much. A known start with
+  no header goes the same way. The filter also hides an END with no header, and the base64-only lines before it.
+  A test that parses a key fails on its fake. Setup and each review name the files holding one, with `arnx allow-secret PATH`. A
+  failure whose text names such a file, or reads as a key failing to parse, is unproven: no finding, a review exits as incomplete (2)
+  and `arnx check` too, and neither says to fix the code. Any other failure reads as usual.
+  **What still leaves.** A file named like a secret and holding no key (`.pem` with only a certificate, `.p12`); any `.env`,
+  `.npmrc`, `credentials*.json` and the like, key or not; a file over 32 MB; a binary or UTF-16 file holding a key, which is never
+  edited; a file with over 2000 tokens to fake; with `stand_ins = false`, a file holding a key. The terminal and `review.md` name each with
+  `arnx allow-secret PATH`, and models are told. A failure naming such a file is unproven. **A limit:** a test that fails
+  because of one with no name in its message reads as any other failure, and one passing on a fallback reads as a pass; `review.md`
+  says so once beside the list. A path that cannot be read counts as left out. A change of only such files stops, naming what can
+  free it.
+  A model told to write `[private key]` is refused, and so is a `review.yaml` holding it. A model's own test keeps what it wrote
+  where it is saved to run.
+  **These get past it:** a no-END key with a broken body (a comment mark on each line, tokens under 8, a line of other text in it);
+  a stray END inside a body, for what follows it; JWK; hex; PKCS12 and PBES1 encrypted keys; lower-case or altered armour; a header
+  broken up in the source (`"...PRIV" + "ATE KEY"`) over a body with another start; a word glued to a key's start (`rsaMII...`);
+  with no header, a body with another start, one with spaces or other marks inside its lines, or one wrapped too short to hold the
+  start; a key in a file name; tokens under 8 characters, which stay real in the sandbox and the saved diff and which the filter hides
+  only with an intact header and END in the same text, so a hunk or a page showing them alone goes out; a test that
+  transforms a pinned key (prints a line of it, or its base64); a line a tool cuts at 200 columns, which can leave under 64 characters
+  of a no-header run. Other text that may be a secret goes through the filter below, and a value it does not recognise goes out.
+  **Allowing a file.** `arnx allow-secret PATH` pins it in `.arnx/review.yaml`, which is then proven again before the next review.
+  A private key is pinned by the hash of the whole file: as it stands, as committed, before the last commit and where its branch
+  left, beside those pinned before. The sandbox then keeps the real key, so tests that parse it run. A pin changes nothing a
+  model sees: the same fake in a diff, a read or a search, and `[private key]` over an intact key. Any edit puts the fake back. A file
+  left out by its name or size is pinned the same way and stays as it is, and any edit leaves it out again. Other key-shaped strings
+  are pinned one by one, and a new one withholds the file again. Models' `read_file` and `grep` skip files named like secrets, allowed or
+  not. `arnx allow-secret` takes only the working tree's file: one deleted cannot be allowed. `arnx allow-secret --remove PATH`
+  takes a file off the list (proven again too). Setup lists allowed files under "Worth a look".
   When a setup run fails on a file left out this way, setup stops and names it: only you can let it in. When it
   fails on a file `.arnxignore` leaves out, setup copies that file into the sandbox (scrubbed the same way, never sent
   to a model; it is in the snapshot only while a test runs), says so in one line, runs the project again, and lists
@@ -139,8 +149,8 @@ Uncommitted work means tracked files only: staged and unstaged changes, and new 
 files are in neither the diff, the copy the reviewer reads nor the sandbox, and the review says how many it left out.
 `--untracked` sends them too and names each one (`untracked = true` under `[review]` in `.arnx/config.toml` does it
 always; `--no-untracked` overrides that); `arnx setup` reads the same way. With no commits yet every file is sent, and
-the review says so first. Paths in `.arnxignore`, secret files (`.pem`, `.key`, `.ppk` and the like) and files holding a private key (see the limits there) are not sent, and other
-key-shaped text goes as a stand-in (see [What runs where](#what-runs-where)). review.json records `untracked_included` or
+the review says so first. Paths in `.arnxignore` and secret files (`.env`, `.ppk`, a `.pem` with no key and the like) are not sent, a private key goes as `[private key]` and other
+key-shaped text as a stand-in (see [What runs where](#what-runs-where)). review.json records `untracked_included` or
 `untracked_left_out`, and `not_sent` the files left out.
 
 With arnx cloud, the same content goes to arnx cloud instead of your providers, and arnx cloud passes it to its model

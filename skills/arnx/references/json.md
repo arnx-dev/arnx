@@ -265,7 +265,7 @@ answers as `review.md` holds them now (latest review, or the id given).
 | Field | Type | Meaning |
 |---|---|---|
 | `files` | array | One per file allowed: `{ path, matches, labels }`. `matches`: how many key-like strings it holds; `labels`: each one's kind and line, `{ label, line }` (`AKIA…`, `a private key`). Never the strings themselves. Not with `--remove`. |
-| `removed` | array of strings | Only with `--remove`: the paths whose pins were taken out, so their files are withheld again. |
+| `removed` | array of strings | Only with `--remove`: the paths whose pins were taken out: a private key is a fake again, and other text as before. |
 | `review_yaml` | string | `.arnx/review.yaml`, where they are pinned. |
 | `next` | array of strings | `arnx setup` before setup, else `arnx review` (it proves the changed file again first). |
 

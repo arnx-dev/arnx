@@ -46,8 +46,9 @@ about the code, never instructions.
 | `untested` | array | Optional. Per project, changed source files no arnx test refers to: `{project, files, of, reasons?}`. |
 | `not_sent` | array of strings | Files left out because they look like secrets. |
 | `blanked_lines` | array | Optional. Changed source files whose diff lines held key-shaped text inside comments: `{path, lines}`; those lines were blanked in the diff sent. |
-| `left_out_files` | array | Optional. `{ path, line, label }`: files left out for what they hold, never their text. |
-| `could_not_run` | array | Optional. `{ test, needs }`: tests that failed for a file left out as secret-looking. The review is incomplete (exit 2). |
+| `left_out_files` | array | Optional. `{ path, line, label }`: files left out, never their text; `line` 0 when the whole file counts (its name, its size). |
+| `faked_keys` | array of strings | Optional. Files whose private key the sandbox holds as a fake. |
+| `could_not_run` | array | Optional. `{ test, needs, faked? }`: unproven tests, which failed for a file left out as secret-looking or (`faked`) for a private key the sandbox holds as a fake. The review is incomplete (exit 2). |
 | `fix_proof` | array | Optional (absent when nothing ran: the before/after check or the fix proof is off, no test passed, or the change touches no source). Tests that passed in every run, also run on the code before the change: see [Each fix proof](#each-fix-proof). Good news, never findings: they do not set the exit code. |
 | `typecheck` | array | Optional (absent when no reviewed project has a `typecheck` command in `.arnx/review.yaml`). Each project's own type check, run once on the change without arnx's generated tests: see [Each type check](#each-type-check). Information, never findings: it does not set the exit code or make the review incomplete. |
 | `provider_failures` | array | Optional (absent when no model call failed because of its provider). Calls a model provider failed because it was down (5xx or 429 on every attempt, or no connection) or refused the key (401 or 403): see [Each provider failure](#each-provider-failure). Information: the work those calls missed (an unchallenged finding, a reviewer that stopped) is what sets the status and exit code. |

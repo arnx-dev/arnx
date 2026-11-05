@@ -116,13 +116,13 @@ one that takes in two or more other projects whole (a catch-all `services/`), wo
 twice, so it goes back to the setup agent as a hint too.
 
 What a review sends, and what it leaves out (untracked files, `.arnxignore`, secrets):
-[SAFETY.md](SAFETY.md#what-a-review-sends). A changed file holding a private key is left out and the rest reviewed; a
-change of only such files stops and names what can free it.
+[SAFETY.md](SAFETY.md#what-a-review-sends). A changed file holding a private key is reviewed with a fake in the sandbox and
+`[private key]` for models; a test that needs the real key reads as unproven until `arnx allow-secret PATH`.
 
 ## Exit codes and JSON
 
 Exit codes: 0 no confirmed findings, 1 confirmed findings, 2 incomplete, 3 setup needed. `arnx check`: 0 all accepted
-tests pass, 1 some fail, 2 some did not report, 3 nothing accepted yet, 4 an accepted test changed since accept.
+tests pass, 1 some fail, 2 some did not report or are unproven, 3 nothing accepted yet, 4 an accepted test changed since accept.
 Every command takes `--json`: one JSON object on stdout, the text on stderr, nothing asked (fields in
 [skills/arnx/references/json.md](../skills/arnx/references/json.md)).
 
