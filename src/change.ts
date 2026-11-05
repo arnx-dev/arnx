@@ -271,7 +271,12 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
   const atRev = blobSides(repo, diff);
   const sealed = sealDiff(diff, allow, (path) => base === EMPTY_TREE ? null : atRev(base, path),
     (path) => head === null ? fileSide(repo, path) : atRev(head, path), standIns);
-  if (!sealed.diff.trim()) throw new ArnxError(secretStop(sealed.withheld, sealed.beforeOnly));
+  if (!sealed.diff.trim()) {
+    // A range is within reach only from HEAD to the commit before it, or to where its branch left.
+    const allowable = kind !== "range" || (head === commitOf(repo, "HEAD") &&
+      [git(repo, ["rev-parse", "--verify", "-q", "HEAD^"], [0, 1]).trim(), branchBase(repo)?.base].includes(base));
+    throw new ArnxError(secretStop(sealed.withheld, sealed.beforeOnly, allowable));
+  }
   notTooLarge(sealed.diff);
   diff = sealed.diff;
   const left = new Set(sealed.withheld.map((w) => w.path));
@@ -285,18 +290,22 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
     ...(sealed.withheld.length ? { withheld: sealed.withheld } : {}) };
 }
 
-/** What a change refuses to send, and the way out. `allow-secret` reads the working tree, so a key only the code before the
- * change holds (`beforeOnly`) has none but another range. */
-function secretStop(files: readonly { path: string; label: string }[], beforeOnly: ReadonlySet<string> = new Set()): string {
+/** What a change refuses to send, and the way out. `allow-secret` takes a file as it stands, at HEAD, before the last commit
+ * and where its branch left, so a range may hold a copy it cannot reach (`allowable`), and a file gone has no way but another
+ * range (`beforeOnly`: a key only the code before the change holds). */
+function secretStop(files: readonly { path: string; label: string }[], beforeOnly: ReadonlySet<string> = new Set(),
+                    allowable = true): string {
   const one = files.length === 1;
   const named = someNames(files.map((f) => `${f.path} (${f.label})`), 5);
+  const start = `the change contains text that looks like a secret (a key or token) in ${named}`;
+  const command = `\`arnx allow-secret ${one ? files[0]!.path : "PATH"}\``;
+  if (!allowable) return `${start}; arnx will not send it to a model. It cannot be allowed in this range, only as it stands at HEAD: review another with \`--range A..B\``;
   if (files.every((f) => beforeOnly.has(f.path))) {
-    return `the change contains text that looks like a secret (a key or token) in ${named}, on the side it removes; arnx ` +
-      "will not send it to a model. Review what comes after it: `arnx review --range A..B`";
+    return `${start}, on the side it removes; arnx will not send it to a model. If the file is still here and a test fixture: ` +
+      `${command}, then \`arnx review\` again. If not, review what comes after it: \`arnx review --range A..B\``;
   }
-  return `the change contains text that looks like a secret (a key or token) in ${named}; arnx will not send it to a model. ` +
-    `If ${one ? "it is" : "one is"} a test fixture, not a secret, allow the file: \`arnx allow-secret ${
-      one ? files[0]!.path : "PATH"}\`, then \`arnx review\` again`;
+  return `${start}; arnx will not send it to a model. If ${one ? "it is" : "one is"} a test fixture, not a secret, allow the file: ` +
+    `${command}, then \`arnx review\` again`;
 }
 
 /** Why a snapshot leaves out `rel` holding `scan`'s key-shaped strings; null when it stays. `fakes`: it may get stand-ins.
@@ -346,9 +355,13 @@ function blobSide(repo: string, rev: string, path: string): FileSide {
 /** Each commit's side of the files of `diff`. One search first says which files may hold a key at all: a read per file
  * takes seconds on a big change. A search that fails leaves every file to read. */
 function blobSides(repo: string, diff: string) {
+  /** A section holding a NUL (UTF-16 shown as text): the search cannot see a key in it, so its file is read. */
+  const always = new Set<string>();
   const paths = [...new Set(diff.split(DIFF_SECTION).flatMap((section) => {
     const { old, now } = sectionPaths(section);
-    return [old, now].filter((p): p is string => p !== null);
+    const named = [old, now].filter((p): p is string => p !== null);
+    if (section.includes("\0")) named.forEach((p) => always.add(p));
+    return named;
   }))];
   const searched = new Map<string, Set<string> | null>();
   const search = (rev: string): Set<string> | null => {
@@ -364,12 +377,10 @@ function blobSides(repo: string, diff: string) {
   return (rev: string, path: string): FileSide => {
     if (!searched.has(rev)) searched.set(rev, search(rev));
     const found = searched.get(rev);
-    return found && !found.has(path) ? null : blobSide(repo, rev, path);
+    return found && !found.has(path) && !always.has(path) ? null : blobSide(repo, rev, path);
   };
 }
 
-/** What a file on disk no scan reads whole says when it cannot be read. */
-const UNREAD = { line: 1, label: "too large to scan" };
 /** What a side says when a path the diff names cannot be read. */
 const UNREADABLE = { line: 1, label: "could not be read" };
 
@@ -386,7 +397,7 @@ function keyInBlob(repo: string, rev: string, path: string): { line: number; lab
     } finally {
       closeSync(fd);
     }
-    return r.error || r.status !== 0 ? UNREAD : keyInStream(p);
+    return r.error || r.status !== 0 ? UNREADABLE : keyInStream(p);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -410,7 +421,7 @@ export function keyInStream(p: string): { line: number; label: string } | null {
     }
     return null;
   } catch {
-    return UNREAD;
+    return UNREADABLE;
   } finally {
     if (fd !== null) closeSync(fd);
   }

@@ -6,6 +6,7 @@ import { adapterFor } from "./adapters";
 import type { TestResult } from "./adapters/types";
 import type { ReviewConfig } from "./config";
 import { REPORT_DIR, type RunResult, type Runner } from "./sandbox";
+import { maskPrivateKeys } from "./secrets";
 
 export type { TestResult };
 
@@ -68,7 +69,9 @@ const DESCRIBE_TAIL = 4000;
 /** What the agent sees after run_tests: the parsed results of its own files first (the console alone can be empty:
  * node:test and vitest write results only to arnx's report), then the end of the runner's console. */
 export function describeRun(result: RunResult, results: TestResult[] | null, files: string[]): string {
-  const console = result.output.trim() ? result.output.slice(-DESCRIBE_TAIL) : "(empty)";
+  // Masked before any cut, which could take a key's header and leave its body. Each message on its own, as a header with no
+  // END hides what follows it.
+  const console = result.output.trim() ? maskPrivateKeys(result.output).slice(-DESCRIBE_TAIL) : "(empty)";
   const tail = `\n\nEnd of the runner's console output:\n${console}`;
   if (result.timedOut) return `The run timed out after ${Math.round(result.seconds)}s; no results.${tail}`;
   if (results === null) {
@@ -85,7 +88,7 @@ export function describeRun(result: RunResult, results: TestResult[] | null, fil
   const summary = [...counts.keys()].sort((a, b) => order(a) - order(b)).map((o) => `${counts.get(o)} ${o}`).join(", ");
   const lines = ours.map((t) => t.outcome === "passed" || t.outcome === "skipped"
     ? `${t.outcome} ${t.testId}`
-    : `${t.outcome.toUpperCase()} ${t.testId}${t.message ? `\n    ${t.message.slice(0, 600).replaceAll("\n", "\n    ")}` : ""}`);
+    : `${t.outcome.toUpperCase()} ${t.testId}${t.message ? `\n    ${maskPrivateKeys(t.message).slice(0, 600).replaceAll("\n", "\n    ")}` : ""}`);
   return `${ours.length} tests: ${summary}\n${lines.join("\n")}${tail}`;
 }
 const order = (o: string) => ["passed", "failed", "error", "skipped"].indexOf(o);

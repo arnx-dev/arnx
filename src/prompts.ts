@@ -12,6 +12,7 @@ import { adapterFor } from "./adapters";
 import type { Words } from "./adapters/types";
 import type { Withheld } from "./change";
 import type { ReviewConfig } from "./config";
+import { KEY_SHOWN, KEY_SHOWN_MEANS } from "./secrets";
 
 // The reviewer sees its project's whole part of the change: arnx refuses changes over MAX_DIFF_BYTES instead of
 // cutting them (a cut diff once hid two thirds of a branch while the review said "Complete").
@@ -153,6 +154,10 @@ export function leftOutNote(files: readonly Withheld[]): string {
 export const scopeTold = (scoped: boolean, scope: Scope): Scope | undefined =>
   scoped ? scope : scope.leftOut?.length ? { owned: [], used: [], leftOut: scope.leftOut } : undefined;
 
+/** Said when a diff shows what the filter hid. In code, and absent otherwise, so the prompts' templates stand. */
+export const keyShownNote = (diff: string) => diff.includes(KEY_SHOWN) ? KEY_SHOWN_MEANS : "";
+const withKeyNote = (scope: string, diff: string) => keyShownNote(diff) ? `${scope}\n${keyShownNote(diff)}\n` : scope;
+
 function scopeText(cfg: ReviewConfig, scope: Scope | undefined): string {
   if (!scope) return "";
   const left = leftOutNote(scope.leftOut ?? []);
@@ -199,14 +204,14 @@ export class Prompts {
 
   /** The first message of a hunted review: the change, then the hunt. */
   huntTask(cfg: ReviewConfig, diff: string, context: string, scope?: Scope): string {
-    return substitute(this.t["hunt.opening"], { diff: clip(diff), scope: scopeText(cfg, scope),
+    return substitute(this.t["hunt.opening"], { diff: clip(diff), scope: withKeyNote(scopeText(cfg, scope), diff),
       context: context || "(none found)" }) +
       substitute(this.t["hunt.task"], { no_tests: literal(this.t["hunt.no_tests"]), max_suspects: MAX_SUSPECTS });
   }
 
   /** The second hunter's task: the same opening and hunt, without tools, with the changed definitions whole. */
   secondHuntTask(cfg: ReviewConfig, diff: string, context: string, definitions: string, scope?: Scope): string {
-    return substitute(this.t["hunt.opening"], { diff: clip(diff), scope: scopeText(cfg, scope),
+    return substitute(this.t["hunt.opening"], { diff: clip(diff), scope: withKeyNote(scopeText(cfg, scope), diff),
       context: context || "(none found)" }) +
       substitute(this.t["hunt.task"], { no_tests: "", max_suspects: MAX_SUSPECTS }) +
       (definitions ? substitute(this.t["hunt.second_files"], { files: definitions }) : "");
@@ -257,7 +262,7 @@ export class Prompts {
 
   reviewTask(cfg: ReviewConfig, diff: string, maxQuestions: number, scope?: Scope): string {
     const w = wordsOf(cfg);
-    return substitute(this.t["review.task"], { diff: clip(diff), scope: scopeText(cfg, scope), property: property(w),
+    return substitute(this.t["review.task"], { diff: clip(diff), scope: withKeyNote(scopeText(cfg, scope), diff), property: property(w),
       tests_dir: join(cfg.workdir, cfg.testsDir), runner: w.runner, test_files: w.testFiles,
       max_questions: maxQuestions });
   }

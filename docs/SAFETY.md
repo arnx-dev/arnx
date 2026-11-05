@@ -65,9 +65,7 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   keep their own values in both copies, as a stand-in there can break an install, so an install step can read those. No other
   file keeps them. An install that copies the project elsewhere (`cp -a . /opt/app`, `pip install .`) copies that second copy, so tests
   that run there see stand-ins for guesses. Binary files are left alone. The real values never leave your machine,
-  beyond what a manifest or a lockfile holds and what the limits above let through. Setup names the files whose snapshot has stand-ins once. A private key with
-  a body cannot get a stand-in: its file is still left out (a header with no body anywhere in the file, such as a form's
-  placeholder, is kept as it is).
+  beyond what a manifest or a lockfile holds and what the limits above let through. Setup names the files whose snapshot has stand-ins once.
   A model works among stand-ins, so what it writes holds them. When its text meets real files, arnx swaps each guess's
   stand-in back, in memory and at the last moment: a test as it goes into the throwaway copy, an accepted test too (the file
   under `.arnx/` keeps the stand-in); a search pattern and a path; a command of setup's `exec`; and the env and commands of
@@ -86,24 +84,30 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   A review's diff blanks comment lines the same way and names them.
   **Private keys.** A key with an intact header (PEM, PGP's block, SSH2's four dashes, any label), or a run of 64 or more
   base64 characters in either alphabet that starts as a key's encoding (a whole PEM in base64, an OpenSSH body, private DER),
-  does not reach a model, whatever its body looks like and however a header's body is wrapped. The file holding one, on either
-  side of a change, is left out of the diff and the snapshot: the review names it with a label and a line, and the rest is
-  reviewed. The filter replaces the same text with `[private key]` in all that leaves arnx, test and `exec` output too, from a
-  header to its END line, or with no END to the end of the text or of that file in a diff. arnx does not read what is under a
-  header, so a placeholder (`...` in a doc or a form) leaves its file out until you allow it. A test that needs a file left
-  out could not run, and reads so: it is no finding. A file over 1 MB that is binary, or over 32 MB, is searched a piece at a
-  time and left out on a hit, whatever a pin says. A path that cannot be read counts as a hit. A change of only such files
-  stops, naming `arnx allow-secret`, or `--range` for a key only the code before the change holds.
+  does not reach a model, within the limits below. The file holding one, on either side of a change, is left out of the diff
+  and the snapshot: the review names it with a label and a line, and the rest is reviewed. A file whose key is only on its
+  removed side keeps its clean copy in the snapshot. arnx does not read what is under a header, so a placeholder (`...` in a
+  doc or a form, a bare header in a comment) leaves its file out until you allow it.
+  The filter replaces the same text with `[private key]` in what leaves arnx, test and `exec` output too, before arnx cuts it:
+  from a header to its END line, or with no END for 16 KB; and from the start of a text to an END with no header before it,
+  which covers a page or a cut that starts inside a key. A model's own test keeps what it wrote where it is saved to run, so
+  an accepted test stays whole; a model reads it masked. A model told to write `[private key]` is refused, and so is a
+  `review.yaml` holding it: a test that needs a key reads the file at run time.
+  A test that needs a file left out could not run, and reads so: it is no finding. A file over 1 MB that is binary, or over
+  32 MB, is searched a piece at a time and left out on a hit, whatever a pin says. A path that cannot be read counts as a hit.
+  A change of only such files stops, naming what can free it: `arnx allow-secret`, `--range`, or that a range cannot be allowed.
   **These get past it:** JWK; hex; PKCS12 and PBES1 encrypted keys; lower-case or altered armour; a header broken up in the
   source (`"...PRIV" + "ATE KEY"`) over a body with another start; with no header, a body with another start, one with spaces
-  or other marks inside its lines, or one wrapped too short to hold the start; a key in a file name. Other text that may be a
+  or other marks inside its lines, one wrapped too short to hold the start, or one glued to a word before it (`rsaMII...`); a
+  key in a file name; a key longer than the 16 KB limit with no END; in text arnx did not cut, what follows a stray END inside
+  a body; a line a tool cuts at 200 columns, which can leave under 64 characters of a no-header run. Other text that may be a
   secret goes through the filter below, and a value it does not recognise goes out.
   **Allowing a file.** When a file's key-shaped text is test fixtures (a secret detector's own tests), `arnx allow-secret PATH`
   pins it in `.arnx/review.yaml`, which is then proven again before the next review. Other key-shaped strings are pinned one by
   one, and a new one withholds the file again. A file holding a private key is pinned by the hash of its whole text: as it
-  stands, as committed and where its branch left, beside those pinned before. It stays in the diff and the sandbox, so its
-  tests run, and a model sees `[private key]`, on each of its lines in a diff, and a stand-in for each piece of 8 characters or more in a search. A pin sends no key:
-  any edit withholds the file until you allow it again, and a pin from before this rule holds nothing. `arnx allow-secret`
+  stands, as committed, before the last commit and where its branch left, beside those pinned before. It stays in the diff and the sandbox, so its
+  tests run, and a model sees `[private key]` on each of its lines in a diff, a read or a search; test output that prints it is masked as above. A header with no END covers its own line and the all-base64 lines right after it, so the rest of the file reads as it is. Each piece of 8 characters or more in both cases also gets a stand-in; a key wrapped shorter, or a piece in one case, does not. A pin sends no key:
+  any edit withholds the file until you allow it again, and a string pin from before this rule holds no private key. `arnx allow-secret`
   takes only the working tree's file: one deleted cannot be allowed. `arnx allow-secret --remove PATH` takes a file off the list (proven again too). Setup lists
   allowed files under "Worth a look".
   When a setup run fails on a file left out this way, setup stops and names it: only you can let it in. When it

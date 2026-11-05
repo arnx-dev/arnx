@@ -259,7 +259,11 @@ export class Boundary {
    * replaced wherever it stands, inside a longer word too, and without the piece of one (`piecesAllowed`) that text cut
    * before the filter left: FRAGMENT_MIN characters or more of its start that end a word, or of its end that start one. */
   mask(raw: string): string {
-    const text = maskPrivateKeys(raw);
+    return this.maskValues(maskPrivateKeys(raw));
+  }
+
+  /** `text` without the values only: for a model's own test, saved to run, where a key in it is its own fake. */
+  maskValues(text: string): string {
     const edits = this.editsOf(text);
     if (!edits.length) return text;
     return apply(text, edits, (e) => {

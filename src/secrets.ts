@@ -46,7 +46,7 @@ const CONTENT = new RegExp(
   "|gh[pousr]_[A-Za-z0-9]{36,}|xox[abpr]-[A-Za-z0-9-]{10,})");
 const ENV_NAME = /KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE/i;
 /** What every CONTENT match holds: a fast test first, since CONTENT's look-behind is slow on a large tree. */
-const QUICK = /-{4,5} ?BEGIN|AKIA|sk-|gh[pousr]_|xox[abpr]-/;
+const QUICK = /-{4,5}(?: |%20)?BEGIN|AKIA|sk-|gh[pousr]_|xox[abpr]-/;
 /** A password written into an address, `scheme://user:password@host`: the groups are the password and the host. A
  * template (`{password}`, `${X}`, `<password>`) holds characters a password here may not, and an example's `u:p` is
  * too short for one. */
@@ -129,7 +129,8 @@ function runAt(text: string, at: number): { end: number; count: number } {
       else break;
     }
     const next = j < text.length ? pastLineEnd(text, j) : -1;
-    if (!first && j < text.length && next < 0) break;
+    // Or a closing quote: the string's last line.
+    if (!first && j < text.length && next < 0 && !/^\\?["'`]/.test(text.slice(j, j + 2))) break;
     count += held;
     if (held) end = j;
     if (next < 0 || text.startsWith("diff --git ", next)) break;
@@ -140,22 +141,46 @@ function runAt(text: string, at: number): { end: number; count: number } {
 
 /** What all private-key text holds, one of these: what the filter looks for first, as it runs on every string of every
  * request. */
-const KEY_SIGNS = ["BEGIN", "LS0tLS", "b3Blbn", "CAQ", "AgE", "IBA", "BgkqhkiG", "CSqGSIb"];
-const KEY_ANY = new RegExp(`${KEY_HEADER}|(?<![A-Za-z0-9])(?:${KEY_START})`, "g");
-/** What ends a header's text: its END, or the next file of a diff, which is another file's text. */
-const KEY_STOP = new RegExp(`-{4,5}( |%20)?END${ARMOUR}|(\\n|\\\\{1,8}n)diff --git `, "g");
-/** Where `text` holds private-key text, first to last: from a header to its END line, or to the end of the text or of its
- * file in a diff when there is no END; a run of KEY_RUN_MIN or more that starts as a key. Linear in `text`. */
-function privateKeySpans(text: string): [number, number][] {
-  if (!KEY_SIGNS.some((s) => text.includes(s))) return [];
+const KEY_SIGNS = ["PRIVATE", "LS0tLS", "b3Blbn", "MI", "CAQ"];
+/** A key's start stands alone, or right after a line end or tab written out (`\n`, `%0A`). */
+const hasKeySign = (text: string) => KEY_SIGNS.some((s) => text.includes(s));
+const KEY_ANY = new RegExp(`${KEY_HEADER}|(?:(?<![A-Za-z0-9])|(?<=\\\\[nrt])|(?<=%0[ADad]))(?:${KEY_START})`, "g");
+const KEY_HEAD = new RegExp(KEY_HEADER, "g");
+const KEY_END = new RegExp(`-{4,5}( |%20)?END${ARMOUR}`, "g");
+/** The most a header with no END hides: a plain limit, more than the longest key. */
+const NO_END_MOST = 16_384;
+
+/** Past a header with no END in a pinned file, all it holds of a key: the rest of its line, and the lines after it that are
+ * all base64. A pin keeps a file to be read, so a doc comment's bare header takes no code with it. */
+function ownLines(text: string, from: number): number {
+  let to = text.indexOf("\n", from);
+  if (to < 0) return text.length;
+  for (;;) {
+    const next = text.indexOf("\n", to + 1);
+    const line = text.slice(to + 1, next < 0 ? text.length : next).replace(/^[\s*#/>;]*/, "").replace(/[\s"'`,;]*$/, "");
+    if (!/^[A-Za-z0-9+/=_-]{8,}$/.test(line)) return to;
+    if (next < 0) return text.length;
+    to = next;
+  }
+}
+
+/** Where `text` holds private-key text, first to last, from `from`: from a header to its END line, or with no END up to
+ * NO_END_MOST (`pinned`: its own lines); a run of KEY_RUN_MIN or more that starts as a key. Linear in `text`. */
+function privateKeySpans(text: string, o: { from?: number; pinned?: boolean } = {}): [number, number][] {
+  if (!hasKeySign(text)) return [];
   const out: [number, number][] = [];
-  KEY_ANY.lastIndex = 0;
+  KEY_ANY.lastIndex = o.from ?? 0;
+  /** The next END, kept while it lies ahead; null once there is none. */
+  let end: RegExpExecArray | null | undefined;
   for (let m = KEY_ANY.exec(text); m; m = KEY_ANY.exec(text)) {
     let to: number;
     if (isHeader(m[0])) {
-      KEY_STOP.lastIndex = m.index + m[0].length;
-      const stop = KEY_STOP.exec(text);
-      to = !stop ? text.length : stop[0].startsWith("-") ? stop.index + stop[0].length : stop.index;
+      const after = m.index + m[0].length;
+      if (end === undefined || (end !== null && end.index < after)) {
+        KEY_END.lastIndex = after;
+        end = KEY_END.exec(text);
+      }
+      to = end ? end.index + end[0].length : o.pinned ? ownLines(text, after) : Math.min(after + NO_END_MOST, text.length);
     } else {
       const run = runAt(text, m.index);
       if (run.count < KEY_RUN_MIN) {
@@ -170,16 +195,32 @@ function privateKeySpans(text: string): [number, number][] {
   return out;
 }
 
+/** Where text that starts inside a key ends that key: its first END, with no header before it (a cut, a page of a file). 0
+ * when it starts otherwise. */
+function strayEnd(text: string): number {
+  KEY_END.lastIndex = 0;
+  const end = KEY_END.exec(text);
+  if (!end) return 0;
+  KEY_HEAD.lastIndex = 0;
+  const head = KEY_HEAD.exec(text);
+  return head && head.index < end.index ? 0 : end.index + end[0].length;
+}
+
 /** What a model reads in place of a private key. */
 export const KEY_SHOWN = "[private key]";
+/** What it means, for a model and for what a model wrote. */
+export const KEY_SHOWN_MEANS = `\`${KEY_SHOWN}\` stands where arnx hides a private key from you; it is no value: a test that needs ` +
+  "the key must read the file at run time.";
 
 /** `text` with its private-key text replaced, for all that leaves arnx. NULs go first when there is any to replace (UTF-16). */
 export function maskPrivateKeys(text: string): string {
   const plain = text.includes("\0") ? text.replaceAll("\0", "") : text;
-  const spans = privateKeySpans(plain);
-  if (!spans.length) return text;
-  const parts: string[] = [];
-  let from = 0;
+  if (!hasKeySign(plain)) return text;
+  const stray = strayEnd(plain);
+  const spans = privateKeySpans(plain, { from: stray });
+  if (!stray && !spans.length) return text;
+  const parts: string[] = stray ? [KEY_SHOWN] : [];
+  let from = stray;
   for (const [a, b] of spans) {
     parts.push(plain.slice(from, a), KEY_SHOWN);
     from = b;
@@ -221,7 +262,7 @@ const isKey = (m: Hit) => isHeader(m[0]) || !!m.start;
 
 /** The pins of every key-shaped string in `text`, and of the whole text when it holds a private key, unique and sorted. */
 export function secretPins(text: string): string[] {
-  const all = contentMatches(text);
+  const all = contentMatches(text.replaceAll("\0", ""));
   return [...new Set([...all.filter((m) => !isKey(m)).map((m) => m[0]), ...all.some(isKey) ? [text] : []].map(pinOf))].sort();
 }
 
@@ -238,12 +279,6 @@ function label(match: string): string {
   if (isHeader(match) || KEY_START_AT.test(match)) return "a private key";
   const prefix = /^(sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|AKIA|gh[pousr]_|xox[abpr]-)/.exec(match)?.[0];
   return prefix ? `${prefix}…` : "a password in an address";
-}
-
-/** The first key-shaped string in `text` that `pins` does not allow, with its line, or null. */
-export function firstUnpinned(text: string, pins: readonly string[]): { line: number; label: string } | null {
-  const m = unpinned(text, contentMatches(text), pins)[0];
-  return m ? { line: text.slice(0, m.index).split("\n").length, label: label(m[0]) } : null;
 }
 
 /** The index in `sorted` (ascending by `key`) of the last item whose key is at most `x`; -1 when none is. */
@@ -724,9 +759,9 @@ export function holdsPrivateKey(text: string, pins: readonly string[]): boolean 
 /** Where a piece of a file holds private-key text; -1 when it holds none. */
 export const privateKeyIn = (text: string) => privateKeySpans(text)[0]?.[0] ?? -1;
 
-/** The lines of `text` holding private-key text, by number, for a pinned file's diff: a hunk may show them with no header. */
+/** The lines of a pinned file holding private-key text, by number: a hunk may show them with no header. */
 export function keyLines(text: string): number[] {
-  const spans = privateKeySpans(text);
+  const spans = privateKeySpans(text, { pinned: true });
   if (!spans.length) return [];
   const out: number[] = [];
   let line = 1, at = 0;
@@ -736,16 +771,25 @@ export function keyLines(text: string): number[] {
     for (; at < b; at++) {
       if (text.charCodeAt(at) === 10) {
         line++;
-        out.push(line);
+        if (at + 1 < b) out.push(line);
       }
     }
   }
   return [...new Set(out)];
 }
 
+/** A pinned file as a tool shows it: its key's lines read KEY_SHOWN, and the rest reads as it is. */
+export function withKeyLines(text: string): string {
+  const lines = keyLines(text);
+  if (!lines.length) return text;
+  const all = text.split("\n");
+  for (const n of lines) all[n - 1] = KEY_SHOWN;
+  return all.join("\n");
+}
+
 /** The pieces of a pinned file's private-key text, for the filter: a search or a page of the file can show a line of it with
  * no header. Below 8 characters, or in one case, a piece is too likely to be something else. */
-export const keyPieces = (text: string) => [...new Set(privateKeySpans(text).flatMap(([a, b]) =>
+export const keyPieces = (text: string) => [...new Set(privateKeySpans(text, { pinned: true }).flatMap(([a, b]) =>
   text.slice(a, b).match(/[A-Za-z0-9+/=_-]{8,}/g) ?? []).filter((t) => /[a-z]/.test(t) && /[A-Z]/.test(t)))];
 
 /** `text` (the file at `path`) with a stand-in for each of its suspects, or null when no stand-in can keep the real
@@ -759,8 +803,9 @@ export function standIn(text: string, pins: readonly string[], path = ""): { tex
 export function secretHits(text: string): { line: number; label: string }[] {
   const out: { line: number; label: string }[] = [];
   let line = 1, at = 0;
-  for (const m of contentMatches(text)) {
-    for (; at < m.index; at++) if (text.charCodeAt(at) === 10) line++;
+  const plain = text.replaceAll("\0", "");
+  for (const m of contentMatches(plain)) {
+    for (; at < m.index; at++) if (plain.charCodeAt(at) === 10) line++;
     out.push({ line, label: label(m[0]) });
   }
   return out;

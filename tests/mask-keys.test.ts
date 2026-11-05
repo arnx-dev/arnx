@@ -86,13 +86,12 @@ test("each armour: PGP's block, SSH2's four dashes, a digit or a hyphen in the l
   clean("URL-encoded", mask(`x=${url}&y=1`), [encodeURIComponent(random.slice(0, 64))]);
 });
 
-test("each file of a diff on its own: a header with no END takes no other file with it", () => {
-  const diff = `diff --git a/k.txt b/k.txt\n--- a/k.txt\n+++ b/k.txt\n@@ -0,0 +1,2 @@\n+${HDR}\n+abc\n` +
-    "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n";
-  const out = mask(diff);
-  expect(out).toContain(`+${SHOWN}\ndiff --git a/app.py b/app.py\n`);
-  expect(out).toContain("+a = 2\n");
-  expect(out).not.toContain("+abc");
+test("a header with no END in a diff hides at most 16 KB, whatever file comes next", () => {
+  const next = "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n";
+  const near = `diff --git a/k.txt b/k.txt\n--- a/k.txt\n+++ b/k.txt\n@@ -0,0 +1,2 @@\n+${HDR}\n+abc\n${next}`;
+  expect(mask(near)).not.toContain("+abc");
+  const far = `diff --git a/k.txt b/k.txt\n--- a/k.txt\n+++ b/k.txt\n@@ -0,0 +1,2 @@\n+${HDR}\n+abc\n+${"y".repeat(16_400)}\n${next}`;
+  expect(mask(far)).toContain("+a = 2\n");
 });
 
 test("a run of 64 or more that starts as a key goes, whole or wrapped, in a diff's marks too", () => {

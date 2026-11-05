@@ -467,7 +467,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   for (const [rel, source] of Object.entries(files)) {
     const dest = join(o.outDir, "tests", rel + COPY_SUFFIX);
     mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, b ? b.mask(source) : source);
+    writeFileSync(dest, b ? b.maskValues(source) : source);
   }
   const hasTests = Object.keys(files).some((rel) => adapter.isTestFile(posix.basename(rel)));
   const classified = classify(results);

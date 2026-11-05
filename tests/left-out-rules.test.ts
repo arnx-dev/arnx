@@ -251,7 +251,7 @@ test("a pure rename counts both its paths: a pin on each lets it through, a pin 
 });
 
 test("a stream that cannot read a file counts as a hit", () => {
-  expect(keyInStream(join(tmp(), "no-such-file"))).toEqual({ line: 1, label: "too large to scan" });
+  expect(keyInStream(join(tmp(), "no-such-file"))).toEqual({ line: 1, label: "could not be read" });
 });
 
 test("a change holding a pinned file still has a usable diff: the rest of it reads as it is", () => {

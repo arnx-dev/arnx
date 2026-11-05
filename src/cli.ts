@@ -1288,8 +1288,9 @@ class Commands {
       if (!hits.length) throw new ArnxError(`${rel} holds nothing that looks like a key; nothing to allow`);
       const shown = hits.slice(0, 5).map((h) => `${h.label} line ${h.line}`).join(", ") + (hits.length > 5 ? ", …" : "");
       this.d.out(`! ${rel}: ${hits.length} key-like string${hits.length === 1 ? "" : "s"} (${shown})`);
-      // Each side of a change must be allowed: the file as it stands, as committed, where its branch left, and as allowed before.
-      const earlier = hasCommits(repo) ? ["HEAD", branchBase(repo)?.base].flatMap((rev) => rev
+      // Each side of a change must be allowed: the file as it stands, as committed, before the last commit, where its branch
+      // left, and as allowed before.
+      const earlier = hasCommits(repo) ? ["HEAD", "HEAD^", branchBase(repo)?.base].flatMap((rev) => rev
         ? [git(repo, ["show", `${rev}:${rel}`], [0, 128])] : []) : [];
       const before = (existsSync(reviewConfigPath(repo)) ? readSecretPins(repo) : []).find((x) => x.path === rel)?.matches ?? [];
       return { path: rel, matches: [...new Set([...secretPins(text), ...earlier.flatMap(secretPins), ...before])].sort(), hits };

@@ -438,7 +438,7 @@ test("a failed read of a file too large to hold leaves it out", () => {
   changeLimits.maxScanBytes = 1000;
   withBroken('for a in "$@"; do [ "$a" = grep ] && exit 2; done\n[ -f /dev/stdout ] && [ "$3" = show ] && exit 2', () => {
     const c = resolveChange(repo);
-    expect(c.withheld).toEqual([{ path: "big.txt", line: 1, label: "too large to scan" }]);
+    expect(c.withheld).toEqual([{ path: "big.txt", line: 1, label: "could not be read" }]);
     expect(c.files).toEqual(["app.py"]);
   });
 });
@@ -459,8 +459,8 @@ test("a change whose only key is on its removed side points to --range, not to a
   }
   expect(said).toContain("k.txt (a private key)");
   expect(said).toContain("--range");
-  expect(said).not.toContain("allow-secret");
-  // With one on the side it adds, allow-secret can still help.
+  expect(said).toContain("arnx allow-secret k.txt");
+  // With one on the side it adds, allow-secret can help.
   put(repo, "m.txt", other);
   commit(repo, "another");
   expect(() => resolveChange(repo)).toThrow("arnx allow-secret m.txt");

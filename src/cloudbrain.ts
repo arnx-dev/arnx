@@ -22,7 +22,7 @@ import { clip, emit, emitModelCall, emitTurn, hypId, type Role } from "./events"
 import { huntParts } from "./hunt";
 import { type ModelUse, newUse, NO_USAGE } from "./llm";
 import type { Say } from "./progress";
-import { leftOutNote, type Suspect } from "./prompts";
+import { keyShownNote, leftOutNote, type Suspect } from "./prompts";
 import type { Merged } from "./questions";
 import { type AgentReport, bySeverity, type Finding, type Group, SEVERITIES } from "./report";
 import { isSecretPath } from "./secrets";
@@ -230,8 +230,8 @@ export class CloudBrain implements Brain {
     say(h ? "arnx cloud is looking for defects" : "arnx cloud is writing tests");
     // A start that timed out or failed on the way (a network failure, 503) is sent once more with the same
     // Idempotency-Key: arnx cloud answers it from the round it already started instead of starting another.
-    // arnx cloud takes no field for the files left out: their note goes in the text it reads.
-    const left = leftOutNote(scope.leftOut ?? []);
+    // arnx cloud takes no field for these notes: they go in the text it reads.
+    const left = [leftOutNote(scope.leftOut ?? []), keyShownNote(diff)].filter(Boolean).join(" ");
     const first = this.post<WireStep>(path, { diff: left ? `${diff}\n\n${left}\n` : diff, context_pack: h?.context ?? "",
       changed_definitions: h?.changedDefinitions ?? (root ? changedDefinitions(root, diff, scope.owned) : ""),
       scope: { owns: cfg.owns, uses: cfg.uses, changed_owned: scope.owned, changed_used: scope.used,

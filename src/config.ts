@@ -11,7 +11,7 @@ import { baselineDigest } from "./baseline";
 import { python } from "./adapters/python";
 import type { Adapter, AdapterId } from "./adapters/types";
 import { ArnxError, SetupRequired } from "./errors";
-import { GENERATED, isSecretEnvName, type SecretPin, suspects } from "./secrets";
+import { GENERATED, isSecretEnvName, KEY_SHOWN, KEY_SHOWN_MEANS, type SecretPin, suspects } from "./secrets";
 import { purePosix, pyJson, pyStr, pyTruthy } from "./util";
 
 export const KEYS = new Set(["version", "image", "workdir", "install", "test_command", "services", "env", "notes",
@@ -377,6 +377,7 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
 }
 
 export function parseReviewFile(text: string): ReviewFile {
+  if (text.includes(KEY_SHOWN)) throw new ArnxError(`review.yaml holds ${KEY_SHOWN}. ${KEY_SHOWN_MEANS}`);
   const raw = parseYaml(text);
   if (!isMap(raw)) throw new ArnxError("review.yaml must be a mapping");
   const problems: string[] = [];

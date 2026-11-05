@@ -31,7 +31,7 @@ import type { FailureModel } from "./jev";
 import { ArnxError } from "./errors";
 import { loadIgnore, matcher } from "./ignore";
 import { projectIndex } from "./indexer";
-import { isSecretPath, type SecretPin } from "./secrets";
+import { isSecretPath, maskPrivateKeys, type SecretPin } from "./secrets";
 import { type AgentModel, allPrices, type Tool } from "./llm";
 import { ownerFile, runTests } from "./outcomes";
 import { look } from "./precheck";
@@ -91,7 +91,7 @@ export function noReport(result: RunResult, cfg: ReviewConfig): string {
   const reach = said === undefined ? ""
     : said === null ? `; ${runner} never said it wrote one, so it stopped first or missed arnx's report option`
     : `; ${runner} got arnx's report option but wrote ${said}, which arnx could not read`;
-  const last = result.output.split("\n").map((l) => l.trim()).filter(Boolean).slice(-3).join(" | ");
+  const last = maskPrivateKeys(result.output).split("\n").map((l) => l.trim()).filter(Boolean).slice(-3).join(" | ");
   return `the suite produced no report (${result.timedOut ? `timed out after ${Math.round(result.seconds)} s`
     : `exit ${result.exitCode}`}${reach})${last ? `; last lines: ${clip(last, 300)}` : ""}`;
 }
@@ -457,9 +457,9 @@ async function askModel(model: FailureModel, results: TestResult[] | null, cfg: 
 /** Generated tests go to tests_dir: prove the runner picks up a file placed there. Any probe reported passing is
  * enough; the probes are removed afterwards. The probes are the run's only targets, so it also tells whether
  * test_command runs only {targets} (see ignoredTargets). [picked up, end of the output, why it runs more] */
-function probe(session: Runner, snap: string, cfg: ReviewConfig): [boolean, string, string] {
+export function probe(session: Pick<Runner, "run">, snap: string, cfg: ReviewConfig): [boolean, string, string] {
   const p = probeRun(session, snap, cfg, writeDirOf(cfg), "probe.xml", SUITE_TIMEOUT);
-  return [p.seen, p.result.output.slice(-OUTPUT_TAIL), p.seen ? ignoredTargets(p.results, p.files, cfg) : ""];
+  return [p.seen, maskPrivateKeys(p.result.output).slice(-OUTPUT_TAIL), p.seen ? ignoredTargets(p.results, p.files, cfg) : ""];
 }
 
 /** Tests a run reported from files other than its `targets` (paths relative to the repository). Tests reported
