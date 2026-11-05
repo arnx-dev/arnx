@@ -1161,7 +1161,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     // Files .arnxignore leaves out that the tests need: in the sandbox only. A fresh setup finds them again.
     const sandbox = new Set(existing ? sandboxOnlyOf(existing.raw) : []);
     const sandboxKey = () => [...sandbox].sort().join("\n");
-    const { withheld, blanked, standIns, fakedKeys, secrets: replaced, suspects: found, standInList, standInValues } = takeSnapshot(repo, null, snap, pins,
+    const { withheld, blanked, standIns, fakedKeys, secrets: replaced, suspects: found, standInList,
+      standInValues } = takeSnapshot(repo, null, snap, pins,
       { untracked, sandbox: [...sandbox] });
     boundary.addScrubbed({ suspects: found, secrets: replaced });
     boundary.add(configSuspects(repo));
@@ -1779,7 +1780,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       hints: setupHintsFor(detection, browser),
       draft,
       withheld: withheld.length ? describeWithheld(withheld) : "",
-      ...(standIns.length ? { standIns: [...standIns] } : {}), current, detection, tree: treeOf(repo, untracked),
+      ...(standIns.length || fakedKeys.length ? { standIns: [...new Set([...standIns, ...fakedKeys])].sort() } : {}), current, detection, tree: treeOf(repo, untracked),
       withheldFiles: withheld,
       ...(o.project ? { project: o.project } : {}), ...(o.add ? { add: true } : {}),
       budgetUsd: settings.setupBudgetUsd, outDir: o.outDir, deadline: { at: limit.at, now: limit.now } },

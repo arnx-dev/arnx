@@ -555,3 +555,29 @@ test("the approval checks name a stale sed with the command that fixes it", asyn
   expect(approvalChecks(file, [], () => false).join("\n")).toContain("arnx setup --project shop");
   expect(approvalChecks(file, [], () => true).join("\n")).not.toContain("setup --project");
 });
+
+test("a stand-in inside a longer word is not named", async () => {
+  const { namesStandIn } = await import("../src/standins");
+  expect(namesStandIn("env: {A: xtokenAbCdEf12y}", ["tokenAbCdEf12"])).toBe(false);
+  expect(namesStandIn("env: {A: tokenAbCdEf12}", ["tokenAbCdEf12"])).toBe(true);
+  expect(namesStandIn("x tokenAbCdEf12y tokenAbCdEf12", ["tokenAbCdEf12"])).toBe(true);
+});
+
+test("the approval warnings of a real repository name a stale sed from the build context", async () => {
+  const { withRepoHolds } = await import("../src/standins");
+  const { approvalWarnings } = await import("../src/setupview");
+  const { parseReviewFile } = await import("../src/config");
+  const { initRepo, commit: commitIn } = await import("./helpers/gitutil");
+  const { useTmp: _u } = await import("./helpers/tmp");
+  void _u;
+  const { mkdtempSync, writeFileSync: write } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const repo = initRepo(join(mkdtempSync(join(tmpdir(), "arnx-t-")), "r"));
+  write(join(repo, "cfg.txt"), "host=livehost.example\n");
+  commitIn(repo, "c");
+  const yaml = (s: string) => parseReviewFile("version: 1\nprojects:\n  shop:\n    root: .\n    language: python\n" +
+    `    image: python:3.12\n    install: ["sed -i 's/${s}/new/' cfg.txt"]\n    test_command: pytest {targets}\n`);
+  const warn = (s: string) => { const f = yaml(s); return withRepoHolds(repo, f, undefined, (h) => approvalWarnings(f, [], h)); };
+  expect(warn("gonehost.example").join("\n")).toContain("arnx setup --project shop");
+  expect(warn("livehost.example").join("\n")).not.toContain("setup --project");
+});

@@ -274,3 +274,17 @@ test("the project's own files a round would clear from tests_dir are found, outs
   expect(ownTestsInWriteDir(rs, ["tests/basic.rs", "tests/common/mod.rs", "tests/arnx_20261012_ab_calc.rs",
     "src/lib.rs"])).toEqual([]);
 });
+
+test("a review names an install sed whose search text no file holds, and lists stand-ins", async () => {
+  const repo = gitRepo(tmp());
+  writeFileSync(join(repo, "svc.py"), "X = 1\nAWS = '" + "AKIA" + "IOSFODNN7EXAMPLE'\n");
+  commit(repo, "svc");
+  const cfg = parseReviewConfig("version: 1\nimage: i\ninstall: [\"sed -i 's/oldhost.example/new/' svc.py\"]\n" +
+    "test_command: pytest {targets}\n");
+  const said: string[] = [];
+  const model = new ScriptedAgent([[text('{"tests": []}')]]);
+  await testRound(repo, null, cfg, { ...answerRound(model, cfg), writeDir: writeDirOf(cfg), budgetUsd: 1.0, runs: 1,
+    outDir: join(tmp(), "out"), sessionFactory: fakeFactory(script), progress: (l) => said.push(l) });
+  expect(said.find((l) => l.includes("oldhost.example"))).toContain("arnx setup --project");
+  expect(said.find((l) => l.includes("stand-ins in 1 file"))).toContain("stand-ins.md");
+});

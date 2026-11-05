@@ -59,6 +59,7 @@ import { filePin, isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageMap, describeCoverage, type NeededFile, type ProjectProof,
   NOTHING_TO_TEST, proofBefore, type ProofBefore, rerecordBaseline, runSetup, type SetupResult, type SetupRun, stillRed,
   WEB_UI_STOP } from "./setup";
+import { withRepoHolds } from "./standins";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, notTestedRecord, PROVEN_BASELINE,
   PROVEN_COPY, proofState, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
 import { isoSeconds } from "./util";
@@ -996,7 +997,7 @@ class Commands {
     if (notes) writeFileSync(notes, result.notes!.trim() + "\n");
     const proposed = parseReviewFile(result.yamlText!);
     const files = filesSummary(proposed, repo, untracked);
-    const warnings = approvalWarnings(proposed, result.projects);
+    const warnings = warningsOf(repo, proposed, result.projects, untracked);
     const json = (o: { approved: boolean; record?: string | null; approval?: ApprovedProject[];
       failure?: Record<string, unknown> | null; next: string[]; stop?: "time" }) => setupJson({ file: proposed,
       result: o.stop ? { ...result, stop: o.stop } : result, approved: o.approved, auto: o.approved, files, warnings,
@@ -1125,7 +1126,7 @@ class Commands {
     this.reproved = { changes: st.changes, no_copy: st.changes === null };
     const why = changes === null ? "is not proven yet" : "changed since its proof";
     const last = lastProof(repo);
-    const r = await this.approveRun(repo, a, undefined, untracked, { warnings: approvalWarnings(file), changes,
+    const r = await this.approveRun(repo, a, undefined, untracked, { warnings: warningsOf(repo, file, [], untracked), changes,
       quick: last?.quick ?? [], ...(last ? { unchanged: last } : {}) });
     if (r.code !== 0) {
       throw new SetupRequired(`${REVIEW_FILE} ${why}, and its suites fail:\n${r.detail}\nNext: fix the ✗ above, then ${command}`);
@@ -1265,7 +1266,7 @@ class Commands {
     }
     this.d.out(changes.length ? ["Changed:", ...changes.map((c) => `  ${c}`)].join("\n") : "The baseline is unchanged.");
     const file = loadReviewFile(repo);
-    const record = this.proofRecord(repo, by, at, approvalWarnings(file),
+    const record = this.proofRecord(repo, by, at, warningsOf(repo, file, [], untracked),
       [...Array.isArray(edits) ? edits : edits === "no-copy" ? ["review.yaml: no copy of the proven file to compare"] : [],
         ...changes], untracked);
     this.provenEnd(repo, file, [], { untracked });
@@ -1456,7 +1457,7 @@ class Commands {
     const st = proofState(repo, file);
     const changes = st.proven ? null : this.sayChanges(st);
     const r = await this.approveRun(repo, a, a.values.project as string | undefined, undefined,
-      { warnings: approvalWarnings(file), changes, quick: lastProof(repo)?.quick ?? [] });
+      { warnings: warningsOf(repo, file, [], undefined), changes, quick: lastProof(repo)?.quick ?? [] });
     if (r.code === 0) this.provenEnd(repo, file, r.projects, { untracked });
     else this.d.out(`Not proven:\n${r.detail}`);
     this.emit(r.code === 0 ? "ok" : "fail", r.code, { approved: r.code === 0, projects: r.projects,
@@ -2287,3 +2288,7 @@ export function copyToClipboard(text: string): string | null {
   }
   return null;
 }
+
+/** The warnings recorded with a proof (setupview.ts approvalWarnings), with the install lines that rewrite text no file holds. */
+const warningsOf = (repo: string, file: ReviewFile, proofs: ProjectProof[], untracked: boolean | undefined): string[] =>
+  withRepoHolds(repo, file, untracked, (holds) => approvalWarnings(file, proofs, holds));

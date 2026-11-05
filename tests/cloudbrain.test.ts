@@ -410,3 +410,20 @@ test("the steps arnx cloud streams that say the same as the line before them are
   for (const m of ["hunting", "looking for defects", "the agent is taking its turn"]) expect(cloudStepShown(m)).toBe(false);
   for (const m of ["writing tests", "checking 4 things in this change"]) expect(cloudStepShown(m)).toBe(true);
 });
+
+test("the stand-in sentence reaches the cloud setup agent as comment lines at the head of draft, tree unchanged", async () => {
+  const c = cloud = fakeCloud();
+  const brain = brainFor(c);
+  const setup = (input: Record<string, unknown>) => brain.agentRound("setup", { hints: "", withheld: "", current: "",
+    budgetUsd: 1, tree: "a.py\n", ...input }, Promise.resolve({ tools: () => [], call: async () => "" }));
+  await setup({ standIns: ["detect.py"] });
+  await setup({ standIns: ["detect.py"], draft: "version: 1\n" });
+  const bodies = c.seen.filter((x) => x.path === "/v1/setup").map((x) => x.body as { draft: string; tree: string });
+  expect(bodies.map((b) => b.tree)).toEqual(["a.py\n", "a.py\n"]);
+  for (const b of bodies) {
+    expect(b.draft.split("\n").filter((l) => l.startsWith("#")).join(" ")).toContain("detect.py");
+    expect(b.draft).toContain("never call the repository corrupt");
+  }
+  expect(bodies[1]!.draft.endsWith("\nversion: 1\n")).toBe(true);
+  expect(bodies[0]!.draft.split("\n").every((l) => l === "" || l.startsWith("# "))).toBe(true);
+});
