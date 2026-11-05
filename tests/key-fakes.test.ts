@@ -23,7 +23,7 @@ import { junitXml } from "./helpers/junit";
 import { RecordingAgent, RecordingJson, treeText } from "./helpers/recording";
 import { useTmp } from "./helpers/tmp";
 
-const { fakeKeys, maskPrivateKeys, secretPins } = secrets;
+const { fakeKeys, looksLikeName, maskPrivateKeys, secretPins } = secrets;
 const tmp = useTmp();
 const KEY = "PRIVATE " + "KEY";
 const HDR = `-----BEGIN ${KEY}-----`, END = `-----END ${KEY}-----`;
@@ -37,7 +37,7 @@ const put = (repo: string, path: string, content: string) => {
   writeFileSync(join(repo, path), content);
 };
 const clean = (what: string, sent: string, body: string[] = lines) => {
-  const found = body.filter((l) => l.length >= 8 && sent.includes(l)).length;
+  const found = body.filter((l) => l.length >= 8 && !looksLikeName(l) && sent.includes(l)).length;
   if (found) throw new Error(`${what}: ${found} of ${body.length} body lines`);
 };
 const YAML = "version: 1\nimage: python:3.12-slim\ntest_command: python3 -m pytest -q -p no:cacheprovider {targets}\n";
@@ -173,6 +173,32 @@ test("no header: the key's start, its run and such a continuation get a fake, an
   clean("wrapped", fakeKeys(wrapped).text);
   clean("wrapped, the wire", maskPrivateKeys(wrapped));
   expect(maskPrivateKeys(wrapped)).toContain("next_line(1)");
+});
+
+// --- a token that looks like an identifier is no key's text ---------------------------------------------------------------------
+
+test("between a header and END a name stays in the sandbox, and the wire still hides it all", () => {
+  const code = `assert "${HDR}" in private_pem\nassert "${END}" in private_pem\n`;
+  expect(fakeKeys(code).text).toBe(code);
+  const cert = `c = client_cert.replace("${HDR}", x)\nclient_cert = client_cert.replace(\n  "${END}\\n-----BEGIN CERTIFICATE-----", y)\n`;
+  expect(fakeKeys(cert).text).toBe(cert);
+  expect(maskPrivateKeys(code)).toBe(`assert "${SHOWN}" in private_pem\n`);
+});
+
+test("what counts as a name: 32 characters or fewer with no digit, + or /; anything else gets its fake", () => {
+  const under = (t: string) => fakeKeys(`${HDR}\n${t}\n${END}\n`).text.includes(t);
+  for (const t of ["private_pem", "client-cert-value", "a".repeat(32), "not-a-valid-key"]) expect(under(t)).toBe(true);
+  for (const t of ["a".repeat(33), "abcdefg1", "abcd+efg", "abcd/efg"]) expect(under(t)).toBe(false);
+});
+
+test("a no-END run stops at a name: shorthand names stay in the sandbox and read normally to a model", () => {
+  const text = `const a = {\n  privateKey: "${HDR}",\n  clientEmail,\n  projectId,\n  tokenUri,\n};\n`;
+  expect(fakeKeys(text).text).toBe(text);
+  expect(maskPrivateKeys(text)).toBe(text.replace(HDR, SHOWN));
+  const stops = `${HDR}\n${random[0]}\nclientEmail\n${random[1]}\n`;
+  expect(fakeKeys(stops).text).not.toContain(random[0]!);
+  expect(fakeKeys(stops).text).toContain(`clientEmail\n${random[1]}`);
+  expect(maskPrivateKeys(stops)).toBe(`${SHOWN}\nclientEmail\n${random[1]}\n`);
 });
 
 // --- rule 3: the wire filter ----------------------------------------------------------------------------------------------------

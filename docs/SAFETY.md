@@ -89,9 +89,10 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   Its file stays in the diff and the sandbox, whether code, fixture, `.pem` or `.key`, and only the key is replaced. Between a
   header and its END, each token of 8 or more base64 characters gets a fake of the same length, the same on both sides of a change
   and in the saved diff. All else stays, the header and END too, so code that looks for them runs. Tokens inside `${...}`,
-  `{...}`, `<...>` stay. arnx does not read what is under a header: a placeholder keeps its file, and long names in code between a
-  header and an END get fakes too. With no END, the header line stays and the run after it gets the fake, tokens of 8 or more
-  separated only by blanks, `\n` or `\r` written out, quotes, commas, `+` or `.`; the filter hides that much. A known start with
+  `{...}`, `<...>` stay. In the sandbox, tokens under 8 characters and tokens of 32 or fewer with no digit, `+` or `/` (a name) keep
+  their text; the filter still hides them on the way out when header and END are intact. With no END, the header line stays and the
+  run after it gets the fake, tokens of 8 or more separated only by blanks, `\n` or `\r` written out, quotes, commas, `+` or `.`; the
+  run stops at a name, and the filter hides that much. A known start with
   no header goes the same way. The filter also hides an END with no header, and the base64-only lines before it.
   A test that parses a key fails on its fake. Setup and each review name the files holding one, with `arnx allow-secret PATH`. A
   failure whose text names such a file, or reads as a key failing to parse, is unproven: no finding, a review exits as incomplete (2)
@@ -105,12 +106,13 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   free it.
   A model told to write `[private key]` is refused, and so is a `review.yaml` holding it. A model's own test keeps what it wrote
   where it is saved to run.
-  **These get past it:** a no-END key with a broken body (a comment mark on each line, tokens under 8, a line of other text in it);
+  **These get past it:** a no-END key with a broken body (a comment mark on each line, tokens under 8, a line of other text in it, or a wrapped line that
+  reads as a name, which is a matter of chance at 32 columns or fewer, and for what follows it);
   a stray END inside a body, for what follows it; JWK; hex; PKCS12 and PBES1 encrypted keys; lower-case or altered armour; a header
   broken up in the source (`"...PRIV" + "ATE KEY"`) over a body with another start; a word glued to a key's start (`rsaMII...`);
   with no header, a body with another start, one with spaces or other marks inside its lines, or one wrapped too short to hold the
-  start; a key in a file name; tokens under 8 characters, which stay real in the sandbox and the saved diff and which the filter hides
-  only with an intact header and END in the same text, so a hunk or a page showing them alone goes out; a test that
+  start; a key in a file name; tokens under 8 characters and name-shaped ones, which stay real in the sandbox and the saved diff and
+  which the filter hides only with an intact header and END in the same text, so a hunk or a page showing them alone goes out; a test that
   transforms a pinned key (prints a line of it, or its base64); a line a tool cuts at 200 columns, which can leave under 64 characters
   of a no-header run. Other text that may be a secret goes through the filter below, and a value it does not recognise goes out.
   **Allowing a file.** `arnx allow-secret PATH` pins it in `.arnx/review.yaml`, which is then proven again before the next review.

@@ -69,7 +69,7 @@ for (const [name, shape] of SHAPES) {
 test("from a header to its END; with no END, its line and the run of tokens after it", () => {
   expect(mask(`a\n${HDR}\nabc\n${END}\nb\n`)).toBe(`a\n${SHOWN}\nb\n`);
   expect(mask(`a\n${HDR}\nabc\nb\n`)).toBe(`a\n${SHOWN}\nabc\nb\n`);
-  expect(mask(`a\n${HDR}\nabcdefgh\nijklmnop\nb\n`)).toBe(`a\n${SHOWN}\nb\n`);
+  expect(mask(`a\n${HDR}\nabcdefg1\nijklmno2\nb\n`)).toBe(`a\n${SHOWN}\nb\n`);
   // A placeholder too: the filter does not read what is under a header.
   expect(mask(`${HDR}\n...\n${END}`)).toBe(SHOWN);
   const twice = `${HDR}\none\n${END}\nmiddle\n${HDR}\ntwo\n${END}\nend`;

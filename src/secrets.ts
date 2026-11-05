@@ -155,6 +155,11 @@ const DIFF_LINE = /(?<=\n)diff --git /g;
 /** The shortest piece of a key's text taken for a token: below this, one is too likely to be something else. */
 const KEY_TOKEN_MIN = 8;
 
+/** The longest token taken for a name when it holds no digit, `+` or `/`: a key's token of that shape is a matter of chance. */
+const NAME_MOST = 32;
+/** Whether a token reads as an identifier or a word, so it is no key's text: it keeps its text and ends a no-END run. */
+export const looksLikeName = (token: string) => token.length <= NAME_MOST && !/[0-9+/]/.test(token);
+
 /** How many base64 characters stand at `at`; `\/` is a slash a JSON text escaped. */
 function tokenLength(text: string, at: number): number {
   let i = at, n = 0;
@@ -190,7 +195,7 @@ function pastSeparators(text: string, from: number): { at: number; closed: boole
 }
 
 /** The end of the tokens of KEY_TOKEN_MIN or more after `from`, with only separators among them; `from` when none stands
- * there. Tokens sharing a line with anything else (a name assigned or called) are no key's. */
+ * there. It stops at a name (looksLikeName), and tokens sharing a line with anything else (a name assigned or called) are no key's. */
 function tokenRun(text: string, from: number): number {
   let end = from, at = pastSeparators(text, from).at;
   for (;;) {
@@ -198,6 +203,7 @@ function tokenRun(text: string, from: number): number {
     if (n < KEY_TOKEN_MIN) return end;
     let past = at;
     while (past < text.length && (isRunChar(text.charCodeAt(past)) || (text[past] === "\\" && text[past + 1] === "/"))) past++;
+    if (looksLikeName(text.slice(at, past))) return end;
     const next = pastSeparators(text, past);
     if (next.at >= text.length || next.closed) end = past;
     else if (tokenLength(text, next.at) < KEY_TOKEN_MIN) return end;
@@ -325,12 +331,12 @@ export const keyTokens = (text: string) => tokensIn(text, privateKeySpans(text))
 function tokensIn(text: string, spans: readonly KeySpan[]): Set<string> {
   const out = new Set<string>();
   for (const s of spans) {
-    for (const m of text.slice(s.body, s.bodyEnd).matchAll(KEY_TOKEN)) if (m[1] === undefined) out.add(m[0]);
+    for (const m of text.slice(s.body, s.bodyEnd).matchAll(KEY_TOKEN)) if (m[1] === undefined && !looksLikeName(m[0])) out.add(m[0]);
   }
   return out;
 }
 
-/** `text` with each token of its private keys given a fake of the same length: all else stays, a header and an END too, so it
+/** `text` with each token of its private keys given a fake of the same length: all else stays, names, a header and an END too, so it
  * still reads as a key and its lines do not move. `count`: the tokens replaced. The same token gets the same fake anywhere.
  * Past BIG_KEYS_MOST, in an allowed file that only a tool shows, letters do for a fake. */
 export function fakeKeys(text: string): { text: string; count: number } {
@@ -341,7 +347,7 @@ export function fakeKeys(text: string): { text: string; count: number } {
   let from = 0, count = 0;
   for (const s of spans) {
     parts.push(text.slice(from, s.body), text.slice(s.body, s.bodyEnd).replace(KEY_TOKEN, (m: string, skip: string | undefined) => {
-      if (skip !== undefined) return m;
+      if (skip !== undefined || looksLikeName(m)) return m;
       const out = many ? m.replace(/[A-Za-z0-9]/g, "x") : keyFake(m);
       if (out !== m) count++;
       return out;

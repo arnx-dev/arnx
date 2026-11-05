@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { changeLimits, fileSide, keyInStream, resolveChange, takeSnapshot } from "../src/change";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
-import { holdsPrivateKey, maskPrivateKeys, scanKeys, secretPins } from "../src/secrets";
+import { holdsPrivateKey, looksLikeName, maskPrivateKeys, scanKeys, secretPins } from "../src/secrets";
 import { defaultSettings, type Settings, writeSettings } from "../src/settings";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { fakeFactory, type FakeSession, tool } from "./helpers/fakes";
@@ -32,7 +32,9 @@ const put = (repo: string, path: string, content: string | Buffer) => {
   writeFileSync(join(repo, path), content);
 };
 const clean = (what: string, sent: string, lines: string[]) => {
-  const found = lines.filter((l) => l.length >= 4 && sent.includes(l)).length;
+  // Where the fake is what counts, a short line or one that reads as a name keeps its text by rule; the wire hides those too.
+  const held = /diff|fake/.test(what) ? lines.filter((l) => l.length >= 8 && !looksLikeName(l)) : lines;
+  const found = held.filter((l) => l.length >= 4 && sent.includes(l)).length;
   if (found) throw new Error(`${what}: ${found} of ${lines.length} body lines`);
 };
 afterEach(() => {
@@ -75,7 +77,7 @@ for (const [name, form] of FORMS) {
       const snap = join(tmp(), "s");
       expect(takeSnapshot(repo, "HEAD", snap, [], { standIns: true }).withheld).toEqual([]);
       // A token under 8 characters stays in the sandbox and the saved diff: stated, and the wire above hides it.
-      const long = lines.filter((l) => l.length >= 8);
+      const long = lines.filter((l) => l.length >= 8 && !looksLikeName(l));
       clean("the diff", c.diff, long);
       clean("the snapshot", readFileSync(join(snap, "k.py"), "utf8"), long);
     });

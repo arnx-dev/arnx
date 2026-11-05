@@ -10,7 +10,7 @@ import { changeLimits, resolveChange, takeSnapshot } from "../src/change";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { leftOutNote } from "../src/prompts";
 import { runReview } from "../src/reviewer";
-import { hasSecretContent, holdsPrivateKey, secretHits, secretPins } from "../src/secrets";
+import { hasSecretContent, holdsPrivateKey, looksLikeName, secretHits, secretPins } from "../src/secrets";
 import { defaultSettings, type Settings, writeSettings } from "../src/settings";
 import { fakeFactory, type FakeSession, tool } from "./helpers/fakes";
 import { commit, gitRepo, runGit } from "./helpers/gitutil";
@@ -27,10 +27,15 @@ const REPORT = JSON.stringify({ tests: [{ test: `${GEN}::test_add`, expects: "ad
 const SOURCE = "from app import add\n\ndef test_add():\n    assert add(2, 3) == 5\n";
 
 const pem = (o: object) => (o as { export(x: object): string });
+const bodyOfAny = (text: string) => text.split("\n").filter((l) => l && !/^-+ ?(BEGIN|END)/.test(l));
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const ec = generateKeyPairSync("ec", { namedCurve: "P-256" });
 const ed = generateKeyPairSync("ed25519");
-const pk8 = pem(rsa.privateKey).export({ type: "pkcs8", format: "pem" });
+let rsaFor32 = rsa;
+const pk8Of = (k: typeof rsa) => pem(k.privateKey).export({ type: "pkcs8", format: "pem" });
+// A no-END run stops at a line that reads as a name, by chance at 32 columns: the row with no END takes a key with none.
+while (bodyOfAny(pk8Of(rsaFor32)).join("").match(/.{1,32}/g)!.some(looksLikeName)) rsaFor32 = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const pk8 = pk8Of(rsaFor32);
 const pk1 = pem(rsa.privateKey).export({ type: "pkcs1", format: "pem" });
 const sec1 = pem(ec.privateKey).export({ type: "sec1", format: "pem" });
 const ecp8 = pem(ec.privateKey).export({ type: "pkcs8", format: "pem" });
@@ -154,7 +159,8 @@ const ROWS: Row[] = [
 ];
 
 const probesOf = (key: string) => {
-  const raw = bodyOf(key).filter((l) => l.length >= 12);
+  // A line that reads as a name stays by rule: it comes up by chance at a short wrap.
+  const raw = bodyOf(key).filter((l) => l.length >= 12 && !looksLikeName(l));
   return raw.length ? raw : [key.slice(0, 60)];
 };
 /** What a test holds of a body, also with a NUL after each character (UTF-16). */
