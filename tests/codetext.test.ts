@@ -1,5 +1,6 @@
 // codeText: comments and string literals cut, by language, in one linear pass.
 import { expect, test } from "bun:test";
+import { usesNew } from "../src/before";
 import { CODE_LANGUAGES, codeText } from "../src/codetext";
 import { SOURCE } from "../src/untested";
 
@@ -63,6 +64,16 @@ test("a regular expression literal hides nothing past itself", () => {
   expect(words(codeText("a = b / c; d = e / f; // gone", "a.js"))).toBe("a b c d e f");
 });
 
+test("JSX closing tags and increments are not regex starts", () => {
+  for (const path of ["a.tsx", "a.jsx"]) {
+    expect(words(codeText("x = <a>{x}</a><b>{newFn(y)}</b>;", path))).toContain("newFn");
+    expect(usesNew(`test("t", () => {\n  render(<a>{x}</a><b>{newFn(y)}</b>);\n});\n`, "t", new Set(["newFn"]), path)).toBe("newFn");
+  }
+  expect(words(codeText("z = x++ / 2 + newFn(y) / 3;", "a.ts"))).toContain("newFn");
+  expect(words(codeText("z = x-- / 2 + newFn(y) / 3;", "a.ts"))).toContain("newFn");
+  expect(words(codeText("z = a + /['\"]/.test(s) && newFn(y);", "a.ts"))).toContain("newFn");
+});
+
 test("code inside strings is code: names in interpolation reach the result", () => {
   const rows: [string, string, string][] = [
     ["a.py", 'x = f"{helper()} and {{lit}} text {obj.attr!r:>{width}}"', "helper obj attr r width"],
@@ -83,31 +94,37 @@ test("code inside strings is code: names in interpolation reach the result", () 
   expect(words(codeText('x = "{nope}"', "a.cs"))).not.toContain("nope");
 });
 
-// Crafted text up to 32 MB: every shape that could make a scanner back up or stack.
+// Crafted text: every shape that could make a scanner back up or stack. Linear means 4x the text takes about 4x the
+// time: with sizes 4, 8 and 16 MB (best of three), 16 MB must take under 8x what 4 MB took. Quadratic work takes 16x.
 const MB = 1 << 20;
-const shapes: [string, string, () => string][] = [
-  ["a long base64 run in a string", "a.py", () => 'KEY = "' + "QUJDREVGR0hJSktMTU5PUA==".repeat(32 * MB / 24).slice(0, 32 * MB - 20) + '"\nx = 1\n'],
-  ["a long base64 run in a comment", "a.ts", () => "// " + "QUJDREVG".repeat(4 * MB) + "\nx = 1\n"],
-  ["a block comment never closed", "a.rs", () => "/* ".repeat(10 * MB)],
-  ["a template string never closed", "a.js", () => "`${".repeat(10 * MB)],
-  ["quotes and lifetimes alternating", "a.rs", () => "'a '\\ r#\"\n".repeat(3 * MB)],
-  ["triple quotes never closed", "a.py", () => "'''\\\n".repeat(6 * MB)],
-  ["many braces and backticks", "a.ts", () => "`${{}`".repeat(5 * MB)],
-  ["regex starts that never end", "a.js", () => "x = /[(\\\\ ".repeat(3 * MB)],
-  ["slashes and spaces", "a.ts", () => "= / ".repeat(7 * MB)],
-  ["f-string braces never closed", "a.py", () => 'f"{'.repeat(10 * MB)],
-  ["interpolation openers", "a.kt", () => '"${$x{{'.repeat(4 * MB)],
+const shapes: [string, string, (bytes: number) => string][] = [
+  ["a long base64 run in a string", "a.py", (b) => 'KEY = "' + "QUJDREVGR0hJSktMTU5PUA==".repeat(b / 24) + '"\nx = 1\n'],
+  ["a long base64 run in a comment", "a.ts", (b) => "// " + "QUJDREVG".repeat(b / 8) + "\nx = 1\n"],
+  ["a block comment never closed", "a.rs", (b) => "/* ".repeat(b / 3)],
+  ["a template string never closed", "a.js", (b) => "`${".repeat(b / 3)],
+  ["quotes and lifetimes alternating", "a.rs", (b) => "'a '\\ r#\"\n".repeat(b / 10)],
+  ["triple quotes never closed", "a.py", (b) => "'''\\\n".repeat(b / 5)],
+  ["many braces and backticks", "a.ts", (b) => "`${{}`".repeat(b / 6)],
+  ["regex starts that never end", "a.js", (b) => "x = /[(\\\\ ".repeat(b / 10)],
+  ["slashes and spaces", "a.ts", (b) => "= / ".repeat(b / 4)],
+  ["jsx tags", "a.tsx", (b) => "<a>{x}</a>".repeat(b / 10)],
+  ["f-string braces never closed", "a.py", (b) => 'f"{'.repeat(b / 3)],
+  ["interpolation openers", "a.kt", (b) => '"${$x{{'.repeat(b / 7)],
 ];
+const best = (text: string, path: string) => {
+  let ms = Infinity;
+  for (let k = 0; k < 3; k++) {
+    const t = performance.now();
+    codeText(text, path);
+    ms = Math.min(ms, performance.now() - t);
+  }
+  return ms;
+};
 for (const [name, path, make] of shapes) {
   test(`linear on crafted input: ${name}`, () => {
-    const text = make();
-    expect(text.length).toBeLessThanOrEqual(33 * MB);
-    const t = performance.now();
-    const out = codeText(text, path);
-    const ms = performance.now() - t;
-    expect(out.length).toBeLessThanOrEqual(text.length + 2);
-    console.log(`${name}: ${text.length} chars, ${Math.round(ms)} ms`);
-    Bun.gc(true);
-    expect(ms).toBeLessThan(15000); // loose for a loaded machine; quadratic work would take minutes
-  }, 60000);
+    const times = [4, 8, 16].map((mb) => best(make(Math.floor(mb * MB)), path));
+    console.log(`${name}: 4/8/16 MB in ${times.map((t) => Math.round(t)).join("/")} ms`);
+    // A floor keeps a few milliseconds of noise from reading as growth.
+    expect(times[2]!).toBeLessThan(8 * Math.max(times[0]!, 40));
+  }, 120000);
 }

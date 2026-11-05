@@ -540,3 +540,36 @@ describe("fix round: whole files, shared messages", () => {
     });
   }
 });
+
+describe("fix round 2: reading the diff against the files", () => {
+  const diffFor = (hunks: string[], from = "lib/a.py", to = "lib/a.py") =>
+    [`diff --git a/${from} b/${to}`, `--- a/${from}`, `+++ b/${to}`, ...hunks, ""].join("\n");
+
+  test("a mapped line that is not the row's text falls back to the hunk", () => {
+    const diff = diffFor(["@@ -1,1 +1,2 @@", " keep", "+brand_new(1)"]);
+    // The head text is not the file the diff was made from: its line 2 differs.
+    const names = [...namesAdded(diff, notTest, () => "something\nelse_entirely(2)\n")];
+    expect(names).toContain("brand_new");
+    expect(names).not.toContain("else_entirely");
+  });
+
+  test("a renamed file's old side is read by its old path", () => {
+    const diff = diffFor(["@@ -1,2 +1,2 @@", " keep", "-def old_one(): pass", "+def new_one(): pass"], "lib/old.py", "lib/new.py");
+    const seen: string[] = [];
+    const names = [...namesAdded(diff, notTest, (path, side) => {
+      seen.push(`${side}:${path}`);
+      return side === "new" ? "keep\ndef new_one(): pass\n" : "keep\ndef old_one(): pass\n";
+    })];
+    expect(seen.sort()).toEqual(["new:lib/new.py", "old:lib/old.py"]);
+    expect(names).toContain("new_one");
+    expect([...newNames(diff, notTest, (path) => path === "lib/old.py" ? "def new_one(): pass\n" : null)]).not.toContain("new_one");
+  });
+
+  test("an unreadable file whose hunk starts after a closing docstring keeps the code", () => {
+    const diff = diffFor(["@@ -3,2 +3,3 @@", '     """', "-    return 1", "+    return brand_new(1)"]);
+    expect([...namesAdded(diff, notTest, () => null)]).toContain("brand_new");
+    expect([...namesAdded(diff, notTest)]).toContain("brand_new");
+    const block = diffFor(["@@ -3,2 +3,3 @@", "     */", "+  run_new(1);"], "lib/a.js", "lib/a.js");
+    expect([...namesAdded(block, notTest)]).toContain("run_new");
+  });
+});

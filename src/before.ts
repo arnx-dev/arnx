@@ -229,6 +229,14 @@ export function textFix(f: Fix): Fix {
 
 const WORDS = /[A-Za-z_$][\w$]*/g;
 
+/** Whether a piece of code closes what it never opened: a triple quote count that is odd, or a `*/` before any `/*`. Read
+ * alone, such a piece would take its code for text; it is read as code instead (names may be spurious, none is lost). */
+function opensBlind(text: string): boolean {
+  const triples = (text.match(/"""|'''/g) ?? []).length;
+  const close = text.indexOf("*/"), open = text.indexOf("/*");
+  return triples % 2 === 1 || (close >= 0 && (open < 0 || close < open));
+}
+
 /** The names a change starts using: in the code (not the comments or strings) of the added lines of its source files,
  * not of their removed ones. Only source files count: a test, a file in a test folder, a document or a data file
  * brings no name. `read(path, side)`: the file's whole text after ("new") or before ("old") the change, null when it
@@ -240,11 +248,12 @@ export function namesAdded(diff: string, isTest: (name: string) => boolean,
   for (const section of diff.split(DIFF_SECTION)) {
     const path = /^\+\+\+ b\/(.*)$/m.exec(section)?.[1] ?? /^--- a\/(.*)$/m.exec(section)?.[1] ?? "";
     if (!path || !SOURCE.test(path) || isTest(posix.basename(path)) || inTestFolder(path)) continue;
-    const whole = new Map<string, string[] | null>();
+    const oldPath = /^--- a\/(.*)$/m.exec(section)?.[1] ?? path;
+    const whole = new Map<string, { raw: string[]; code: string[] } | null>();
     const lines = (side: "new" | "old") => {
       if (!whole.has(side)) {
-        const text = read?.(path, side) ?? null;
-        whole.set(side, text === null ? null : codeText(text, path).split("\n"));
+        const text = read?.(side === "new" ? path : oldPath, side) ?? null;
+        whole.set(side, text === null ? null : { raw: text.split("\n"), code: codeText(text, path).split("\n") });
       }
       return whole.get(side)!;
     };
@@ -255,11 +264,14 @@ export function namesAdded(diff: string, isTest: (name: string) => boolean,
         const file = head ? lines(side) : null;
         const mine = rows.filter((l) => !l.startsWith(other));
         const at = Number(first) - 1;
-        // The whole file's line for each row, else the hunk read alone.
-        const code = file ? null : codeText(mine.map((l) => l.slice(1)).join("\n"), path).split("\n");
+        // The whole file's code for a row, if that line is the row's text; else the hunk read alone.
+        const same = (l: string, k: number) => file !== null && file.raw[at + k]?.replace(/\r$/, "") === l.slice(1).replace(/\r$/, "");
+        let alone: string[] | null = null;
+        const hunkAlone = () => alone ??= opensBlind(mine.map((l) => l.slice(1)).join("\n"))
+          ? mine.map((l) => l.slice(1)) : codeText(mine.map((l) => l.slice(1)).join("\n"), path).split("\n");
         mine.forEach((l, k) => {
           if (!l.startsWith(mark)) return;
-          for (const w of (file ? file[at + k] : code![k])?.match(WORDS) ?? []) set.add(w);
+          for (const w of (same(l, k) ? file!.code[at + k] : hunkAlone()[k])?.match(WORDS) ?? []) set.add(w);
         });
       }
     }
@@ -291,7 +303,7 @@ export function newNames(diff: string, isTest: (name: string) => boolean, old: (
   const before = new Set<string>();
   for (const section of diff.split(DIFF_SECTION)) {
     const path = /^\+\+\+ b\/(.*)$/m.exec(section)?.[1];
-    const text = path && SOURCE.test(path) ? old(path) : null;
+    const text = path && SOURCE.test(path) ? old(/^--- a\/(.*)$/m.exec(section)?.[1] ?? path) : null;
     if (text) for (const w of codeText(text, path!).match(WORDS) ?? []) before.add(w);
   }
   return new Set([...namesAdded(diff, isTest, read)].filter((n) => n.length >= 4 && !LANGUAGE.has(n) && !before.has(n)));
@@ -321,7 +333,9 @@ export function vacuousBefore(b: Before, source: string, func: string, names: Re
 
 /** A same failure says nothing when tests that pass with the change fail the same way there: the message is shared
  * (an `assert False`), not specific to this test. Counted: tests of `passedOnChange` that failed with `signatureOf`'s
- * first line in every run of `baseRuns`, and in no run otherwise. */
+ * first line in every run of `baseRuns`, and in no run otherwise. Limit: only tests that ran on the code before the
+ * change can count, those in the findings' files and the fix proof's (up to its cap); a passing test in another file, past
+ * the cap, never ran there and is not seen. */
 export function sharedFailure(b: Before, signatureOf: string, baseRuns: BeforeRun[], passedOnChange: ReadonlySet<string>): Before {
   const each = baseRuns.length;
   if (b.status !== "pre-existing" || !passedOnChange.size || !each) return b;

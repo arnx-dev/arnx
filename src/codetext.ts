@@ -151,6 +151,9 @@ export function codeText(source: string, path: string, strings?: (text: string) 
   const regexOk = (i: number): boolean => {
     let k = i - 1;
     while (k >= 0 && [32, 9, 10, 13].includes(s.charCodeAt(k))) k--;
+    // `</` closes a JSX tag, and `++ /` or `-- /` divides.
+    if (k >= 0 && s[k] === "<" && k === i - 1) return false;
+    if (k >= 1 && (s[k] === "+" || s[k] === "-") && s[k - 1] === s[k]) return false;
     if (k < 0 || BEFORE_REGEX.has(s[k]!)) return true;
     if (!isWord(s.charCodeAt(k))) return false;
     let w = k;
