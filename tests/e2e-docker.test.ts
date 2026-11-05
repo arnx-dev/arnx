@@ -2,14 +2,15 @@
 import { describe, expect, test } from "bun:test";
 import { blankMarks } from "./helpers/review";
 import { appendFileSync, cpSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer, type AddressInfo } from "node:net";
 import { basename, dirname, join } from "node:path";
 import { accept } from "../src/accept";
 import { snapshot, takeSnapshot } from "../src/change";
 import { check, checkJson, checkSummary } from "../src/check";
-import { isApproved, loadReviewFile, parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
+import { isApproved, loadReviewFile, parseReviewConfig, parseReviewFile, reviewConfigPath, stamp } from "../src/config";
 import type { AgentModel, Block, JsonModel } from "../src/llm";
 import { recheckJson, recheckReview, recheckSummary } from "../src/recheck";
-import { docker, ensureEnv } from "../src/sandbox";
+import { docker, ensureEnv, Session } from "../src/sandbox";
 import { runTests } from "../src/outcomes";
 import { dockerSession } from "../src/testround";
 import { fake } from "../src/secrets";
@@ -268,6 +269,43 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     const [ok2, detail2] = await approveConfig(repo, { by: "Dev", at: "2026-10-20" });
     expect([ok2, detail2]).toEqual([true, "4 passed"]);
   }, 900_000);
+
+  // --- a service network ------------------------------------------------------------------------------------------------
+  test("a test on a service network reaches its services, and no listener on this machine through the network's gateway", async () => {
+    const server = createServer((c) => c.end("listening\n"));
+    await new Promise<void>((done) => server.listen(0, "0.0.0.0", done));
+    const port = (server.address() as AddressInfo).port;
+    const cfg = parseReviewFile(`version: 1\nimage: python:3.12-slim\ntest_command: python -m pytest -q {targets}\n` +
+      "services:\n  cache:\n    image: redis:7-alpine\n    ready: redis-cli ping\n").projects[0]!;
+    const reach = (host: string, p = port) => `python -c "import socket; s = socket.create_connection(('${host}', ${p}), 3); ` +
+      `print('reached')" 2>&1 | tail -1`;
+    const dockerOut = (...args: string[]) => docker(args).stdout.trim();
+    // The check bites: on a network with the old options the same listener answers from the gateway.
+    const open = `arnx-open-${process.pid}`;
+    docker(["network", "create", "--internal", open]);
+    try {
+      const gateway = dockerOut("network", "inspect", open, "-f", "{{(index .IPAM.Config 0).Gateway}}");
+      const control = docker(["run", "--rm", "--network", open, "python:3.12-slim", "sh", "-c", reach(gateway)]).stdout;
+      expect(control).toContain("reached");
+    } finally {
+      docker(["network", "rm", open]);
+    }
+    const session = await new Session("python:3.12-slim", cfg, tmp()).start();
+    try {
+      const made = JSON.parse(dockerOut("network", "inspect", session.network, "-f", "{{json .IPAM.Config}}"));
+      expect(made[0].Gateway ?? "").toBe("");
+      // What would be its gateway, and the default bridge's, which a test could guess.
+      const first = String(made[0].Subnet).replace(/\.0\/\d+$/, ".1");
+      const bridge = dockerOut("network", "inspect", "bridge", "-f", "{{(index .IPAM.Config 0).Gateway}}");
+      for (const host of [first, bridge]) {
+        expect(session.run(reach(host), 30).output).not.toContain("reached");
+      }
+      expect(session.run(reach("cache", 6379), 30).output).toContain("reached");
+    } finally {
+      session.close();
+      server.close();
+    }
+  }, 300_000);
 
   // --- a real guess in the code ------------------------------------------------------------------------------------
   const GUESS = "zX9qP2vL7mK4tR8b";

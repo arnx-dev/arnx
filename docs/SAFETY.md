@@ -5,7 +5,9 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
 ## What runs where
 
 - Tests run only in Docker: no network (only the services in `.arnx/review.yaml`), no environment variables except
-  the ones in it, CPU, memory and process limits, on a throwaway copy of your repository.
+  the ones in it, CPU, memory and process limits, on a throwaway copy of your repository. A network for services has no
+  way out and no address on this machine, on Docker 28 or later. On an older Docker a test with services declared can reach
+  what listens on this machine, a database too; arnx says so when it happens.
 - Each test environment is a Docker image (`arnx-env:<hash>`), built again when the install steps or the dependency
   files change; Rust images can take several GB. With `context = "precise"` (`.arnx/config.toml`), each one also
   gets a code indexer layer (`arnx-env:<hash>-scip1`, about 0.7 GB for Python and TypeScript; the indexer runs with
@@ -42,7 +44,7 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   snapshot too, wherever they appear, so no file keeps them and every file gets the same fake; the tests run with the
   fake, and one that checks a signature made with the real value (a signed license key) fails. A guess stays as it is
   in the snapshot, since a wrong guess must not change code that runs, and those runs have no network beyond the services
-  you declared. A guess is a literal given to a secret-looking name (token, secret, password, credential, private,
+  you declared (see the Docker version above). A guess is a literal given to a secret-looking name (token, secret, password, credential, private,
   authorization, API key; also key, auth, salt or cookie when the value looks random; the word must be what the name is,
   its last one: `AUTH_TOKEN`, `secret_key`, not `TOKEN_PROGRAM` or `account_key`) in code, JSON, YAML, TOML, INI or env
   files, as an assignment, a keyword argument or a `("NAME", "value")` pair; on a command line or in a build file

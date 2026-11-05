@@ -544,8 +544,9 @@ before its Next line and lists the pair in `may_contradict` (`mayContradict`). N
 ## Rules that must stay true
 
 - Untrusted code (the repo, its install scripts, generated tests) runs only in Docker. There is no host fallback.
-- Test containers get no network (or an internal one reaching only declared services), no host environment, no
-  capabilities, CPU, memory and process limits, and a throwaway copy of the repo.
+- Test containers get no network (or an internal one reaching only declared services, with no address on the host: Docker 28
+  or later, and arnx says so on an older one), no host environment, no capabilities, CPU, memory and process limits, and a
+  throwaway copy of the repo.
 - Model keys stay in the arnx process: never passed to Docker, written to a file, or logged.
 - A guess at a secret (`named-*`) never changes code that runs: it stays real where tests run, and every read a model has
   goes through the filter (`boundary.ts`), as does what arnx writes or prints for a coding agent: a round and a review as
