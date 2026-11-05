@@ -10,7 +10,7 @@ import { check, checkJson, checkSummary } from "../src/check";
 import { isApproved, loadReviewFile, parseReviewConfig, parseReviewFile, reviewConfigPath, stamp } from "../src/config";
 import type { AgentModel, Block, JsonModel } from "../src/llm";
 import { recheckJson, recheckReview, recheckSummary } from "../src/recheck";
-import { docker, ensureEnv, Session } from "../src/sandbox";
+import { docker, dockerSteps, ensureEnv, networkNotice, Session } from "../src/sandbox";
 import { runTests } from "../src/outcomes";
 import { dockerSession } from "../src/testround";
 import { fake } from "../src/secrets";
@@ -290,8 +290,18 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     } finally {
       docker(["network", "rm", open]);
     }
-    const session = await new Session("python:3.12-slim", cfg, tmp()).start();
+    // A protected network is not reported as an open one.
+    const noticed: string[] = [];
+    const before = { say: dockerSteps.say, said: networkNotice.said };
+    dockerSteps.say = (m) => void noticed.push(m);
+    networkNotice.said = false;
+    const session = await new Session("python:3.12-slim", cfg, tmp()).start().finally(() => {
+      dockerSteps.say = before.say;
+    });
     try {
+      expect(noticed).toEqual([]);
+      expect(networkNotice.said).toBe(false);
+      networkNotice.said = before.said;
       const made = JSON.parse(dockerOut("network", "inspect", session.network, "-f", "{{json .IPAM.Config}}"));
       expect(made[0].Gateway ?? "").toBe("");
       // What would be its gateway, and the default bridge's, which a test could guess.

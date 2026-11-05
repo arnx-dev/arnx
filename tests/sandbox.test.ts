@@ -652,16 +652,21 @@ const ISOLATED = "com.docker.network.bridge.gateway_mode_ipv4=isolated";
 const WITH_DB = parseReviewFile(`version: 1\nimage: python:3.12-slim\ntest_command: python -m pytest {targets}\n` +
   "services:\n  db:\n    image: postgres:16-alpine\n").projects[0]!;
 
-/** A docker that keeps its calls. `create`: the shell for `network create`; `gateway`: what inspect says the network's
- * gateway is. */
-function networkDocker(create: string, gateway: string): { calls: () => string[] } {
+/** What Docker 29.9.2 says of a network. Asked for one gateway's text, a network with none prints the zero address's. */
+const ISOLATED_CONFIG = '[{"Subnet":"172.22.0.0/16"}]';
+const OPEN_CONFIG = '[{"Subnet":"172.22.0.0/16","Gateway":"172.22.0.1"}]';
+const OPEN_V6_CONFIG = '[{"Subnet":"fd00:dead:beef::/64","Gateway":"fd00:dead:beef::1"},{"Subnet":"172.22.0.0/16"}]';
+
+/** A docker that keeps its calls. `create`: the shell for `network create`; `inspect`: the shell for `network inspect`
+ * asked for the IPAM config as JSON. */
+function networkDocker(create: string, inspect: string): { calls: () => string[] } {
   const dir = tmp();
   const log = join(dir, "calls");
   writeFileSync(join(dir, "docker"), `#!/bin/sh
 printf '%s\\n' "$*" >> '${log}'
 case "$1 $2" in
   "network create") ${create};;
-  "network inspect") printf '%s\\n' '${gateway}';;
+  "network inspect") case "$*" in *json*) ${inspect};; *) echo 'invalid IP';; esac;;
 esac
 exit 0
 `);
@@ -669,12 +674,13 @@ exit 0
   sandboxOptions.docker = join(dir, "docker");
   return { calls: () => readFileSync(log, "utf8").split("\n") };
 }
+const prints = (config: string) => `printf '%s\\n' '${config}'`;
 
-async function openingSession(create: string, gateway: string) {
+async function openingSession(create: string, inspect: string) {
   const saved = { docker: sandboxOptions.docker, say: dockerSteps.say, said: networkNotice.said };
   const said: string[] = [];
   try {
-    const docker = networkDocker(create, gateway);
+    const docker = networkDocker(create, inspect);
     networkNotice.said = false;
     dockerSteps.say = (m) => void said.push(m);
     const s = await new Session("img", WITH_DB, tmp()).start();
@@ -690,23 +696,30 @@ async function openingSession(create: string, gateway: string) {
 }
 
 test("a service network has no address on this machine, and nothing need be said", async () => {
-  const { said, calls } = await openingSession(":", "");
+  const { said, calls } = await openingSession(":", prints(ISOLATED_CONFIG));
   expect(calls.some((c) => c.startsWith("network create --internal -o") && c.includes(ISOLATED))).toBe(true);
   expect(said).toEqual([]);
 });
 
 test("a Docker that refuses the option still gets an internal network, and it says so once", async () => {
-  const { said, calls } = await openingSession(`case "$*" in *isolated*) echo unknown gateway mode >&2; exit 1;; esac`, "");
+  const { said, calls } = await openingSession(`case "$*" in *isolated*) echo unknown gateway mode >&2; exit 1;; esac`, prints(ISOLATED_CONFIG));
   expect(calls.filter((c) => c.startsWith("network create")).at(-1)).toMatch(/^network create --internal arnx-/);
   expect(said).toEqual([NETWORK_OPEN]);
   expect(said[0]).toContain("Docker 28");
 });
 
-test("a Docker that ignores the option leaves a gateway, and it says so once", async () => {
-  const { said } = await openingSession(":", "172.22.0.1");
-  expect(said).toEqual([NETWORK_OPEN]);
+test("a Docker that ignores the option leaves a gateway, IPv4 or IPv6, and it says so once", async () => {
+  for (const config of [OPEN_CONFIG, OPEN_V6_CONFIG]) {
+    expect((await openingSession(":", prints(config))).said).toEqual([NETWORK_OPEN]);
+  }
+});
+
+test("a network Docker will not describe counts as open: no answer, a failed one, or one that does not read", async () => {
+  for (const inspect of ["exit 1", ":", "echo not json", "echo null", `echo '[]'`, `echo '{"Subnet":"x"}'`, `echo '["x"]'`]) {
+    expect([inspect, (await openingSession(":", inspect)).said]).toEqual([inspect, [NETWORK_OPEN]]);
+  }
 });
 
 test("a network Docker cannot make at all stops the session, naming why", async () => {
-  await expect(openingSession(`echo no addresses left >&2; exit 1`, "")).rejects.toThrow("no addresses left");
+  await expect(openingSession(`echo no addresses left >&2; exit 1`, prints(ISOLATED_CONFIG))).rejects.toThrow("no addresses left");
 });
