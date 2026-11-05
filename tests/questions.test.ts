@@ -64,3 +64,9 @@ test("a disclaimer with no question is dropped", () => {
   expect(plainQuestion("I could not find the docs for this option.")).toBe("");
   expect(plainQuestion("")).toBe("");
 });
+
+test("a question without a question mark is kept unless it is only a disclaimer", () => {
+  expect(plainQuestion("Confirm whether X is intended.")).toBe("Confirm whether X is intended.");
+  expect(plainQuestion("I have not read the docs. Confirm whether X is intended.")).toBe("Confirm whether X is intended.");
+  expect(plainQuestion("I have not read the docs.")).toBe("");
+});

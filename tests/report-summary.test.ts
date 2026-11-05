@@ -87,8 +87,8 @@ test("a status line wins: Incomplete and Not tested never come with No findings"
   expect(out[6]).toContain("Not tested");
 });
 
-test("Partly covered keeps No findings: its status line already says nothing is shown for the rest", () => {
+test("Partly covered wins over No findings", () => {
   const s = said(quiet({ untested: [{ project: "main", files: ["a.py"], of: 2 }] as never, sourceFiles: 2 }));
   expect(s).toContain("Partly covered");
-  expect(s).toContain("\n  No findings.\n");
+  expect(s).not.toContain("No findings");
 });

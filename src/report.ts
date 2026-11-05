@@ -1107,8 +1107,7 @@ export function summary(r: Review, reviewMd: string): string {
       : ""].filter(Boolean);
   // With no issue row, one line says why. A status line above (Incomplete, Not tested), a provider's failure, trouble
   // in the runs or a list of what was not tested wins: "no findings" next to them would read as reassurance.
-  // Partly covered keeps it: its status line says what nothing was shown for.
-  const qualified = problems.length || st.none || incomplete(r) || down || trouble.length || !!r.couldNotRun?.length ||
+  const qualified = problems.length || st.none || incomplete(r) || down || trouble.length || st.untested > 0 || !!r.couldNotRun?.length ||
     r.uncovered.some((u) => isSourcePath(u.path));
   if (!issues.length && !qualified) {
     out.push(already.length ? `  No issue from this change; ${already.length} already failing before it.`
