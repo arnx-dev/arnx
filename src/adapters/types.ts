@@ -5,6 +5,8 @@ export type AdapterId = "python" | "typescript" | "rust" | "csharp";
 
 /** One test in one run, from the runner's report. */
 export interface TestResult {
+  /** The file left out of the snapshot this failure needs: it could not run, which says nothing about the project. */
+  needs?: string;
   testId: string;
   fileAttr: string;
   name: string;

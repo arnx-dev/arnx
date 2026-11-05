@@ -7,8 +7,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
 import { Boundary, STAND_INS_NOTE } from "./boundary";
-import { takeSnapshot } from "./change";
+import { filesAt, takeSnapshot } from "./change";
 import { configSuspects, loadReviewFile, sandboxOnlyOf, secretPinsOf } from "./config";
+import { markLeftOut } from "./diagnose";
 import { SetupRequired } from "./errors";
 import { asError, ownerFile, runTests, type TestResult } from "./outcomes";
 import type { Say } from "./progress";
@@ -27,7 +28,9 @@ export interface FindingRecheck { id: string; project: string; testId: string; s
 
 export interface ReviewRecheck { review: string; findings: FindingRecheck[];
   /** A message was masked. */
-  standInsShown?: boolean }
+  standInsShown?: boolean;
+  /** Files left out as secret-looking that its tests needed, and those left out in all. */
+  couldNotRun?: string[]; leftOut?: string[] }
 
 /** The generated tests a review kept for one project, by repository-relative path. */
 function generated(rdir: string, project: string, writable: RegExp): Record<string, string> {
@@ -37,12 +40,12 @@ function generated(rdir: string, project: string, writable: RegExp): Record<stri
 }
 
 /** A finding's outcome in one run: its own result, else the load error of its file, else absent. */
-function outcomeIn(run: TestResult[] | null, f: Finding): { outcome: string; message: string } {
+function outcomeIn(run: TestResult[] | null, f: Finding): { outcome: string; message: string; needs?: string } {
   if (run === null) return { outcome: "missing", message: "" };
   const own = run.find((t) => t.testId === f.testId);
-  if (own) return { outcome: own.outcome, message: own.message };
+  if (own) return { outcome: own.outcome, message: own.message, ...(own.needs ? { needs: own.needs } : {}) };
   const load = f.file ? run.find((t) => t.outcome === "error" && ownerFile(t.fileAttr, [f.file!]) !== null) : undefined;
-  return load ? { outcome: "error", message: load.message } : { outcome: "absent", message: "" };
+  return load ? { outcome: "error", message: load.message, ...(load.needs ? { needs: load.needs } : {}) } : { outcome: "absent", message: "" };
 }
 
 /** Run the review's confirmed tests `settings.runs` times at most: a test that fails once is still failing and its file
@@ -57,6 +60,7 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
   // A coding agent reads what a check says, and the code it ran on holds real values.
   const boundary = new Boundary(configSuspects(repo));
   let shown = false;
+  const leftOut = new Set<string>(), couldNotRun = new Set<string>();
   for (const name of [...new Set(todo.map((f) => f.project))]) {
     const cfg = file.projects.find((p) => p.name === name) ?? (file.legacy ? file.projects[0] : undefined);
     if (!cfg) {
@@ -67,7 +71,7 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
     const mine = todo.filter((f) => f.project === name);
     const owner = (f: Finding) => f.file && files[f.file] !== undefined ? f.file : ownerFile(f.testId.split("::")[0]!,
       Object.keys(files));
-    const runs = new Map<string, { outcome: string; message: string }[]>(mine.map((f) => [f.id, []]));
+    const runs = new Map<string, { outcome: string; message: string; needs?: string }[]>(mine.map((f) => [f.id, []]));
     const unrunnable = mine.filter((f) => !owner(f));
     for (const f of unrunnable) runs.get(f.id)!.push({ outcome: "missing", message: "the review kept no test file for it" });
     const runnable = mine.filter((f) => owner(f));
@@ -80,8 +84,12 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
         const snap = join(tmp, "repo");
         // The working tree as it is now, fixes included, untracked files too (accepted tests are untracked until
         // committed): no model sees what a check runs.
-        boundary.addScrubbed(takeSnapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw),
-          untracked: true }));
+        const taken = takeSnapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw),
+          untracked: true });
+        boundary.addScrubbed(taken);
+        const lacking = taken.withheld.map((w) => w.path);
+        lacking.forEach((p) => leftOut.add(p));
+        const tree = lacking.length ? filesAt(repo, null, true) : [];
         // The review's generated files go in as they ran, in place of anything in its tests directory.
         mkdirSync(join(snap, writeDir), { recursive: true });
         for (const rel of collect(snap, writeDir, adapter.writable)) rmSync(join(snap, rel), { force: true });
@@ -102,7 +110,7 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
             o.progress?.(`${name}: run ${i}/${settings.runs}, ${targets.length} file${targets.length === 1 ? "" : "s"}`);
             const [, parsed] = runTests(session, snap, cfg, targets, `recheck-${i}.xml`, RUN_TIMEOUT);
             // The saved finding's id holds a stand-in where the run's holds the value (a parametrized test).
-            const results = parsed?.map(asError).map((t) => ({ ...t, testId: boundary.mask(t.testId) })) ?? null;
+            const results = parsed && markLeftOut(parsed.map(asError), lacking, tree).map((t) => ({ ...t, testId: boundary.mask(t.testId) }));
             for (const f of open) runs.get(f.id)!.push(outcomeIn(results, f));
           }
           return null;
@@ -113,9 +121,11 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
     }
     for (const f of mine) {
       const seen = runs.get(f.id)!;
-      const failed = seen.find((r) => r.outcome === "failed" || r.outcome === "error");
-      const status: RecheckStatus = failed ? "still-failing"
+      const failed = seen.find((r) => (r.outcome === "failed" || r.outcome === "error") && !r.needs);
+      const lack = seen.find((r) => r.needs);
+      const status: RecheckStatus = lack && !failed ? "no-report" : failed ? "still-failing"
         : seen.length === settings.runs && seen.every((r) => r.outcome === "passed") ? "fixed" : "no-report";
+      if (lack && !failed) couldNotRun.add(lack.needs!);
       const message = failed?.message ?? seen.find((r) => r.outcome !== "passed")?.message ?? "";
       const said = boundary.mask(message);
       shown ||= said !== message;
@@ -124,7 +134,8 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
   }
   const order = new Map(review.findings.map((f, i) => [f.id, i]));
   out.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
-  return { review: review.id, findings: out, ...(shown ? { standInsShown: true } : {}) };
+  return { review: review.id, findings: out, ...(shown ? { standInsShown: true } : {}),
+    ...(couldNotRun.size ? { couldNotRun: [...couldNotRun].sort() } : {}), ...(leftOut.size ? { leftOut: [...leftOut].sort() } : {}) };
 }
 
 /** The exit code, as check's: 0 every confirmed test passes (or none to run), 1 some still fail, 2 some gave no
@@ -150,9 +161,15 @@ export function recheckSummary(r: ReviewRecheck): [string, number] {
     lines.push(`  ${mark} ${f.id} ${f.testId}: ${why}`);
   }
   if (r.standInsShown) lines.push(STAND_INS_NOTE);
+  if (r.couldNotRun) {
+    lines.push(`Could not run: ${r.couldNotRun.join(", ")} is left out as secret-looking. If it is a test fixture: \`arnx allow-secret ` +
+      `${r.couldNotRun.length === 1 ? r.couldNotRun[0] : "PATH"}\`, then run this again.`);
+  } else if (r.leftOut && code !== 0) {
+    lines.push(`Left out as secret-looking, which these tests may need: ${r.leftOut.join(", ")}. If one is a test fixture: \`arnx allow-secret PATH\`.`);
+  }
   lines.push(code === 0 ? "Every confirmed test passes now."
     : code === 1 ? "Fix the code (not the tests) and run `arnx check --review` again."
-    : "Some tests did not report; see above.");
+    : r.couldNotRun ? "These tests say nothing about the code until it is." : "Some tests did not report; see above.");
   return [lines.join("\n"), code];
 }
 

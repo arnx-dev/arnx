@@ -93,7 +93,8 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   which covers a page or a cut that starts inside a key. A model's own test keeps what it wrote where it is saved to run, so
   an accepted test stays whole; a model reads it masked. A model told to write `[private key]` is refused, and so is a
   `review.yaml` holding it: a test that needs a key reads the file at run time.
-  A test that needs a file left out could not run, and reads so: it is no finding. A file over 1 MB that is binary, or over
+  A test that needs a file left out could not run, and reads so: it is no finding, models are told the file is left out, a
+  review exits as incomplete (2) and `arnx check` too, and both name the file and `arnx allow-secret`. A file over 1 MB that is binary, or over
   32 MB, is searched a piece at a time and left out on a hit, whatever a pin says. A path that cannot be read counts as a hit.
   A change of only such files stops, naming what can free it: `arnx allow-secret`, `--range`, or that a range cannot be allowed.
   **These get past it:** JWK; hex; PKCS12 and PBES1 encrypted keys; lower-case or altered armour; a header broken up in the

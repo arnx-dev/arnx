@@ -468,7 +468,7 @@ test("a change whose only key is on its removed side points to --range, not to a
 
 test("the note does not say a file left out is unreadable when a clean copy is there to read", async () => {
   const note = leftOutNote([{ path: "k.txt", line: 1, label: "a private key" }]);
-  expect(note).toContain("left out of this diff");
+  expect(note).toContain("neither this diff");
   expect(note).toContain("a copy holding the secret is in neither");
   const repo = configured();
   put(repo, "k.txt", pk8);

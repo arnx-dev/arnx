@@ -151,6 +151,8 @@ export interface Review {
   blankedLines?: Blanked[];
   /** Changed files left out as secret-looking: what they hold and where, never the text. */
   leftOutFiles?: Withheld[];
+  /** Tests that failed for a file left out: they could not run, which leaves the review incomplete. */
+  couldNotRun?: { test: string; needs: string }[];
   /** Untracked files the review sent because the owner opted in (--untracked); absent when none. */
   untrackedIncluded?: string[];
   /** How many untracked files the review left out (not sent, not in the sandbox); absent when none. */
@@ -223,7 +225,8 @@ export const notChecked = (r: Review) => active(r).filter((f) => f.verdict !== "
 /** Suspects the hunt named when the review wrote no test at all: "nothing found" would then say nothing. */
 const neverTested = (r: Review) => r.testsWritten === 0 ? (r.suspects ?? []).filter((s) => s.outcome === "not tested")
   : [];
-export const incomplete = (r: Review) => r.stop !== "end_turn" || r.missingRuns > 0 || neverTested(r).length > 0;
+export const incomplete = (r: Review) => r.stop !== "end_turn" || r.missingRuns > 0 || neverTested(r).length > 0 ||
+  !!r.couldNotRun?.length;
 export const exitCode = (r: Review) => (confirmed(r).length || notChecked(r).length ? 1 : incomplete(r) ? 2 : 0);
 
 export interface Marks {
@@ -338,6 +341,11 @@ function statusOf(r: Review): { problems: string[]; notes: string[] } {
     } else if (!p.tests) {
       notes.push(p.testFiles ? `\`${p.name}\`: no run reported its tests` : `\`${p.name}\`: the reviewer wrote no tests`);
     }
+  }
+  if (r.couldNotRun?.length) {
+    const needs = [...new Set(r.couldNotRun.map((x) => x.needs))];
+    problems.push(`${plural(r.couldNotRun.length, "test")} could not run: ${r.couldNotRun.length === 1 ? "it needs" : "they need"} ` +
+      `${someNames(needs, 5)}, left out as secret-looking`);
   }
   const untried = neverTested(r);
   if (!problems.length && untried.length && r.stop === "end_turn" && !r.missingRuns) {
@@ -677,6 +685,7 @@ export function render(r: Review): string {
   if (r.blankedLines?.length) {
     out.push(`- Comment lines blanked as secret-looking (not sent): ${describeBlanked(r.blankedLines)}`);
   }
+  for (const x of r.couldNotRun ?? []) out.push(`- Could not run: \`${x.test}\` needs \`${x.needs}\`, left out.`);
   if (r.notSent.length) {
     const named = r.notSent.map((p) => {
       const w = r.leftOutFiles?.find((x) => x.path === p);
@@ -944,7 +953,13 @@ export function summary(r: Review, reviewMd: string): string {
   });
   if (optional) out.push(`  ${optional === 1 ? "1 optional question" : `${optional} optional questions`} in review.md ` +
     `(no issue waits on ${optional === 1 ? "it" : "them"})`);
-  if (!r.findings.length && !r.questions.length) out.push("  No findings and no questions.");
+  if (!r.findings.length && !r.questions.length && !r.couldNotRun?.length) out.push("  No findings and no questions.");
+  if (r.notSent.length) {
+    out.push(`  Left out as secret-looking: ${someNames(r.notSent.map((p) => {
+      const w = r.leftOutFiles?.find((x) => x.path === p);
+      return w ? `${p} (${w.label}, line ${w.line})` : p;
+    }), 10)}; if one is a test fixture, allow it with \`arnx allow-secret PATH\``);
+  }
   for (const u of (r.untested ?? []).filter((x) => x.files.length)) {
     const shown = u.files.slice(0, 8).join(", ") + (u.files.length > 8 ? `, … (${u.files.length - 8} more)` : "");
     out.push(`  Not tested${multi(r) ? ` (${u.project})` : ""}: ${shown}`);

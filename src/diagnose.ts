@@ -149,6 +149,17 @@ export function missingLeftOut(texts: string[], leftOut: string[], all: string[]
   });
 }
 
+/** `results` with each failure that names a file of `leftOut` (a test that needs it) marked: it could not run, however the
+ * runner reports it (an import inside a test is a plain failure). */
+export function markLeftOut(results: TestResult[], leftOut: string[], all: string[]): TestResult[] {
+  if (!leftOut.length) return results;
+  return results.map((t) => {
+    if (!failed(t)) return t;
+    const [needs] = missingLeftOut([t.message], leftOut, all);
+    return needs ? { ...t, outcome: "error", needs, message: `needs ${needs}, left out as secret-looking: ${t.message}` } : t;
+  });
+}
+
 /** The package npx tried to download because it is not installed where the command ran ("@scope/name" decoded), or
  * null. The sandbox has no network, so npx gives up after a while and the run writes no report. */
 export function npxDownload(output: string): string | null {

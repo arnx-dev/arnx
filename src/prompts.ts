@@ -141,12 +141,13 @@ export function elsewhereNote(files: readonly string[]): string {
     "diff above: never conclude that something is missing from the change because the diff does not show it.";
 }
 
-/** The change's files left out as secret-looking, named with what they hold so a round never takes them for absent. */
+/** Files left out as secret-looking, named with what they hold so a round never takes them for absent. */
 export function leftOutNote(files: readonly Withheld[]): string {
   if (!files.length) return "";
   const named = files.slice(0, ELSEWHERE_MAX).map((x) => `\`${x.path}\` (${x.label})`).join(", ");
-  return "This change also edits files left out of this diff because they look like secrets, so never conclude that an " +
-    "edit to them is missing; a copy holding the secret is in neither the code you can read nor the sandbox: " + named +
+  return "These files look like secrets and are left out: a copy holding the secret is in neither this diff, the code you can " +
+    "read nor the sandbox, so never conclude that an edit to one is missing or that its absence is a defect, and a test that " +
+    "needs one cannot run: " + named +
     `${files.length > ELSEWHERE_MAX ? `, and ${files.length - ELSEWHERE_MAX} more` : ""}.`;
 }
 

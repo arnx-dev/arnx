@@ -26,6 +26,7 @@ test("the owner's example: a count line, numbered issues, the findings at the ri
     // F4 assumed an answer to Q1, but F3 proves the issue: its mark covers F4 and Q1 is optional.
     `  ✗ 2  ${BULK}  F3, F4`,
     "  1 optional question in review.md (no issue waits on it)",
+    "  Left out as secret-looking: .env.local; if one is a test fixture, allow it with `arnx allow-secret PATH`",
     "All 2 issues come marked real: nothing to do unless you disagree.",
     "9 tests · $0.04 · 1m04s · .arnx/reviews/20261021-54347c/review.md",
     "Next: arnx accept",

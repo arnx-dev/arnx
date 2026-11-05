@@ -41,6 +41,7 @@ the path each test runs from; `files` are where they are kept.
 | `accepted` | array of strings | The ids, of those that passed or failed, that are accepted tests: the tests behind findings marked real (and answers the code disagrees with). The rest are other tests the review wrote into the same files. Read from `.arnx/accepted-tests.json` (committed, so a fresh clone or CI tells them apart too); for a file recorded by an older arnx, from its review in `.arnx/reviews/`; with neither, every test in the file counts as accepted. |
 | `failed` | array | Tests that failed: see [Each failed test](#each-failed-test). |
 | `skipped` | number | Tests skipped: one accept could not cut out of a kept file, or (accepted by an arnx before 0.1.2) not confirmed, marked intended or noise, or set aside. |
+| `could_not_run`, `left_out` | array | Optional. `{ test_id, needs }`: tests that failed for a file left out as secret-looking, which is not a failure of the code (exit 2); `{ path, line, label }`: the files left out. |
 
 ## Each failed test
 
