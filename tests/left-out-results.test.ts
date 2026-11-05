@@ -67,6 +67,7 @@ for (const [name, message] of [["its import stops the file loading", LOAD], ["it
     expect(md).toContain("`lib.py`");
     expect(md).toContain("arnx allow-secret");
     expect(md).toContain(`\`${GEN}::test_add\` needs \`lib.py\``);
+    expect(md).not.toContain("Run `arnx review` again to cover it");
     // The saved review reads the same, and the model was told.
     expect(exitCode(load(rdir))).toBe(2);
     expect(agent.bodies[0]).toContain("`lib.py` (a private key)");

@@ -389,7 +389,9 @@ function statusLines(r: Review): string[] {
   const { problems, notes } = statusOf(r);
   const names = r.projects.length > 1 ? ` (${ticks(r.projects)})` : "";
   // When a resume redoes what an outage cut, the outage line below says so: no fresh review here.
-  const again = (r.providerFailures ?? []).some(resumes) ? "" : " Run `arnx review` again to cover it.";
+  const again = (r.providerFailures ?? []).some(resumes) ? ""
+    : r.couldNotRun?.length ? " If it is a test fixture, allow it with `arnx allow-secret PATH`, then `arnx review` again."
+    : " Run `arnx review` again to cover it.";
   const out = [problems.length ? `Incomplete: ${problems.join("; ")}.${again}`
     : untestedCount(r) ? `Partly covered: no arnx test refers to ${untestedCount(r)} of the ${untestedOf(r)} changed ` +
       "source files below, so finding nothing there says nothing about them. Check them yourself, or review them " +
