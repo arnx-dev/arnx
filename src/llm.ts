@@ -123,13 +123,15 @@ export const TOTAL_TIMEOUT = 300;
 // ATTEMPT_TIMEOUT bounds one attempt: a request still unanswered after it is abandoned and sent again (within the
 // total), since a second try of a hung request usually answers in seconds.
 export const ATTEMPT_TIMEOUT = 150;
-// Second opinions are short calls (3–20 s when the connection is up): a stalled one is abandoned after 60 s, so a
-// dropped connection costs a minute, not two and a half. Hunt calls keep ATTEMPT_TIMEOUT (they take 60–90 s). In
+// Second opinions take 9 s at the median and up to a minute for the slowest healthy stream, so the wall clock is
+// generous (150 s) and a dead connection is caught by silence instead (VERDICT_IDLE_TIMEOUT, 30 s without bytes).
+// Hunt calls keep ATTEMPT_TIMEOUT (they take 60–90 s). In
 // background mode (OpenAI) the attempt limit bounds only the create; polling runs to the call's total timeout.
 // When the challenger has a fallback, its first model is given one timed-out attempt only (`timeoutAttempts: 1`):
 // retrying a stalled model four times cost up to 280 s before the fallback, which answers in seconds, was asked.
 // Retryable statuses and network errors that are not timeouts keep the usual retries.
-export const VERDICT_ATTEMPT_TIMEOUT = 60;
+export const VERDICT_ATTEMPT_TIMEOUT = 150;
+export const VERDICT_IDLE_TIMEOUT = 30;
 // OpenAI streams of hidden reasoning go quiet for long stretches and stall on some networks although the response
 // completes: OpenAI calls run in background mode instead, polled every POLL_SECONDS (a GET, not a new generation).
 export const POLL_SECONDS = 3;
@@ -1223,7 +1225,7 @@ export function makeJsonModel(ref: ModelRef, s: Settings, env: Env, b: Boundary,
   return maskedJson(jsonModel(ref, s, env, { downDelays: OUTAGE_DELAYS.slice(0, 3), ...opts }), b);
 }
 
-type JsonOptions = { attemptSeconds?: number; timeoutAttempts?: number; effort?: string; downDelays?: number[] };
+type JsonOptions = { attemptSeconds?: number; idleSeconds?: number; timeoutAttempts?: number; effort?: string; downDelays?: number[] };
 
 function jsonModel(ref: ModelRef, s: Settings, env: Env, opts: JsonOptions): JsonModel {
   const prices = allPrices(s);
@@ -1234,6 +1236,7 @@ function jsonModel(ref: ModelRef, s: Settings, env: Env, opts: JsonOptions): Jso
   if (p.api === "messages") {
     return new AnthropicJson(ref, new AnthropicAgent(ref.model, effort, key, undefined,
       { ...(timing.timeoutAttempts ? { timeoutAttempts: timing.timeoutAttempts } : {}),
+        ...(timing.idleSeconds ? { idleSeconds: timing.idleSeconds } : {}),
         ...(timing.downDelays ? { downDelays: timing.downDelays } : {}), ...messagesOpts(p, url) }),
       prices);
   }
@@ -1246,7 +1249,7 @@ function jsonModel(ref: ModelRef, s: Settings, env: Env, opts: JsonOptions): Jso
  * Both give up on a stalled attempt after VERDICT_ATTEMPT_TIMEOUT; the first model, when a fallback stands behind it,
  * after one timed-out attempt, so the fallback is asked at once. Without a fallback it retries as usual. */
 export function makeChallenger(s: Settings, env: Env, b: Boundary): JsonModel {
-  const verdict = { attemptSeconds: VERDICT_ATTEMPT_TIMEOUT };
+  const verdict = { attemptSeconds: VERDICT_ATTEMPT_TIMEOUT, idleSeconds: VERDICT_IDLE_TIMEOUT };
   // With a fallback standing behind it, the first model waits out [2, 8] of an outage only: the fallback is asked next.
   const first = jsonModel(s.challenger, s, env,
     s.challengerFallback ? { ...verdict, timeoutAttempts: 1, downDelays: OUTAGE_DELAYS.slice(0, 2) } : verdict);

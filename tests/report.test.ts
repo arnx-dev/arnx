@@ -210,3 +210,18 @@ test("review.json carries schema_version, each finding's status and the exit cod
   save(sampleReview({ findings: [] }), tmp(), "");
   expect(JSON.parse(readFileSync(join(tmp(), "review.json"), "utf8")).exit_code).toBe(0);
 });
+
+test("the header names every model that gave a verdict", () => {
+  const f = (id: string, judge?: string) => ({ ...sampleReview().findings[0]!, id, ...(judge ? { judge } : {}) });
+  const r = sampleReview({ challenger: "openai:gpt-5.5-2026-04-23", findings: [f("F1"), f("F2"), f("F3"),
+    f("F4", "river:glm-5"), { ...f("F5"), verdict: null, judge: "river:other" }] });
+  const md = render(r);
+  expect(md).toContain("Second opinion: openai:gpt-5.5-2026-04-23 (3 findings), river:glm-5 (1, when " +
+    "openai:gpt-5.5-2026-04-23 did not reply in time) · Prompts:");
+  expect(md.split("\n").find((l) => l.startsWith("- Reviewer:"))).not.toContain("river:other");
+});
+
+test("one judge reads as before", () => {
+  expect(render(sampleReview())).toContain("- Reviewer: anthropic:claude-sonnet-5-5 · Second opinion: " +
+    "openai:gpt-5.5-2026-04-23 · Prompts: abc");
+});

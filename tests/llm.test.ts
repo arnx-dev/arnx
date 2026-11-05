@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { ModelError } from "../src/errors";
 import {
   AnthropicAgent, AnthropicJson, CANCEL_SECONDS, cancelInFlight, costUsd, FallbackJson, makeAgentModel, makeJsonModel,
-  makeChallenger, makeSecondHunter, OUTAGE_DELAYS, OUTAGE_WAIT_MAX_SECONDS, parseJsonObject, PRICES, resetOutageWaits, ResponsesAgent,
+  makeChallenger, makeSecondHunter, VERDICT_ATTEMPT_TIMEOUT, VERDICT_IDLE_TIMEOUT, OUTAGE_DELAYS, OUTAGE_WAIT_MAX_SECONDS, parseJsonObject, PRICES, resetOutageWaits, ResponsesAgent,
   responsesInput, ResponsesJson, unpricedModels, unpricedNote,
 } from "../src/llm";
 import { exitCodeAfter, finalExitCode, onInterrupt, startInterrupt } from "../src/interrupt";
@@ -1239,11 +1239,11 @@ test("makeChallenger: timeoutAttempts 1 on the first model only, and only with a
   expect(withFallback).toBeInstanceOf(FallbackJson);
   const [first, second] = [(withFallback as unknown as { first: unknown }).first,
     (withFallback as unknown as { second: unknown }).second];
-  expect([limit(first), attempt(first)]).toEqual([1, 60]);
-  expect([limit(second), attempt(second)]).toEqual([Infinity, 60]);
+  expect([limit(first), attempt(first)]).toEqual([1, 150]);
+  expect([limit(second), attempt(second)]).toEqual([Infinity, 150]);
   const alone = makeChallenger({ ...s, challengerFallback: undefined }, env, noValues);
   expect(alone).not.toBeInstanceOf(FallbackJson);
-  expect([limit(alone), attempt(alone)]).toEqual([Infinity, 60]);
+  expect([limit(alone), attempt(alone)]).toEqual([Infinity, 150]);
 });
 
 test("main's exit waits for an interrupt in progress, so its cancel calls are not cut off", async () => {
@@ -1461,3 +1461,50 @@ test("the wait shows in the terminal and costs no budget", async () => {
   expect(reply.unknownCalls ?? 0).toBe(0);
   expect(reply.attempts!.filter((a) => a.outcome === "ok")).toHaveLength(1);
 });
+
+// A verdict call is cut by silence (VERDICT_IDLE_TIMEOUT), not by a short wall clock: a stream still sending lives to
+// VERDICT_ATTEMPT_TIMEOUT.
+const verdictLimits = () => {
+  const env = { ...COMPAT_ENV, OPENAI_API_KEY: "o" };
+  const s = { ...defaultSettings(), providers: TABLES, prices: PRICED,
+    challenger: parseModelRef("compat:some-model", TABLES), challengerFallback: parseModelRef("openai:gpt-6.1-sol") };
+  const fb = makeChallenger(s, env, noValues) as unknown as { first: object; second: object };
+  const of = (m: object) => [(m as { attemptLimit: number }).attemptLimit, (m as { idle: number }).idle];
+  return [of(fb.first), of(fb.second)];
+};
+
+test("a verdict call still streaming past the old limit is not cut", async () => {
+  expect([VERDICT_ATTEMPT_TIMEOUT, VERDICT_IDLE_TIMEOUT]).toEqual([150, 30]);
+  expect(verdictLimits()).toEqual([[150, 30], [150, 30]]);
+  // Alive for 0.3 s, past a 0.2 s attempt limit's worth of the old kind, never silent for 0.1 s.
+  const slow = (init: RequestInit) => {
+    let timer: ReturnType<typeof setInterval>;
+    const [head, ...rest] = anthropicEvents("hi");
+    return new Response(new ReadableStream({ start(c) {
+      c.enqueue(enc.encode(head!));
+      timer = setInterval(() => { try { c.enqueue(enc.encode(sseEvent("ping", {}))); } catch { clearInterval(timer); } }, 10);
+      setTimeout(() => { clearInterval(timer); for (const e of rest) c.enqueue(enc.encode(e)); c.close(); }, 300);
+      init.signal?.addEventListener("abort", () => { clearInterval(timer); c.error(new DOMException("aborted", "AbortError")); });
+    } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  let n = 0;
+  const agent = new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, { idleSeconds: 0.1, attemptSeconds: 2,
+    totalSeconds: 5, timeoutAttempts: 1, sleep: noSleep, fetch: fakeFetch((_u, init) => { n++; return slow(init); }) });
+  expect((await ask(agent)).content[0]!.text).toBe("hi");
+  expect(n).toBe(1);
+}, 10_000);
+
+test("a silent verdict call is cut at the idle limit and falls back", async () => {
+  const first = { n: 0 }, second = { n: 0 };
+  const quiet = new ResponsesJson(GPT, "https://api.example/v1", "k", "medium", PRICES, { sleep: noSleep,
+    idleSeconds: 0.05, attemptSeconds: 5, totalSeconds: 5, timeoutAttempts: 1,
+    fetch: fakeFetch((_u, init) => { first.n++; return stalledStream(init); }) });
+  const fallback = new ResponsesJson(STALL, "https://api.example/v1", "k", "medium", PRICES, { sleep: noSleep,
+    fetch: fakeFetch(() => { second.n++; return okReply(); }) });
+  const t0 = performance.now();
+  const reply = await new FallbackJson(quiet, fallback).completeJson("s", "u", SCHEMA);
+  expect(performance.now() - t0).toBeLessThan(2000);
+  expect([first.n, second.n]).toEqual([1, 1]);
+  expect(reply[4]).toBe("openai:gpt-6.1-sol");
+  expect(verdictLimits()[0]![1]).toBe(30);
+}, 10_000);

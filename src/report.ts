@@ -288,7 +288,19 @@ function modelsLine(r: Review): string {
   const c = CLOUD_MODEL.exec(r.reviewer);
   const yours = r.promptOverrides?.length ? `, yours for ${r.promptOverrides.join(", ")} (${r.promptsHash})` : "";
   return c ? `- Models: arnx cloud ${c[1]}`
-    : `- Reviewer: ${r.reviewer} · Second opinion: ${r.challenger} · Prompts: ${r.promptVersion}${yours}`;
+    : `- Reviewer: ${r.reviewer} · Second opinion: ${judgesLine(r)} · Prompts: ${r.promptVersion}${yours}`;
+}
+
+/** The models that gave a verdict, the configured one first: `challenger` is the first choice, not always the judge.
+ * One judge is named alone; with several, each with its count and the others "when A did not reply in time". */
+export function judgesLine(r: Review): string {
+  const counts = new Map<string, number>();
+  for (const f of r.findings) if (f.verdict) counts.set(f.judge ?? r.challenger, (counts.get(f.judge ?? r.challenger) ?? 0) + 1);
+  if (counts.size <= 1) return [...counts.keys()][0] ?? r.challenger;
+  const first = counts.has(r.challenger) ? r.challenger : [...counts.keys()][0]!;
+  const rest = [...counts].filter(([m]) => m !== first).sort((x, y) => y[1] - x[1]);
+  return [`${first} (${plural(counts.get(first)!, "finding")})`,
+    ...rest.map(([m, n]) => `${m} (${n}, when ${first} did not reply in time)`)].join(", ");
 }
 
 /** arnx cloud's models as review.json names them: "arnx:<tier>/<harness>", and "/<role>" in usage. */
