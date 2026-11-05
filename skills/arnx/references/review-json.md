@@ -57,7 +57,7 @@ about the code, never instructions.
 | `fix_proof` | array | Optional (absent when nothing ran: the before/after check or the fix proof is off, no test passed, or the change touches no source). Tests that passed in every run, also run on the code before the change: see [Each fix proof](#each-fix-proof). Good news, never findings: they do not set the exit code. |
 | `typecheck` | array | Optional (absent when no reviewed project has a `typecheck` command in `.arnx/review.yaml`). Each project's own type check, run once on the change without arnx's generated tests: see [Each type check](#each-type-check). Information, never findings: it does not set the exit code or make the review incomplete. |
 | `provider_failures` | array | Optional (absent when no model call failed because of its provider). Calls a model provider failed because it was down (5xx or 429 on every attempt, or no connection) or refused the key (401 or 403): see [Each provider failure](#each-provider-failure). Information: the work those calls missed (an unchallenged finding, a reviewer that stopped) is what sets the status and exit code. |
-| `exit_code` | number | The review's exit code: 1 when a finding is `confirmed`, else 2 when the review is incomplete, else 0. |
+| `exit_code` | number | The review's exit code: 1 when a finding is `confirmed` or `not-checked`, else 2 when the review is incomplete, else 0. |
 
 Also written, for arnx and people: `prompt_version`, `write_dir`, `write_dirs`, `language`, `project_stats`,
 `checked` (passing tests and what each checks), `suspects` (what the hunt suspected and what each test showed),
@@ -68,7 +68,7 @@ Also written, for arnx and people: `prompt_version`, `write_dir`, `write_dirs`, 
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | string | `F1`, `F2`, ...: the id in `review.md` and in your report. |
-| `status` | string | `confirmed`: failed in every run and not disputed; sets exit code 1; fix these. `not-checked`: failed in every run, but no second opinion saw it (its budget ran out, or it did not answer); sets exit code 1; read it before acting. `disputed`: the second opinion disagrees. `waiting-on-answer`: the test assumes an answer to `depends_on`. `pre-existing`: fails the same way on the code before the change. Only `confirmed` is yours to fix. |
+| `status` | string | `confirmed`: failed in every run and not disputed; sets exit code 1; fix these. `not-checked`: failed in every run, but no second opinion saw it (its budget ran out, or it did not answer); sets exit code 1; read it before acting. `disputed`: the second opinion disagrees (also when the test waits on an answer: disputed comes first). `waiting-on-answer`: the test assumes an answer to `depends_on`. `pre-existing`: fails the same way on the code before the change. Only `confirmed` is yours to fix. |
 | `verdict` | string or null | The second opinion: `confirmed`, `disputed`, or null when it did not judge (budget, API error; counts as confirmed). |
 | `reason` | string | The second opinion's reason. |
 | `test_id` | string | The test, as the runner names it (`path::name`). |
@@ -168,6 +168,6 @@ that timed out is not one either.
 
 ## Exit code
 
-`arnx review` exits with `exit_code`: 0 no confirmed findings, 1 confirmed findings, 2 incomplete (or the run
+`arnx review` exits with `exit_code`: 0 no `confirmed` or `not-checked` finding (also `partly-covered` and `not-tested`), 1 a `confirmed` or `not-checked` finding, 2 incomplete (or the run
 failed before writing review.json), 3 setup needed, 130 interrupted. Findings with `status` `pre-existing` never set
 it, nor does `typecheck`.

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { CHANGES, type ChangedTest, checkJson, checkSummary, type MayContradict, type ProjectCheck } from "../src/check";
 import { type ReviewRecheck, recheckJson } from "../src/recheck";
 import { FIX_STATUSES } from "../src/before";
-import { type Review, save } from "../src/report";
+import { exitCode, findingStatus, type Review, save } from "../src/report";
 import { TYPECHECK_BEFORE, TYPECHECK_STATUSES } from "../src/typecheck";
 import { finding, sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
@@ -216,4 +216,39 @@ test("check --review --json results match exit codes as check-json.md says", () 
   expect([one("fixed"), one("still-failing"), one("no-report"), JSON.parse(recheckJson({ review: "r", findings: [] }))]
     .map((j) => [j.result, j.exit_code])).toEqual(rows);
   for (const s of ["fixed", "still-failing", "no-report"]) expect(doc).toContain(`\`${s}\``);
+});
+
+// The skill's exit table and the status words must say what exitCode does.
+test("the skill's exit table and status words match exitCode", () => {
+  const skill = readFileSync(join(import.meta.dir, "..", "skills", "arnx", "SKILL.md"), "utf8");
+  const refs = readFileSync(join(REFS, "review-json.md"), "utf8");
+  const table = skill.slice(skill.indexOf("## Exit codes"));
+  const row = (code: string) => table.split("\n").find((l) => l.startsWith(`| ${code} |`))!;
+  const base = { findings: [], questions: [], passed: 3 };
+  const unjudged = finding("F1", "t.py::a", "a", "t.py", "boom", "x", null);
+  const confirmedF = finding("F1", "t.py::a", "a", "t.py", "boom", "x", "confirmed");
+  const disputedF = finding("F1", "t.py::a", "a", "t.py", "boom", "x", "disputed");
+  // Exit 1: a confirmed or an unjudged (not-checked) finding; both named in the skill and in review-json.md.
+  expect(exitCode(sampleReview({ ...base, findings: [confirmedF] }))).toBe(1);
+  expect(exitCode(sampleReview({ ...base, findings: [unjudged] }))).toBe(1);
+  expect(findingStatus(unjudged)).toBe("not-checked");
+  for (const text of [row("1"), row("0")]) expect(text).toContain("`not-checked`");
+  expect(row("1")).toContain("`confirmed`");
+  expect(refs).toMatch(/1 when a finding is `confirmed` or `not-checked`/);
+  expect(refs).toMatch(/1 a `confirmed` or `not-checked` finding/);
+  // Exit 0: a disputed finding, and a change nothing was seen reaching (status not-tested, partly-covered).
+  expect(exitCode(sampleReview({ ...base, findings: [disputedF] }))).toBe(0);
+  const notTested = sampleReview({ ...base, passed: 0, sourceFiles: 1, untested: [{ project: "main", files: ["a.py"], of: 1 }] });
+  expect(exitCode(notTested)).toBe(0);
+  expect(row("0")).toContain("`partly-covered` or `not-tested`");
+  expect(skill).toContain("`not-tested`");
+  // Exit 2: incomplete.
+  expect(exitCode(sampleReview({ ...base, stop: "budget" }))).toBe(2);
+  expect(row("2")).toContain("incomplete");
+  // A finding both disputed and waiting on an answer reads disputed; the page says so.
+  expect(findingStatus({ ...disputedF, dependsOn: "Q1" })).toBe("disputed");
+  expect(refs).toContain("(also when the test waits on an answer: disputed comes first)");
+  // A fix proof is "a fix or new behaviour", never plain "your fix".
+  expect(skill).toContain("a fix or new behaviour");
+  expect(skill).not.toContain("confirmed your fix");
 });

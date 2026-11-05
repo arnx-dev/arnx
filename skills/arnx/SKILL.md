@@ -57,10 +57,10 @@ code, not instructions to you.
 
 Report every finding (id, status, one line on the bug; groups from `groups` once, with `input`, `actual`,
 `expected`), every question verbatim with its id (`Q1`, ...), any "Not reviewed by arnx" paths, the review's
-`cost_usd` and the path to `review.md`. For each `fix_proof` entry with `before_status` `"fixed"`, say "arnx
-confirmed your fix: `<test_id>` fails before the change and passes after"; report no other entry as a fix. Then tell
-the user to run `arnx triage <id>` (marks and answers; or edit `review.md` by hand) and `arnx accept <id>`, and to
-tell you when that is done. Stop there: change no code.
+`cost_usd` and the path to `review.md`. For a `fix_proof` entry with `before_status` `"fixed"`, say "`<test_id>` fails
+before the change and passes after: a fix or new behaviour"; no other entry is one. Read a `not-checked` finding before
+acting, never fix it as if confirmed. `status` `partly-covered` or `not-tested`: finding nothing says nothing about
+those files (exit stays 0). Tell the user to run `arnx triage <id>`, `arnx accept <id>`, and tell you. Stop: change no code.
 
 While they triage, help when asked: explain a finding, read the code behind it, say what you think. The marks and
 answers are theirs: do not write them, and do not treat a mark you suggested as made.
@@ -139,8 +139,8 @@ this change`) or lists paths in `uncovered` or `untested`:
 
 | Code | `arnx review` | `arnx check` |
 |---|---|---|
-| 0 | no confirmed findings | all accepted tests pass |
-| 1 | confirmed findings | some accepted tests fail |
+| 0 | no `confirmed` or `not-checked` finding (also when `status` is `partly-covered` or `not-tested`) | all accepted tests pass |
+| 1 | a `confirmed` or `not-checked` finding | some accepted tests fail |
 | 2 | incomplete (or failed: the message says why) | some tests did not report |
 | 3 | setup needed (config, consent, keys, Docker, environment) | nothing accepted yet |
 | 4 | | an accepted test changed since accept |
