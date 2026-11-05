@@ -60,6 +60,14 @@ describe("parseTsc", () => {
     expect(markNew([e("a.ts", 9), e("a.ts", 12), e("b.ts", 1), e("a.ts", 3, "other")], [e("a.ts", 4)]))
       .toEqual([false, true, true, true]);
   });
+
+  test("an error that differs only in tsc's '... N more ...' is not new", () => {
+    const e = (message: string) => ({ file: "a.ts", line: 1, column: 1, code: "TS2322", message });
+    const before = [e("Type '{ a: 1; ... 3 more ...; }' is not assignable to type 'T'.")];
+    const after = [e("Type '{ a: 1; ... 4 more ...; }' is not assignable to type 'T'.")];
+    expect(markNew(after, before)).toEqual([false]);
+    expect(markNew([e("Type '{ a: 1; ... 4 more ...; }' is not assignable to type 'U'.")], before)).toEqual([true]);
+  });
 });
 
 describe("review.yaml", () => {

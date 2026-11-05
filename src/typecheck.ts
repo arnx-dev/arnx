@@ -99,7 +99,8 @@ export async function runTypecheck(session: Runner, cfg: ReviewConfig): Promise<
   }
 }
 
-const keyOf = (e: TscError) => `${e.file}\0${e.code}\0${e.message}`;
+/** tsc elides a long type with "... N more ..." where N moves with the change; the count is not part of the error. */
+const keyOf = (e: TscError) => `${e.file}\0${e.code}\0${e.message.replace(/\.\.\. \d+ more \.\.\./g, "... N more ...")}`;
 
 /** Which errors on the change are new: an error is not when the code before the change has the same one (same file,
  * code and message; its line may have moved), matched once each. */
