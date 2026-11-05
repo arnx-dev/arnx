@@ -139,7 +139,8 @@ export function withEventSpend(usage: ModelUse[], fromEvents: ModelUse[]): Model
   for (const e of fromEvents) {
     const u = out.find((x) => bare(x.model) === bare(e.model));
     if (!u) {
-      out.push({ ...e });
+      // A model whose calls all failed has a row of zeros: not worth a line.
+      if (e.calls || e.unknownCalls || e.costUsd) out.push({ ...e });
       continue;
     }
     u.calls = Math.max(u.calls, e.calls); u.unknownCalls = Math.max(u.unknownCalls, e.unknownCalls);

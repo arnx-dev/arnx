@@ -8,7 +8,7 @@ import { runReview } from "../src/reviewer";
 import { defaultSettings } from "../src/settings";
 import { spendClosers } from "../src/interrupt";
 import { withProviderSlot } from "../src/provider";
-import { logPartial, reconcileUsage, USAGE_LOG, usageFromEvents } from "../src/usage";
+import { logPartial, reconcileUsage, USAGE_LOG, usageFromEvents, withEventSpend } from "../src/usage";
 import { render, summary } from "../src/report";
 import { sampleReview } from "./helpers/review";
 import { FakeJson, FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -185,6 +185,13 @@ test("failed with an unsaved round, then resume: the resume's own spend is logge
   expect(agentLogged(id)).toBeCloseTo(agentEvents(rdir), 6);
   expect(review.usage.filter((u) => u.model.endsWith(AGENT)).reduce((a, u) => a + u.costUsd, 0))
     .toBeCloseTo(agentEvents(rdir), 6); // and the review's own cost says so too
+  // calls and tokens as well, not cost alone
+  const ev = usageFromEvents(join(rdir, "events.jsonl")).filter((u) => u.model.endsWith(AGENT));
+  const mine = review.usage.filter((u) => u.model.endsWith(AGENT));
+  expect(ev.reduce((a, u) => a + u.calls, 0)).toBeGreaterThan(0);
+  for (const k of ["calls", "input", "output"] as const) {
+    expect(mine.reduce((a, u) => a + u[k], 0)).toBeGreaterThanOrEqual(ev.reduce((a, u) => a + u[k], 0));
+  }
   expect(sum(repo, id)).toBeCloseTo(review.costUsd, 4);
 });
 
@@ -255,4 +262,19 @@ test("the summary line says cost unknown for a model whose calls all ended unpri
   const md = summary(sampleReview({ costUsd: 0.4, usage }), "review.md");
   expect(md).toContain("gpt-5.5-2026-04-23: cost unknown");
   expect(md).not.toContain("a little more");
+});
+
+test("events raise a model's calls and tokens field by field, add a model only they hold, and skip one with no spend", () => {
+  const held = { ...newUse("anthropic:claude-sonnet-5-5"), calls: 2, input: 100, output: 50, costUsd: 0.2 };
+  const raised = { ...held, calls: 3, input: 80, output: 90, costUsd: 0.1 };
+  const only = { ...newUse("openai:gpt-5.5"), calls: 1, input: 7, output: 3, costUsd: 0.05 };
+  // a model whose calls all failed: a row of zeros
+  const failed = newUse("google:gemini-x");
+  const out = withEventSpend([held], [raised, only, failed]);
+  expect(out.map((u) => u.model)).toEqual(["anthropic:claude-sonnet-5-5", "openai:gpt-5.5"]);
+  expect(out[0]).toMatchObject({ calls: 3, input: 100, output: 90, costUsd: 0.2 });
+  expect(out[1]).toMatchObject({ calls: 1, input: 7, output: 3, costUsd: 0.05 });
+  // unknown calls or a cost alone are spend
+  const unknown = { ...newUse("a:b"), unknownCalls: 1 }, priced = { ...newUse("c:d"), costUsd: 0.01 };
+  expect(withEventSpend([], [unknown, priced]).map((u) => u.model)).toEqual(["a:b", "c:d"]);
 });
