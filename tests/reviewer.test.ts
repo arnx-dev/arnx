@@ -292,8 +292,8 @@ test("a file a failing stack trace goes through is not listed", async () => {
   };
   const without = await go("assert failed");
   expect(without.untested![0]!.files.sort()).toEqual(["app.py", "other.py"]);
-  expect(without.untested![0]!.reasons).toEqual({ "app.py": "a test reads it as text; nothing runs it",
-    "other.py": "a test reads it as text; nothing runs it" });
+  expect(without.untested![0]!.reasons).toEqual({ "app.py": "a test only mentions it as text",
+    "other.py": "a test only mentions it as text" });
   const through = await go("app.py:2: in add\n    return a - b\n/src/vendor/x.py:1 [private key]:3");
   expect(through.untested![0]!.files).toEqual(["other.py"]);
 });

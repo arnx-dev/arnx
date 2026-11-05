@@ -126,7 +126,7 @@ test("review --json: the summary's findings, questions, status and next, from th
     untested: [{ project: "main", files: ["app/x.py"], of: 3 }] }), "m", "j");
   expect(partly.slice(0, 2)).toEqual(["clean", 0]);
   expect(partly[2]).toMatchObject({ status: "partly-covered", not_tested: ["app/x.py"],
-    problems: ["no test refers to 1 of 3 changed source files, so finding nothing there says nothing about them"] });
+    problems: ["no test was seen reaching 1 of 3 changed source files, so finding nothing there says nothing about them"] });
 });
 
 test("triage --json draws nothing and changes nothing: the marks and answers as review.md holds them", async () => {

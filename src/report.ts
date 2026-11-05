@@ -456,7 +456,7 @@ function statusLines(r: Review): string[] {
     : r.couldNotRun?.length ? " If it is a test fixture, allow it with `arnx allow-secret PATH`, then `arnx review` again."
     : " Run `arnx review` again to cover it.";
   const out = [problems.length ? `Incomplete: ${problems.join("; ")}.${again}`
-    : untestedCount(r) ? `Partly covered: no arnx test refers to ${untestedCount(r)} of the ${untestedOf(r)} changed ` +
+    : untestedCount(r) ? `Partly covered: no arnx test was seen reaching ${untestedCount(r)} of the ${untestedOf(r)} changed ` +
       "source files below, so finding nothing there says nothing about them. Check them yourself, or review them " +
       "on their own with `arnx review --range`."
     : `Complete: ${r.projects.length > 1 ? `${r.projects.length} projects tested${names}` : "the change was tested"}; ` +
@@ -1013,7 +1013,7 @@ export function summary(r: Review, reviewMd: string): string {
   const { problems } = statusOf(r);
   const said = problems.join("; ");
   const status = problems.length ? `Incomplete: ${said}.`
-    : untestedCount(r) ? `Partly covered: no test refers to ${untestedCount(r)} of ${untestedOf(r)} changed source ` +
+    : untestedCount(r) ? `Partly covered: no test was seen reaching ${untestedCount(r)} of ${untestedOf(r)} changed source ` +
       "files, so finding nothing there says nothing about them." : "";
   const down = (r.providerFailures ?? []).map(failureLine).join(" ");
   const out = [`arnx review ${r.id} · ${r.change} · ${plural(r.filesChanged, "file")}, +${r.added} −${r.removed}`];

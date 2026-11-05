@@ -64,7 +64,9 @@ export function changedSources(owned: string[], adapter: Adapter): string[] {
 
 const TEST_DIR = /(^|\/)tests?\//;
 /** A line that loads something by a path or module name held in a string. */
-const LOADS = /\b(?:from|import|require|mock|importActual|import_module|__import__)\b|#\[path/;
+const LOADS = /\b(?:from|import|require|mock|importActual|import_module|__import__|spec_from_file_location|exec_module|runpy)\b|#\[path/;
+/** A test with one of these runs files by path: every string in it may be such a path. */
+const FILE_LOADER = /\b(?:spec_from_file_location|exec_module|runpy)\b/;
 const EMPTY_LITERAL = /(['"`])\1/g;
 
 /** `body` as code: comments and string literals blanked, except the strings of a line that loads something (`from`,
@@ -74,21 +76,44 @@ export function codeOf(body: string, path: string): string {
   const strings: string[] = [];
   const code = codeText(body, path, (t) => strings.push(t));
   const lines = code.split("\n");
+  const loads = (l: string) => LOADS.test(l) || fileLoader;
+  const fileLoader = FILE_LOADER.test(code);
   const total = lines.reduce((n, l) => n + (l.match(EMPTY_LITERAL)?.length ?? 0), 0);
   if (total !== strings.length) {
     // Quotes did not pair up with the strings read (an odd literal form): keep the loading lines whole.
     const original = body.split("\n");
-    return lines.map((l, i) => LOADS.test(l) ? original[i] ?? l : l).join("\n");
+    return lines.map((l, i) => loads(l) ? original[i] ?? l : l).join("\n");
   }
   let at = 0;
   return lines.map((l) => {
     const n = l.match(EMPTY_LITERAL)?.length ?? 0;
     const mine = strings.slice(at, at + n);
     at += n;
-    if (!LOADS.test(l)) return l;
+    if (!loads(l)) return l;
     let k = 0;
     return l.replace(EMPTY_LITERAL, (q) => `${q[0]}${mine[k++] ?? ""}${q[0]}`);
   }).join("\n");
+}
+
+const NAME = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/;
+
+/** The strings of `body` that are bare names (identifiers, dotted): no `/`, no extension-like tail, no spaces. A test
+ * that loads modules by name from a list holds them so. */
+function stringNames(body: string, path: string): string[] {
+  const out: string[] = [];
+  codeText(body, path, (t) => { if (NAME.test(t)) out.push(t); });
+  return out;
+}
+
+/** Whether one of `names` is the file's module name or its dotted module path (or the end of it). */
+function namedByString(path: string, names: Set<string>): boolean {
+  if (!names.size) return false;
+  const stem = posix.basename(path).replace(/\.[^.]+$/, "");
+  const mod = INDEX.includes(stem) ? posix.dirname(path) : path.replace(/\.[^.]+$/, "");
+  const dotted = mod.split("/").filter((x) => x && x !== ".").join(".");
+  const name = moduleName(path);
+  if (name !== "." && names.has(name)) return true;
+  return [...names].some((n) => n.includes(".") && (dotted === n || dotted.endsWith("." + n)));
 }
 
 /** Files named as `path.ext:line` in a message (a stack frame in a test runner's output). Directories under
@@ -109,9 +134,14 @@ const frameIs = (frame: string, path: string) => {
   return f === path || path.endsWith("/" + f.replace(/^\//, "")) || f.endsWith("/" + path);
 };
 
-/** The sources a stack frame goes through. */
+/** The sources a stack frame goes through. A frame that fits more than one changed file (a bare `utils.py:9`) hides none. */
 export function framed(sources: string[], frames: string[]): string[] {
-  return sources.filter((p) => frames.some((f) => frameIs(f, p)));
+  const hit = new Set<string>();
+  for (const f of frames) {
+    const fits = sources.filter((p) => frameIs(f, p));
+    if (fits.length === 1) hit.add(fits[0]!);
+  }
+  return sources.filter((p) => hit.has(p));
 }
 
 /** Changed source files with no sign a test reached them: no test of `tests` (those that loaded) names them in code
@@ -121,9 +151,10 @@ export function notReached(owned: string[], ev: { tests: Record<string, string>;
                            adapter: Adapter): string[] {
   const tests = Object.fromEntries(Object.entries(ev.tests).map(([k, v]) => [k, codeOf(v, k)]));
   const text = Object.values(tests).join("\n");
+  const names = new Set(Object.entries(ev.tests).flatMap(([k, v]) => stringNames(v, k)));
   const sources = changedSources(owned, adapter);
   const hit = new Set([...framed(sources, ev.frames), ...(ev.ran ?? []).filter((r) => sources.includes(r))]);
-  return sources.filter((p) => !hit.has(p) && (posix.basename(p) === "lib.rs" ? !text.trim() : !referredTo(p, tests)));
+  return sources.filter((p) => !hit.has(p) && (posix.basename(p) === "lib.rs" ? !text.trim() : !referredTo(p, tests) && !namedByString(p, names)));
 }
 
 /** The generated files whose tests loaded: a test file with a passed, failed or flaky test (one that only has errors,

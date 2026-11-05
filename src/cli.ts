@@ -2094,7 +2094,7 @@ export function reviewJson(r: Review, reviewMd: string, reviewJsonPath: string)
   const st = summaryStatus(r);
   const rows = summaryRows(r);
   const needed = neededQuestions(r);
-  const problems = st.problems.length ? st.problems : st.untested ? [`no test refers to ${st.untested} of ${st.of} ` +
+  const problems = st.problems.length ? st.problems : st.untested ? [`no test was seen reaching ${st.untested} of ${st.of} ` +
     "changed source files, so finding nothing there says nothing about them"] : [];
   return [code === 1 ? "findings" : code === 2 ? "incomplete" : "clean", code, {
     review_id: r.id, review_md: reviewMd, review_json: reviewJsonPath, change: r.change, files_changed: r.filesChanged,

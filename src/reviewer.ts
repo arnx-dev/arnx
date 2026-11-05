@@ -646,14 +646,14 @@ export async function runReview(repo: string, o: { settings: Settings;
         const byText = new Set(untestedFiles(ownedNow, rnd.files, adapter));
         const missed = notReached(ownedNow, { tests: loaded, frames }, adapter);
         const reasons: Record<string, string> = {};
-        for (const f of missed) if (!byText.has(f)) reasons[f] = "a test reads it as text; nothing runs it";
+        for (const f of missed) if (!byText.has(f)) reasons[f] = "a test only mentions it as text";
         // A file the reviewer named stays listed, unless a failing test's frame goes through it.
         const sources = changedSources(ownedNow, adapter);
         const named = (report.not_tested ?? []).flatMap((n) => !isObject(n) ? [] :
           sources.filter((x) => x === text(n.file) || x.endsWith(`/${text(n.file)}`)));
         const shown = new Set(framed(sources, frames));
-        const files = [...new Set([...missed, ...named.filter((f) => !shown.has(f)), ...rnd.dbUntested ?? []])];
-        for (const f of rnd.dbUntested ?? []) reasons[f] = "it holds SQL, and no test that connects to the database refers to it (arnx checks names, not what ran)";
+        const files = [...new Set([...missed, ...named.filter((f) => !shown.has(f)), ...(rnd.dbUntested ?? []).filter((f) => !shown.has(f))])];
+        for (const f of files) if ((rnd.dbUntested ?? []).includes(f)) reasons[f] = "it holds SQL, and no test that connects to the database was seen reaching it (arnx checks names, not what ran)";
         for (const n of report.not_tested ?? []) {
           if (!isObject(n)) continue;
           const f = files.find((x) => x === text(n.file) || x.endsWith(`/${text(n.file)}`));

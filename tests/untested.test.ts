@@ -109,3 +109,32 @@ test("a stack frame, from a message, names a file", () => {
   expect(notReached(["pkg/mod.py", "pkg/other.py", "pkg/z.py"], { tests: {}, frames: ["pkg/mod.py", "/src/pkg/other.py"] },
     python)).toEqual(["pkg/z.py"]);
 });
+
+test("a bare name in a string of a loaded test counts as reaching the file", () => {
+  const none = { frames: [] as string[] };
+  const list = { "t/test_p.py": 'NAMES = ["autobpm", "metasync", "info/x"]\nfor n in NAMES: load(f"plug.{n}")\n' };
+  const owned = ["plug/autobpm.py", "plug/metasync/__init__.py", "plug/other.py", "plug/info.py", "plug/x.py"];
+  expect(notReached(owned, { tests: list, ...none }, python)).toEqual(["plug/other.py", "plug/info.py", "plug/x.py"]);
+  expect(notReached(["a/b/c.py"], { tests: { "t/test_p.py": "m = 'b.c'" }, ...none }, python)).toEqual([]);
+  // A path, a name with an extension or a sentence is not a module name.
+  expect(notReached(["a/c.py"], { tests: { "t/test_p.py": "m = 'a/c'; n = 'c.py'; o = 'c is slow'" }, ...none }, python))
+    .toEqual(["a/c.py"]);
+});
+
+test("a loader call keeps its path string", () => {
+  const body = 'spec = importlib.util.spec_from_file_location("t", "docs_src/tut.py")\nspec.loader.exec_module(m)\n';
+  expect(notReached(["docs_src/tut.py"], { tests: { "t/test_d.py": body }, frames: [] }, python)).toEqual([]);
+  // The path may be held in a variable first.
+  const apart = 'p = Path("docs_src/tut.py")\nspec = importlib.util.spec_from_file_location("t", p)\nspec.loader.exec_module(m)\n';
+  expect(notReached(["docs_src/tut.py"], { tests: { "t/test_d.py": apart }, frames: [] }, python)).toEqual([]);
+  expect(notReached(["docs_src/tut.py"], { tests: { "t/test_d.py": 'p = Path("docs_src/tut.py").read_text()' },
+    frames: [] }, python)).toEqual(["docs_src/tut.py"]);
+  expect(notReached(["docs_src/tut.py"], { tests: { "t/test_d.py": 'runpy.run_path("docs_src/tut.py")' }, frames: [] },
+    python)).toEqual([]);
+});
+
+test("a frame that fits more than one changed file hides none", () => {
+  const owned = ["a/utils.py", "b/utils.py", "c/main.py"];
+  expect(notReached(owned, { tests: {}, frames: ["utils.py", "main.py"] }, python)).toEqual(["a/utils.py", "b/utils.py"]);
+  expect(notReached(owned, { tests: {}, frames: ["b/utils.py"] }, python)).toEqual(["a/utils.py", "c/main.py"]);
+});
