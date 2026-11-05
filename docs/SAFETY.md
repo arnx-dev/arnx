@@ -102,6 +102,7 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   such a file: no finding, a review exits as incomplete (2) and `arnx check` too. It names the file its text shows, else "a faked
   file". Setup keeps such a test out of `baseline.json` and lists it. **Limits, as this reads words:** a failure the fake caused with no
   parse words or file name (a hash check, a swallowed parse error, a `skipif`) can read as a finding, as already failing or as skipped,
+  and setup can record such a failure (a hash check, for example) as a failure of the project in the baseline,
   and a real failure whose exception holds such words (`invalid api key`) reads as unproven. Where a fake exists and a test fails or is
   skipped, the terminal and `arnx check` say so: `Fix the code; if this test needs a real key: arnx allow-secret PATH`.
   **What still leaves.** A file named like a secret and holding no key: `.key`, `.p12`, a `.pem` with no block arnx knows (a `.pem`
