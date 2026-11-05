@@ -21,6 +21,10 @@ import { standInsSetting } from "./settings";
 import { splitLines } from "./util";
 
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+/** The form of every diff a review reads: git's own text. A textconv driver (which can decrypt), an external diff
+ * tool (which cannot run here) and a submodule shown as a diff would each print what the repository does not hold as
+ * text. */
+const DIFF_FORM = ["--no-ext-diff", "--no-textconv", "--submodule=short"];
 export const MAX_DIFF_BYTES = 200_000;
 export const SCAN_LIMIT = 1_000_000;
 /** The largest text file a snapshot keeps. read_file has no size limit, so one it cannot scan may not stay. Measured on
@@ -159,7 +163,7 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
     changed.filter((p) => !ignored(p) && isLockfile(p)).forEach((p) => lockOut.add(p));
     const out = (p: string) => ignored(p) || isLockfile(p);
     const skip = changed.filter(out).map((p) => `:(exclude,literal)${p}`);
-    return [git(repo, ["diff", "--no-color", ...revs, "--", ".", ...ex, ...skip]), changed.filter((p) => !out(p))];
+    return [git(repo, ["diff", "--no-color", ...DIFF_FORM, ...revs, "--", ".", ...ex, ...skip]), changed.filter((p) => !out(p))];
   };
   let kind: Change["kind"], base: string, head: string | null, diff: string, files: string[];
   let branch: Change["branch"];
@@ -192,7 +196,7 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
         notSent.push(path);
         continue;
       }
-      diff += git(repo, ["diff", "--no-color", "--no-index", "--", "/dev/null", path], [0, 1]);
+      diff += git(repo, ["diff", "--no-color", ...DIFF_FORM, "--no-index", "--", "/dev/null", path], [0, 1]);
       files.push(path);
       included.push(path);
     }

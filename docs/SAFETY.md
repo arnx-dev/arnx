@@ -86,6 +86,10 @@ always; `--no-untracked` overrides that); `arnx setup` reads the same way. With 
 the review says so first. Paths in `.arnxignore`, secret files and files with key-shaped text are never sent (see [What
 runs where](#what-runs-where)). review.json records `untracked_included` or `untracked_left_out`.
 
+The diff is git's plain text form. arnx turns off textconv drivers, external diff tools and the diff form of a
+submodule (`diff.submodule`) for every diff it reads. A driver that decrypts a file cannot put its text in the diff.
+A submodule shows as a pointer only.
+
 With arnx cloud, the same content goes to arnx cloud instead of your providers, and arnx cloud passes it to its model
 providers ([CLOUD.md](CLOUD.md)).
 
