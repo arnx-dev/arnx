@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ArnxError } from "../src/errors";
-import { exitCode, load, MD_WIDTH, parseMarks, parseReport, render, save, summary, wrapMarkdown } from "../src/report";
+import { adjudicate, exitCode, load, MD_WIDTH, parseMarks, parseReport, render, save, summary, wrapMarkdown } from "../src/report";
 import { sampleReview, blankMarks } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
 
@@ -229,4 +229,27 @@ test("the header names every model that gave a verdict", () => {
 test("one judge reads as before", () => {
   expect(render(sampleReview())).toContain("- Reviewer: anthropic:claude-sonnet-5-5 · Second opinion: " +
     "openai:gpt-5.5-2026-04-23 · Prompts: abc");
+});
+
+test("two suspects sharing one test both get its outcome and finding ids", () => {
+  const r = sampleReview();
+  const sus = ["S1", "S2"].map((id) => ({ id, project: "main", file: "a.py", line: 1, claim: "c", by: "x",
+    outcome: "failed", tests: ["tests/t.py::test_a"] })) as never[];
+  // the later suspect took the finding's suspect id
+  adjudicate(sus, [{ ...r.findings[0]!, testId: "tests/t.py::test_a", suspect: "S2" }]);
+  for (const x of sus as { outcome: string; findings: string[] }[]) {
+    expect(x.findings).toEqual(["F1"]);
+    expect(x.outcome).toBe("proven");
+  }
+  const md = render(sampleReview({ suspects: sus as never }));
+  expect(md).not.toContain(": .");
+  expect(md).not.toContain("did not judge it: .");
+});
+
+test("a suspect with no finding ids does not render an empty reference", () => {
+  const sus = [{ id: "S1", project: "main", file: "a.py", line: 1, claim: "c", by: "x", outcome: "unchecked", tests: [],
+    findings: [] }] as never;
+  const md = render(sampleReview({ suspects: sus }));
+  expect(md).toContain("the second model did not judge it.");
+  expect(md).not.toContain("did not judge it:");
 });

@@ -766,14 +766,15 @@ export function render(r: Review): string {
       "not proven is still a claim worth reading; check the ones that matter to you.", "");
     for (const x of sus) {
       const where = multi(r) ? ` (${x.project})` : "";
-      const fs = (x.findings ?? []).join(", ");
-      const what = x.outcome === "proven" ? `proven: ${fs}`
+      const ids = (x.findings ?? []).join(", ");
+      const sep = ids ? `: ${ids}` : "";
+      const what = x.outcome === "proven" ? `proven${sep}`
         : x.outcome === "same cause" ? `proven only together with ${x.sameAs}: its tests fail for the same cause ` +
-          `(one fix makes both pass); whatever its claim says beyond ${x.sameAs}'s is not shown: ${fs}`
-        : x.outcome === "disputed" ? `its test failed, but the second model disputed it: ${fs}`
-        : x.outcome === "unchecked" ? `its test failed; the second model did not judge it: ${fs}`
-        : x.outcome === "pending answer" ? `its test failed; whether that is a defect depends on a question: ${fs}`
-        : x.outcome === "pre-existing" ? `its test failed, but it fails with the same message before the change: ${fs}`
+          `(one fix makes both pass); whatever its claim says beyond ${x.sameAs}'s is not shown${sep}`
+        : x.outcome === "disputed" ? `its test failed, but the second model disputed it${sep}`
+        : x.outcome === "unchecked" ? `its test failed; the second model did not judge it${sep}`
+        : x.outcome === "pending answer" ? `its test failed; whether that is a defect depends on a question${sep}`
+        : x.outcome === "pre-existing" ? `its test failed, but it fails with the same message before the change${sep}`
         : x.outcome === "not reproduced" ? `not reproduced: its test passed (\`${x.tests[0]}\`), which does not ` +
           "rule it out"
         : x.outcome === "inconclusive" ? `inconclusive, flaky or errored: \`${x.tests[0]}\``
@@ -857,7 +858,8 @@ function huntCounts(sus: SuspectOutcome[]): string {
 export function adjudicate(sus: SuspectOutcome[], findings: Finding[]): void {
   for (const x of sus) {
     if (x.outcome !== "failed") continue;
-    const fs = findings.filter((f) => f.project === x.project && f.suspect === x.id);
+    // By its tests: two suspects may share one, and the finding names only the later of them.
+    const fs = findings.filter((f) => f.project === x.project && ((x.tests ?? []).includes(f.testId) || f.suspect === x.id));
     x.findings = fs.map((f) => f.id);
     x.outcome = fs.length && fs.every(isPreExisting) ? "pre-existing"
       : fs.some((f) => f.verdict === "confirmed" && !f.dependsOn && !isPreExisting(f)) ? "proven"
@@ -1098,7 +1100,21 @@ export function summary(r: Review, reviewMd: string): string {
   if (optional) out.push(`  ${optional === 1 ? "1 optional question" : `${optional} optional questions`} in review.md ` +
     `(${covered ? "a proven issue's mark covers the findings that assumed " + (optional === 1 ? "it" : "them")
       : `no issue waits on ${optional === 1 ? "it" : "them"}`})`);
-  if (!r.findings.length && !r.questions.length && !r.couldNotRun?.length) out.push("  No findings and no questions.");
+  const stats = r.projectStats ?? [];
+  const where = (ps: ProjectStat[]) => multi(r) && ps.length ? ` (${ps.map((p) => p.name).join(", ")})` : "";
+  const trouble = [r.flaky.length ? `${r.flaky.length} flaky` : "", r.errors.length ? plural(r.errors.length, "error") : "",
+    r.missingRuns ? `${plural(r.missingRuns, "run")} without a report${where(stats.filter((p) => p.missingRuns > 0))}`
+      : ""].filter(Boolean);
+  // With no issue row, one line says why. A status line above (Incomplete, Not tested), a provider's failure, trouble
+  // in the runs or a list of what was not tested wins: "no findings" next to them would read as reassurance.
+  // Partly covered keeps it: its status line says what nothing was shown for.
+  const qualified = problems.length || st.none || incomplete(r) || down || trouble.length || !!r.couldNotRun?.length ||
+    r.uncovered.some((u) => isSourcePath(u.path));
+  if (!issues.length && !qualified) {
+    out.push(already.length ? `  No issue from this change; ${already.length} already failing before it.`
+      : r.testsWritten === 0 || (stats.length > 0 && stats.every((p) => !p.tests)) ? "  No findings: no test ran."
+      : "  No findings.");
+  }
   if (r.notSent.length) {
     // A file the change touches or a failure names; the rest as a count, with the list in review.md.
     const said = [...r.findings.map((f) => f.message), ...(r.couldNotRun ?? []).map((x) => x.needs)].join("\n");
@@ -1129,11 +1145,6 @@ export function summary(r: Review, reviewMd: string): string {
       c.by.join(", "));
   }
   if (r.notReviewed.length) out.push(`  Not reviewed (over max_projects): ${r.notReviewed.join(", ")}`);
-  const stats = r.projectStats ?? [];
-  const where = (ps: ProjectStat[]) => multi(r) && ps.length ? ` (${ps.map((p) => p.name).join(", ")})` : "";
-  const trouble = [r.flaky.length ? `${r.flaky.length} flaky` : "", r.errors.length ? plural(r.errors.length, "error") : "",
-    r.missingRuns ? `${plural(r.missingRuns, "run")} without a report${where(stats.filter((p) => p.missingRuns > 0))}`
-      : ""].filter(Boolean);
   if (trouble.length) out.push(`  ${trouble.join(" · ")}`);
   const blind = stats.filter((p) => !p.sawResults);
   if (blind.length) out.push(`  The reviewer never saw its tests run: ${blind.map((p) => p.name).join(", ")}`);
