@@ -358,13 +358,16 @@ ${preload}
   // Up to 3 rounds side by side, as accept's answers run; a review runs 2. Any way out goes through the same exit.
   test("a project failing while others run: arnx exits and no container stays up", async () => {
     const r = await arnxAfter(`
+let up = 0;
 await inPool(["run", "run", "fails"], 3, async (item) => {
-  if (item === "run") return open();
-  while (!(globalThis as { up?: number }).up) await new Promise((r) => setTimeout(r, 50));
+  if (item === "run") {
+    void open().then(() => { up++; });
+    return;
+  }
+  while (up < 2) await new Promise((r) => setTimeout(r, 50));
   throw new Error("the other project failed");
 }).catch((e) => console.log(e.message));
-`.replace("return open();", "{ void (async () => { await open(); const g = globalThis as { up?: number }; g.up = (g.up ?? 0) + 1; })(); return; }"),
-    ["review"]);
+`, ["review"]);
     expect(r.said).toContain("the other project failed");
     expect(r.said).toContain("container up");
     expect(r.ids).toHaveLength(2);
@@ -632,6 +635,89 @@ test("every session is closed even when closing one fails, and the first failure
   });
 });
 
+const hasNode = spawnSync("node", ["--version"]).status === 0;
+
+/** arnx itself, main.ts, running `args` in a folder with no repository, while `sessions` sessions have a run in flight, on a
+ * fake docker whose `rm` never answers. Answers with its exit code, what it printed and how long it took from the moment
+ * main.ts started. */
+async function arnxOnStalledDocker(runtime: "bun" | "node", sessions: number, args: string[], before = "") {
+  const repoRoot = join(import.meta.dir, "..");
+  const dir = join(tmp(), `stalled-${Math.random().toString(16).slice(2)}`);
+  mkdirSync(dir);
+  const fake = join(dir, "docker");
+  writeFileSync(fake, '#!/bin/sh\ncase "$1" in\n  rm) exec sleep 60;;\n  run) exec sleep 60;;\nesac\nexit 0\n');
+  chmodSync(fake, 0o755);
+  writeFileSync(join(dir, "scene.ts"), `
+import { parseReviewConfig } from ${JSON.stringify(join(repoRoot, "src/config"))};
+import { sandboxOptions, Session } from ${JSON.stringify(join(repoRoot, "src/sandbox"))};
+sandboxOptions.docker = ${JSON.stringify(fake)};
+const cfg = parseReviewConfig("version: 1\\nimage: i\\ntest_command: pytest -q {targets}\\n");
+for (let i = 0; i < ${sessions}; i++) void (await new Session("img", cfg, ${JSON.stringify(dir)}).start()).run("pytest -q", 600);
+${before}
+console.log("main starts");
+`);
+  const entry = join(dir, "entry.ts");
+  writeFileSync(entry, `import "./scene.ts";\nimport ${JSON.stringify(join(repoRoot, "src/main.ts"))};\n`);
+  let argv = [process.execPath, entry];
+  if (runtime === "node") {
+    const built = join(dir, "entry.mjs");
+    expect(spawnSync(process.execPath, ["build", "--target=node", entry, "--outfile", built]).status).toBe(0);
+    argv = ["node", built];
+  }
+  const child = spawn(argv[0]!, [...argv.slice(1), ...args], { cwd: dir, stdio: ["ignore", "pipe", "pipe"],
+    env: { PATH: process.env.PATH, HOME: dir } });
+  let said = "", t0 = 0;
+  for (const out of [child.stdout, child.stderr]) {
+    out.setEncoding("utf8").on("data", (d: string) => {
+      said += d;
+      if (!t0 && said.includes("main starts")) t0 = performance.now();
+    });
+  }
+  // Past this it hangs: only SIGKILL ends a process in a synchronous exit handler.
+  const stuck = setTimeout(() => child.kill("SIGKILL"), 25_000);
+  const code = await new Promise<number | null>((r) => child.on("close", (c) => r(c)));
+  clearTimeout(stuck);
+  return { code, said, ms: performance.now() - t0 };
+}
+const leftLine = (said: string) => said.split("\n").filter((l) => l.startsWith("arnx: Docker did not answer"));
+
+for (const runtime of ["bun", "node"] as const) {
+  describe.skipIf(runtime === "node" && !hasNode)(`a stalled Docker at exit, on ${runtime}`, () => {
+    test("the whole cleanup stops at its budget, the exit code stays and what may be left is named", async () => {
+      const intended = await arnxOnStalledDocker(runtime, 0, ["review"]);
+      expect(intended.code).not.toBe(0);
+      expect(leftLine(intended.said)).toEqual([]);
+      const r = await arnxOnStalledDocker(runtime, 4, ["review"]);
+      expect(r.code).toBe(intended.code);
+      expect(r.ms).toBeLessThan(13_000);
+      const [line, ...more] = leftLine(r.said);
+      expect(more).toEqual([]);
+      expect(line).toMatch(/^arnx: Docker did not answer; these may still be there: (arnx-\w+-run-\w+, ){2}arnx-\w+-run-\w+ and 1 more$/);
+    }, 60_000);
+  });
+}
+
+test("a stalled Docker: one call gets 3 s, and a normal exit keeps its code", async () => {
+  const r = await arnxOnStalledDocker("bun", 1, ["--version"]);
+  expect(r.code).toBe(0);
+  expect(r.ms).toBeLessThan(6000);
+  expect(leftLine(r.said)).toHaveLength(1);
+}, 40_000);
+
+test("a stalled Docker during an interrupt: it still exits 130, naming what may be left once", async () => {
+  const r = await arnxOnStalledDocker("bun", 1, ["--version"], `
+const on = process.on.bind(process);
+(process as { on: unknown }).on = (event: string, fn: () => void) => {
+  on(event as "SIGINT", fn);
+  if (event === "SIGINT") queueMicrotask(() => process.emit("SIGINT"));
+  return process;
+};
+`);
+  expect(r.code).toBe(130);
+  expect(r.ms).toBeLessThan(6000);
+  expect(leftLine(r.said)).toHaveLength(1);
+}, 40_000);
+
 /** What a run answers with a fake docker doing `body`, limit 1 s, the process blocked `blockMs` right after it starts: run by
  * `runtime`, Bun as the binary is and Node as the npm package is. */
 function afterBlock(runtime: "bun" | "node", body: string, blockMs: number) {
@@ -665,8 +751,6 @@ process.exit(0);
   expect(r.stderr).toBe("");
   return JSON.parse(r.stdout) as { timedOut: boolean; exitCode: number | null; output: string; ms: number };
 }
-const hasNode = spawnSync("node", ["--version"]).status === 0;
-
 for (const runtime of ["bun", "node"] as const) {
   describe.skipIf(runtime === "node" && !hasNode)(`limits, on ${runtime}`, () => {
     test("a run that ended inside its limit does not read as timed out after the process was blocked", () => {

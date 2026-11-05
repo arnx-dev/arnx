@@ -229,8 +229,9 @@ no model, whose tools wait on the same loop. On an interrupt, `Session.close` ki
 container by its name (asking again for a little over a second, since a start already sent can still make it) and gives
 the run no answer: what waits on it stops there, so a killed run never reads as a result. A run's limit lives in this
 process, so `main.ts` closes every session on any exit too: a project failing while another's run is in flight, or a
-session opened after the interrupt's cleanup, leaves no container. SIGKILL and an unhandled signal such as SIGHUP cannot
-be caught this way.
+session opened after the interrupt's cleanup, leaves no container. That cleanup is synchronous and at exit no signal can
+stop it, so Docker gets 3 s per call and 10 s in all; past that arnx exits with its own code and names what may be left.
+SIGKILL and an unhandled signal such as SIGHUP cannot be caught this way.
 
 ## Trace events
 

@@ -132,7 +132,7 @@ export type SessionFactory = <T>(cfg: ReviewConfig, snap: string, buildLog: stri
   => Promise<T>;
 
 export function docker(args: string[], { timeout = 120, stdin }: { timeout?: number; stdin?: string } = {}) {
-  const r = spawnSync(sandboxOptions.docker, args, { encoding: "utf8", timeout: timeout * 1000, input: stdin,
+  const r = spawnSync(sandboxOptions.docker, args, { encoding: "utf8", timeout: Math.ceil(timeout * 1000), input: stdin,
     maxBuffer: MAX_BUFFER, killSignal: "SIGKILL" });
   const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
   if (code === "ENOENT") throw new SetupRequired("Docker is not installed; arnx runs tests only inside Docker");
@@ -430,15 +430,47 @@ function hasNoGateway(config: string): boolean {
 
 const live = new Set<Session>();
 
+/** What a close may still ask of Docker while the process is going: `until` (performance.now() ms) ends it all, and `left`
+ * gathers what Docker was not heard removing. */
+interface Leaving { until: number; left: string[] }
+/** Seconds for one Docker call while the process is going, and for all of them. A stalled client must not hold it: this
+ * runs synchronously, and at exit no signal can stop it. */
+const LEAVING_CALL = 3;
+const LEAVING_TOTAL = 10;
+
+/** One Docker call of a close, for `name`. While the process is going it is bounded, and one that gets no answer leaves
+ * `name` named and null. */
+function closing(args: string[], name: string, leaving?: Leaving): ReturnType<typeof docker> | null {
+  if (!leaving) return docker(args);
+  const seconds = (leaving.until - performance.now()) / 1000;
+  try {
+    if (seconds > 0) return docker(args, { timeout: Math.min(LEAVING_CALL, seconds) });
+  } catch {
+    // named below
+  }
+  leaving.left.push(name);
+  return null;
+}
+
 /** Tear down every running session, for an interrupt and for any exit (main.ts): the process is going. Each is closed
- * whatever another's close does; the first failure is thrown after. */
+ * whatever another's close does, within LEAVING_TOTAL; what may be left is said, and the first failure is thrown after. */
 export function cleanupLiveSessions(): void {
+  const leaving: Leaving = { until: performance.now() + LEAVING_TOTAL * 1000, left: [] };
   const failed: unknown[] = [];
   for (const s of [...live]) {
     try {
-      s.close(true);
+      s.close(leaving);
     } catch (e) {
       failed.push(e);
+    }
+  }
+  const { left } = leaving;
+  if (left.length) {
+    try {
+      process.stderr.write(`arnx: Docker did not answer; these may still be there: ${left.slice(0, 3).join(", ")}` +
+        `${left.length > 3 ? ` and ${left.length - 3} more` : ""}\n`);
+    } catch {
+      // no terminal left to tell
     }
   }
   if (failed.length) throw failed[0];
@@ -589,21 +621,23 @@ export class Session implements Runner {
     throw new ArnxError(`service ${service} was not ready after ${readyWait.seconds}s (ready: ${ready})`);
   }
 
-  /** `exiting`: an interrupt closes it, and the process goes next. A run in flight stops here: Docker's client goes, and
-   * its container with it, since a client killed leaves its container running. */
-  close(exiting = false): void {
+  /** `leaving`: the process goes next (an interrupt, an exit), and Docker gets only that long. A run in flight stops here:
+   * Docker's client goes, and its container with it, since a client killed leaves its container running. */
+  close(leaving?: Leaving): void {
     this.closed = true;
-    this.exiting ||= exiting;
+    this.exiting ||= !!leaving;
     const running = [...this.running];
     this.running.clear();
     for (const r of running) r.stop();
     if (!live.delete(this) && !running.length) return;
-    for (const { container } of running) if (container) removeStarting(container);
-    this.dropBox();
-    for (const name of this.boxes) docker(["rm", "-fv", name]);
+    for (const { container } of running) if (container) removeStarting(container, leaving);
+    // Leaving, the shared container goes with the others below, under the same bound.
+    if (leaving) this.box = null;
+    else this.dropBox();
+    for (const name of this.boxes) closing(["rm", "-fv", name], name, leaving);
     this.boxes.clear();
-    for (const name of this.started) docker(["rm", "-fv", name]);
-    if (this.networkCreated) docker(["network", "rm", this.network]);
+    for (const name of this.started) closing(["rm", "-fv", name], name, leaving);
+    if (this.networkCreated) closing(["network", "rm", this.network], this.network, leaving);
   }
 
   run(command: string, timeout: number): Promise<RunResult> {
@@ -767,10 +801,10 @@ export class Session implements Runner {
 /** Removes a run's container whose client was just killed. A start the client had already sent still makes it, moments
  * later and left "Created" for good, so until Docker says it removed one (it names it; with none there it says nothing, or
  * fails) it is asked again, for a little over a second. */
-function removeStarting(name: string): void {
+function removeStarting(name: string, leaving?: Leaving): void {
   for (const wait of [100, 200, 400, 800, 0]) {
-    const r = docker(["rm", "-fv", name]);
-    if ((r.status === 0 && r.stdout.trim()) || !wait) return;
+    const r = closing(["rm", "-fv", name], name, leaving);
+    if (!r || (r.status === 0 && r.stdout.trim()) || !wait) return;
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
   }
 }
