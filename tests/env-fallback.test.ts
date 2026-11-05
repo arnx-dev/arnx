@@ -5,11 +5,12 @@ import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { digest, parseReviewConfig, parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { EnvFailed } from "../src/errors";
 import { exitCode, render } from "../src/report";
 import { runReview } from "../src/reviewer";
-import { envOwner, repoId, sandboxOptions } from "../src/sandbox";
+import { ensureEnv, envOwner, repoId, sandboxOptions, timeLimit, withTimeLimit } from "../src/sandbox";
 import type { Runner, SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { testRound, writeDirOf } from "../src/testround";
@@ -104,6 +105,7 @@ test("a project whose environment does not build is reported not tested and the 
   expect(md).not.toContain("Complete:");
   // the review is written and says what the failed project cost: nothing
   expect(review.usage.every((u) => u.calls > 0)).toBe(true);
+  expect(md).not.toContain("Run `arnx review` again");
   expect(JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")).project_stats[0].env.state).toBe("failed");
 });
 
@@ -231,4 +233,128 @@ test("findings from a fallback image are shown, labelled, and do not fail the ru
   // another project's findings still fail it
   const other = sampleReview({ projectStats: [{ ...r.projectStats[0]!, name: "other" }] });
   expect(exitCode(other)).toBe(1);
+});
+
+test("a build that does not finish is a failed environment with its log, not an abort", async () => {
+  const fake = join(tmp(), "docker");
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in image) exit 1;; build) exec sleep 5;; esac\n`);
+  chmodSync(fake, 0o755);
+  sandboxOptions.docker = fake;
+  const [buildkit, floor] = [sandboxOptions.buildkit, timeLimit.floorSeconds];
+  [sandboxOptions.buildkit, timeLimit.floorSeconds] = [false, 1];
+  try {
+    const log = join(tmp(), "out", "env-build.log");
+    const limit = { at: performance.now() + 2000, now: () => performance.now(), minutes: 1 };
+    const err = await withTimeLimit(limit, () => ensureEnv(PLAIN, tmp(), log)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EnvFailed);
+    expect(err).toMatchObject({ kind: "build", network: false, log: "env-build.log" });
+    expect(String(err)).toMatch(/docker build did not finish in [12]s/);
+    expect(existsSync(log)).toBe(true);
+    expect(readFileSync(log, "utf8")).toContain("did not finish");
+  } finally {
+    [sandboxOptions.buildkit, timeLimit.floorSeconds] = [buildkit, floor];
+  }
+});
+
+test("on a fallback no verdict says the change caused it or fixed it", async () => {
+  const { asFallbackBefore, asFallbackFix } = await import("../src/before");
+  const reg = { status: "regression" as const, detail: "passes before", runs: ["passed"] };
+  const b = asFallbackBefore(reg);
+  expect(b.status).toBe("unknown");
+  expect(b.detail).toContain("another commit");
+  expect(b.detail).not.toContain("broke");
+  expect(asFallbackBefore({ status: "pre-existing", detail: "d", runs: [] }).status).toBe("pre-existing");
+  expect(asFallbackFix({ status: "fixed", detail: "f", runs: [] }).status).toBe("unknown");
+  expect(asFallbackFix({ status: "unchanged", detail: "u", runs: [] }).status).toBe("unchanged");
+});
+
+test("a finding from a fallback carries the label in the report, in triage and in accept's line", async () => {
+  const { sampleReview } = await import("./helpers/review");
+  const { markInteractive } = await import("../src/mark");
+  const { PLAIN: paint } = await import("../src/color");
+  const r = sampleReview();
+  r.findings[0]!.fallback = true;
+  expect(render(r).replace(/\s+/g, " ")).toContain("### F1 · confirmed by the second opinion · ran on another commit's image");
+  const screens: string[][] = [];
+  await markInteractive(r, render(r), { paint, width: 80, draw: (l) => screens.push(l),
+    keys: { async next() { return { value: "quit" as const, done: false }; } } });
+  expect(screens[0]!.join("\n")).toContain("another commit's image");
+});
+
+test("a fallback is refused when a reached copy holds files this commit does not have", async () => {
+  const BAKED = parseReviewConfig("version: 1\nimage: i\nworkdir: app\ninstall: [\"mkdir -p /opt/app && cp -r . /opt/app\"]\n" +
+    "test_command: cd /opt/app && python -m pytest -q {targets}\n");
+  const repo = gitRepo(tmp());
+  mkdirSync(join(repo, "app"));
+  for (const f of ["a.py", "b.py", "c.py"]) writeFileSync(join(repo, "app", f), `${f} = 1\n`);
+  commit(repo, "one");
+  envOwner.repo = repo;
+  fakeDocker([{ tag: "arnx-env:8888888888888888", labels: labelsFor(BAKED, repo, "2026-10-20T00:00:00Z") }], {
+    files: "/opt/app/a.py\n/opt/app/b.py\n/opt/app/c.py\n/opt/app/gone_old.py\n",
+    hashes: ["a.py", "b.py", "c.py"].map((f) => `${sha(`${f} = 1\n`)}  /opt/app/${f}\n`).join("") });
+  const asked: (string | undefined)[] = [];
+  const factory: SessionFactory = async (_cfg, snap, _log, body, _from, key) => {
+    asked.push(key);
+    if (!key) throw broken("probe");
+    return body(passing(snap));
+  };
+  const r = await round(repo, BAKED, factory);
+  expect(asked).toEqual([undefined]);
+  expect(r.env?.state).toBe("failed");
+});
+
+test("an env-failed review has its own next step and does not say to review again", async () => {
+  const { sampleReview } = await import("./helpers/review");
+  const { whatNext } = await import("../src/next");
+  const { save } = await import("../src/report");
+  const repo = gitRepo(tmp());
+  mkdirSync(join(repo, "svc"));
+  writeFileSync(join(repo, "svc/a.py"), "X = 1\n");
+  const YAML = "version: 1\nprojects:\n  svc:\n    root: svc\n    image: python:3.12-slim\n    test_command: pytest {targets}\n";
+  mkdirSync(join(repo, ".arnx"));
+  writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(YAML), "Dev", "2026-10-14"));
+  writeFileSync(join(repo, ".arnx", "config.toml"), "");
+  commit(repo, "a");
+  const { writeSettings } = await import("../src/settings");
+  writeSettings(repo, { ...defaultSettings(), consentAt: "2026-10-14T00:00:00Z" });
+  writeFileSync(join(repo, "svc/a.py"), "X = 2\n");
+  const rdir = join(repo, ".arnx/reviews/20261014-abcdef");
+  mkdirSync(rdir, { recursive: true });
+  writeFileSync(join(rdir, "state.json"), "{}\n");
+  const review = { ...sampleReview({ findings: [], questions: [], questionProjects: [], flaky: [], passed: 0,
+    testsWritten: 0 }), id: "20261014-abcdef", projects: ["svc"], projectStats: [{ name: "svc", testFiles: 0, tests: 0,
+    passed: 0, missingRuns: 0, sawResults: true, stop: "env_failed: build",
+    env: { state: "failed" as const, kind: "build" as const, log: "projects/svc/env-build.log" } }] };
+  save(review, rdir, "d");
+  const next = whatNext(repo);
+  expect(next.command).toBe("arnx setup --project svc");
+  expect(next.where).not.toContain("waiting for your marks");
+  const md = readFileSync(join(rdir, "review.md"), "utf8").replace(/\s+/g, " ");
+  expect(md).not.toContain("Run `arnx review` again");
+});
+
+test("a failing install runs once: the session reuses the indexer's verdict", async () => {
+  const dir = tmp();
+  const calls = join(dir, "calls");
+  writeFileSync(join(dir, "docker"), `#!/bin/sh\necho "$1" >> '${calls}'\ncase "$1" in image) exit 1;; build) echo "ERROR: step failed" >&2; exit 1;; esac\n`);
+  chmodSync(join(dir, "docker"), 0o755);
+  sandboxOptions.docker = join(dir, "docker");
+  const buildkit = sandboxOptions.buildkit;
+  sandboxOptions.buildkit = false;
+  const { projectIndex } = await import("../src/indexer");
+  const { forgetFailedBuilds } = await import("../src/sandbox");
+  forgetFailedBuilds();
+  try {
+    const snap = tmp();
+    writeFileSync(join(snap, "a.py"), "X = 1\n");
+    const out = join(tmp(), "out");
+    const r = await projectIndex(PLAIN, snap, out);
+    expect(r.index).toBeNull();
+    const err = await ensureEnv(PLAIN, snap, join(out, "env-build.log")).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EnvFailed);
+    expect(readFileSync(calls, "utf8").split("\n").filter((l) => l === "build").length).toBe(1);
+  } finally {
+    sandboxOptions.buildkit = buildkit;
+    forgetFailedBuilds();
+  }
 });

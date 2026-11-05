@@ -104,6 +104,13 @@ function step(repo: string): Omit<Next, "phase"> & { phase?: string } {
     let settled = false, cut = false;
     try {
       const r = load(latest);
+      // Nothing to mark and a project whose commit has no working install: marks are not what is waited for.
+      const broken = (r.projectStats ?? []).find((p) => p.env);
+      if (broken && nextSteps(r).length === 0) {
+        return { where: `review ${id}: \`${broken.name}\` was ${broken.env!.state === "failed" ? "not tested" : "tested on another commit's image"}; ` +
+          "this commit's install does not work", command: `arnx setup --project ${broken.name}`,
+        why: "builds one that does, or review a later commit" };
+      }
       settled = nextSteps(r).length === 1;
       cut = (r.projectStats ?? []).some((p) => p.stop === "budget");
     } catch {

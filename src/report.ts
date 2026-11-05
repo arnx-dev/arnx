@@ -54,7 +54,12 @@ export interface Finding {
   /** Its test checks the code's text or only that something exists (shallow.ts); absent: it exercises behaviour, or
    * the review predates the check. Information only. */
   shallow?: Shallow;
+  /** Its project was tested on the image built for another commit (its dependencies may differ). */
+  fallback?: true;
 }
+
+/** How a finding from a fallback image is labelled wherever it is shown. */
+export const FALLBACK_LABEL = "ran on another commit's image";
 
 /** A defect the hunt suspected, and what its test showed. */
 export interface SuspectOutcome {
@@ -351,8 +356,9 @@ function why(stop: string, r?: Review): string {
 }
 
 /** What kept the review from being complete, per project where known; then notes that do not make it incomplete. */
-function statusOf(r: Review): { problems: string[]; notes: string[] } {
+function statusOf(r: Review): { problems: string[]; notes: string[]; envOnly: boolean } {
   const problems: string[] = [], notes: string[] = [];
+  let envProblems = 0;
   const stats = r.projectStats ?? [];
   for (const p of stats) {
     if (p.env) {
@@ -360,6 +366,7 @@ function statusOf(r: Review): { problems: string[]; notes: string[] } {
       problems.push(p.env.state === "failed"
         ? `\`${p.name}\` not tested: this commit's ${p.env.kind === "build" ? "install does not build" : "environment runs no test"}; that is the commit, not your setup. Review a later commit, or \`arnx setup --project ${p.name}\` from this one`
         : `\`${p.name}\`: this commit's own ${p.env.kind === "build" ? "install does not build" : "environment runs no test"} (see ${log}). Tested on the image built for another commit: its dependencies may differ`);
+      envProblems++;
       if (p.env.state === "failed") continue;
     }
     // reviews written before per-project stops: a project with no tests is put down to the review's stop
@@ -392,7 +399,7 @@ function statusOf(r: Review): { problems: string[]; notes: string[] } {
   } else if (!problems.length && incomplete(r)) {
     problems.push(r.stop !== "end_turn" ? why(r.stop, r) : `${plural(r.missingRuns, "run")} gave no report`);
   }
-  return { problems, notes };
+  return { problems, notes, envOnly: problems.length > 0 && problems.length === envProblems };
 }
 
 /** What the work of each role is, when all of it is missing. */
@@ -427,10 +434,11 @@ const FIX_WITH_FAKE = "Fix the code; if this test needs a real key: `arnx allow-
 const skippedNote = (r: Review) => r.skippedTests ? `; ${plural(r.skippedTests, "test")} skipped, which may be why` : "";
 
 function statusLines(r: Review): string[] {
-  const { problems, notes } = statusOf(r);
+  const { problems, notes, envOnly } = statusOf(r);
   const names = r.projects.length > 1 ? ` (${ticks(r.projects)})` : "";
   // When a resume redoes what an outage cut, the outage line below says so: no fresh review here.
-  const again = (r.providerFailures ?? []).some(resumes) ? ""
+  // The same install fails again: reviewing again covers nothing.
+  const again = (r.providerFailures ?? []).some(resumes) || envOnly ? ""
     : r.couldNotRun?.length ? " If it is a test fixture, allow it with `arnx allow-secret PATH`, then `arnx review` again."
     : " Run `arnx review` again to cover it.";
   const out = [problems.length ? `Incomplete: ${problems.join("; ")}.${again}`
@@ -477,7 +485,7 @@ function statusLines(r: Review): string[] {
 function findingLines(r: Review, f: Finding, marked = true): string[] {
   const state = isPreExisting(f) ? "already failing before this change"
     : f.before?.status === "regression" ? `regression · ${opinion(f)}` : opinion(f);
-  const out = [`### ${f.id} · ${state}`, "", `- Test: \`${f.testId}\``, `- Failure: \`${firstLine(f.message)}\``,
+  const out = [`### ${f.id} · ${state}${f.fallback ? ` · ${FALLBACK_LABEL}` : ""}`, "", `- Test: \`${f.testId}\``, `- Failure: \`${firstLine(f.message)}\``,
     `- Reviewer: ${f.explanation || "(no explanation)"}`];
   // Said once above the findings when the code before the change has nothing to compare against.
   const said = r.beforeBaseEmpty === "first-commit" ||

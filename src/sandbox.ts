@@ -358,11 +358,28 @@ export function dockerfile(cfg: ReviewConfig, { cache = false, mark }: { cache?:
 /** The tag of the environment image with key `key` (envKey). */
 export const envTag = (key: string) => `arnx-env:${key}`;
 
+/** Installs the code indexer found failing in this run (by image tag): the review's session reuses the verdict instead of
+ * running the same failing install again. */
+const failedBuilds = new Map<string, EnvFailed>();
+export const forgetFailedBuilds = () => failedBuilds.clear();
+
 /** `mark`: the image is made from the code under test (baked.ts); its build is marked with its tag. `built`: it must be there
  * already; nothing is built. */
 export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: string, key?: string,
-                                { mark = false, built = false }: { mark?: boolean; built?: boolean } = {}): Promise<string> {
+                                { mark = false, built = false, remember = false }:
+                                { mark?: boolean; built?: boolean; remember?: boolean } = {}): Promise<string> {
   const tag = envTag(key ?? envKey(cfg, snapshot));
+  if (!remember && failedBuilds.has(tag) && docker(["image", "inspect", tag]).status !== 0) throw failedBuilds.get(tag)!;
+  try {
+    return await ensureBuilt(cfg, snapshot, logPath, tag, { mark, built });
+  } catch (e) {
+    if (remember && e instanceof EnvFailed && !e.network) failedBuilds.set(tag, e);
+    throw e;
+  }
+}
+
+async function ensureBuilt(cfg: ReviewConfig, snapshot: string, logPath: string, tag: string,
+                           { mark, built }: { mark: boolean; built: boolean }): Promise<string> {
   const t0 = performance.now();
   if (docker(["image", "inspect", tag]).status === 0) {
     stepLog({ step: "image", project: cfg.name, tag, built: false, secs: secsSince(t0) });
@@ -373,8 +390,20 @@ export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: st
   const text = dockerfile(cfg, { cache: buildkit(), ...(mark ? { mark: tag } : {}) });
   const labels = envLabels(cfg);
   const context = buildContextOf(snapshot);
-  let r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", context], { timeout: stepTimeout(BUILD_TIMEOUT),
-    stdin: text });
+  // A build that does not finish is a failed environment like one that fails: its log says so, and the review goes on.
+  const build = async () => {
+    try {
+      return await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", context], { timeout: stepTimeout(BUILD_TIMEOUT),
+        stdin: text });
+    } catch (e) {
+      if (!(e instanceof ArnxError) || e instanceof SetupRequired || !/^docker build did not finish in /.test(e.message)) throw e;
+      mkdirSync(dirname(logPath), { recursive: true });
+      writeFileSync(logPath, `${e.message}\n`);
+      stepLog({ step: "image", project: cfg.name, tag, built: true, ok: false, timeout: true, secs: secsSince(t0) });
+      throw new EnvFailed(`${e.message}; see ${logPath}`, "build", basename(logPath));
+    }
+  };
+  let r = await build();
   stepLog({ step: "image", project: cfg.name, tag, built: true, ok: r.status === 0, secs: secsSince(t0) });
   mkdirSync(dirname(logPath), { recursive: true });
   writeFileSync(logPath, r.stdout + r.stderr);
@@ -384,8 +413,7 @@ export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: st
     dockerSteps.say?.(`${cfg.name}: the package index did not answer; trying again in ${networkRetry.waitSeconds}s`);
     await sleep(networkRetry.waitSeconds * 1000);
     const t1 = performance.now();
-    r = await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", context], { timeout: stepTimeout(BUILD_TIMEOUT),
-      stdin: text });
+    r = await build();
     stepLog({ step: "image", project: cfg.name, tag, built: true, ok: r.status === 0, retry: "network", secs: secsSince(t1) });
     writeFileSync(logPath, r.stdout + r.stderr);
   }

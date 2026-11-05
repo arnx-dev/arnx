@@ -4,7 +4,7 @@
 import type { Paint } from "./color";
 import { isPreExisting } from "./before";
 import { active, type Finding, groupsOf, isIssue, ISSUE_HEADING, type Marks, marksIssues, neededQuestions, parseMarks,
-  proven, REWRITE, type Review } from "./report";
+  FALLBACK_LABEL, proven, REWRITE, type Review } from "./report";
 
 export type Key = "up" | "down" | "left" | "right" | "enter" | "space" | "backspace" | "escape" | "quit" |
   { char: string };
@@ -206,7 +206,7 @@ export async function markInteractive(review: Review, md: string, io: MarkIO): P
       const color = sure ? p.red : state === "disputed" ? p.dim : p.yellow;
       const tests = it.all.length === 1 ? it.f.id : `${it.all.length} tests: ${it.all.map((x) => x.id).join(", ")}`;
       lines.push(`${head(g?.title || it.f.explanation.split("\n")[0] || it.f.id)}  ${pos}`,
-        `${color(state)}${g?.severity ? ` · severity ${g.severity} (estimate)` : ""} · ${p.dim(tests)}`, "");
+        `${color(state)}${g?.severity ? ` · severity ${g.severity} (estimate)` : ""} · ${p.dim(tests)}${it.all.some((x) => x.fallback) ? p.dim(` · ${FALLBACK_LABEL}`) : ""}`, "");
       for (const [label, value] of [["Actual", g?.actual], ["Expected", g?.expected], ["Why it matters",
         g?.consequence]] as const) if (value?.trim()) lines.push(...wrapTo(`${label}: ${value.trim()}`, io.width));
       if (!g) lines.push(...wrapTo(it.f.explanation || it.f.message.split("\n")[0]!, io.width));
@@ -215,7 +215,7 @@ export async function markInteractive(review: Review, md: string, io: MarkIO): P
       const f = it.f;
       const state = f.dependsOn ? `waits on ${f.dependsOn}` : f.verdict ?? "unchecked";
       const color = f.verdict === "confirmed" && !f.dependsOn ? p.red : f.verdict === "disputed" ? p.dim : p.yellow;
-      lines.push(`${head(`${f.id}`)} · ${color(state)}${f.project !== "main" ? p.dim(` · ${f.project}`) : ""}  ${pos}`, "");
+      lines.push(`${head(`${f.id}`)} · ${color(state)}${f.project !== "main" ? p.dim(` · ${f.project}`) : ""}${f.fallback ? p.dim(` · ${FALLBACK_LABEL}`) : ""}  ${pos}`, "");
       lines.push(...wrapTo(f.explanation || f.message.split("\n")[0]!, io.width));
       lines.push("", p.dim(`Test: ${f.testId}`), p.dim(`Failure: ${f.message.split("\n")[0]!.slice(0, io.width - 9)}`));
       if (f.reason) lines.push(...wrapTo(`Second opinion: ${f.reason}`, io.width).map((l) => p.dim(l)));

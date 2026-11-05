@@ -1643,6 +1643,10 @@ class Commands {
     this.d.out(real.length ? `✓ Accepted ${n(realTests, "test")} from ${n(issues, "issue")} ` +
       `(${n(real.length, "finding")})` : aside ? "No test of a finding kept: their tests were set aside."
       : tests.length ? "No findings marked real." : "No findings marked real; nothing kept.");
+    const onFallback = real.filter((f) => f.fallback).length;
+    if (onFallback) {
+      this.d.out(`  ${n(onFallback, "finding")} ran on the image built for another commit: its dependencies may differ`);
+    }
     if (left) this.d.out(`  ${left} mark${left === 1 ? " was" : "s were"} pre-filled (not reviewed in triage)`);
     const questions = result.review.questions.length;
     const unanswered = a.values["no-answers"] ? questions

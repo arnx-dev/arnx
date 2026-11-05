@@ -10,7 +10,7 @@ import { type AgentResult, Workspace } from "./agent";
 import { adapterFor } from "./adapters";
 import { bakedError, bakedIn, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
   from "./baked";
-import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
+import { asFallbackBefore, asFallbackFix, BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
   fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, newNames, notChecked, SKIP_REASONS, textBefore, textFix,
   vacuousBefore } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
@@ -139,6 +139,8 @@ export function usableFallback(cfg: ReviewConfig, snap: string): string | null {
   if (!image) return null;
   const baked = existsSync(snap) && readdirSync(snap).length ? bakedIn(cfg, image.tag, snap) : null;
   if (baked?.differ.length) return null;
+  // A copy holding files this commit removed would run (or leak) what is gone.
+  if (baked && copyOnly(cfg, image.tag, baked.copies, snap, "").files.length) return null;
   return image.tag.slice(image.tag.indexOf(":") + 1);
 }
 
@@ -530,7 +532,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
       .sort((a, b) => (a.testId < b.testId ? -1 : a.testId > b.testId ? 1 : 0)).slice(0, o.before.fixProofMax) : [];
     if (o.before && (failing.length || proofs.length)) {
       ({ before, fixProof } = await beforeStage(repo, cfg, { ...o.before, findings: failing, proofs, files,
-        writeDir: o.writeDir, runs: o.runs, apart, headSnap: snap, headKey, tmp, outDir: o.outDir,
+        writeDir: o.writeDir, runs: o.runs, apart, headSnap: snap, headKey, tmp, outDir: o.outDir, fallback: env?.state === "fallback",
         sessionFactory: o.sessionFactory ?? dockerSession, say, ...(baked ? {} : { swap }),
         ...(o.brain.boundary ? { boundary: o.brain.boundary } : {}) }));
     }
@@ -679,7 +681,7 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
  * runs; the files holding the others run `runs` times more, after the findings' runs, so they cannot change them. */
 async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | null; diff?: string; deadline?: number;
   findings: TestResult[]; proofs: TestResult[]; files: Record<string, string>; writeDir: string; runs: number;
-  headSnap: string; headKey: string; tmp: string;
+  headSnap: string; headKey: string; tmp: string; fallback?: boolean;
   apart?: boolean; outDir: string; sessionFactory: SessionFactory; say: (m: string) => void; boundary?: Boundary; swap?: Swap })
   : Promise<{ before?: BeforeCheck; fixProof?: FixCheck }> {
   const started = performance.now();
@@ -836,13 +838,15 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
     });
     return result(() => done(Object.fromEntries(o.findings.map((t) => {
       const file = ownerFile(t.fileAttr, own), b = judgeBefore(t, file, runs, envChanged);
-      return [t.testId, asText(t, file) ? textBefore(b) : file === null ? b : vacuousBefore(b, o.files[file] ?? "", funcOf(t), brought)];
+      const judged = asText(t, file) ? textBefore(b) : file === null ? b : vacuousBefore(b, o.files[file] ?? "", funcOf(t), brought);
+      return [t.testId, o.fallback ? asFallbackBefore(judged) : judged];
     }))),
     () => proofLate ? proved({}, "time") : proved(Object.fromEntries(o.proofs.map((t) => {
       const file = ownerFile(t.fileAttr, own);
       const f = judgeFix(t, file, file !== null && owners.includes(file) ? runs : proofRuns, envChanged);
       const faked = file === null ? null : fakedName(o.files[file] ?? "", added);
-      return [t.testId, asText(t, file) ? textFix(f) : faked ? fakedFix(f, faked) : f];
+      const judged = asText(t, file) ? textFix(f) : faked ? fakedFix(f, faked) : f;
+      return [t.testId, o.fallback ? asFallbackFix(judged) : judged];
     }))));
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

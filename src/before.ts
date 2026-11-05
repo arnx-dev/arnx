@@ -361,3 +361,17 @@ export const SKIP_REASONS = {
 } as const;
 
 export const isPreExisting = (f: { before?: Before }) => f.before?.status === "pre-existing";
+
+const ANOTHER = "this ran on the image built for another commit, so the dependencies may differ";
+
+/** On a fallback image, a test that passes before the change says nothing about what the change did. */
+export function asFallbackBefore(b: Before): Before {
+  return b.status !== "regression" ? b : { ...b, status: "unknown",
+    detail: `passes on the code before the change (${plural(b.runs.length, "run")}), but ${ANOTHER}: not shown to be the change's doing` };
+}
+
+/** As `asFallbackBefore`, for the fix proof. */
+export function asFallbackFix(f: Fix): Fix {
+  return f.status !== "fixed" ? f : { ...f, status: "unknown",
+    detail: `fails on the code before the change (${plural(f.runs.length, "run")}) and passes after, but ${ANOTHER}: not shown to be a fix` };
+}

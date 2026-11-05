@@ -218,7 +218,7 @@ test("a review whose environment runs no test never starts the round: nothing bi
     sessionFactory: fakeFactory(broken, [], { probe: "ignore" }) });
   expect(review.projectStats[0]).toMatchObject({ stop: "env_failed: probe" });
   expect(c.seen.some((x) => x.path.endsWith("/agent"))).toBe(false);
-  expect(c.seen.find((x) => x.path.endsWith("/finish"))!.body).toMatchObject({ stop: "completed", tests_written: 0 });
+  expect(c.seen.find((x) => x.path.endsWith("/finish"))!.body).toMatchObject({ stop: "completed", projects_reviewed: 0, tests_written: 0 });
 });
 
 test("a tool call the CLI does not run is answered as an error result", async () => {

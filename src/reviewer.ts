@@ -570,7 +570,7 @@ export async function runReview(repo: string, o: { settings: Settings;
         writeFileSync(roundFile, JSON.stringify({ round: rnd, hunted, second: projSecond, extras: projExtras }) + "\n");
       }
       const c = rnd.classified;
-      soFar.projectsReviewed += 1;
+      if (!rnd.env || rnd.env.state === "fallback") soFar.projectsReviewed += 1;
       soFar.testsWritten += c.findings.length + c.flaky.length + c.errors.length + c.passed.length;
       soFar.passed += c.passed.length;
       soFar.findings += c.findings.length;
@@ -612,7 +612,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       }
       const projectFindings = buildFindings(rnd, report).map((f) => {
         const shallow = shallowKind(f.file ? rnd.files[f.file] : undefined, f.func);
-        return { ...f, project: cfg.name, ...(shallow ? { shallow } : {}) };
+        return { ...f, project: cfg.name, ...(shallow ? { shallow } : {}), ...(rnd.env?.state === "fallback" ? { fallback: true as const } : {}) };
       });
       findings.push(...projectFindings);
       if (h?.length) suspects.push(...suspectOutcomes(cfg.name, h, rnd, report, projectFindings));
@@ -836,7 +836,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       ...(failures.length ? { providerFailures: failures } : {}),
     };
     // The local brain bills nothing (the user's keys pay the providers), so its answer changes nothing here.
-    await finish(stop, { stop, projectsReviewed: done.length, testsWritten: written, passed, findings: findings.length,
+    await finish(stop, { stop, projectsReviewed: done.filter((d) => d.rnd.env?.state !== "failed").length, testsWritten: written, passed, findings: findings.length,
       flaky: flaky.length, seconds: review.seconds });
     dockerSteps.log = null;
     dockerSteps.say = null;
