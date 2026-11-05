@@ -73,6 +73,8 @@ const pytest: SessionFactory = async (_cfg, at, _log, body) => body({
     return { exitCode: r.status, output: (r.stdout ?? "") + (r.stderr ?? ""), timedOut: false, seconds: 0.2 };
   } });
 const hasPytest = spawnSync("python3", ["-m", "pytest", "--version"]).status === 0;
+/** How long a test may take that runs real pytest several times: on a loaded machine that passes bun's default. */
+const REAL_PYTEST_MS = 30_000;
 
 // --- rule 1: stays in, with a fake --------------------------------------------------------------------------------------------
 
@@ -393,7 +395,7 @@ test("real pytest, a test that parses a fixture key: a fake reads as unproven, a
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")), "Dev", "2026-11-04"));
   const again = await check(repo, SETTINGS, { sessionFactory: pytest });
   expect(checkSummary(again)[1]).toBe(0);
-});
+}, REAL_PYTEST_MS);
 
 test("the review and setup line names a faked key and the way to the real one, with no failure at all", async () => {
   const repo = project({ "tests/data/fixture.txt": pem });
@@ -468,7 +470,7 @@ test("real pytest, a file left out by its name: a failure naming it is unproven,
   expect(await cli.run("allow-secret", "tests/data/server.key")).toBe(0);
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")), "Dev", "2026-11-04"));
   expect(checkSummary(await check(repo, SETTINGS, { sessionFactory: pytest }))[1]).toBe(0);
-});
+}, REAL_PYTEST_MS);
 
 test("one failing with no name in it stays a failure, and the report says that much", async () => {
   const repo = project({ "tests/data/ca.pem": "not a key\n" });
