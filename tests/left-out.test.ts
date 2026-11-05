@@ -173,7 +173,7 @@ test("a file with a key in code is kept with a stand-in: the tests and the agent
     expect([r.stop, r.needed, r.withheld, r.standIns]).toEqual(["end_turn", undefined, [], ["detect.py"]]);
     expect(texts[0]).not.toContain(AWS_KEY);
     expect(texts[0]).toMatch(/^AWS = 'AKIA[0-9A-Z]{16}'\n$/);
-    expect(said).toContain("stand-ins for key-shaped text, the real values kept here: detect.py");
+    expect(said.find((l) => l.startsWith("stand-ins in 1 file, real values kept here; list: "))).toContain("stand-ins.md");
   });
 
 test("arnx setup says it stopped and names the command that lets the file in", async () => {

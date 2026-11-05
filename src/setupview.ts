@@ -13,6 +13,7 @@ import { BROWSER_TESTS, WEB_UI } from "./browser";
 import { matcher } from "./ignore";
 import { type Coverage, coverageFiles, coverageMap, NO_TESTS, type ProjectProof, SCRIPTS, unexplainedFailing }
   from "./setup";
+import { staleLine, staleRewrites } from "./standins";
 import { SOURCE } from "./untested";
 
 // Rough minutes and USD per project, for the estimate shown before setup starts.
@@ -73,7 +74,7 @@ export function downloadHosts(line: string): string[] {
 
 /** What a developer should look at once the environment is proven: tests it cannot run, shortcuts in it, and
  * downloads from outside the package registries. */
-export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = []): string[] {
+export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = [], holds?: (text: string) => boolean): string[] {
   const out: string[] = [];
   for (const p of file.projects) {
     const proof = proofs.find((x) => x.name === p.name);
@@ -92,6 +93,8 @@ export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = []): s
     }
     const hidden = p.install.filter((l) => /\|\|\s*true\b/.test(l)).length + (/\|\|\s*true\b|;\s*true\)/.test(p.testCommand) ? 1 : 0);
     if (hidden) out.push(`${p.name}: ${hidden} command(s) ignore their own errors (|| true)`);
+    const stale = holds ? staleRewrites(p.install, holds) : [];
+    if (stale.length) out.push(`${p.name}: ${staleLine(p.name, stale)}`);
     const hosts = [...new Set(p.install.flatMap(downloadHosts))];
     if (hosts.length) out.push(`${p.name}: install downloads from ${hosts.join(", ")} (not a package registry)`);
   }
@@ -99,8 +102,8 @@ export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = []): s
 }
 
 /** Every warning recorded with a proof: approvalChecks, and the files allowed although they look like secrets. */
-export function approvalWarnings(file: ReviewFile, proofs: ProjectProof[] = []): string[] {
-  const checks = approvalChecks(file, proofs);
+export function approvalWarnings(file: ReviewFile, proofs: ProjectProof[] = [], holds?: (text: string) => boolean): string[] {
+  const checks = approvalChecks(file, proofs, holds);
   const allowed = secretPinsOf(file.raw);
   if (allowed.length) {
     checks.push(`${allowed.map((p) => p.path).join(", ")}: allowed although secret-looking; sent to the model and the ` +

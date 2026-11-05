@@ -32,6 +32,7 @@ import { ArnxError } from "./errors";
 import { loadIgnore, matcher } from "./ignore";
 import { projectIndex } from "./indexer";
 import { isSecretPath, maskPrivateKeys, type SecretPin } from "./secrets";
+import { namesStandIn, type StandInRow, standInsLine, writeStandIns } from "./standins";
 import { type AgentModel, allPrices, type Tool } from "./llm";
 import { ownerFile, runTests } from "./outcomes";
 import { look } from "./precheck";
@@ -1160,7 +1161,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     // Files .arnxignore leaves out that the tests need: in the sandbox only. A fresh setup finds them again.
     const sandbox = new Set(existing ? sandboxOnlyOf(existing.raw) : []);
     const sandboxKey = () => [...sandbox].sort().join("\n");
-    const { withheld, blanked, standIns, fakedKeys, secrets: replaced, suspects: found } = takeSnapshot(repo, null, snap, pins,
+    const { withheld, blanked, standIns, fakedKeys, secrets: replaced, suspects: found, standInList, standInValues } = takeSnapshot(repo, null, snap, pins,
       { untracked, sandbox: [...sandbox] });
     boundary.addScrubbed({ suspects: found, secrets: replaced });
     boundary.add(configSuspects(repo));
@@ -1201,7 +1202,14 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         "it with `arnx allow-secret PATH` and run setup again");
     }
     if (blanked.length) say(`comment lines blanked as secret-looking: ${describeBlanked(blanked)}`);
-    if (standIns.length) say(`stand-ins for key-shaped text, the real values kept here: ${someNames(standIns)}`);
+    // The certain values' stand-ins, which no file of the agent's may name; and where they stand, for the developer.
+    const standInNames = new Set(standInValues);
+    const standRows: StandInRow[] = [...standInList];
+    const listStandIns = (files: string[]) => {
+      const at = o.outDir ? writeStandIns(o.outDir, standRows) : null;
+      if (files.length) say(at ? standInsLine(files, at) : `stand-ins in ${someNames(files)}, real values kept here`);
+    };
+    listStandIns(standIns);
     if (fakedKeys.length) say(fakedKeysText(fakedKeys));
     if (withheld.length || blanked.length || standIns.length) {
       emit("setup.withheld", { files: withheld.map((w) => w.path), blanked: blanked.map((b) => b.path),
@@ -1230,6 +1238,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       state.lastTried = withOurs(yaml);
       try {
         const own = parseReviewFile(yaml);
+        if (namesStandIn(yaml, standInNames)) {
+          return "invalid: the file names a stand-in arnx put in place of key-shaped text; it is not the project's value. " +
+            "Leave that text out: the tests run with it already";
+        }
         if ("approved" in own.raw) return "invalid: remove the approved key; arnx stamps the file after its proof";
         if ("allow_secret_looking" in own.raw) {
           return "invalid: remove allow_secret_looking; only the user allows secret-looking files, and setup adds " +
@@ -1413,9 +1425,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           r.sandboxed.forEach((p) => sandbox.add(p));
           r.withheld.forEach((w) => secret.add(w.path));
           leftOut.paths = leftOut.paths.filter((p) => !sandbox.has(p));
-          if (r.standIns.length) {
-            say(`stand-ins for key-shaped text, the real values kept here: ${someNames(r.standIns)}`);
-          }
+          r.standInValues.forEach((v) => standInNames.add(v));
+          standRows.push(...r.standInList);
+          if (r.standIns.length) listStandIns(r.standIns);
           if (r.fakedKeys.length) say(fakedKeysText(r.fakedKeys));
           if (r.sandboxed.length && !r.withheld.length) {
             say(`${name}: the tests need ${someNames(r.sandboxed)}, which .arnxignore leaves out: copied into the ` +
@@ -1766,7 +1778,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const { agent: result } = drafted ? { agent: drafted } : await withRole("setup", () => brain.agentRound("setup", {
       hints: setupHintsFor(detection, browser),
       draft,
-      withheld: withheld.length ? describeWithheld(withheld) : "", current, detection, tree: treeOf(repo, untracked),
+      withheld: withheld.length ? describeWithheld(withheld) : "",
+      ...(standIns.length ? { standIns: [...standIns] } : {}), current, detection, tree: treeOf(repo, untracked),
       withheldFiles: withheld,
       ...(o.project ? { project: o.project } : {}), ...(o.add ? { add: true } : {}),
       budgetUsd: settings.setupBudgetUsd, outDir: o.outDir, deadline: { at: limit.at, now: limit.now } },

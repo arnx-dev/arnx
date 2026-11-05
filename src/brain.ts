@@ -113,6 +113,8 @@ export interface SetupInput extends RoundBase {
   draft?: string;
   /** Files left out of the snapshot as secret-looking, described ("" when none). */
   withheld: string;
+  /** Files kept with stand-ins for key-shaped text (the agent is told in code, standins.ts standInsText). */
+  standIns?: string[];
   /** Re-prove only this project of the current review.yaml. */
   project?: string;
   /** Cover what the current review.yaml lists as uncovered. */

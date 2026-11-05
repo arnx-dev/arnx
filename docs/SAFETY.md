@@ -65,7 +65,7 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   keep their own values in both copies, as a stand-in there can break an install, so an install step can read those. No other
   file keeps them. An install that copies the project elsewhere (`cp -a . /opt/app`, `pip install .`) copies that second copy, so tests
   that run there see stand-ins for guesses. Binary files are left alone. The real values never leave your machine,
-  beyond what a manifest or a lockfile holds and what the limits above let through. Setup names the files whose snapshot has stand-ins once.
+  beyond what a manifest or a lockfile holds and what the limits above let through. Setup names the files whose snapshot has stand-ins once. The setup agent is told which files hold them, and a file it proposes that names one is refused. `stand-ins.md`, beside the setup and review output, lists each place by file, line and rule, never a value.
   A model works among stand-ins, so what it writes holds them. When its text meets real files, arnx swaps each guess's
   stand-in back, in memory and at the last moment: a test as it goes into the throwaway copy, an accepted test too (the file
   under `.arnx/` keeps the stand-in); a search pattern and a path; a command of setup's `exec`; and the env and commands of

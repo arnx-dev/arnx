@@ -15,13 +15,14 @@ import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type Be
   vacuousBefore } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
 import { type Boundary, maskedCopy, type Swap } from "./boundary";
+import { holdsIn, staleLine, staleRewrites, standInsLine, writeStandIns } from "./standins";
 import { filesAt, snapshot, takeSnapshot, type Withheld, withSandboxFiles } from "./change";
 import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
 import { markUnproven } from "./diagnose";
 import { clip, emit, testMessage } from "./events";
 import { type Classified, classify, describeRun, funcOf, ownerFile, runTests, type TestResult } from "./outcomes";
-import { DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
+import { buildContextOf, DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
   type SessionFactory } from "./sandbox";
 import type { Say } from "./progress";
 import { describeTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
@@ -322,6 +323,11 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
     removed = taken.withheld.map((w) => w.path);
     leftOut = taken.withheld;
     ({ fakedKeys } = taken);
+    // What the snapshot replaced, for the developer: file, line and rule, never a value; and a rewrite of text that is gone.
+    const listed = writeStandIns(o.outDir, taken.standInList);
+    if (listed) say(standInsLine(taken.standIns.length ? taken.standIns : [...new Set(taken.standInList.map((r) => r.path))], listed));
+    const stale = staleRewrites(cfg.install, holdsIn(buildContextOf(snap)));
+    if (stale.length) say(staleLine(cfg.name, stale));
     // Before the brain hears anything from this snapshot.
     const filter = o.brain.boundary;
     filter?.addScrubbed(taken);

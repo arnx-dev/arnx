@@ -716,6 +716,11 @@ export interface SnapshotOptions { untracked?: boolean; standIns?: boolean; sand
 export interface Scrubbed { withheld: Withheld[]; blanked: Blanked[]; standIns: string[]; sandboxed: string[];
   /** Files kept with a fake for their private key's tokens (secrets.ts fakeKeys). */
   fakedKeys: string[];
+  /** Where the stand-ins stand: file, line and rule, never a value (standins.ts). A faked private key counts, with the rule "private key". */
+  standInList: { path: string; line: number; rule: string }[];
+  /** The stand-ins themselves of the certain values (never the guesses' and never an original), in memory only: what a setup
+   * file may not name. */
+  standInValues: ReadonlySet<string>;
   /** The values given stand-ins where tests run, the certain ones (secrets.ts isCertainRule): kept in memory for a later
    * copy into the sandbox (addToSandbox), never logged. */
   secrets: ReadonlySet<string>;
@@ -1047,6 +1052,8 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   const blanked: Blanked[] = [];
   const standIns: string[] = [];
   const fakedKeys: string[] = [];
+  const standInList: { path: string; line: number; rule: string }[] = [];
+  const ruleOf = new Map<string, string>();
   const sandboxed = new Set<string>();
   const beside = sandboxDir(root);
   const inside = (p: string) => p === realRoot || p.startsWith(realRoot + sep);
@@ -1177,6 +1184,7 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
       if (faked.count) {
         writeFileSync(f.p, faked.text);
         fakedKeys.push(f.rel);
+        standInList.push(...changedRuns(text, faked.text).map((line) => ({ path: f.rel, line, rule: "private key" })));
         ({ text } = faked);
       }
     }
@@ -1197,7 +1205,10 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
       removedFiles.push({ path: f.rel, line: 1, label: `over ${BIG_KEYS_MOST} key-shaped strings` });
       continue;
     }
-    for (const v of certain) values.add(v);
+    for (const v of certain) {
+      values.add(v);
+      ruleOf.set(v, why.get(v)!);
+    }
     const guessed = fakes(f.rel) ? found.filter((v) => !isCertain(v)) : [];
     if (big !== null && guessed.length > BIG_KEYS_MOST) notBuilt.add(f.rel);
     else for (const v of guessed) guesses.add(v);
@@ -1239,7 +1250,10 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
     if (!lines && !r.count) continue;
     writeFileSync(f.p, r.text);
     if (lines) blanked.push({ path: f.rel, lines });
-    if (r.count) standIns.push(f.rel);
+    if (r.count) {
+      standIns.push(f.rel);
+      standInList.push(...placesOf(f.rel, text, values, ruleOf));
+    }
   }
   // Folders the moves left empty go.
   for (const rel of sandboxed) {
@@ -1253,7 +1267,34 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   if (toBuild) linkTree(root, context, notBuilt);
   const byPath = (a: { path: string }, b: { path: string }) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
   return { withheld: removedFiles.sort(byPath), blanked: blanked.sort(byPath), standIns: standIns.sort(), fakedKeys: fakedKeys.sort(),
+    standInList: standInList.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line),
+    standInValues: new Set([...values].map((v) => made.get(v)).filter((v): v is string => !!v)),
     sandboxed: [...sandboxed].sort(), secrets: values, guesses, suspects: seen };
+}
+
+/** The first line of each run of lines that differ between two texts of the same lines. */
+function changedRuns(before: string, after: string): number[] {
+  const a = before.split("\n"), b = after.split("\n"), out: number[] = [];
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i] && (i === 0 || a[i - 1] === b[i - 1])) out.push(i + 1);
+  return out;
+}
+
+/** Where `values` stand in `text`, with the rule of each: path, line and rule only. A file whose lines are not found
+ * (an encoded form) is listed at line 0. */
+function placesOf(path: string, text: string, values: ReadonlySet<string>, ruleOf: ReadonlyMap<string, string>)
+  : { path: string; line: number; rule: string }[] {
+  const here = [...values].filter((v) => text.includes(v));
+  const seen = new Set<string>(), out: { path: string; line: number; rule: string }[] = [];
+  text.split("\n").forEach((l, i) => {
+    for (const v of here) {
+      const rule = ruleOf.get(v) ?? "key-shaped";
+      if (l.includes(v) && !seen.has(`${i}\0${rule}`)) {
+        seen.add(`${i}\0${rule}`);
+        out.push({ path, line: i + 1, rule });
+      }
+    }
+  });
+  return out.length ? out : [{ path, line: 0, rule: "key-shaped" }];
 }
 
 /** A text file's content (scrubText); null for a binary file. */

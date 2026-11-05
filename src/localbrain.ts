@@ -15,6 +15,7 @@ import { partHunts, parseSuspects, rankSuspects, sameSuspect, secondHunt } from 
 import { type AgentModel, FallbackJson, type JsonModel, type ModelUse, newUse, parseJsonObject } from "./llm";
 import { DEFAULT_PROMPTS, isModelKey, PROMPT_VERSION, type Prompts, scopeTold, type Suspect } from "./prompts";
 import { mergeQuestions } from "./questions";
+import { standInsText } from "./standins";
 import { type Finding, parseReports, questionTexts } from "./report";
 import type { Prices } from "./settings";
 
@@ -181,6 +182,7 @@ export class LocalBrain implements Brain {
         `like a key: ${x.withheld}. Code that needs them cannot build or run here; do not recreate ` +
         "them. If a suite cannot run without them, say so in your summary: only the user can allow them.";
     }
+    if (x.standIns?.length) user += `\n\n${standInsText(x.standIns)}`;
     if (x.project) {
       user += `\n\nRe-prove only the project \`${x.project}\`. The current review.yaml is below; keep every other ` +
         `project exactly as it is.\n<review.yaml>\n${x.current}</review.yaml>`;

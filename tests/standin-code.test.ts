@@ -533,3 +533,25 @@ test("a random password in a comment stays certain, and code beside the comment 
 test("a file whose comments no reader knows keeps the address certain", () => {
   expect(rule(`# db://sample:access_token${AT}sample.com\n`, "notes.txt")).toEqual([["access_token@", "address-password"]]);
 });
+
+test("a sed in install whose search text no file holds is named as stale", async () => {
+  const { staleRewrites } = await import("../src/standins");
+  const install = ["grep -rl 'oldhost.example' . | xargs sed -i 's/oldhost.example/newhost.example/g'",
+    "pip install pytest"];
+  expect(staleRewrites(install, () => false)).toEqual(["oldhost.example"]);
+});
+
+test("one whose text exists is left alone", async () => {
+  const { staleRewrites } = await import("../src/standins");
+  const install = ["sed -i 's|oldhost.example|newhost.example|' cfg.txt", "sed -i 's/a.*b/c/' x"];
+  expect(staleRewrites(install, (t) => t === "oldhost.example")).toEqual([]);
+});
+
+test("the approval checks name a stale sed with the command that fixes it", async () => {
+  const { approvalChecks } = await import("../src/setupview");
+  const { parseReviewFile } = await import("../src/config");
+  const file = parseReviewFile("version: 1\nprojects:\n  shop:\n    root: .\n    language: python\n    image: python:3.12\n" +
+    "    install: [\"sed -i 's/oldhost.example/new/' cfg.txt\"]\n    test_command: python -m pytest -q {targets}\n");
+  expect(approvalChecks(file, [], () => false).join("\n")).toContain("arnx setup --project shop");
+  expect(approvalChecks(file, [], () => true).join("\n")).not.toContain("setup --project");
+});
