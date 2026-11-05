@@ -2,12 +2,16 @@
 // that share one cause, labels the second opinion, and records severity with the marks. Report only: finding rules,
 // verdicts and exit codes are unchanged.
 import { expect, test } from "bun:test";
-import { defaultMarks, exitCode, neededQuestions, nextSteps, parseMarks, rankGroups, render, sameCause, summary,
+import { rmSync } from "node:fs";
+import { join } from "node:path";
+import { useTmp } from "./helpers/tmp";
+import { load, save, defaultMarks, exitCode, neededQuestions, nextSteps, parseMarks, rankGroups, render, sameCause, summary,
   summaryStatus,
   type SuspectOutcome, yourCall }
   from "../src/report";
 import { finding, sampleReview, blankMarks } from "./helpers/review";
 
+const tmp = useTmp();
 const stat = (name: string, over: Record<string, unknown> = {}) => ({ name, tests: 3, passed: 3, missingRuns: 0,
   testFiles: 1, sawResults: true, stop: "end_turn", ...over });
 
@@ -245,7 +249,7 @@ test("the status never says complete above changed source files nobody tested", 
 });
 
 test("no changed source file reached reads not tested", () => {
-  const none = sampleReview({ findings: [], sourceFiles: 2, untested: [{ project: "main", files: ["a.py", "b.py"], of: 2 }] });
+  const none = sampleReview({ findings: [], passed: 0, sourceFiles: 2, untested: [{ project: "main", files: ["a.py", "b.py"], of: 2 }] });
   expect(render(none)).toContain("Not tested: arnx saw no test reach any of the 2 changed source files, so finding " +
     "nothing says nothing about this change.");
   expect(render(none)).not.toContain("Complete:");
@@ -265,4 +269,34 @@ test("no changed source file reached reads not tested", () => {
   // Reviews saved before sourceFiles existed: the total comes from the files changed, so it never reads as none.
   const older = sampleReview({ filesChanged: 4, uncovered: [{ path: "a.py", reason: "r" }] });
   expect(render(older)).toContain("Partly covered: arnx saw no test reach 1 of the 4");
+});
+
+test("a change reached only through imports is partly covered, never not tested", () => {
+  // A passing test imports pkg.main, which uses the changed pkg/helper.py: the text match cannot see that.
+  const r = sampleReview({ findings: [], passed: 1, sourceFiles: 1,
+    untested: [{ project: "main", files: ["pkg/helper.py"], of: 1 }] });
+  expect(render(r)).toContain("Partly covered: arnx saw no test reach 1 of the 1 changed source file below");
+  expect(render(r)).not.toContain("Not tested: arnx");
+  expect(summary(r, "x")).toContain("Partly covered: no test seen reaching 1 of 1 changed source file, so");
+  expect(summaryStatus(r).none).toBe(false);
+});
+
+test("the count of changed source files says file when it is one", () => {
+  const none = sampleReview({ findings: [], passed: 0, sourceFiles: 1, untested: [{ project: "main", files: ["a.py"], of: 1 }] });
+  expect(render(none)).toContain("reach any of the 1 changed source file, so");
+  expect(summary(none, "x")).toContain("reaching any of 1 changed source file, so");
+});
+
+test("a saved review counts its changed source files from change.diff", () => {
+  const rdir = join(tmp(), "r");
+  const r = sampleReview({ findings: [], filesChanged: 30, sourceFiles: 11, uncovered: [{ path: "src/a.py", reason: "x" }] });
+  const diff = ["src/a.py", "src/b.py", "tests/test_b.py", "docs/a.md", "web/c.ts", "web/c.test.ts"]
+    .map((f) => `diff --git a/${f} b/${f}\n--- a/${f}\n+++ b/${f}\n`).join("");
+  save(r, rdir, diff);
+  const back = load(rdir);
+  expect(back.sourceFiles).toBe(3);
+  expect(render(back)).toContain("reach 1 of the 3 changed");
+  // Without the diff file, the review's own count stands.
+  rmSync(join(rdir, "change.diff"));
+  expect(load(rdir).sourceFiles).toBe(11);
 });

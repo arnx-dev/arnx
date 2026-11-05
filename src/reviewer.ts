@@ -844,8 +844,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       ...(routing.checkOnly.length && !file.legacy ? { typecheckOnly: routing.checkOnly.map((c) => ({
         project: c.project.name, by: c.by })) } : {}),
       uncovered: [...routing.uncovered, ...routing.declared],
-      sourceFiles: new Set([...sourceSet, ...[...routing.uncovered, ...routing.declared].map((u) => u.path)
-        .filter(isSourcePath)]).size, questionProjects: questionProjects.slice(0, s.maxQuestions), writeDirs,
+      sourceFiles: new Set(change.files.filter(isSourcePath)).size, questionProjects: questionProjects.slice(0, s.maxQuestions), writeDirs,
       projectStats,
       groups, checked, ...(untested.some((u) => u.files.length) ? { untested } : {}),
       ...(suspects.length ? { suspects } : {}),

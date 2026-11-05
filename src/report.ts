@@ -244,6 +244,13 @@ export function notReached(r: Review): string[] {
     .filter(isSourcePath))];
 }
 
+const files = (n: number) => `${n} changed source file${n === 1 ? "" : "s"}`;
+
+/** The changed source files a diff names: each `diff --git a/<path> b/…` header whose path is a source file. */
+export function diffSources(diff: string): number {
+  return new Set([...diff.matchAll(/^diff --git a\/(.+?) b\//gm)].map((m) => m[1]!).filter(isSourcePath)).size;
+}
+
 /** How much of the change a test was seen reaching: `m` source files not reached, out of `n`. `none`: every changed
  * source file is unreached and no passing test failed before the change (a real fix proof shows one reached it). */
 function coverage(r: Review): { m: number; n: number; none: boolean } {
@@ -252,7 +259,7 @@ function coverage(r: Review): { m: number; n: number; none: boolean } {
   const old = r.untested ? r.untested.reduce((k, u) => k + u.of, 0) + r.uncovered.filter((u) => isSourcePath(u.path)).length
     : r.filesChanged;
   const n = Math.max(m, r.sourceFiles ?? old);
-  return { m, n, none: m > 0 && m === n && !fixed(r).length };
+  return { m, n, none: m > 0 && m === n && !fixed(r).length && !(r.passed > 0) };
 }
 
 /** More than one project, or something not tested: the report names projects and lists what was left out. */
@@ -475,9 +482,9 @@ function statusLines(r: Review): string[] {
     : r.couldNotRun?.length ? " If it is a test fixture, allow it with `arnx allow-secret PATH`, then `arnx review` again."
     : " Run `arnx review` again to cover it.";
   const out = [problems.length ? `Incomplete: ${problems.join("; ")}.${again}`
-    : cov.none ? `Not tested: arnx saw no test reach any of the ${cov.n} changed source files, so finding nothing says ` +
+    : cov.none ? `Not tested: arnx saw no test reach any of the ${cov.n} changed source file${cov.n === 1 ? "" : "s"}, so finding nothing says ` +
       "nothing about this change."
-    : cov.m ? `Partly covered: arnx saw no test reach ${cov.m} of the ${cov.n} changed source files below, so finding ` +
+    : cov.m ? `Partly covered: arnx saw no test reach ${cov.m} of the ${cov.n} changed source file${cov.n === 1 ? "" : "s"} below, so finding ` +
       "nothing there says nothing about them. Check them yourself, or review them on their own with `arnx review --range`."
     : `Complete: ${r.projects.length > 1 ? `${r.projects.length} projects tested${names}` : "the change was tested"}; ` +
       "every run reported its tests."];
@@ -1044,8 +1051,8 @@ export function summary(r: Review, reviewMd: string): string {
   const st = summaryStatus(r);
   const said = problems.join("; ");
   const status = problems.length ? `Incomplete: ${said}.`
-    : st.none ? `Not tested: no test seen reaching any of ${st.of} changed source files, so finding nothing says nothing.`
-    : st.untested ? `Partly covered: no test seen reaching ${st.untested} of ${st.of} changed source files, so finding ` +
+    : st.none ? `Not tested: no test seen reaching any of ${files(st.of)}, so finding nothing says nothing.`
+    : st.untested ? `Partly covered: no test seen reaching ${st.untested} of ${files(st.of)}, so finding ` +
       "nothing there says nothing about them." : "";
   const down = (r.providerFailures ?? []).map(failureLine).join(" ");
   const out = [`arnx review ${r.id} · ${r.change} · ${plural(r.filesChanged, "file")}, +${r.added} −${r.removed}`];
@@ -1246,6 +1253,11 @@ export function load(rdir: string): Review {
   r.usage = ((data.usage ?? []) as object[]).map((u) => rekey(u, camel) as unknown as ModelUse);
   r.groups = (data.groups ?? []) as Group[];
   r.checked = (data.checked ?? []) as Checked[];
+  // The count of changed source files is read from the diff, so old and new reviews count the same way.
+  try {
+    const diff = readFileSync(join(rdir, "change.diff"), "utf8");
+    if (/^diff --git /m.test(diff)) r.sourceFiles = diffSources(diff);
+  } catch { /* no diff kept: the review's own count stands */ }
   if (data.timings) r.timings = rekey(data.timings as object, camel) as Review["timings"];
   if (data.fix_proof) r.fixProof = (data.fix_proof as object[]).map((x) => rekey(x, camel) as unknown as FixProof);
   if (data.typecheck) r.typecheck = (data.typecheck as object[]).map((t) => rekey(t, camel) as unknown as TypeCheck);
