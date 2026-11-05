@@ -339,6 +339,18 @@ export function runArgv(o: { image: string; name: string; network: string; snaps
   return [...argv, o.image, "sh", "-c", o.command];
 }
 
+/** Whether a network's IPAM config (as JSON: as text, a missing gateway prints `invalid IP`) says it has no gateway. What
+ * does not say so counts as having one. */
+function hasNoGateway(config: string): boolean {
+  try {
+    const list: unknown = JSON.parse(config);
+    return Array.isArray(list) && list.length > 0 &&
+      list.every((c) => typeof c === "object" && c !== null && !(c as { Gateway?: unknown }).Gateway);
+  } catch {
+    return false;
+  }
+}
+
 const live = new Set<Session>();
 
 /** Tear down every running session; the interrupt handler calls this before exiting. */
@@ -454,8 +466,8 @@ export class Session implements Runner {
     if (open) r = docker(["network", "create", "--internal", this.network]);
     if (r.status !== 0) return r;
     if (!open) {
-      const seen = docker(["network", "inspect", this.network, "-f", "{{range .IPAM.Config}}{{.Gateway}}{{end}}"]);
-      open = seen.status !== 0 || !!seen.stdout.trim();
+      const seen = docker(["network", "inspect", this.network, "-f", "{{json .IPAM.Config}}"]);
+      open = seen.status !== 0 || !hasNoGateway(seen.stdout);
     }
     if (open && !networkNotice.said) {
       networkNotice.said = true;
