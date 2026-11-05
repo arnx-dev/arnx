@@ -45,6 +45,31 @@ export function brief(message: string): string {
   return message.length > 100 ? `${message.slice(0, 100)}…` : message;
 }
 export const DELAYS = [2, 8, 30];
+/** Waits (seconds) while every attempt of a call found the provider down: 7 attempts over about 220 s, which stays
+ * under the 5-minute lifetime of Anthropic's prompt cache (jitter of 20% either way reaches 264 s, plus the
+ * attempts). Timeouts and streams cut after they started keep DELAYS: those may be billed. */
+export const OUTAGE_DELAYS = [2, 8, 30, 60, 60, 60];
+/** Once a provider has had this many seconds of outage waits in this process, its calls wait [2, 8] only, and a
+ * review that still finds it down ends with the resume advice. */
+export const OUTAGE_WAIT_MAX_SECONDS = 600;
+const outageWaited = new Map<string, number>();
+/** For tests: forget the outage waits of every provider. */
+export function resetOutageWaits(): void { outageWaited.clear(); }
+/** The waits a call to `provider` follows now while the provider stays down: `delays`, or [2, 8] of them once the
+ * provider has cost OUTAGE_WAIT_MAX_SECONDS. */
+function outageSchedule(provider: string, delays: number[]): number[] {
+  return (outageWaited.get(provider) ?? 0) >= OUTAGE_WAIT_MAX_SECONDS ? delays.slice(0, 2) : delays;
+}
+/** `base` seconds with 20% jitter either way (`random` is in [0, 1)), to the tenth of a second. */
+const jittered = (base: number, random: () => number) => Math.round(base * (0.8 + 0.4 * random()) * 10) / 10;
+const chargeOutage = (provider: string, seconds: number) =>
+  void outageWaited.set(provider, (outageWaited.get(provider) ?? 0) + seconds);
+/** The progress line of a wait for a provider that is down: who, what it answered, how long, which try is next. */
+function outageLine(provider: string, met: string, seconds: number, next: number, of: number): string {
+  const status = /^HTTP (\d+)$/.exec(met)?.[1];
+  const what = status === "429" ? `rate limited (${met})` : status ? `overloaded (${met})` : met;
+  return `${PRESETS[provider]?.label ?? provider} ${what}; waiting ${Math.round(seconds)} s, try ${next} of ${of}`;
+}
 /** A status that says the provider is down or overloaded, not that the request was wrong. */
 const isDown = (status: number) => status >= 500 || status === 429;
 /** A refused key, which no retry fixes. */
@@ -268,12 +293,17 @@ export class AnthropicAgent implements AgentModel {
   private timeoutAttempts: number;
   private fetch: typeof fetch;
   private sleep: (seconds: number) => Promise<void>;
+  /** The waits while every attempt finds the provider down (OUTAGE_DELAYS unless the role gives fewer). */
+  readonly downDelays: number[];
+  private random: () => number;
 
   constructor(readonly model: string, readonly effort: string, private apiKey: string, private client?: MessagesClient,
               opts: { idleSeconds?: number; firstEventSeconds?: number; totalSeconds?: number; attemptSeconds?: number;
                 timeoutAttempts?: number; fetch?: typeof fetch; sleep?: (seconds: number) => Promise<void>;
-                provider?: string; baseURL?: string } = {}) {
+                provider?: string; baseURL?: string; downDelays?: number[]; random?: () => number } = {}) {
     this.provider = opts.provider ?? "anthropic";
+    this.downDelays = opts.downDelays ?? OUTAGE_DELAYS;
+    this.random = opts.random ?? Math.random;
     this.baseURL = opts.baseURL;
     this.timeoutAttempts = opts.timeoutAttempts ?? Infinity;
     this.fetch = opts.fetch ?? fetch;
@@ -373,16 +403,19 @@ export class AnthropicAgent implements AgentModel {
         // An APIError by its status or type; any other SDK error (a dropped or truncated stream) is the transport's.
         const retryable = !!timeout || !(e instanceof Anthropic.APIError) || e instanceof Anthropic.APIConnectionError ||
           RETRY_STATUS.has(e.status ?? 0) || ["overloaded_error", "rate_limit_error", "api_error"].includes(e.type ?? "");
-        delay = Math.max(DELAYS[attempt - 1] ?? 0,
-          e instanceof Anthropic.APIError ? retryAfter(e.headers) ?? 0 : 0);
         if (timeout) timeouts += 1;
         const met = timeout || e instanceof Anthropic.APIConnectionTimeoutError ? null
           : e instanceof Anthropic.APIConnectionError ? noConnection(e.cause ?? e)
           : e instanceof Anthropic.APIError && e.status && isDown(e.status) ? `HTTP ${e.status}` : null;
         down = down && met ? [...down, met] : null;
+        // While every attempt found the provider down the outage schedule applies; otherwise today's three attempts.
+        const schedule = down ? outageSchedule(this.provider, this.downDelays) : DELAYS.slice(0, ANTHROPIC_ATTEMPTS - 1);
+        const base = schedule[attempt - 1];
+        delay = Math.max(base === undefined ? 0 : down ? jittered(base, this.random) : base,
+          e instanceof Anthropic.APIError ? retryAfter(e.headers) ?? 0 : 0);
         const exhausted = timeout === "total" || timeouts >= this.timeoutAttempts ||
           performance.now() + delay * 1000 >= deadline;
-        if (!retryable || attempt >= ANTHROPIC_ATTEMPTS || exhausted) {
+        if (!retryable || base === undefined || exhausted) {
           const err = new ModelError(`${this.model}: ${reason} (${attempt} attempts)`);
           err.timedOut = !!timeout || (retryable && exhausted);
           err.unknownCalls = billed.unknown;
@@ -390,7 +423,12 @@ export class AnthropicAgent implements AgentModel {
           if (fault ?? down) err.fault = fault ?? unavailable(down!);
           throw err;
         }
-        this.notice?.(`${this.model}: ${reason}; retrying (${attempt + 1}/${ANTHROPIC_ATTEMPTS}) in ${delay}s`);
+        if (down) {
+          chargeOutage(this.provider, delay);
+          this.notice?.(outageLine(this.provider, down[down.length - 1]!, delay, attempt + 1, schedule.length + 1));
+        } else {
+          this.notice?.(`${this.model}: ${reason}; retrying (${attempt + 1}/${ANTHROPIC_ATTEMPTS}) in ${delay}s`);
+        }
       } finally {
         settled = true;
         clearTimeout(timer);
@@ -503,6 +541,9 @@ export class ResponsesJson implements JsonModel {
   readonly model: string;
   private fetch: typeof fetch;
   private sleep: (seconds: number) => Promise<void>;
+  /** The waits while every attempt finds the provider down (OUTAGE_DELAYS unless the role gives fewer). */
+  readonly downDelays: number[];
+  private random: () => number;
   private idle: number;
   private connect: number;
   private total: number;
@@ -525,8 +566,10 @@ export class ResponsesJson implements JsonModel {
               opts: { fetch?: typeof fetch; sleep?: (seconds: number) => Promise<void>; idleSeconds?: number;
                       connectSeconds?: number; totalSeconds?: number; attemptSeconds?: number;
                       timeoutAttempts?: number; tier?: string | null; store?: boolean; background?: boolean; pollSeconds?: number;
-                      graceSeconds?: number } = {}) {
+                      graceSeconds?: number; downDelays?: number[]; random?: () => number } = {}) {
     this.ref = refString(ref);
+    this.downDelays = opts.downDelays ?? OUTAGE_DELAYS;
+    this.random = opts.random ?? Math.random;
     this.model = ref.model;
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.fetch = opts.fetch ?? fetch;
@@ -603,14 +646,14 @@ export class ResponsesJson implements JsonModel {
       [e.timedOut, e.tries] = [true, attempt];
       return failed(e);
     };
-    for (const backoff of [...DELAYS, null]) {
+    for (;;) {
       if (performance.now() >= deadline) throw late();
       attempt += 1;
       const started = performance.now();
       const diagnostics: Record<string, unknown> = {};
       const traced = (outcome: string) => this.trace?.({ attempt, outcome: outcome.slice(0, 300),
         secs: Math.round((performance.now() - started) / 100) / 10, ...diagnostics });
-      let delay = backoff ?? 0;
+      let delay = 0;
       try {
         const data = this.background ? await this.backgroundAttempt(payload, deadline, attempt, diagnostics)
           : await this.attempt(payload, deadline, diagnostics);
@@ -630,18 +673,26 @@ export class ResponsesJson implements JsonModel {
         down = down && e.down ? [...down, e.down] : null;
         if (performance.now() >= deadline || diagnostics.timeout === "total") throw late(e.message);
         if (e.timedOut) timeouts += 1;
-        if (backoff === null || timeouts >= this.timeoutAttempts) {
+        // While every attempt found the provider down the outage schedule applies; otherwise today's four attempts.
+        const provider = providerOf(this.ref);
+        const schedule = down ? outageSchedule(provider, this.downDelays) : DELAYS;
+        const backoff = schedule[attempt - 1];
+        if (backoff === undefined || timeouts >= this.timeoutAttempts) {
           const err = billedError(`${this.ref}: ${e.message} (${attempt} attempt${attempt === 1 ? "" : "s"})`, 0, null, unknown);
           [err.timedOut, err.tries] = [e.timedOut, attempt];
           throw failed(err);
         }
-        delay = Math.max(delay, e.retryAfter ?? 0);
+        delay = Math.max(down ? jittered(backoff, this.random) : backoff, e.retryAfter ?? 0);
         if (performance.now() + delay * 1000 >= deadline) throw late(`retry would exceed deadline; ${e.message}`);
-        this.notice?.(`${this.ref}: ${brief(e.message)}; retrying (attempt ${attempt + 1}) in ${delay}s`);
+        if (down) {
+          chargeOutage(provider, delay);
+          this.notice?.(outageLine(provider, down[down.length - 1]!, delay, attempt + 1, schedule.length + 1));
+        } else {
+          this.notice?.(`${this.ref}: ${brief(e.message)}; retrying (attempt ${attempt + 1}) in ${delay}s`);
+        }
       }
       await this.sleep(delay);
     }
-    throw new ModelError(`${this.ref}: no reply`);
   }
 
   /** One request. Network errors, timeouts and retryable statuses throw Retryable. */
@@ -1145,10 +1196,11 @@ function agentModel(s: Settings, env: Env): AgentModel {
 /** `effort`, when given, is sent as is (a role's own effort, such as second_hunter_effort); else `s.effort`, in the
  * provider's words. */
 export function makeJsonModel(ref: ModelRef, s: Settings, env: Env, b: Boundary, opts: JsonOptions = {}): JsonModel {
-  return maskedJson(jsonModel(ref, s, env, opts), b);
+  // Hunters and the ranker: the review goes on without them, so they wait [2, 8, 30] of an outage.
+  return maskedJson(jsonModel(ref, s, env, { downDelays: OUTAGE_DELAYS.slice(0, 3), ...opts }), b);
 }
 
-type JsonOptions = { attemptSeconds?: number; timeoutAttempts?: number; effort?: string };
+type JsonOptions = { attemptSeconds?: number; timeoutAttempts?: number; effort?: string; downDelays?: number[] };
 
 function jsonModel(ref: ModelRef, s: Settings, env: Env, opts: JsonOptions): JsonModel {
   const prices = allPrices(s);
@@ -1158,7 +1210,8 @@ function jsonModel(ref: ModelRef, s: Settings, env: Env, opts: JsonOptions): Jso
   const effort = own ?? vendorEffort(p, s.effort);
   if (p.api === "messages") {
     return new AnthropicJson(ref, new AnthropicAgent(ref.model, effort, key, undefined,
-      { ...(timing.timeoutAttempts ? { timeoutAttempts: timing.timeoutAttempts } : {}), ...messagesOpts(p, url) }),
+      { ...(timing.timeoutAttempts ? { timeoutAttempts: timing.timeoutAttempts } : {}),
+        ...(timing.downDelays ? { downDelays: timing.downDelays } : {}), ...messagesOpts(p, url) }),
       prices);
   }
   const { tier, background } = responsesOpts(p, s);
@@ -1171,7 +1224,9 @@ function jsonModel(ref: ModelRef, s: Settings, env: Env, opts: JsonOptions): Jso
  * after one timed-out attempt, so the fallback is asked at once. Without a fallback it retries as usual. */
 export function makeChallenger(s: Settings, env: Env, b: Boundary): JsonModel {
   const verdict = { attemptSeconds: VERDICT_ATTEMPT_TIMEOUT };
-  const first = jsonModel(s.challenger, s, env, s.challengerFallback ? { ...verdict, timeoutAttempts: 1 } : verdict);
+  // With a fallback standing behind it, the first model waits out [2, 8] of an outage only: the fallback is asked next.
+  const first = jsonModel(s.challenger, s, env,
+    s.challengerFallback ? { ...verdict, timeoutAttempts: 1, downDelays: OUTAGE_DELAYS.slice(0, 2) } : verdict);
   return maskedJson(s.challengerFallback ? new FallbackJson(first, jsonModel(s.challengerFallback, s, env, verdict)) : first, b);
 }
 

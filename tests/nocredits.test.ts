@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runAgent, Workspace } from "../src/agent";
 import { ModelError, NoCredits } from "../src/errors";
-import { type AgentModel, AnthropicAgent, FallbackJson, PRICES, ResponsesAgent, ResponsesJson } from "../src/llm";
+import { type AgentModel, AnthropicAgent, FallbackJson, PRICES, resetOutageWaits, ResponsesAgent, ResponsesJson } from "../src/llm";
 import { parseModelRef } from "../src/settings";
 import { Cli } from "./helpers/cli";
 import { FakeJson } from "./helpers/fakes";
@@ -52,6 +52,7 @@ test("OpenAI: a background response that failed for credits stops at once", asyn
 });
 
 test("OpenAI: a 429 for credits is not retried; one for the rate limit still is", async () => {
+  resetOutageWaits();
   let n = 0;
   const quota = new ResponsesJson(GPT, "https://api.example/v1", "k", "medium", PRICES, { sleep: noSleep,
     fetch: fetching((i) => {
@@ -67,7 +68,7 @@ test("OpenAI: a 429 for credits is not retried; one for the rate limit still is"
     }) });
   const e = await busy.completeJson("s", "u", { type: "object" }).catch((x: unknown) => x);
   expect(e).not.toBeInstanceOf(NoCredits);
-  expect(n).toBe(4);
+  expect(n).toBe(7);
 });
 
 test("Anthropic: \"Your credit balance is too low\" (400) stops at once", async () => {

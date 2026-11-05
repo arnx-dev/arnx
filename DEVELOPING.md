@@ -344,6 +344,17 @@ challenger (the first model only) is built with `timeoutAttempts: 1` (`makeChall
 at once instead of after four attempts (~280 s). A retryable status or a network error that is not a timeout is still
 retried on the first model. The fallback, the hunters and a challenger without a fallback keep the usual retries.
 
+### Outage waits
+
+While every attempt of a call found the provider down (5xx, 429, no connection), the call follows `OUTAGE_DELAYS`
+(2, 8, 30, 60, 60, 60 s: seven attempts, about 220 s, each wait with 20% jitter) instead of the three or four attempts
+of `DELAYS`, and says so in the progress line ("Anthropic overloaded (HTTP 503); waiting 60 s, try 5 of 7"). Timeouts and
+streams cut after they started keep the usual attempts, because those may be billed; an error reply is not billed, so the
+budget is untouched. The role gives the schedule with `downDelays`: the full one for the reviewer, a challenger with no
+fallback and the fallback; [2, 8] for a challenger with a fallback; [2, 8, 30] for the hunters and the ranker. Once a
+provider has cost `OUTAGE_WAIT_MAX_SECONDS` (600 s) of waits in this process, its calls wait [2, 8] only. The call
+deadlines still apply. 220 s stays under the five-minute lifetime of Anthropic's prompt cache (jitter can reach 264 s).
+
 ## Telemetry
 
 `telemetry.ts`, off by default: `telemetry` at the top of `.arnx/config.toml` (init writes `false`; the user edits it,

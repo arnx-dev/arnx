@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { ModelError } from "../src/errors";
 import {
   AnthropicAgent, AnthropicJson, CANCEL_SECONDS, cancelInFlight, costUsd, FallbackJson, makeAgentModel, makeJsonModel,
-  makeChallenger, makeSecondHunter, parseJsonObject, PRICES, ResponsesAgent,
+  makeChallenger, makeSecondHunter, OUTAGE_DELAYS, OUTAGE_WAIT_MAX_SECONDS, parseJsonObject, PRICES, resetOutageWaits, ResponsesAgent,
   responsesInput, ResponsesJson, unpricedModels, unpricedNote,
 } from "../src/llm";
 import { exitCodeAfter, finalExitCode, onInterrupt, startInterrupt } from "../src/interrupt";
@@ -469,7 +469,7 @@ async function retryWaits(status: number, headers: Record<string, string>): Prom
   const waits: number[] = [];
   let n = 0;
   const m = new ResponsesJson(GPT, "https://api.example/v1", "k", "medium", PRICES, {
-    sleep: async (s) => { waits.push(s); },
+    random: () => 0.5, sleep: async (s) => { waits.push(s); },
     fetch: fakeFetch(() => (++n === 1 ? new Response("busy", { status, headers })
       : new Response(sse(responsesBody('{"verdict": "confirmed"}')), { status: 200 }))) });
   await m.completeJson("s", "u", SCHEMA);
@@ -567,7 +567,7 @@ test("anthropic: HTTP 529 overloaded_error is retried after the local backoff, t
   const notes: string[] = [];
   let n = 0;
   const agent = new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, {
-    sleep: async (s) => { waits.push(s); },
+    random: () => 0.5, sleep: async (s) => { waits.push(s); },
     fetch: fakeFetch(() => (++n === 1 ? errorResponse(529, "overloaded_error") : sseResponse(anthropicEvents("hi")))) });
   agent.notice = (x) => notes.push(x);
   const reply = await ask(agent);
@@ -1268,4 +1268,105 @@ test("a retry's progress line gives the HTTP status, never the body the provider
   expect(brief('HTTP 429: {"error":{"message":"Account request rate limit exceeded"}}')).toBe("HTTP 429 (rate limit)");
   expect(brief("HTTP 503: No ready deployment")).toBe("HTTP 503");
   expect(brief("no reply within 300s")).toBe("no reply within 300s");
+});
+
+// --- outages: a provider that answers "down" is waited for, with the wait shown ----------------------------------------
+
+const outageAgent = (waits: number[], answer: (n: number) => Response, opts: Record<string, unknown> = {}) => {
+  let n = 0;
+  return new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, { random: () => 0.5,
+    sleep: async (s) => { waits.push(s); }, fetch: fakeFetch(() => answer(++n)), ...opts });
+};
+
+test("a provider answering 503 follows the outage schedule until it answers", async () => {
+  resetOutageWaits();
+  const waits: number[] = [];
+  const agent = outageAgent(waits, (n) => (n <= 5 ? errorResponse(503, "api_error") : sseResponse(anthropicEvents("hi"))));
+  const reply = await ask(agent);
+  expect(reply.content[0]!.text).toBe("hi");
+  expect(waits).toEqual([2, 8, 30, 60, 60]);
+  expect(OUTAGE_DELAYS).toEqual([2, 8, 30, 60, 60, 60]);
+});
+
+test("the outage schedule has 20% jitter either way", async () => {
+  resetOutageWaits();
+  const at = async (random: number) => {
+    const waits: number[] = [];
+    await ask(outageAgent(waits, (n) => (n <= 2 ? errorResponse(503, "api_error") : sseResponse(anthropicEvents("hi"))),
+      { random: () => random }));
+    return waits;
+  };
+  expect(await at(0)).toEqual([1.6, 6.4]);
+  expect(await at(1)).toEqual([2.4, 9.6]);
+});
+
+test("a stream cut after it started keeps three attempts", async () => {
+  resetOutageWaits();
+  const waits: number[] = [];
+  const cut = () => new Response(new ReadableStream({ start(c) {
+    c.enqueue(enc.encode(anthropicEvents("x")[0]!));
+    setTimeout(() => c.error(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" })), 1);
+  } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  const err = await ask(outageAgent(waits, cut)).catch((e: unknown) => e) as ModelError;
+  expect(err).toBeInstanceOf(ModelError);
+  expect(err.attempts).toHaveLength(3);
+  expect(waits).toEqual([2, 8]);
+  // An outage before the cut ends the outage schedule too: 503, then a cut stream, is no longer "every attempt down".
+  resetOutageWaits();
+  const mixed: number[] = [];
+  const e2 = await ask(outageAgent(mixed, (n) => (n === 1 ? errorResponse(503, "api_error") : cut())))
+    .catch((e: unknown) => e) as ModelError;
+  expect([e2.attempts!.length, e2.fault]).toEqual([3, undefined]);
+});
+
+test("waiting stops growing once a provider has cost 10 minutes", async () => {
+  resetOutageWaits();
+  expect(OUTAGE_WAIT_MAX_SECONDS).toBe(600);
+  const down = async () => {
+    const waits: number[] = [];
+    const err = await ask(outageAgent(waits, () => errorResponse(503, "api_error"))).catch((e: unknown) => e) as ModelError;
+    expect(err.fault?.kind).toBe("unavailable");
+    return waits;
+  };
+  expect(await down()).toEqual([2, 8, 30, 60, 60, 60]);
+  expect(await down()).toEqual([2, 8, 30, 60, 60, 60]);
+  expect(await down()).toEqual([2, 8, 30, 60, 60]); // 600 s reached before the last wait
+  expect(await down()).toEqual([2, 8]);
+  expect(await down()).toEqual([2, 8]);
+});
+
+test("a second opinion with a fallback goes to it after 2 and 8 s", async () => {
+  resetOutageWaits();
+  const waits: number[] = [];
+  const first = new ResponsesJson(GPT, "https://api.example/v1", "k", "medium", PRICES, { random: () => 0.5,
+    sleep: async (s) => { waits.push(s); }, downDelays: [2, 8], fetch: fakeFetch(() => new Response("down", { status: 503 })) });
+  const second = new ResponsesJson(STALL, "https://api.example/v1", "k", "medium", PRICES, { sleep: noSleep,
+    fetch: fakeFetch(() => okReply()) });
+  const reply = await new FallbackJson(first, second).completeJson("s", "u", SCHEMA);
+  expect([waits, reply[4]]).toEqual([[2, 8], "openai:gpt-6.1-sol"]);
+});
+
+test("makeChallenger and the other roles: the outage schedule each is given", () => {
+  const env = { ...COMPAT_ENV, OPENAI_API_KEY: "o" };
+  const s = { ...defaultSettings(), providers: TABLES, prices: PRICED, secondHunter: parseModelRef("openai:gpt-6.1-sol"),
+    challenger: parseModelRef("compat:some-model", TABLES), challengerFallback: parseModelRef("openai:gpt-6.1-sol") };
+  const delays = (m: unknown) => (m as { downDelays: number[] }).downDelays;
+  const fb = makeChallenger(s, env, noValues) as unknown as { first: unknown; second: unknown };
+  expect([delays(fb.first), delays(fb.second)]).toEqual([[2, 8], OUTAGE_DELAYS]);
+  expect(delays(makeChallenger({ ...s, challengerFallback: undefined }, env, noValues))).toEqual(OUTAGE_DELAYS);
+  expect(delays(makeSecondHunter(s, env, noValues))).toEqual([2, 8, 30]);
+  expect(delays(makeJsonModel(s.secondHunter!, s, env, noValues))).toEqual([2, 8, 30]);
+});
+
+test("the wait shows in the terminal and costs no budget", async () => {
+  resetOutageWaits();
+  const waits: number[] = [], notes: string[] = [];
+  const agent = outageAgent(waits, (n) => (n <= 4 ? errorResponse(503, "api_error") : sseResponse(anthropicEvents("hi"))));
+  agent.notice = (x) => notes.push(x);
+  const reply = await ask(agent);
+  expect(notes[3]).toBe("Anthropic overloaded (HTTP 503); waiting 60 s, try 5 of 7");
+  expect(notes[0]).toBe("Anthropic overloaded (HTTP 503); waiting 2 s, try 2 of 7");
+  // The four error replies were never billed or counted as billed with unknown usage; only the answer is.
+  expect(reply.unknownCalls ?? 0).toBe(0);
+  expect(reply.attempts!.filter((a) => a.outcome === "ok")).toHaveLength(1);
 });
