@@ -532,6 +532,13 @@ export function defaultMarks(r: Review): Record<string, string | null> {
   return out;
 }
 
+/** Why a question is optional: no issue waits on it, or a proven issue's mark covers the findings that assumed it. */
+function optionalWhy(c: [number, string[]] | undefined): string {
+  if (!c) return "no issue waits on it";
+  const [n, ids] = c;
+  return `Issue ${n}'s mark covers ${ids.join(", ")}, which assumed an answer`;
+}
+
 /** Questions an answer decides an issue for: a finding waits on it in an issue no other test proves. The rest are
  * optional: no issue waits on them, and an answer still lets \`arnx accept\` write a test for it. */
 export function neededQuestions(r: Review): Set<string> {
@@ -540,7 +547,7 @@ export function neededQuestions(r: Review): Set<string> {
   const out = new Set<string>();
   for (const { findings } of groupsOf(r, active(r))) {
     if (proven(findings)) continue;
-    for (const f of findings) if (f.dependsOn) out.add(f.dependsOn);
+    for (const f of findings) if (f.dependsOn && f.verdict !== "disputed") out.add(f.dependsOn);
   }
   return out;
 }
@@ -640,6 +647,8 @@ export function render(r: Review): string {
       "failed before it (below)." : "No test failed in every run.", "");
   }
   const grouped = (r.groups ?? []).length > 0;
+  // Optional questions a proven issue's mark covers: question -> [issue number, the findings that assumed an answer].
+  const covers = new Map<string, [number, string[]]>();
   if (grouped) {
     const parts = groupsOf(r, caused);
     if (parts.length) out.push(`${plural(parts.length, "issue")} from ${plural(caused.length, "failing test")}, most severe first.`, "");
@@ -657,9 +666,13 @@ export function render(r: Review): string {
         ["Why it matters", g.consequence]] as const) if (value.trim()) out.push(`- ${label}: ${value.trim()}`);
       out.push(`${FAILING_TESTS} ${findings.map((f) => f.id).join(", ")}`);
       if (proven(findings)) {
-        const assumed = findings.filter((f) => f.dependsOn && defaultMark(f) !== "real");
-        const disputed = findings.filter((f) => !f.dependsOn && f.verdict === "disputed");
+        const assumed = findings.filter((f) => f.dependsOn && f.verdict !== "disputed" && defaultMark(f) !== "real");
+        const disputed = findings.filter((f) => f.verdict === "disputed");
         const qs = [...new Set(assumed.map((f) => f.dependsOn!))].join(", ");
+        for (const f of assumed) {
+          const c = covers.get(f.dependsOn!);
+          if (c) c[1].push(f.id); else covers.set(f.dependsOn!, [i + 1, [f.id]]);
+        }
         if (assumed.length) out.push(`- ${ids(assumed)} assumed an answer to ${qs}; this issue's mark covers them.`);
         if (disputed.length) out.push(`- The second opinion disputed ${ids(disputed)}; this issue's mark covers them.`);
       }
@@ -682,8 +695,8 @@ export function render(r: Review): string {
   if (!r.questions.length) out.push("None.", "");
   const needed = neededQuestions(r);
   r.questions.forEach((q, i) => out.push(`### Q${i + 1}`, "", ...(multi(r) ? [`Project: ${r.questionProjects[i]}`, ""] : []),
-    q, "", ...(needed.has(`Q${i + 1}`) ? [] : ["Optional: no issue waits on it. An answer lets `arnx accept` write a " +
-      "test for it.", ""]), "Answer:", ""));
+    q, "", ...(needed.has(`Q${i + 1}`) ? [] : [`Optional: ${optionalWhy(covers.get(`Q${i + 1}`))}. An answer lets ` +
+      "`arnx accept` write a test for it.", ""]), "Answer:", ""));
   const sus = r.suspects ?? [];
   if (sus.length) {
     out.push("## Suspected before testing", "",
@@ -787,8 +800,8 @@ export function adjudicate(sus: SuspectOutcome[], findings: Finding[]): void {
     x.findings = fs.map((f) => f.id);
     x.outcome = fs.length && fs.every(isPreExisting) ? "pre-existing"
       : fs.some((f) => f.verdict === "confirmed" && !f.dependsOn && !isPreExisting(f)) ? "proven"
-      : fs.some((f) => f.dependsOn) ? "pending answer"
-      : fs.some((f) => f.verdict === "disputed") ? "disputed" : "unchecked";
+      : fs.some((f) => f.verdict === "disputed") ? "disputed"
+      : fs.some((f) => f.dependsOn) ? "pending answer" : "unchecked";
   }
 }
 
@@ -942,8 +955,8 @@ export function summaryRows(r: Review): SummaryRow[] {
   }
   return rows.map(({ group, findings }) => {
     const mark = findings.some((f) => isConfirmed.has(f.id)) ? "✗" : findings.some((f) => unjudged.has(f.id)) ? "!"
-      : findings.some((f) => f.dependsOn) ? "?" : "·";
-    const states = findings.map((f) => f.dependsOn ? `depends on ${f.dependsOn}` : verdictOf(f));
+      : findings.some((f) => f.dependsOn && f.verdict !== "disputed") ? "?" : "·";
+    const states = findings.map((f) => f.dependsOn && f.verdict !== "disputed" ? `depends on ${f.dependsOn}` : verdictOf(f));
     const counts = [...new Set(states)].map((st) => `${states.filter((x) => x === st).length} ${st}`);
     const f0 = findings[0]!;
     // Confirmed findings plainly, first; the others by state.
@@ -1127,7 +1140,7 @@ export const REVIEW_SCHEMA_VERSION = 1;
  * marked real; the others wait on an answer, were disputed by the second opinion, or failed before the change too. */
 export type FindingStatus = "confirmed" | "not-checked" | "waiting-on-answer" | "disputed" | "pre-existing";
 export const findingStatus = (f: Finding): FindingStatus => isPreExisting(f) ? "pre-existing"
-  : f.dependsOn ? "waiting-on-answer" : f.verdict === "disputed" ? "disputed" : f.verdict === "confirmed" ? "confirmed"
+  : f.verdict === "disputed" ? "disputed" : f.dependsOn ? "waiting-on-answer" : f.verdict === "confirmed" ? "confirmed"
   : "not-checked";
 
 export function save(r: Review, rdir: string, diff: string): void {

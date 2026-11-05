@@ -2,7 +2,8 @@
 // the change and passes after it is not always a fix, and what already failed is named, not only counted.
 import { expect, test } from "bun:test";
 import { judgeFix, newNames, vacuousBefore, type Before, type BeforeRun } from "../src/before";
-import { exitCode, nextSteps, summary, summaryRows, yourCall } from "../src/report";
+import { adjudicate, exitCode, findingStatus, neededQuestions, nextSteps, render, summary, summaryRows, yourCall,
+  type SuspectOutcome } from "../src/report";
 import { finding, sampleReview } from "./helpers/review";
 
 const f = (id: string, test: string, verdict: string | null, reason = "") =>
@@ -75,4 +76,37 @@ test("failing the same way says nothing when the test uses what the change adds"
     new Set(["toast"]))).toBe(same);
   const other: Before = { status: "regression", detail: "d", runs: [] };
   expect(vacuousBefore(other, "toast", "test_a", new Set(["toast"]))).toBe(other);
+});
+
+// A dispute outranks a question the test also depended on: the second opinion's no is the verdict.
+const disputedWithQuestion = () => sampleReview({
+  findings: [{ ...f("F1", "test_a", "disputed", "no"), dependsOn: "Q1" }, f("F2", "test_b", "confirmed", "real")],
+  questions: ["Round up?"], questionProjects: ["main"],
+  groups: [{ title: "a", findings: ["F1"] }, { title: "b", findings: ["F2"] }] as never });
+
+test("a disputed finding with a question is disputed in status, row and summary count", () => {
+  const r = disputedWithQuestion();
+  expect(findingStatus(r.findings[0]!)).toBe("disputed");
+  expect(summaryRows(r).map((row) => row.mark)).toEqual(["·", "✗"]);
+  expect(summaryRows(r)[0]!.said).not.toContain("depends on");
+  expect(summary(r, "review.md")).toContain("1 issue confirmed");
+  expect(summary(r, "review.md")).not.toContain("waits on a question");
+  const sus: SuspectOutcome[] = [{ id: "S1", project: "main", outcome: "failed" } as never];
+  adjudicate(sus, [{ ...r.findings[0]!, suspect: "S1" }]);
+  expect(sus[0]!.outcome).toBe("disputed");
+});
+
+test("a disputed finding does not make its question needed", () => {
+  const r = disputedWithQuestion();
+  expect([...neededQuestions(r)]).toEqual([]);
+});
+
+test("an optional question says which assumed finding the mark covers", () => {
+  const r = sampleReview({
+    findings: [f("F1", "test_a", "confirmed", "real"), { ...f("F2", "test_b", "confirmed", "real"), dependsOn: "Q1" }],
+    questions: ["Round up?"], questionProjects: ["main"],
+    groups: [{ findings: ["F1", "F2"], title: "a", input: "", actual: "", expected: "", consequence: "" }] as never });
+  const md = render(r);
+  expect(md).toContain("Optional: Issue 1's mark covers F2, which assumed an answer.");
+  expect(md).not.toContain("no issue waits on it");
 });

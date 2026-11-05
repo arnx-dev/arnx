@@ -111,7 +111,7 @@ test("an issue's one mark covers its disputed tests and those that assumed an an
   const one = md.replace("- Test: `t.js::b`", "Mark: [ ] real  [ ] intended  [x] noise\n- Test: `t.js::b`");
   expect(parseMarks(one, ["F1", "F2", "F3", "F4"]).findings.F2).toBe("noise");
   expect([...neededQuestions(r)]).toEqual(["Q2"]);
-  expect(md).toContain("400 or 500?\n\nOptional: no issue waits on it.");
+  expect(md).toContain("400 or 500?\n\nOptional: Issue 1's mark covers F3, which assumed an answer.");
   expect(md).not.toContain("Should d hold?\n\nOptional");
   expect(defaultMarks(r)).toEqual({ F1: "real", F2: "real", F3: "real", F4: null });
   const s = summary(r, "review.md");

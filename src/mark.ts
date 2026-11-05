@@ -201,8 +201,9 @@ export async function markInteractive(review: Review, md: string, io: MarkIO): P
     if (it.kind === "finding" && it.all.length > 1 || it.kind === "finding" && titles.has(it.f.id)) {
       const g = titles.get(it.f.id);
       const sure = proven(it.all);
-      const state = sure ? "proven" : it.all.some((x) => x.dependsOn) ? `waits on ${it.all.find((x) => x.dependsOn)!
-        .dependsOn}` : "disputed";
+      const waiting = it.all.find((x) => x.dependsOn && x.verdict !== "disputed");
+      const state = sure ? "proven" : waiting && !it.all.some((x) => x.verdict === "disputed") ? `waits on ${waiting.dependsOn}`
+        : "disputed";
       const color = sure ? p.red : state === "disputed" ? p.dim : p.yellow;
       const tests = it.all.length === 1 ? it.f.id : `${it.all.length} tests: ${it.all.map((x) => x.id).join(", ")}`;
       lines.push(`${head(g?.title || it.f.explanation.split("\n")[0] || it.f.id)}  ${pos}`,
@@ -213,7 +214,7 @@ export async function markInteractive(review: Review, md: string, io: MarkIO): P
       lines.push("");
     } else if (it.kind === "finding") {
       const f = it.f;
-      const state = f.dependsOn ? `waits on ${f.dependsOn}` : f.verdict ?? "unchecked";
+      const state = f.verdict === "disputed" ? "disputed" : f.dependsOn ? `waits on ${f.dependsOn}` : f.verdict ?? "unchecked";
       const color = f.verdict === "confirmed" && !f.dependsOn ? p.red : f.verdict === "disputed" ? p.dim : p.yellow;
       lines.push(`${head(`${f.id}`)} · ${color(state)}${f.project !== "main" ? p.dim(` · ${f.project}`) : ""}${f.fallback ? p.dim(` · ${FALLBACK_LABEL}`) : ""}  ${pos}`, "");
       lines.push(...wrapTo(f.explanation || f.message.split("\n")[0]!, io.width));
