@@ -98,7 +98,8 @@ export const requireTime = (): void => void stepTimeout(Infinity);
 /** Whether `limit` leaves too little time for a Docker step (a step cut short at it ends with less than that). */
 export const timeIsUp = (limit: TimeLimit | null | undefined): boolean =>
   !!limit && limit.at - limit.now() < timeLimit.floorSeconds * 1000;
-export const READY_TIMEOUT = 90;
+/** Mutable so tests can shorten it. */
+export const readyWait = { seconds: 90 };
 /** Said when a service network keeps its address on this machine (Session.start). */
 export const NETWORK_OPEN = "Docker keeps an address on this machine for test networks: with services declared, a test can " +
   "reach what listens here. Docker 28 or later closes that.";
@@ -553,12 +554,12 @@ export class Session implements Runner {
   }
 
   private async waitReady(container: string, service: string, ready: string): Promise<void> {
-    const deadline = performance.now() + READY_TIMEOUT * 1000;
+    const deadline = performance.now() + readyWait.seconds * 1000;
     while (performance.now() < deadline) {
       if (docker(["exec", container, "sh", "-c", this.real(ready)], { timeout: 30 }).status === 0) return;
       await sleep(1000);
     }
-    throw new ArnxError(`service ${service} was not ready after ${READY_TIMEOUT}s (ready: ${ready})`);
+    throw new ArnxError(`service ${service} was not ready after ${readyWait.seconds}s (ready: ${ready})`);
   }
 
   close(): void {

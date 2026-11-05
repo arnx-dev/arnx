@@ -14,7 +14,7 @@ import type { AgentModel, Block, JsonModel, Reply } from "../src/llm";
 import { recheckReview } from "../src/recheck";
 import { BASELINE_FILE } from "../src/baseline";
 import { runReview } from "../src/reviewer";
-import { DEFAULT_LIMITS, dockerfile, dockerSteps, type ExecFactory, type Runner, sandboxOptions, Session,
+import { DEFAULT_LIMITS, dockerfile, dockerSteps, type ExecFactory, readyWait, type Runner, sandboxOptions, Session,
   type SessionFactory } from "../src/sandbox";
 import { fake } from "../src/secrets";
 import { defaultSettings, type Settings, writeSettings } from "../src/settings";
@@ -904,4 +904,67 @@ test("canary: from setup to check, on a project whose own tests quote the value,
   for (const f of [BASELINE_FILE, ".arnx/review.yaml", ".arnx/.gitignore"]) expect(kept).toContain(f);
   expect(kept.some((f) => f.startsWith(".arnx/tests/"))).toBe(true);
   for (const [p, t] of allUnder(join(repo, ".arnx"))) expectNoReal(p, t);
+});
+
+// --- each of these keeps a real value where it belongs ----------------------------------------------------------------------
+
+test("check --review on a baked copy leaves a kept test as written", async () => {
+  const { repo, rdir } = await acceptedReview();
+  const ran: string[] = [];
+  await recheckReview(repo, rdir, SETTINGS, { sessionFactory: runningFactory((snap) => {
+    ran.push(readFileSync(join(snap, GEN), "utf8"));
+    return [junitXml([[GEN, "test_v", "passed", ""]]), "1 passed", false];
+  }, { baked: true }) });
+  expect(ran.length).toBeGreaterThan(0);
+  expect(ran.every((t) => t.includes(SHOWN) && !t.includes(GUESS))).toBe(true);
+});
+
+test("a probe that fails writes its log and its error with no real value", async () => {
+  const repo = valueRepo();
+  const out = join(tmp(), "probe-out");
+  const cfg = parseReviewConfig(YAML);
+  const { LocalBrain } = await import("../src/localbrain");
+  const { PRICES } = await import("../src/llm");
+  const factory = (async <T>(_c: unknown, snap: string, _l: string, body: (r: Runner) => Promise<T>) =>
+    body(new FakeSession(snap, () => [null, `E  ${GUESS}\nno report\n`, false], { probe: "ignore" }))) as unknown as SessionFactory;
+  const failed = await testRound(repo, null, cfg, { brain: new LocalBrain({ agentModel: new Recording([], "x"), prices: PRICES, boundary: new Boundary() }),
+    ask: () => ({ kind: "answer" as const, input: { cfg, question: "q", answer: "a", diff: "" } }), writeDir: "tests/arnx_generated",
+    budgetUsd: 5, runs: 1, outDir: out, sessionFactory: factory }).then(() => null, (e: Error) => e);
+  expect(failed?.message).toContain("runs no test");
+  expectNoReal("the probe's error", failed!.message);
+  const log = readFileSync(join(out, "probe.log"), "utf8");
+  expect(log).toContain(`E  ${SHOWN}`);
+  expectNoReal("probe.log", log);
+});
+
+test("grep reads a stand-in as a pattern, escaped as a careful model writes it", async () => {
+  const v = "Ab.c+d(9)Kq2Lm7Xw";
+  const b = new Boundary([v]);
+  const s = b.mask(v);
+  const root = write(join(tmp(), "g"), { "s.py": `pw = "${v}"\nother = "${v.replaceAll(".", "x")}"\n` });
+  const ws = new Workspace(root, { reads: b.swapFor(root) });
+  const escaped = s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  expect(await ws.call("grep", { pattern: escaped, path: "." })).toBe(`s.py:1: pw = "${v}"`);
+  // Bare, its signs still mean themselves.
+  expect(await ws.call("grep", { pattern: s, path: "." })).toBe(`s.py:1: pw = "${v}"`);
+});
+
+test("a service that is not ready is named with the stand-in its check holds", async () => {
+  const saved = { docker: sandboxOptions.docker, seconds: readyWait.seconds };
+  try {
+    const dir = tmp();
+    writeFileSync(join(dir, "docker"), `#!/bin/sh\ncase "$1" in exec) exit 1;; esac\nexit 0\n`);
+    chmodSync(join(dir, "docker"), 0o755);
+    sandboxOptions.docker = join(dir, "docker");
+    readyWait.seconds = 0.01;
+    const cfg = parseReviewConfig(ENV_YAML);
+    const swap = new Boundary([GUESS]).swapFor(write(join(tmp(), "r"), { "a.py": "x\n" }));
+    const failed = await new Session("img", cfg, tmp(), DEFAULT_LIMITS, swap).start().then(() => null, (e: Error) => e);
+    expect(failed?.message).toContain(`was not ready`);
+    expect(failed?.message).toContain(SHOWN);
+    expectNoReal("the error", failed!.message);
+  } finally {
+    sandboxOptions.docker = saved.docker;
+    readyWait.seconds = saved.seconds;
+  }
 });
