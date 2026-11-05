@@ -281,6 +281,10 @@ const CLOUD_MODEL = /^arnx:([^/]+)\/([^/]+)(?:\/(.+))?$/;
 
 /** "Cost $0.47 (claude-sonnet-5-5 $0.40 · gpt-5.5 $0.07)": the total, then each model's share. With arnx cloud, the
  * total alone ("Billed $0.89 by arnx cloud"): how it splits the work is its own business. */
+/** A model whose cost arnx cannot state: no price, or only calls given up on with unknown usage. */
+const costUnknown = (u: { unpriced?: boolean; costUsd: number; unknownCalls: number }): boolean =>
+  !!u.unpriced || (u.costUsd === 0 && u.unknownCalls > 0);
+
 function costLine(r: Review): string {
   const usage = r.usage ?? [];
   if (!usage.length) return `Cost $${r.costUsd.toFixed(2)}`;
@@ -288,7 +292,7 @@ function costLine(r: Review): string {
   // price is not charged, so there is no note to add.
   if (usage.every((u) => CLOUD_MODEL.test(u.model))) return `Billed $${r.costUsd.toFixed(2)} by arnx cloud`;
   const parts = usage.map((u) => `${u.model.replace(/^[^:]*:/, "")} ` +
-    (u.unpriced || (u.costUsd === 0 && u.unknownCalls > 0) ? "cost unknown" : `$${u.costUsd.toFixed(2)}`)).join(" · ");
+    (costUnknown(u) ? "cost unknown" : `$${u.costUsd.toFixed(2)}`)).join(" · ");
   // A model with no price says so in its part; every one of its calls is in unknownCalls.
   const unknown = usage.reduce((a, u) => a + (u.unpriced ? 0 : u.unknownCalls), 0);
   // A call cut off mid-reply is billed, but the provider never said for how much: its cost is not in the total.
@@ -1068,8 +1072,8 @@ function issuesLine(r: Review, rows: SummaryRow[]): string {
 function costShort(r: Review): string {
   if (billedByCloud(r)) return `$${r.costUsd.toFixed(2)} billed`;
   const usage = r.usage ?? [];
-  const unknown = usage.reduce((a, u) => a + (u.unpriced ? 0 : u.unknownCalls), 0);
-  const unpriced = usage.filter((u) => u.unpriced).map((u) => u.model.replace(/^[^:]*:/, ""));
+  const unknown = usage.reduce((a, u) => a + (costUnknown(u) ? 0 : u.unknownCalls), 0);
+  const unpriced = usage.filter(costUnknown).map((u) => u.model.replace(/^[^:]*:/, ""));
   const notes = [...unknown ? ["a little more: some calls were cut off mid-reply"] : [],
     ...unpriced.length ? [`${unpriced.join(", ")}: cost unknown`] : []];
   return `$${r.costUsd.toFixed(2)}${notes.length ? ` (${notes.join("; ")})` : ""}`;

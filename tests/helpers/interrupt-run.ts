@@ -21,6 +21,7 @@ void runReview(repo, { settings: { ...defaultSettings(), beforeCheck: false, con
     return body({ run: (command) => {
       if (command.includes("test_arnx_probe")) return fake.run(command);
       process.stdout.write("RUNNING\n");
+      if (process.argv[3] === "exit") setTimeout(() => process.exit(2), 200); // a crash, not a signal
       return new Promise(() => {});
     } });
   },

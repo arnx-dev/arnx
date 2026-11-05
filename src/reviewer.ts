@@ -38,7 +38,7 @@ import { isSecretPath } from "./secrets";
 import { cloudModels, modelRefs, refString, type Settings } from "./settings";
 import { collect, dockerSession, ownTestsInWriteDir, ownTestsProblem, type Round, testRound, typecheckRound,
   writeDirOf } from "./testround";
-import { logPartial, logUsage, type PartialReason, reconcileUsage } from "./usage";
+import { logPartial, logUsage, type PartialReason, reconcileUsage, usageFromEvents, withEventSpend } from "./usage";
 import { randomHex } from "./util";
 import { buildInfo, VERSION } from "./version";
 
@@ -785,6 +785,8 @@ export async function runReview(repo: string, o: { settings: Settings;
       if (i >= 0) usage[i] = mergeUse(usage[i]!, u);
       else usage.push(u);
     }
+    // The events hold every call that ended, saved round or not: a round lost to a cut or a kill is still paid for.
+    usage.splice(0, usage.length, ...withEventSpend(usage, usageFromEvents(join(rdir, EVENTS_FILE))));
     // A model arnx has no price for ran with its cost unknown: its entry says so.
     if (!label) {
       const unpriced = new Set(unpricedModels(s, modelRefs(s)).map((m) => m.ref));

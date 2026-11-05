@@ -64,8 +64,8 @@ export function logPartial(repo: string, command: string, id: string, reason: Pa
   try {
     const inFlight = reason === "killed" ? [] : callsInFlight().map(([p, n]) =>
       ({ ...newUse(`${p}:(in flight)`), unknownCalls: n }));
-    const rows = unlogged(repo, id, [...usageFromEvents(events), ...inFlight]);
-    if (rows.length) logUsage(repo, command, rows, now, id, reason);
+    const all = [...usageFromEvents(events), ...inFlight];
+    if (unlogged(repo, id, all).length) logUsage(repo, command, all, now, id, reason); // logUsage takes off what is logged
   } catch {
     // keeping the books never stops the run that is ending
   }
@@ -130,4 +130,22 @@ export function unlogged(repo: string, id: string, usage: ModelUse[]): ModelUse[
       cacheWrite: take(u.cacheWrite, d, "cacheWrite"),
       costUsd: Math.round(take(u.costUsd, d, "cost") * 1_000_000) / 1_000_000 } : u;
   }).filter((u) => u.calls || u.unknownCalls || u.costUsd);
+}
+
+/** A review's usage, raised to what its events say per model (field by field): a round that was never saved, or a
+ * session that was killed, spent money its tallies do not hold, and the events do. Models are matched by bare name. */
+export function withEventSpend(usage: ModelUse[], fromEvents: ModelUse[]): ModelUse[] {
+  const out = usage.map((u) => ({ ...u }));
+  for (const e of fromEvents) {
+    const u = out.find((x) => bare(x.model) === bare(e.model));
+    if (!u) {
+      out.push({ ...e });
+      continue;
+    }
+    u.calls = Math.max(u.calls, e.calls); u.unknownCalls = Math.max(u.unknownCalls, e.unknownCalls);
+    u.input = Math.max(u.input, e.input); u.output = Math.max(u.output, e.output);
+    u.cacheRead = Math.max(u.cacheRead, e.cacheRead); u.cacheWrite = Math.max(u.cacheWrite, e.cacheWrite);
+    u.costUsd = Math.max(u.costUsd, e.costUsd);
+  }
+  return out;
 }
