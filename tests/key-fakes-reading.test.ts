@@ -124,6 +124,11 @@ test("a finding beside a fake says fix the code, and how to run it with the real
     [junitXml([["tests/arnx/r1/test_kept.py", "test_add", "failed", "E   assert 1 == 2"]]), "1 failed\n", false]) }));
   expect(code).toBe(1);
   expect(said).toContain(FIX);
+  expect(said.split("Fix the code").length - 1).toBe(1);
+  // A test that is no finding, beside a fake: once too.
+  const [other] = checkSummary(await check(repo, SETTINGS, { sessionFactory: fakeFactory(() =>
+    [junitXml([["tests/arnx/r1/test_kept.py", "test_add", "passed", ""], ["tests/arnx/r1/test_kept.py", "test_more", "failed", "E   assert 1 == 2"]]), "1 failed\n", false]) }));
+  expect(other.split("Fix the code").length - 1).toBe(1);
   // With no fake, the words are as they were.
   const plain = project();
   expect(summary((await review(plain, "E   assert 1 == 2")).review, "review.md")).not.toContain("allow-secret");
@@ -233,6 +238,51 @@ test("a no-header run ends at a token under 16 characters, unless it ends in =",
   const padded = `x = "${lines.slice(0, 3).join('"\n"')}"\n"abc1=="\nnext(1)\n`;
   expect(maskPrivateKeys(padded)).not.toContain('"abc1=="');
   expect(maskPrivateKeys(padded)).toContain("next(1)");
+});
+
+// --- a name-like line inside a no-END key --------------------------------------------------------------------------------------------
+
+// A line of a wrapped key with no digit, `+` or `/`, built so no test here hangs on what a random key holds.
+const SHOWN = "[private key]";
+const NAME_LINE = "AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEf";
+const KEY_LINES = ["aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF", "gH2jK5mN8pQ1sT4vW7yZ0bC3eF6hJ9kL", "mN4pQ7sT0vW3yZ6bC9eF2hJ5kL8nP1qR"];
+
+test("no END: a line that reads as a name stays in the run while a key-like token follows, in the fake and the filter alike", () => {
+  for (const [name, text] of [
+    ["in the middle", `${HDR}\n${KEY_LINES[0]}\n${NAME_LINE}\n${KEY_LINES[1]}\n${KEY_LINES[2]}\nnext_line(1)\n`],
+    ["right after the header", `${HDR}\n${NAME_LINE}\n${KEY_LINES[0]}\n${KEY_LINES[1]}\n${KEY_LINES[2]}\nnext_line(1)\n`],
+    ["written \\n", `x = "${HDR}\\n${KEY_LINES[0]}\\n${NAME_LINE}\\n${KEY_LINES[1]}\\n${KEY_LINES[2]}\\n"\nnext_line(1)\n`],
+  ] as const) {
+    const out = fakeKeys(text).text, masked = maskPrivateKeys(text);
+    for (const l of [...KEY_LINES, NAME_LINE]) {
+      if (out.includes(l)) throw new Error(`${name}: the fake keeps a line`);
+      if (masked.includes(l)) throw new Error(`${name}: the filter shows a line`);
+    }
+    expect(out).toContain("next_line(1)");
+    expect(masked).toContain("next_line(1)");
+    expect(masked.split(SHOWN).length - 1).toBe(1);
+    expect(fakeKeys(text, { view: true }).text.includes(NAME_LINE)).toBe(false);
+  }
+});
+
+test("no END: a name with no key-like token after it still ends the run", () => {
+  for (const code of [`a = {\n  privateKey: "${HDR}",\n  clientEmail,\n  projectId,\n  tokenUri,\n};\n`,
+    `${HDR}\nclientEmail\nprojectId\n`, `"${HDR}"\nsome_long_name = 1\nother_long_name2 = 2\n`,
+    `# ${HDR}\nfunction someName2() {}\n`]) {
+    expect(fakeKeys(code).text).toBe(code);
+    expect(maskPrivateKeys(code)).toBe(code.replace(HDR, SHOWN));
+  }
+  // At the run's end too: what follows the key is no part of it.
+  const after = `${HDR}\n${KEY_LINES[0]}\n${KEY_LINES[1]}\nclientEmail,\nprojectId,\n`;
+  expect(fakeKeys(after).text).toContain("clientEmail,\nprojectId,\n");
+  expect(maskPrivateKeys(after)).toBe(`${SHOWN}\nclientEmail,\nprojectId,\n`);
+});
+
+test("a name-like line between an intact header and END keeps its text in the sandbox, as ruled", () => {
+  const text = `${HDR}\n${KEY_LINES[0]}\n${NAME_LINE}\n${KEY_LINES[1]}\n${END}\n`;
+  expect(fakeKeys(text).text).toContain(NAME_LINE);
+  expect(fakeKeys(text, { view: true }).text).not.toContain(NAME_LINE);
+  expect(maskPrivateKeys(text)).toBe(`${SHOWN}\n`);
 });
 
 // --- 5, 6. setup -----------------------------------------------------------------------------------------------------------------

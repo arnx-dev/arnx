@@ -198,17 +198,28 @@ function pastSeparators(text: string, from: number): { at: number; closed: boole
   return { at: i, closed };
 }
 
+/** Past the token at `at`. */
+function pastToken(text: string, at: number): number {
+  let past = at;
+  while (past < text.length && (isRunChar(text.charCodeAt(past)) || (text[past] === "\\" && text[past + 1] === "/"))) past++;
+  return past;
+}
+
 /** The end of the tokens of KEY_TOKEN_MIN or more after `from`, with only separators among them; `from` when none stands
- * there. It stops at a name (looksLikeName), and tokens sharing a line with anything else (a name assigned or called) are no key's. */
+ * there. It stops at a name (looksLikeName) unless a token of 8 or more with a digit, `+` or `/` follows it, which makes it a wrapped
+ * key's line by chance. Tokens sharing a line with anything else (a name assigned or called) are no key's. */
 function tokenRun(text: string, from: number, noHeader = false): number {
   let end = from, at = pastSeparators(text, from).at;
   for (;;) {
     const n = tokenLength(text, at);
     if (n < KEY_TOKEN_MIN) return end;
-    let past = at;
-    while (past < text.length && (isRunChar(text.charCodeAt(past)) || (text[past] === "\\" && text[past + 1] === "/"))) past++;
-    if (looksLikeName(text.slice(at, past)) || (noHeader && n < RUN_PIECE_MIN && text[past - 1] !== "=")) return end;
+    const past = pastToken(text, at);
+    if (noHeader && n < RUN_PIECE_MIN && text[past - 1] !== "=") return end;
     const next = pastSeparators(text, past);
+    if (looksLikeName(text.slice(at, past))) {
+      const following = text.slice(next.at, pastToken(text, next.at));
+      if (tokenLength(following, 0) < KEY_TOKEN_MIN || !/[0-9+/]/.test(following)) return end;
+    }
     if (next.at >= text.length || next.closed) end = past;
     else if (tokenLength(text, next.at) < KEY_TOKEN_MIN) return end;
     at = next.at;
@@ -248,7 +259,8 @@ function strayStart(text: string, end: number, floor: number): number {
   return at;
 }
 
-/** Private-key text in a text. `body` to `bodyEnd`: what may hold its tokens. `end`: a stray END, and what it closes. */
+/** Private-key text in a text. `body` to `bodyEnd`: what may hold its tokens. `end`: a stray END, and what it closes. `closed`: a
+ * header with its END, where code may lie between; anywhere else every token the run took is the key's. */
 interface KeySpan { from: number; to: number; kind: "header" | "start" | "end"; body: number; bodyEnd: number; closed?: boolean }
 
 /** Where `text` holds private-key text, first to last: from a header to its END line, or with no END to the end of its run of
@@ -346,7 +358,7 @@ export const keyTokens = (text: string) => tokensIn(text, privateKeySpans(text))
 function tokensIn(text: string, spans: readonly KeySpan[]): Set<string> {
   const out = new Set<string>();
   for (const s of spans) {
-    for (const m of text.slice(s.body, s.bodyEnd).matchAll(KEY_TOKEN)) if (m[1] === undefined && !looksLikeName(m[0])) out.add(m[0]);
+    for (const m of text.slice(s.body, s.bodyEnd).matchAll(KEY_TOKEN)) if (m[1] === undefined && !(s.closed && looksLikeName(m[0]))) out.add(m[0]);
   }
   return out;
 }
@@ -369,7 +381,7 @@ export function fakeKeys(text: string, o: { view?: boolean } = {}): { text: stri
   let from = 0, count = 0;
   for (const s of spans) {
     parts.push(text.slice(from, s.body), text.slice(s.body, s.bodyEnd).replace(all(s) ? VIEW_TOKEN : KEY_TOKEN, (m: string, skip: string | undefined) => {
-      if (skip !== undefined || (!all(s) && looksLikeName(m))) return m;
+      if (skip !== undefined || (s.closed && !all(s) && looksLikeName(m))) return m;
       const out = many ? m.replace(/[A-Za-z0-9]/g, "x") : keyFake(m);
       if (out !== m) count++;
       return out;

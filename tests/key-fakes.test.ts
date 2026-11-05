@@ -195,10 +195,10 @@ test("a no-END run stops at a name: shorthand names stay in the sandbox and read
   const text = `const a = {\n  privateKey: "${HDR}",\n  clientEmail,\n  projectId,\n  tokenUri,\n};\n`;
   expect(fakeKeys(text).text).toBe(text);
   expect(maskPrivateKeys(text)).toBe(text.replace(HDR, SHOWN));
-  const stops = `${HDR}\n${random[0]}\nclientEmail\n${random[1]}\n`;
+  const stops = `${HDR}\n${random[0]}\nclientEmail\nprojectId\n${random[1]}\n`;
   expect(fakeKeys(stops).text).not.toContain(random[0]!);
-  expect(fakeKeys(stops).text).toContain(`clientEmail\n${random[1]}`);
-  expect(maskPrivateKeys(stops)).toBe(`${SHOWN}\nclientEmail\n${random[1]}\n`);
+  expect(fakeKeys(stops).text).toContain(`clientEmail\nprojectId\n${random[1]}`);
+  expect(maskPrivateKeys(stops)).toBe(`${SHOWN}\nclientEmail\nprojectId\n${random[1]}\n`);
 });
 
 // --- rule 3: the wire filter ----------------------------------------------------------------------------------------------------

@@ -95,7 +95,8 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   what is read. The header and END stay, so code that looks for them runs. Tokens inside `${...}`, `{...}`, `<...>` stay, and so do,
   in the sandbox alone, tokens under 8 characters and tokens of 32 or fewer with no digit, `+` or `/` (a name). With no END, the
   header line stays and the run after it gets the fake, tokens of 8 or more separated only by blanks, `\n` or `\r` written out, quotes,
-  commas, `+` or `.`; the run stops at a name, and the filter hides that much.
+  commas, `+` or `.`. It stops at a name unless a token of 8 or more with a digit, `+` or `/` follows, as a wrapped line of a key can read as a name by
+  chance; a name in the run gets the fake too, and the filter hides that much.
   A test that parses a key fails on its fake. Setup and each review name the files holding one, with `arnx allow-secret PATH`. A
   failure is unproven when its exception's last line reads as a key failing to parse, or a missing-file or open-failure line names
   such a file: no finding, a review exits as incomplete (2) and `arnx check` too. It names the file its text shows, else "a faked
@@ -114,12 +115,11 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   by name is nothing to review.
   A model told to write `[private key]` is refused, and so is a `review.yaml` holding it. A model's own test keeps what it wrote
   where it is saved to run.
-  **These get past it:** a no-END key with a broken body (a comment mark on each line, tokens under 8, a line of other text in it, or a
-  wrapped line that reads as a name, which is a matter of chance at 32 columns or fewer, and for what follows it); a stray END inside a
+  **These get past it:** a no-END key with a broken body (a comment mark on each line, tokens under 8, a line of other text in it, or two
+  wrapped lines in a row that read as names, or one as its last line, a matter of chance at 32 columns or fewer); a stray END inside a
   body, for what follows it; JWK; hex; PKCS12 and PBES1 encrypted keys; lower-case or altered armour; a header broken up in the source
   (`"...PRIV" + "ATE KEY"`) over a body with another start; a word glued to a key's start (`rsaMII...`); with no header, a body with
-  another start, one with spaces or other marks inside its lines, or one wrapped too short to hold the start, and in a run, a line that
-  reads as a name in the sandbox and in what is read; a key in a file name; a test that prints a piece of what the sandbox keeps (a token
+  another start, one with spaces or other marks inside its lines, or one wrapped too short to hold the start; a key in a file name; a test that prints a piece of what the sandbox keeps (a token
   under 8 or a name) or transforms a pinned key (prints a line of it, or its base64); a line a tool cuts at 200 columns, which can leave
   under 64 characters of a no-header run. Other text that may be a secret goes through the filter below, and a value it does not recognise
   goes out.

@@ -476,13 +476,13 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
       const again = ids.length ? `\`arnx accept --again ${ids[0]}\`` +
         (ids.length > 1 ? ` (and ${ids.slice(1).map((r) => `\`${r}\``).join(", ")})` : "")
         : "accept the review that kept it again (`arnx accept --again` with its id; `ls .arnx/reviews` lists them)";
-      lines.push("Fix the code, not the accepted tests. A real bug whose test is wrong: mark it rewrite in review.md " +
+      lines.push(`${fakedKeys.length ? "Leave the accepted tests as they are" : "Fix the code, not the accepted tests"}. A real bug whose test is wrong: mark it rewrite in review.md ` +
         `with a \`Rewrite:\` line saying why (noise only when there is no bug), then ${again}.`);
     }
     if (othFail.length) {
       const one = othFail.length === 1;
       lines.push(`The ${count(othFail.length, `${other}test`)} that fail${one ? "s is not a finding" : " are not findings"}: ` +
-        `marks do not cover ${one ? "it" : "them"}. Fix the code, or fix or delete ${one ? "it" : "them"} in the file ` +
+        `marks do not cover ${one ? "it" : "them"}. ${fakedKeys.length ? "Or fix" : "Fix the code, or fix"} or delete ${one ? "it" : "them"} in the file ` +
         "(then `arnx accept --keep-edits`).");
     }
     lines.push("Next: arnx check");
