@@ -97,6 +97,11 @@ export const requireTime = (): void => void stepTimeout(Infinity);
 export const timeIsUp = (limit: TimeLimit | null | undefined): boolean =>
   !!limit && limit.at - limit.now() < timeLimit.floorSeconds * 1000;
 export const READY_TIMEOUT = 90;
+/** Said when a service network keeps its address on this machine (Session.start). */
+export const NETWORK_OPEN = "Docker keeps an address on this machine for test networks: with services declared, a test can " +
+  "reach what listens here. Docker 28 or later closes that.";
+/** Said once per run of arnx; mutable for tests. */
+export const networkNotice = { said: false };
 export const OUTPUT_LIMIT = 200_000;
 export const REPORT_DIR = ".arnx-run";
 const MAX_BUFFER = 1 << 30;
@@ -416,7 +421,7 @@ export class Session implements Runner {
     const t0 = performance.now();
     try {
       if (this.cfg.services.length) {
-        let r = docker(["network", "create", "--internal", this.network]);
+        let r = this.createNetwork();
         if (r.status !== 0) throw new ArnxError(`docker network create failed: ${r.stderr.trim().slice(0, 200)}`);
         this.networkCreated = true;
         for (const svc of this.cfg.services) {
@@ -437,6 +442,27 @@ export class Session implements Runner {
       this.close();
       throw e;
     }
+  }
+
+  /** The services' network: internal has no route out, and isolated gives it no address on this machine, so a test cannot
+   * reach what listens here through a gateway (a database on 0.0.0.0). A Docker before 28 refuses or ignores that, which is
+   * told plainly: the run goes on, as internal still keeps the outside away. */
+  private createNetwork(): ReturnType<typeof docker> {
+    let r = docker(["network", "create", "--internal", "-o", "com.docker.network.bridge.gateway_mode_ipv4=isolated",
+      this.network]);
+    let open = r.status !== 0;
+    if (open) r = docker(["network", "create", "--internal", this.network]);
+    if (r.status !== 0) return r;
+    if (!open) {
+      const seen = docker(["network", "inspect", this.network, "-f", "{{range .IPAM.Config}}{{.Gateway}}{{end}}"]);
+      open = seen.status !== 0 || !!seen.stdout.trim();
+    }
+    if (open && !networkNotice.said) {
+      networkNotice.said = true;
+      stepLog({ step: "network", project: this.cfg.name, isolated: false });
+      (dockerSteps.say ?? ((m: string) => void process.stderr.write(`${m}\n`)))(NETWORK_OPEN);
+    }
+    return r;
   }
 
   private async waitReady(container: string, service: string, ready: string): Promise<void> {

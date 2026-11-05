@@ -5,7 +5,9 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
 ## What runs where
 
 - Tests run only in Docker: no network (only the services in `.arnx/review.yaml`), no environment variables except
-  the ones in it, CPU, memory and process limits, on a throwaway copy of your repository.
+  the ones in it, CPU, memory and process limits, on a throwaway copy of your repository. A network for services has no
+  way out and no address on this machine, on Docker 28 or later. On an older Docker a test with services declared can reach
+  what listens on this machine, a database too; arnx says so when it happens.
 - Each test environment is a Docker image (`arnx-env:<hash>`), built again when the install steps or the dependency
   files change; Rust images can take several GB. With `context = "precise"` (`.arnx/config.toml`), each one also
   gets a code indexer layer (`arnx-env:<hash>-scip1`, about 0.7 GB for Python and TypeScript; the indexer runs with

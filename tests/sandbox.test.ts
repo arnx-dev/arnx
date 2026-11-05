@@ -7,7 +7,7 @@ import { parseReviewConfig, parseReviewFile } from "../src/config";
 import { SetupRequired } from "../src/errors";
 import {
   cleanupLiveSessions, DEFAULT_LIMITS, dockerfile, ensureEnv, envKey, requireDocker, runArgv, sandboxOptions, Session,
-  dockerSteps, keptBox, networkRetry,
+  dockerSteps, keptBox, NETWORK_OPEN, networkNotice, networkRetry,
 } from "../src/sandbox";
 import { useTmp } from "./helpers/tmp";
 import { CFG } from "./helpers/yaml";
@@ -592,4 +592,69 @@ test("a project's runs still each get a new container while exec keeps its own",
   });
   expect(fake.calls().map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["exec", expect.any(String)],
     ["run", "--rm"], ["rm", "-fv"]]);
+});
+
+// --- a service network reaches its services and nothing else ----------------------------------------------------------
+
+const ISOLATED = "com.docker.network.bridge.gateway_mode_ipv4=isolated";
+const WITH_DB = parseReviewFile(`version: 1\nimage: python:3.12-slim\ntest_command: python -m pytest {targets}\n` +
+  "services:\n  db:\n    image: postgres:16-alpine\n").projects[0]!;
+
+/** A docker that keeps its calls. `create`: the shell for `network create`; `gateway`: what inspect says the network's
+ * gateway is. */
+function networkDocker(create: string, gateway: string): { calls: () => string[] } {
+  const dir = tmp();
+  const log = join(dir, "calls");
+  writeFileSync(join(dir, "docker"), `#!/bin/sh
+printf '%s\\n' "$*" >> '${log}'
+case "$1 $2" in
+  "network create") ${create};;
+  "network inspect") printf '%s\\n' '${gateway}';;
+esac
+exit 0
+`);
+  chmodSync(join(dir, "docker"), 0o755);
+  sandboxOptions.docker = join(dir, "docker");
+  return { calls: () => readFileSync(log, "utf8").split("\n") };
+}
+
+async function openingSession(create: string, gateway: string) {
+  const saved = { docker: sandboxOptions.docker, say: dockerSteps.say, said: networkNotice.said };
+  const said: string[] = [];
+  try {
+    const docker = networkDocker(create, gateway);
+    networkNotice.said = false;
+    dockerSteps.say = (m) => void said.push(m);
+    const s = await new Session("img", WITH_DB, tmp()).start();
+    s.close();
+    const again = await new Session("img", WITH_DB, tmp()).start();
+    again.close();
+    return { said, calls: docker.calls() };
+  } finally {
+    sandboxOptions.docker = saved.docker;
+    dockerSteps.say = saved.say;
+    networkNotice.said = saved.said;
+  }
+}
+
+test("a service network has no address on this machine, and nothing need be said", async () => {
+  const { said, calls } = await openingSession(":", "");
+  expect(calls.some((c) => c.startsWith("network create --internal -o") && c.includes(ISOLATED))).toBe(true);
+  expect(said).toEqual([]);
+});
+
+test("a Docker that refuses the option still gets an internal network, and it says so once", async () => {
+  const { said, calls } = await openingSession(`case "$*" in *isolated*) echo unknown gateway mode >&2; exit 1;; esac`, "");
+  expect(calls.filter((c) => c.startsWith("network create")).at(-1)).toMatch(/^network create --internal arnx-/);
+  expect(said).toEqual([NETWORK_OPEN]);
+  expect(said[0]).toContain("Docker 28");
+});
+
+test("a Docker that ignores the option leaves a gateway, and it says so once", async () => {
+  const { said } = await openingSession(":", "172.22.0.1");
+  expect(said).toEqual([NETWORK_OPEN]);
+});
+
+test("a network Docker cannot make at all stops the session, naming why", async () => {
+  await expect(openingSession(`echo no addresses left >&2; exit 1`, "")).rejects.toThrow("no addresses left");
 });
