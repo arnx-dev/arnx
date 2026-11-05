@@ -9,10 +9,14 @@ export const SECRET_FILE_GLOBS: readonly string[] = [
   ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "*.jks", "id_rsa*", "id_ecdsa*",
   "id_ed25519*", "*.ppk", ".netrc", ".npmrc", ".pypirc", "credentials*.json", "service-account*.json", "*.session",
   "*.session-journal"];
-/** A private key's header in any armour (PEM, PGP's block, SSH2's four dashes), plain or URL-encoded, as a pattern. */
-export const KEY_HEADER = "-{4,5}( |%20)?BEGIN( |%20|\\+)[A-Z0-9 %+]*PRIVATE( |%20|\\+)KEY(( |%20|\\+)BLOCK)?( |%20)?-{4,5}";
+/** What follows BEGIN or END in a private key's armour (PEM, PGP's block, SSH2's four dashes), plain or URL-encoded, a label
+ * of any words up to PRIVATE KEY. A label's length is bounded, so a failed match stays quick. */
+const ARMOUR = "( |%20|\\+)[A-Z0-9 %+-]{0,64}PRIVATE( |%20|\\+)KEY(( |%20|\\+)BLOCK)?( |%20)?-{4,5}";
+/** A private key's header, as a pattern. */
+export const KEY_HEADER = `-{4,5}( |%20)?BEGIN${ARMOUR}`;
 const isHeader = (s: string) => s.startsWith("----");
-const B64 = "[A-Za-z0-9+/]";
+/** Base64 in either alphabet. */
+const B64 = "[A-Za-z0-9+/_-]";
 /** What a private key's base64 must start with when no header says so, as a pattern: a whole PEM's base64, an OpenSSH
  * body, and the DER of PKCS1 (a version, then the modulus), PKCS8 (a version, then an algorithm), SEC1, encrypted PKCS8. A
  * certificate or a public key starts otherwise. */
@@ -37,7 +41,7 @@ export const MAY_HOLD_KEY = `-[^B]?[^B]?[^B]?B[^B]?E[^E]?G[^G]?I[^I]?N|AKIA|sk-|
 export const mayShowPrivateKey = (text: string) => text.includes("PRIVATE") || KEY_START_GATE.test(text);
 const KEY_START_GATE = new RegExp(KEY_START);
 const KEY_START_AT = new RegExp(`^(?:${KEY_START})`);
-const KEY_START_ANY = new RegExp(`(?<!${B64})(?:${KEY_START})`, "g");
+const KEY_START_ANY = new RegExp(`(?<![A-Za-z0-9])(?:${KEY_START})`, "g");
 // A key starts a token: no letter or digit right before it, so `task-…` or `desk-…` is not an `sk-` key.
 const CONTENT = new RegExp(
   `${KEY_HEADER}|` + "(?<![A-Za-z0-9])(?:AKIA[0-9A-Z]{16}|sk-ant-[A-Za-z0-9_-]{20,}" +
@@ -82,6 +86,110 @@ const contentMatches = (text: string): Hit[] => {
   const found = QUICK.test(text) ? [...text.matchAll(new RegExp(CONTENT, "g"))] as Hit[] : [];
   return [...found, ...headerlessKeys(text, found), ...addressPasswords(text)].sort((a, b) => a.index - b.index);
 };
+
+/** The shortest run taken for a key known by how it starts. */
+const KEY_RUN_MIN = 64;
+const isRunChar = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 43 || c === 47 ||
+  c === 61 || c === 45 || c === 95;
+const CLOSING = "\"'`,;+)] \t";
+const OPENING = "\"'`,;+[( \t#*>|%!";
+
+/** Past a line end at `from` (real or escaped) with the marks a language, a comment or a diff puts around it; -1 when no line
+ * end stands there. */
+function pastLineEnd(text: string, from: number): number {
+  let i = from, eol = false;
+  for (let n = 0; n < 128 && i < text.length; n++) {
+    const c = text[i]!;
+    if (c === "\n" || c === "\r") {
+      eol = true;
+      i++;
+    } else if (c === "\\") {
+      let k = i + 1;
+      while (text[k] === "\\" && k - i < 16) k++;
+      const next = text[k];
+      if (next !== "n" && next !== "r" && next !== '"' && next !== "'") break;
+      eol ||= next === "n" || next === "r";
+      i = k + 1;
+    } else if (eol ? OPENING.includes(c) : CLOSING.includes(c) || (c === "." && !isRunChar(text.charCodeAt(i - 1)) && text[i - 1] !== ".")) {
+      i++;
+    } else break;
+  }
+  return eol ? i : -1;
+}
+
+/** The run of base64 at `at`, across line ends and `\/`: how many characters it holds, and where its last one ends. A later
+ * line counts only when it is all run, so a word starting the next line of code does not. Each character is passed a
+ * bounded number of times, as no later start in a run can hold more than the run. */
+function runAt(text: string, at: number): { end: number; count: number } {
+  let i = at, end = at, count = 0;
+  for (let first = true; ; first = false) {
+    let j = i, held = 0;
+    while (j < text.length) {
+      if (isRunChar(text.charCodeAt(j))) {
+        held++;
+        j++;
+      } else if (text[j] === "\\" && text[j + 1] === "/") j++;
+      else break;
+    }
+    const next = j < text.length ? pastLineEnd(text, j) : -1;
+    if (!first && j < text.length && next < 0) break;
+    count += held;
+    if (held) end = j;
+    if (next < 0 || text.startsWith("diff --git ", next)) break;
+    i = next;
+  }
+  return { end, count };
+}
+
+/** What all private-key text holds, one of these: what the filter looks for first, as it runs on every string of every
+ * request. */
+const KEY_SIGNS = ["BEGIN", "LS0tLS", "b3Blbn", "CAQ", "AgE", "IBA", "BgkqhkiG", "CSqGSIb"];
+const KEY_ANY = new RegExp(`${KEY_HEADER}|(?<![A-Za-z0-9])(?:${KEY_START})`, "g");
+/** What ends a header's text: its END, or the next file of a diff, which is another file's text. */
+const KEY_STOP = new RegExp(`-{4,5}( |%20)?END${ARMOUR}|(\\n|\\\\{1,8}n)diff --git `, "g");
+/** Where `text` holds private-key text, first to last: from a header to its END line, or to the end of the text or of its
+ * file in a diff when there is no END; a run of KEY_RUN_MIN or more that starts as a key. Linear in `text`. */
+function privateKeySpans(text: string): [number, number][] {
+  if (!KEY_SIGNS.some((s) => text.includes(s))) return [];
+  const out: [number, number][] = [];
+  KEY_ANY.lastIndex = 0;
+  for (let m = KEY_ANY.exec(text); m; m = KEY_ANY.exec(text)) {
+    let to: number;
+    if (isHeader(m[0])) {
+      KEY_STOP.lastIndex = m.index + m[0].length;
+      const stop = KEY_STOP.exec(text);
+      to = !stop ? text.length : stop[0].startsWith("-") ? stop.index + stop[0].length : stop.index;
+    } else {
+      const run = runAt(text, m.index);
+      if (run.count < KEY_RUN_MIN) {
+        KEY_ANY.lastIndex = Math.max(run.end, m.index + 1);
+        continue;
+      }
+      to = run.end;
+    }
+    out.push([m.index, to]);
+    KEY_ANY.lastIndex = Math.max(to, m.index + 1);
+  }
+  return out;
+}
+
+/** What a model reads in place of a private key. */
+export const KEY_SHOWN = "[private key]";
+
+/** `text` with its private-key text replaced, for all that leaves arnx. NULs go first when there is any to replace (UTF-16). */
+export function maskPrivateKeys(text: string): string {
+  const plain = text.includes("\0") ? text.replaceAll("\0", "") : text;
+  const spans = privateKeySpans(plain);
+  if (!spans.length) return text;
+  const parts: string[] = [];
+  let from = 0;
+  for (const [a, b] of spans) {
+    parts.push(plain.slice(from, a), KEY_SHOWN);
+    from = b;
+  }
+  parts.push(plain.slice(from));
+  return parts.join("");
+}
 
 /** How far after a header a key's body may start and end. */
 const BODY_WINDOW = 65536;

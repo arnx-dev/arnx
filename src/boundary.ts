@@ -10,7 +10,7 @@
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentModel, JsonModel } from "./llm";
-import { fake, hasSecretContent, isCertainRule, nameShaped, type SecretPin, suspects } from "./secrets";
+import { fake, hasSecretContent, isCertainRule, maskPrivateKeys, nameShaped, type SecretPin, suspects } from "./secrets";
 import { DIFF_SECTION } from "./util";
 import { ValueIndex } from "./valueindex";
 
@@ -255,10 +255,11 @@ export class Boundary {
     this.keepFaked([...why].filter(([, rule]) => isCertainRule(rule)).map(([v]) => v));
   }
 
-  /** `text` without any of the values, each replaced wherever it stands, inside a longer word too, and without the piece
-   * of one (`piecesAllowed`) that text cut before the filter left: FRAGMENT_MIN characters or more of its start that end
-   * a word, or of its end that start one. */
-  mask(text: string): string {
+  /** `text` without private-key text, known or not (secrets.ts maskPrivateKeys), and without any of the values, each
+   * replaced wherever it stands, inside a longer word too, and without the piece of one (`piecesAllowed`) that text cut
+   * before the filter left: FRAGMENT_MIN characters or more of its start that end a word, or of its end that start one. */
+  mask(raw: string): string {
+    const text = maskPrivateKeys(raw);
     const edits = this.editsOf(text);
     if (!edits.length) return text;
     return apply(text, edits, (e) => {
@@ -297,18 +298,27 @@ export class Boundary {
     return yes;
   }
 
-  /** A copy of `value` with `mask` applied to every string in it, keys too; the same object when there are no values. */
+  /** A copy of `value` with `mask` applied to every string in it, keys too; the same object when that changes nothing. */
   maskValue<T>(value: T): T {
-    return this.longest.length ? this.walk(value) as T : value;
+    return this.walk(value) as T;
   }
 
   private walk(v: unknown): unknown {
     if (typeof v === "string") return this.mask(v);
-    if (Array.isArray(v)) return v.map((x) => this.walk(x));
+    if (Array.isArray(v)) {
+      const items = v.map((x) => this.walk(x));
+      return items.every((x, i) => x === v[i]) ? v : items;
+    }
     if (typeof v !== "object" || v === null) return v;
     const json = (v as { toJSON?: () => unknown }).toJSON;
-    if (typeof json === "function") return this.walk(json.call(v));
-    return Object.fromEntries(Object.entries(v).map(([k, x]) => [this.mask(k), this.walk(x)]));
+    if (typeof json === "function") {
+      const plain = json.call(v);
+      const walked = this.walk(plain);
+      return walked === plain ? v : walked;
+    }
+    const entries = Object.entries(v);
+    const out = entries.map(([k, x]) => [this.mask(k), this.walk(x)] as const);
+    return out.every(([k, x], i) => k === entries[i]![0] && x === entries[i]![1]) ? v : Object.fromEntries(out);
   }
 
   /** Where `text` holds the stand-in of a value real where tests run, longest first at each place. A value's slow hash is
