@@ -288,7 +288,7 @@ function costLine(r: Review): string {
   // price is not charged, so there is no note to add.
   if (usage.every((u) => CLOUD_MODEL.test(u.model))) return `Billed $${r.costUsd.toFixed(2)} by arnx cloud`;
   const parts = usage.map((u) => `${u.model.replace(/^[^:]*:/, "")} ` +
-    (u.unpriced ? "cost unknown" : `$${u.costUsd.toFixed(2)}`)).join(" · ");
+    (u.unpriced || (u.costUsd === 0 && u.unknownCalls > 0) ? "cost unknown" : `$${u.costUsd.toFixed(2)}`)).join(" · ");
   // A model with no price says so in its part; every one of its calls is in unknownCalls.
   const unknown = usage.reduce((a, u) => a + (u.unpriced ? 0 : u.unknownCalls), 0);
   // A call cut off mid-reply is billed, but the provider never said for how much: its cost is not in the total.

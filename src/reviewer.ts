@@ -17,7 +17,7 @@ import { configSuspects, fileDigest, loadReviewFile, parseReviewFile, type Revie
 import { ArnxError, SetupRequired } from "./errors";
 import { huntParts } from "./hunt";
 import { projectIndex } from "./indexer";
-import { closers } from "./interrupt";
+import { closers, spendClosers } from "./interrupt";
 import { addUsage, type AgentModel, allPrices, FallbackJson, type JsonModel, type ModelUse, newUse,
   type Trace, unpricedModels } from "./llm";
 import { LocalBrain } from "./localbrain";
@@ -38,7 +38,7 @@ import { isSecretPath } from "./secrets";
 import { cloudModels, modelRefs, refString, type Settings } from "./settings";
 import { collect, dockerSession, ownTestsInWriteDir, ownTestsProblem, type Round, testRound, typecheckRound,
   writeDirOf } from "./testround";
-import { logUsage, unlogged } from "./usage";
+import { logPartial, logUsage, type PartialReason, reconcileUsage } from "./usage";
 import { randomHex } from "./util";
 import { buildInfo, VERSION } from "./version";
 
@@ -335,6 +335,7 @@ export async function runReview(repo: string, o: { settings: Settings;
   if (changed) o.progress?.("review.yaml, models or prompts changed since that review: running it fresh");
   const rid = resumed ? posix.basename(resumed) : newReviewId(o.now ?? new Date());
   const rdir = join(repo, ".arnx", "reviews", rid);
+  reconcileUsage(repo, rid); // reviews an earlier run never finished (killed) are counted now
   if (resumed) o.progress?.(`resuming review ${rid}`);
   else {
     mkdirSync(rdir, { recursive: true });
@@ -835,7 +836,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     const toSave: Review = masked.shown || done.some((d) => d.rnd.standInsShown)
       ? { ...masked.value, standInsShown: true } : masked.value;
     save(toSave, rdir, change.diff);
-    logUsage(repo, "review", unlogged(repo, rid, usage), o.now ?? new Date(), rid);
+    logUsage(repo, "review", usage, o.now ?? new Date(), rid);
     const byOutcome: Record<string, number> = {};
     for (const x of suspects) byOutcome[x.outcome] = (byOutcome[x.outcome] ?? 0) + 1;
     emit("report.done", { findings: findings.length, questions: review.questions.length, checked: checked.length,
@@ -849,13 +850,18 @@ export async function runReview(repo: string, o: { settings: Settings;
     return { review: toSave, rdir };
   };
   // Whatever stops the review is recorded, then thrown again unchanged.
+  // What was spent is logged however the review ends. An interrupt or an exit does it synchronously, before the process
+  // goes (the run's promise never settles then); a failure does it here. Only what is not yet logged goes in.
+  const keepBooks = (reason: PartialReason) => logPartial(repo, "review", rid, reason);
+  spendClosers.add(keepBooks);
   return withEvents(log, () => withCalls(calls, run).catch(async (e: unknown) => {
     emit("review.failed", { error: clip(e instanceof Error ? e.message : String(e)),
       name: e instanceof Error ? e.name : typeof e });
+    keepBooks("failed");
     // Closing is best effort: what stopped the review is what the user is told.
     await finish?.("failed").catch(() => null);
     throw e;
-  }));
+  })).finally(() => { spendClosers.delete(keepBooks); });
 }
 
 /** What came of the things a review checked, said once they are judged: proven, waiting on an answer, failing the same

@@ -19,6 +19,21 @@ export async function closeOpen(capSeconds = INTERRUPT_CLOSE_SECONDS): Promise<v
   clearTimeout(timer);
 }
 
+/** What an interrupt or an exit does synchronously, before anything awaits: the open runs write down what they spent
+ * (an interrupted run's promise never settles, and the exit handler cannot wait). Each must be safe to call twice. */
+export const spendClosers = new Set<(reason: "failed" | "interrupted") => void>();
+
+/** Runs every spend closer; one failing never stops another. */
+export function closeSpend(reason: "failed" | "interrupted"): void {
+  for (const c of [...spendClosers]) {
+    try {
+      c(reason);
+    } catch {
+      // the books are best effort
+    }
+  }
+}
+
 export interface InterruptDeps { cleanup: () => void; cancel: () => Promise<[string, boolean][]>;
   err: (text: string) => void; exit: (code: number) => void; close?: () => Promise<void> }
 
@@ -53,6 +68,7 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
 export async function onInterrupt(signal: keyof typeof EXIT_CODES, d: InterruptDeps = defaults,
   s: InterruptState = moduleState): Promise<void> {
   s.code ??= EXIT_CODES[signal];
+  closeSpend("interrupted"); // first, and synchronously: whatever follows may take the process down
   try {
     d.cleanup(); // service containers and the network go away even when a review is interrupted
   } catch (e) { d.err(`arnx: interrupt cleanup failed: ${message(e)}\n`); }
@@ -66,4 +82,27 @@ export async function onInterrupt(signal: keyof typeof EXIT_CODES, d: InterruptD
     await d.close?.();
   } catch (e) { d.err(`arnx: interrupt cleanup failed: ${message(e)}\n`); }
   d.exit(EXIT_CODES[signal]);
+}
+
+/** main's process handlers: any exit closes the test sessions and writes down the spend of what was still running; a
+ * signal starts the interrupt, a second one exits at once. */
+export function installProcessHandlers(): void {
+  // A run's limit lives in this process, so no way out leaves a container behind: one project failing while another's
+  // run is in flight, or a session opened after an interrupt's cleanup. What fails here must not change the exit code.
+  process.on("exit", () => {
+    closeSpend("failed");
+    try {
+      cleanupLiveSessions();
+    } catch {
+      // nothing is left to tell
+    }
+  });
+  let stopping = false;
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => {
+      if (stopping) process.exit(finalExitCode(EXIT_CODES[signal])); // a second signal does not wait for the cancels
+      stopping = true;
+      void startInterrupt(signal);
+    });
+  }
 }

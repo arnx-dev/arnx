@@ -259,6 +259,13 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   call and no test was written. The new attempt gets the hunt's suspects (`ReviewInput.prior`, the local brain only): no
   hunter runs, the hunters' costs and the cut attempt's are kept, and usage.jsonl logs only what it did not hold for the
   id. `state.json` keeps `seconds`, which a resume adds to.
+- Spend is logged however a review ends (`usage.ts`). `logUsage` with an id writes only what that id has not logged
+  (one mechanism for a resume, a failure, an interrupt and a kill), so a dollar is neither counted twice nor lost.
+  `usageFromEvents` sums the `model.call` events, which are appended as each call ends. A failed review calls
+  `logPartial` (`partial: true`, `reason: failed`); an interrupt or an exit calls it synchronously first thing
+  (`spendClosers` in `interrupt.ts`: the stopped run's promise never settles), adding the calls still holding a
+  provider slot as `unknown_calls`; `reconcileUsage` at the start of a review logs reviews with events but no
+  `review.json` as `killed` (SIGKILL). Outage waits cost nothing and are not in usage. Setup is not covered yet.
 - `agent.turn` (`agent.ts`): one agent turn: stop reason, tools called, `paths` (the path argument of each `read_file`,
   `list_dir` and `grep` call, in order; never contents), tool errors, writes, test runs.
 - `hunt.list`, `hunt.suspect`, `hunt.merged`, `hunt.dropped` (`localbrain.ts`): each hunter's list, the ranked
