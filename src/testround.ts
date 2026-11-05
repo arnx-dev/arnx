@@ -65,7 +65,7 @@ export function swapFiles(snap: string, rels: readonly string[], swap: Swap): vo
 
 // `swap` reaches the session only when runs read the mounted code: a baked copy comes from the build context, so it holds
 // each guess's stand-in, and a test, an env or a command holding that stand-in agrees with it as it is. `Runner.copies` tells
-// whoever places a test. A test there that reads /src and compares with a stand-in fails: /src holds the value.
+// whoever places a test. A test there that reads a project file by path and compares with a stand-in fails: /src holds the value.
 export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, envFrom, key, swap) => {
   requireDocker();
   // Another snapshot's image was built for that snapshot's session. That snapshot now holds a model's tests, with real values

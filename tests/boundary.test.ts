@@ -282,9 +282,56 @@ test("short values have no encoded forms: short text turns up by chance", () => 
   expect(b.mask(`${b64("abc")} ABC`)).toBe(`${b64("abc")} ABC`);
 });
 
+// What a dump prints, as the tools lay it out: 16 bytes a line, in pairs (xxd) or apart (hexdump -C, with a gap in the middle).
+const bytesOf = (t: string) => [...Buffer.from(t)].map((n) => n.toString(16).padStart(2, "0"));
+const xxdOf = (t: string) => bytesOf(t).reduce<string[][]>((lines, h, i) => {
+  if (i % 16 === 0) lines.push([]);
+  lines.at(-1)!.push(h);
+  return lines;
+}, []).map((l, n) => `${(n * 16).toString(16).padStart(8, "0")}: ${l.map((h, i) => i % 2 ? h : ` ${h}`).join("").trim()}`).join("\n") + "\n";
+const hexdumpOf = (t: string) => bytesOf(t).reduce<string[][]>((lines, h, i) => {
+  if (i % 16 === 0) lines.push([]);
+  lines.at(-1)!.push(h);
+  return lines;
+}, []).map((l, n) => `${(n * 16).toString(16).padStart(8, "0")}  ${l.slice(0, 8).join(" ")}  ${l.slice(8).join(" ")}`).join("\n") + "\n";
+
+test("the hex column of a dump goes: spaced, in pairs at either start, whole or split across lines", () => {
+  const b = new Boundary([CANARY]);
+  const fake = b.mask(CANARY);
+  const inner = bytesOf(CANARY);
+  expect(b.mask(`x ${inner.join(" ")} y`)).toBe(`x ${bytesOf(fake).join(" ")} y`);
+  /** Whether `text` shows six bytes running of the value, in any of the layouts. */
+  const shows = (text: string) => Array.from({ length: inner.length - 5 }, (_, i) => inner.slice(i, i + 6))
+    .some((run) => text.includes(run.join(" ")) || text.includes(run.join("")) ||
+      text.includes(run.join("").match(/.{1,4}/g)!.join(" ")) || text.includes(`${run[0]} ${run.slice(1).join("").match(/.{1,4}/g)!.join(" ")}`));
+  expect(shows(xxdOf(CANARY))).toBe(true);
+  // Aligned to a line, off by one, two or three bytes: then it runs over two lines.
+  for (const before of ["", "a", "ab", "abc"]) {
+    expect([before, shows(b.mask(xxdOf(`${before}${CANARY}`)))]).toEqual([before, false]);
+  }
+  expect(shows(b.mask(hexdumpOf(CANARY)))).toBe(false);
+});
+
+test("what hexdump's gap leaves between a value's two ends stays, as SAFETY.md says", () => {
+  const b = new Boundary([CANARY]);
+  const out = b.mask(hexdumpOf(`abc${CANARY}`));
+  const inner = bytesOf(CANARY);
+  // Its start is gone; the eight bytes after the gap are a piece from the middle.
+  expect(out).not.toContain(inner.slice(0, 5).join(" "));
+  expect(out).toContain(inner.slice(5, 13).join(" "));
+});
+
+test("hex that only looks alike stays: a dump of other bytes, a checksum, a list of numbers", () => {
+  const b = new Boundary([CANARY]);
+  const other = xxdOf("nothing to see in this file at all\n") + hexdumpOf("nothing to see in this file at all\n");
+  expect(b.mask(other)).toBe(other);
+  expect(b.mask("5a 71 37 78")).toBe("5a 71 37 78");
+  const text = "ff 00 ff 00 de ad be ef 12 34\n0123 4567 89ab cdef\n";
+  expect(b.mask(text)).toBe(text);
+});
+
 test("only the value's plain forms come back from unmask: an encoded form's stand-in has no one place to go", () => {
   const b = new Boundary([CANARY]);
-  expect(b.standIns().sort()).toEqual([b.mask(CANARY)].sort());
   expect(b.unmask(b.mask(CANARY))).toBe(CANARY);
 });
 
@@ -909,7 +956,6 @@ test("a stand-in has the value's shape and comes back as the value", () => {
   const masked = b.mask(text);
   expect(masked).not.toContain(CANARY);
   expect(b.mask(CANARY)).toHaveLength(CANARY.length);
-  expect(b.standIns().sort()).toEqual([b.mask(CANARY), b.mask(REMOVED)].sort());
   expect(b.unmask(masked)).toBe(text);
 });
 
@@ -919,7 +965,6 @@ test("no values: the same string and the same object come back", () => {
   expect(b.mask("anything")).toBe("anything");
   expect(b.maskValue(msg)).toBe(msg);
   expect(b.unmask("anything")).toBe("anything");
-  expect(b.standIns()).toEqual([]);
   expect(new Boundary(["", ""]).mask("anything")).toBe("anything");
   const raw = new RecordingAgent([]);
   expect(maskedAgent(raw, b)).toBeDefined();

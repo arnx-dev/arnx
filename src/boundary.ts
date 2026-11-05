@@ -73,13 +73,20 @@ function base64Inside(v: string, lead: number, last = false): string {
 const urlSafe = (b64: string) => b64.replaceAll("+", "-").replaceAll("/", "_");
 const plainBase64 = (v: string) => Buffer.from(v).toString("base64").replace(/=+$/, "");
 const hexOf = (v: string) => Buffer.from(v).toString("hex");
+/** A hex dump's column: its bytes apart (hexdump, od). */
+const hexApart = (v: string) => [...Buffer.from(v)].map((b) => b.toString(16).padStart(2, "0")).join(" ");
+/** And in pairs (xxd), the value starting at a pair's first byte or its second. */
+const hexPairs = (v: string, lead: number) => {
+  const hex = hexOf(v);
+  return [...lead ? [hex.slice(0, lead * 2)] : [], ...hex.slice(lead * 2).match(/.{1,4}/g) ?? []].join(" ");
+};
 /** What a program makes of a value's bytes. Applied to a stand-in, each gives what a model reads in its place, of the same
  * length. A value in padded base64 is found by its text before the padding. */
 const ENCODINGS: ((v: string) => string)[] = [plainBase64, (v) => urlSafe(plainBase64(v)),
   ...[0, 1, 2].flatMap((lead) => [(v: string) => base64Inside(v, lead), (v: string) => urlSafe(base64Inside(v, lead))]),
   ...[1, 2].flatMap((lead) => [(v: string) => base64Inside(v, lead, true),
     (v: string) => urlSafe(base64Inside(v, lead, true))]),
-  hexOf, (v) => hexOf(v).toUpperCase()];
+  hexOf, (v) => hexOf(v).toUpperCase(), hexApart, (v) => hexPairs(v, 0), (v) => hexPairs(v, 1)];
 /** And what it makes of its letters. */
 const CASES: ((v: string) => string)[] = [(v) => v.toUpperCase(), (v) => v.toLowerCase()];
 /** The shortest encoded text taken for a value: shorter ones turn up by chance. */
@@ -380,11 +387,6 @@ export class Boundary {
       return yes;
     };
     return { text: (t) => this.unmask(t, held), pattern: (p) => this.unmaskPattern(p, held) };
-  }
-
-  /** The stand-ins of every value. */
-  standIns(): string[] {
-    return this.longest.map((v) => this.standIn(v));
   }
 
   /** A value of signs alone keeps its shape, so `fake` leaves it as it is. An encoded form's stand-in is its value's

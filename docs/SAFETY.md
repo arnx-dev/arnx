@@ -31,13 +31,17 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   in the comment), and setup names the file and its lines. Everything else that may be a secret reaches a model as a
   stand-in, a fake of the same shape (its prefix such as `sk-`, `whsec_` or `AKIA` kept, then the same length and kinds
   of characters, hex staying hex), in every request, whatever it holds: a file read, a search, a test's output. The same
-  goes for its JSON and URL forms, its upper and lower case, its hex and its base64, also inside the base64 of a longer
-  text (`Basic base64(user:value)`), and for what arnx writes or prints for you and your coding agent: `review.md`,
-  `review.json`, `round.json`, `fix-prompt.md`, and the output of `arnx prompt`, `arnx check` and `arnx check --review`.
-  These say so, and name the test's file and line, which hold the real code. **No filter is complete:** tests run on the
-  real guesses (below), and a test can turn a value into something no filter recognises, by reversing it, adding spaces,
-  hashing it or joining it with other text before encoding it in another way. A cut of a value under 12 characters
-  passes too, as does a value written with escapes in the source (`"ab\x55c"`), which nothing reads as that value.
+  goes for its JSON and URL forms, its upper and lower case, its hex (a dump's hex column too) and its base64, also inside
+  the base64 of a longer text (`Basic base64(user:value)`), and for what arnx writes or prints for you and your coding agent:
+  `review.md`, `review.json`, `round.json`, `fix-prompt.md`, and the output of `arnx prompt`, `arnx check` and
+  `arnx check --review`. These say so, and name the test's file and line, which hold the real code.
+  **No filter is complete.** arnx hides a value and its common encodings; a test or a command that prints a cut or
+  transformed form can get past it, and tests run on the real guesses (below). A cut goes only where it keeps the value's start
+  or end up to a word's edge, from 12 characters: `cut -c3-30`, a start cut running into a letter and `fold -w16` show the rest
+  raw. In a lower-case hex dump (`xxd`, `od -tx1`) a long value can show a middle line, `hexdump -C`'s gap can leave the middle
+  of one line, and the text column shows pieces. Nothing recognises a value reversed (`rev`), in rot13, base32, wrapped base64
+  (`base64 -w8`), an upper-case dump (`xxd -u`), `od -c`, `%XX` of every byte, `list()`, compressed or hashed, nor one written
+  with escapes in the source (`"ab\x55c"`).
   Local files arnx writes for itself keep what they saw: `change.diff` and image build logs, neither of which `arnx init`'s
   `.arnx/.gitignore` lets git take. What a commit of `.arnx/` takes (`review.yaml`, `baseline.json`, accepted tests) holds
   stand-ins, apart from a value you wrote into `review.yaml` yourself.
@@ -69,10 +73,13 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   `review.yaml` when they run, inside the run's network. `review.yaml` itself keeps the stand-in, and `install` is never
   swapped, since a build has network. Whatever a run prints then goes out through the filter again. A key-shaped value's
   stand-in stays, as it is what the code holds. A project whose tests run on an install's copy stays among stand-ins, as that
-  copy does: nothing is swapped for its runs, so a test there that reads `/src` and compares with a stand-in fails.
+  copy does: nothing is swapped for its runs, so a test there that reads a project file by any path, `/src` or relative, and
+  compares with a stand-in fails.
   Only a plain stand-in comes back. One a model encoded, re-cased or cut itself stays as written, and a test holding it fails
-  on the real value; a test that encodes a plain stand-in when it runs is fine. A stand-in a real file holds by chance stays
-  as written everywhere, since there it means itself.
+  on the real value; a test that encodes a plain stand-in when it runs is fine. A stand-in a real file holds, by chance or
+  because a coding agent copied it into tracked code, stays as written everywhere, since there it means itself.
+  While a run lasts, a test holding a real guess sits on disk in the temporary snapshot, and real values appear in
+  `docker run -e` and `sh -c` arguments, which `ps` on this machine shows.
   `[review] stand_ins = false` in `.arnx/config.toml` turns stand-ins off in both copies: files with key-shaped text in code
   are left out, and requests still hold stand-ins for the other values.
   A review's diff blanks comment lines the same
