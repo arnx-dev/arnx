@@ -6,7 +6,7 @@ import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { ArnxError, ModelError, SetupRequired } from "../src/errors";
 import { closeOpen, closers } from "../src/interrupt";
 import { LocalBrain } from "../src/localbrain";
-import { exitCode, render, summary } from "../src/report";
+import { exitCode, incomplete, render, summary } from "../src/report";
 import { newReviewId, runReview } from "../src/reviewer";
 import { defaultSettings, type Settings } from "../src/settings";
 import { PRICES, type Reply } from "../src/llm";
@@ -70,7 +70,10 @@ test("test_hanging_tests_make_the_review_incomplete", async () => {
   const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent(), challenger: new FakeJson([]),
     sessionFactory: hang });
   expect(review.findings).toEqual([]);
-  expect(review.missingRuns).toBe(3);
+  expect(review.missingRuns).toBe(0);
+  expect(review.projectStats[0]!.hungFiles).toEqual([GEN]);
+  expect(incomplete(review)).toBe(true);
+  expect(summary(review, "review.md")).toContain("did not finish");
   expect(exitCode(review)).toBe(2);
 });
 

@@ -666,7 +666,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       const tests = c.findings.length + c.flaky.length + c.errors.length + c.passed.length;
       projectStats.push({ name: cfg.name, tests, passed: c.passed.length, missingRuns: c.missingRuns,
         testFiles: Object.keys(rnd.files).filter((p) => adapterFor(cfg).isTestFile(posix.basename(p))).length,
-        sawResults: rnd.sawResults, stop: rnd.agent.stop,
+        ...(rnd.hungFiles?.length ? { hungFiles: rnd.hungFiles } : {}), sawResults: rnd.sawResults, stop: rnd.agent.stop,
         // A round with no report and no test that ran is not a finished one (tests that ran speak for themselves).
         ...(tests === 0 && !hasReport([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]) ? { noReport: true } : {}) });
       agentCost += rnd.agent.costUsd;

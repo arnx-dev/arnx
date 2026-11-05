@@ -92,8 +92,8 @@ fields are in `skills/arnx/references/json.md` and `check-json.md`; `tests/json-
           agentRound       localbrain.ts the brain's round starts with its tools (with --hunt, the tool-less hunters
                                          too); after each final reply, the facts
           runAgent         agent.ts      the model reads, writes tests, runs them (tools only, no shell)
-        runTests x3        outcomes.ts   the adapter's command and report -> passed / failed / error, per run;
-                                         after a run times out the rest are skipped (no report)
+        runBounded x3      outcomes.ts   the adapter's command and report -> passed / failed / error, per run;
+                                         files that time out together (300 s) run apart (180 s each, 600 s in all)
         classify           outcomes.ts   failed in all 3 runs = finding; anything else never is
         beforeStage        testround.ts  findings' files x3 on a snapshot of the change's base, same image
           judgeBefore      before.ts     regression / pre-existing / new-code / changed / unknown, per finding
@@ -144,7 +144,7 @@ uncommitted work); a first commit has none and its findings are `unknown` ("not 
 commits yet (change kind `no-commits`: every file a working-tree snapshot holds, diffed against the empty tree). The
 snapshot of the base gets the round's generated files exactly as they ran and nothing else from the change; only the
 files with findings run, `runs` times, each with the final runs' timeout, in the change's image (`SessionFactory`'s
-`envFrom`); as in the final runs, after a run times out the others are skipped (runs without a report), here and in
+`envFrom`); as in the final runs (`runBounded`), once files have run apart they go file by file, here and in
 the fix proof's runs. A same failure is the same first line of the message (addresses evened out); when the change also alters
 what keys the image (its dependencies), a same failure proves nothing and is `unknown`. A check that cannot run (no
 base, out of time, an error, an image holding a copy of the code that differs from the base: `baked.ts`) never stops
@@ -272,12 +272,16 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   suspects, where a listed suspect went (`hunt.merged` has `duplicate`).
 - `test.files`, `test.run`, `test.run_missing`, `test.classified` (`testround.ts`): generated files, each result of each
   repeat (`func`; `run_seconds` for runs that were not carried), the class of each test; a run without a report says
-  `timed_out`, `exit_code` and `seconds`. After a final run times out the others are not run (a hanging test would
-  hang again): each says `skipped` and counts as a run without a report.
+  `timed_out`, `exit_code` and `seconds`. Final runs go through `runBounded`: all files together within 300 s; when
+  that times out, each file alone within 180 s (600 s for the whole repeat), the reports merged, and the later repeats
+  and the before check go file by file. A file that does not finish alone is one `error` result ("did not finish in
+  180 s; its tests have no result"; never a finding), is not run again, and is listed in `project_stats[].hung_files`;
+  the review is incomplete. The output is saved as `final-N.log`, masked. pytest runs with
+  `-o faulthandler_timeout=60`, which names a stuck test in the log without killing it.
 - `test.written` (`reviewer.ts`): which suspect a test was written for; `func` is the test function name, the key
   `test.run` and `test.classified` share.
 - `before.started`, `before.run`, `before.done` (`testround.ts`): the before/after check of one project: findings and
-  files; each run's `duration_ms`, whether it `reported` and `timed_out` (`skipped` after a run timed out); the whole
+  files; each run's `duration_ms`, whether it `reported` and `timed_out`; the whole
   check's `duration_ms`, `snapshot_ms`, `runs_ms`, `counts` by status, and `skipped_reason` (`no-base`, `time`,
   `error`) when it did not run.
 - `before.finding` (`reviewer.ts`): each finding's status on the code before the change, with `detail` (`resumed`

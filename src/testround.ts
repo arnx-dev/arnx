@@ -21,7 +21,7 @@ import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
 import { markUnproven } from "./diagnose";
 import { clip, emit, testMessage } from "./events";
-import { type Classified, classify, describeRun, funcOf, ownerFile, runTests, type TestResult } from "./outcomes";
+import { type Classified, classify, describeRun, funcOf, ownerFile, runBounded, runTests, type TestResult } from "./outcomes";
 import { buildContextOf, DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
   type SessionFactory } from "./sandbox";
 import type { Say } from "./progress";
@@ -32,6 +32,8 @@ import { projectSource, shallowKind } from "./shallow";
 
 export const TOOL_TIMEOUT = 300;
 export const RUN_TIMEOUT = 600;
+/** One repeat of a round's files: together first, then apart (outcomes.ts runBounded). */
+export const RUN_BOUNDS = { together: 300, file: 180, total: RUN_TIMEOUT };
 
 export interface Round {
   /** Something in it was masked (boundary.ts). */
@@ -44,6 +46,8 @@ export interface Round {
   leftOut?: Withheld[];
   /** Files the snapshot holds with a fake for their private key. */
   fakedKeys?: string[];
+  /** Test files that did not finish alone within their time (each is one error, never a finding). */
+  hungFiles?: string[];
   /** True when a run_tests call showed the agent results from its own files (or it wrote no tests). */
   sawResults: boolean;
   /** Changed files with SQL that no generated test ran against the project's database (absent without one). */
@@ -312,6 +316,10 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   let leftOut: Withheld[] = [], fakedKeys: string[] = [];
   let saw = false, dbLeft: string[] | undefined, before: BeforeCheck | undefined, headKey = "";
   let hunt: RoundHunt | undefined;
+  // Once a round's files have run apart, every later run goes file by file; a file that did not finish alone is not
+  // run again.
+  let apart = false;
+  const hungSet = new Set<string>();
   let fixProof: FixCheck | undefined;
   let baked = false;
   let checked: TypeCheckRun | undefined, typecheck: TypeCheck | undefined;
@@ -430,8 +438,14 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
             : target;
           say(failing ? `final run ${i + 1}/${o.runs} (${files.length} file${files.length === 1 ? "" : "s"} with failures)`
             : `final run ${i + 1}/${o.runs}`);
-          const [run, parsed] = await runTests(session, snap, cfg, files.length ? files : target, `final-${i + 1}.xml`,
-            RUN_TIMEOUT);
+          const bounded = await runBounded(session, snap, cfg, files.length ? files : target, `final-${i + 1}.xml`,
+            { ...RUN_BOUNDS, apart, hung: [...hungSet] });
+          const [run, parsed] = [bounded.run, bounded.results];
+          apart = bounded.apart;
+          bounded.hung.forEach((h) => hungSet.add(h));
+          if (bounded.hung.length) say(`${bounded.hung.length === 1 ? "a test file" : `${bounded.hung.length} test files`} did not finish`);
+          // Masked before it is saved, as the probe's log is.
+          if (run.output) writeFileSync(join(o.outDir, `final-${i + 1}.log`), filter ? filter.mask(run.output) : run.output);
           const got = ours(parsed), secs = Math.round(run.seconds * 10) / 10;
           if (!got || !failing || !first) {
             r.push(got);
@@ -444,17 +458,6 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
             r.push([...kept, ...got]);
             ran(i + 1, kept, true);
             ran(i + 1, got, false, secs);
-          }
-          // A test that hangs would hang again: the other runs are skipped, each a run without a report, as if it
-          // had timed out there too.
-          if (run.timedOut && i + 1 < o.runs) {
-            say(`final run ${i + 1}/${o.runs} timed out; the other runs skipped`);
-            for (let j = i + 2; j <= o.runs; j++) {
-              r.push(null);
-              emit("test.run_missing", { project: cfg.name, repeat: j, timed_out: false, exit_code: null, seconds: 0,
-                skipped: true });
-            }
-            break;
           }
         }
         if (o.typecheck && cfg.typecheck) checked = await typecheckHere(session, snap, cfg, o.writeDir, say);
@@ -470,7 +473,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
       .sort((a, b) => (a.testId < b.testId ? -1 : a.testId > b.testId ? 1 : 0)).slice(0, o.before.fixProofMax) : [];
     if (o.before && (failing.length || proofs.length)) {
       ({ before, fixProof } = await beforeStage(repo, cfg, { ...o.before, findings: failing, proofs, files,
-        writeDir: o.writeDir, runs: o.runs, headSnap: snap, headKey, tmp, outDir: o.outDir,
+        writeDir: o.writeDir, runs: o.runs, apart, headSnap: snap, headKey, tmp, outDir: o.outDir,
         sessionFactory: o.sessionFactory ?? dockerSession, say, ...(baked ? {} : { swap }),
         ...(o.brain.boundary ? { boundary: o.brain.boundary } : {}) }));
     }
@@ -497,8 +500,9 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         message: testMessage(t.message) });
     }
   }
+  const hungFiles = [...hungSet].sort();
   const round: Round = { agent, files, classified, removed, ...(leftOut.length ? { leftOut } : {}),
-    ...(fakedKeys.length ? { fakedKeys } : {}), sawResults: saw || !hasTests,
+    ...(fakedKeys.length ? { fakedKeys } : {}), ...(hungFiles.length ? { hungFiles } : {}), sawResults: saw || !hasTests,
     ...(dbLeft ? { dbUntested: dbLeft } : {}), ...(before ? { before } : {}), ...(fixProof ? { fixProof } : {}),
     ...(typecheck ? { typecheck } : {}) };
   // All a round says from here on is saved and read by people and coding agents, none of it through a model's filter.
@@ -619,7 +623,7 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
 async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | null; diff?: string; deadline?: number;
   findings: TestResult[]; proofs: TestResult[]; files: Record<string, string>; writeDir: string; runs: number;
   headSnap: string; headKey: string; tmp: string;
-  outDir: string; sessionFactory: SessionFactory; say: (m: string) => void; boundary?: Boundary; swap?: Swap })
+  apart?: boolean; outDir: string; sessionFactory: SessionFactory; say: (m: string) => void; boundary?: Boundary; swap?: Swap })
   : Promise<{ before?: BeforeCheck; fixProof?: FixCheck }> {
   const started = performance.now();
   const ms = (from: number) => Math.round(performance.now() - from);
@@ -703,24 +707,20 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
       envChanged = !inImage && envKey(cfg, snap) !== o.headKey;
       snapshotMs = ms(t0);
       const out: BeforeRun[] = [];
-      // As in the final runs, a test that hangs would hang again: after a run times out the others are skipped, each
-      // a run without a report.
-      const skipRest = (runs: BeforeRun[], i: number, type: "before.run" | "fix_proof.run", files: number) => {
-        o.say(`before the change: run ${i}/${o.runs}${type === "fix_proof.run" ? " of the passing tests" : ""} ` +
-          "timed out; the other runs skipped");
-        for (let j = i + 1; j <= o.runs; j++) {
-          runs.push({ results: null, output: "skipped: an earlier run timed out", timedOut: false });
-          emit(type, { project: cfg.name, run: j, files, duration_ms: 0, reported: false, timed_out: false,
-            skipped: true });
-        }
-      };
+      // Files go one at a time once the round's did; a file that hangs alone is not run again.
+      let apartNow = !!o.apart;
+      const hungBefore = new Set<string>(), hungProof = new Set<string>();
       for (let i = 1; ids.length && i <= o.runs; i++) {
         if (o.deadline !== undefined && performance.now() >= o.deadline) {
           late = true;
           break;
         }
         const t = performance.now();
-        const [run, parsed] = await runTests(session, snap, cfg, targets, `before-${i}.xml`, RUN_TIMEOUT);
+        const bounded = await runBounded(session, snap, cfg, targets, `before-${i}.xml`,
+          { ...RUN_BOUNDS, apart: apartNow, hung: [...hungBefore] });
+        const [run, parsed] = [bounded.run, bounded.results];
+        apartNow = bounded.apart;
+        bounded.hung.forEach((h) => hungBefore.add(h));
         const took = ms(t);
         runsMs += took;
         // As in the final runs, only the generated tests count.
@@ -728,10 +728,6 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
         out.push({ results: ours.length ? ours : null, output: run.output, timedOut: run.timedOut });
         emit("before.run", { project: cfg.name, run: i, files: targets.length, duration_ms: took,
           reported: ours.length > 0, timed_out: run.timedOut });
-        if (run.timedOut && i < o.runs) {
-          skipRest(out, i, "before.run", targets.length);
-          break;
-        }
       }
       for (let i = 1; !late && proofTargets.length && i <= o.runs; i++) {
         if (o.deadline !== undefined && performance.now() >= o.deadline) {
@@ -739,17 +735,17 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
           break;
         }
         const t = performance.now();
-        const [run, parsed] = await runTests(session, snap, cfg, proofTargets, `fix-proof-${i}.xml`, RUN_TIMEOUT);
+        const bounded = await runBounded(session, snap, cfg, proofTargets, `fix-proof-${i}.xml`,
+          { ...RUN_BOUNDS, apart: apartNow, hung: [...hungProof] });
+        const [run, parsed] = [bounded.run, bounded.results];
+        apartNow = bounded.apart;
+        bounded.hung.forEach((h) => hungProof.add(h));
         const took = ms(t);
         proofMs += took;
         const ours = parsed?.filter((x) => ownerFile(x.fileAttr, own) !== null) ?? [];
         proofRuns.push({ results: ours.length ? ours : null, output: run.output, timedOut: run.timedOut });
         emit("fix_proof.run", { project: cfg.name, run: i, files: proofTargets.length, duration_ms: took,
           reported: ours.length > 0, timed_out: run.timedOut });
-        if (run.timedOut && i < o.runs) {
-          skipRest(proofRuns, i, "fix_proof.run", proofTargets.length);
-          break;
-        }
       }
       return out;
     };

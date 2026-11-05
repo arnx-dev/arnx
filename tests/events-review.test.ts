@@ -352,11 +352,15 @@ test("a final run without a report is recorded as missing", async () => {
     .toBe(true);
 });
 
-test("a final run that timed out is recorded as missing with timed_out and no exit code", async () => {
+test("a final run in which a file does not finish is recorded as that file's error, and the file is not run again", async () => {
   const { es } = await twoFiles((n) => n === 2 ? null : junitXml([
     ["tests/arnx_generated/test_bad.py", "test_bad", "failed", "x"]]), 2);
-  expect(ofType(es, "test.run_missing").map((e) => [e.data.repeat, e.data.timed_out, e.data.exit_code, e.data.skipped]))
-    .toEqual([[2, true, null, undefined], [3, false, null, true]]); // the run after it is skipped
+  expect(ofType(es, "test.run_missing")).toHaveLength(0);
+  // the file is one error in the run it did not finish in, and in the next one, which does not run it
+  const bad = (n: number) => ofType(es, "test.run").filter((e) => e.data.repeat === n && String(e.data.file).endsWith("test_bad.py"))
+    .map((e) => [e.data.outcome, e.data.carried]);
+  expect(bad(2)).toEqual([["error", false]]);
+  expect(bad(3)).toEqual([["error", false]]);
 });
 
 test("a test message that looks like a secret is withheld from test.run and test.classified", async () => {

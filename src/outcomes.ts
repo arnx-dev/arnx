@@ -124,3 +124,72 @@ function reportElsewhere(said: string | null | undefined, snap: string): string 
   if (!said?.startsWith("/src/") || said.split("/").includes("..")) return null;
   return join(snap, said.slice("/src/".length));
 }
+
+export interface Bounds {
+  /** Seconds for all the files in one run, for each file alone, and for the whole repeat. */
+  together: number;
+  file: number;
+  total: number;
+  /** Set when an earlier repeat already ran the files apart: they go file by file from the start. */
+  apart?: boolean;
+  /** Files that did not finish alone in an earlier repeat: not run again, each still one error. */
+  hung?: string[];
+}
+
+const hungError = (file: string, message: string): TestResult =>
+  ({ testId: file, fileAttr: file, name: file, outcome: "error", message });
+
+/** One repeat of the targets within `bounds.total` seconds. They run together first, so the usual case costs nothing.
+ * When that times out they run apart, each within `bounds.file` and what is left of the total, and the reports are
+ * merged; a file that does not finish alone is one error (never a finding) and is listed in `hung`. Runs are one at
+ * a time. The output is as the runs gave it: the caller masks it before it is cut or saved. */
+export async function runBounded(session: Runner, snap: string, cfg: ReviewConfig, targets: string[], report: string,
+                                 bounds: Bounds): Promise<{ results: TestResult[] | null; run: RunResult; hung: string[]; apart: boolean }> {
+  const priorHung = (bounds.hung ?? []).filter((h) => targets.includes(h));
+  const live = targets.filter((t) => !priorHung.includes(t));
+  const carried = priorHung.map((h) => hungError(h, `did not finish in ${bounds.file} s; its tests have no result`));
+  if (!bounds.apart && !priorHung.length) {
+    const [run, results] = await runTests(session, snap, cfg, targets, report, targets.length > 1 ? bounds.together : bounds.total);
+    if (!run.timedOut) return { results, run, hung: [], apart: false };
+    if (targets.length === 1) {
+      const limit = bounds.total;
+      return { results: [hungError(targets[0]!, `did not finish in ${limit} s; its tests have no result`)], run: { ...run, timedOut: false },
+        hung: [targets[0]!], apart: false };
+    }
+    return await apartRuns(session, snap, cfg, targets, report, bounds, run.seconds, run.output, []);
+  }
+  return await apartRuns(session, snap, cfg, live, report, bounds, 0, "", carried, priorHung);
+}
+
+async function apartRuns(session: Runner, snap: string, cfg: ReviewConfig, targets: string[], report: string, bounds: Bounds,
+                         spent: number, output: string, carried: TestResult[], priorHung: string[] = [])
+  : Promise<{ results: TestResult[] | null; run: RunResult; hung: string[]; apart: boolean }> {
+  // A run that timed out used all it was given.
+  let used = spent;
+  const results: TestResult[] = [...carried], hung: string[] = [...priorHung];
+  const out = [output], started = spent;
+  let seconds = 0, seen = carried.length > 0;
+  for (const [k, target] of targets.entries()) {
+    const left = bounds.total - used;
+    if (left < 1) {
+      hung.push(target);
+      results.push(hungError(target, `was not run: the ${bounds.total} s for this run were used; its tests have no result`));
+      continue;
+    }
+    const limit = Math.min(bounds.file, Math.floor(left));
+    const [run, parsed] = await runTests(session, snap, cfg, [target], report.replace(/\.xml$/, `-${k + 1}.xml`), limit);
+    used += run.timedOut ? limit : run.seconds;
+    seconds += run.seconds;
+    out.push(`== ${target} ==\n${run.output}`);
+    if (run.timedOut) {
+      hung.push(target);
+      results.push(hungError(target, `did not finish in ${limit} s; its tests have no result`));
+    } else if (parsed) {
+      results.push(...parsed);
+      seen = true;
+    }
+  }
+  const run: RunResult = { exitCode: hung.length ? null : 0, output: out.filter(Boolean).join("\n"), timedOut: false,
+    seconds: seconds + started };
+  return { results: seen || hung.length ? results : null, run, hung, apart: true };
+}

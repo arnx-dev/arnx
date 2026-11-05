@@ -59,7 +59,10 @@ test("test_round_end_to_end_with_fakes", async () => {
   expect(r.agent.stop).toBe("end_turn");
   expect(Object.keys(r.files)).toEqual(["app/" + GEN]); // the stale file was cleared before the agent ran
   expect(existsSync(join(out, "tests", "app", GEN + COPY_SUFFIX)) && existsSync(join(out, "transcript.jsonl"))).toBe(true);
-  expect(r.classified.missingRuns).toBe(2); // one run timed out, the last was skipped after it
+  // the file did not finish in the second run: it is one error, and its tests have one result, so none is a finding
+  expect(r.classified.missingRuns).toBe(0);
+  expect(r.hungFiles).toEqual([GEN]); // as the runner is told it
+  expect(r.classified.errors.map((t) => t.fileAttr)).toEqual([GEN]);
   expect(r.classified.findings).toEqual([]);
   expect(r.classified.flaky.map((t) => t.name)).toEqual(["test_x"]);
   const commands = sessions[0]!.commands;
@@ -70,7 +73,7 @@ test("test_round_end_to_end_with_fakes", async () => {
 });
 
 // One hanging test made every final run wait the whole timeout: three runs, three times RUN_TIMEOUT.
-test("after a final run times out the other final runs are skipped, counted as runs without a report", async () => {
+test("after a file does not finish the other final runs do not run it again; it is one error in every run", async () => {
   const repo = gitRepo(tmp());
   const model = new ScriptedAgent([
     [tool("write_file", { path: "app/" + GEN, content: "def test_x(): pass\n" })],
@@ -85,11 +88,12 @@ test("after a final run times out the other final runs are skipped, counted as r
     writeDir: writeDirOf(CFG), budgetUsd: 1.0, runs: 3, outDir: join(tmp(), "o"), progress: (m) => said.push(m),
     sessionFactory: fakeFactory(hangs, sessions) }));
   expect(sessions[0]!.commands.filter((c) => c.includes("final-"))).toHaveLength(1);
-  expect([r.classified.missingRuns, r.classified.totalRuns]).toEqual([3, 3]); // as when all three timed out
-  expect(said).toContain("main: final run 1/3 timed out; the other runs skipped");
+  expect([r.classified.missingRuns, r.classified.totalRuns]).toEqual([0, 3]);
+  expect(r.classified.errors).toHaveLength(1);
+  expect(said).toContain("main: a test file did not finish");
   const missing = readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
     .filter((e) => e.type === "test.run_missing").map((e) => [e.data.repeat, e.data.timed_out, e.data.skipped]);
-  expect(missing).toEqual([[1, true, undefined], [2, false, true], [3, false, true]]);
+  expect(missing).toEqual([]);
 });
 
 test("test_round_without_tests_skips_runs", async () => {

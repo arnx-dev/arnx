@@ -213,7 +213,7 @@ export const python: Adapter = {
   reportSaid: (output) => [...output.matchAll(/generated xml file: (\S+)/g)].at(-1)?.[1] ?? null,
   command: (testCommand, targets, reportPath) =>
     testCommand.replaceAll("{targets}", targets.map(shQuote).join(" ")) +
-    " -p no:cacheprovider --continue-on-collection-errors -o junit_family=xunit1" +
+    " -p no:cacheprovider --continue-on-collection-errors -o junit_family=xunit1 -o faulthandler_timeout=60" +
     ` --junitxml=${shQuote(reportPath)}`,
   parseReport: (text) => parseJunit(text, (f) => f.endsWith(".py") ? f.slice(0, -3).replaceAll("/", ".") : ""),
   listCommand: (testCommand, targets) => testCommand.replaceAll("{targets}", targets.map(shQuote).join(" ")) +
