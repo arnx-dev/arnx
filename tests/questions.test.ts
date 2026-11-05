@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { ModelError } from "../src/errors";
 import { newUse } from "../src/llm";
 import { askedTask, mergeTask } from "../src/prompts";
-import { mergeBy, mergeQuestions } from "../src/questions";
+import { mergeBy, mergeQuestions, plainQuestion } from "../src/questions";
 import { questionTexts } from "../src/report";
 import { FakeJson } from "./helpers/fakes";
 
@@ -52,4 +52,15 @@ test("a follow-up lists the questions already asked and asks for new ones only",
   expect(note).toContain("list only questions you have not asked yet");
   expect(askedTask([])).toBe("");
   expect(mergeTask(QS)).toContain("one answer would settle both");
+});
+
+test("a question loses an opening disclaimer about what the model read", () => {
+  expect(plainQuestion("I have not read the changelog. We couldn't find the docs! Should the cursor come back?"))
+    .toBe("Should the cursor come back?");
+  expect(plainQuestion("Should we have not read it?")).toBe("Should we have not read it?");
+});
+
+test("a disclaimer with no question is dropped", () => {
+  expect(plainQuestion("I could not find the docs for this option.")).toBe("");
+  expect(plainQuestion("")).toBe("");
 });

@@ -24,6 +24,7 @@ import { LocalBrain } from "./localbrain";
 import { changeEditsPrompts, PROMPTS_EDITED, promptsFor } from "./userprompts";
 import { changeEditsAccepted } from "./check";
 import { funcOf, ownerFile, testKey } from "./outcomes";
+import { plainQuestion } from "./questions";
 import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, resumes, withCalls } from "./outage";
 import { CONTEXT_LIMIT, contextPack } from "./context";
 import { elsewhereNote, leftOutNote, PROMPT_VERSION, type Suspect } from "./prompts";
@@ -625,7 +626,9 @@ export async function runReview(repo: string, o: { settings: Settings;
       if (h?.length) suspects.push(...suspectOutcomes(cfg.name, h, rnd, report, projectFindings));
       checked.push(...buildChecked(rnd, report, cfg.name));
       for (const q of report.questions) {
-        questions.push(isObject(q) && typeof q.question === "string" ? q.question : text(q));
+        const asked = plainQuestion(isObject(q) && typeof q.question === "string" ? q.question : text(q));
+        if (!asked) continue;
+        questions.push(asked);
         questionProjects.push(cfg.name);
         if (questions.length > s.maxQuestions) continue;
         // A test the question names, or one written for a suspect it names ("… (S9)"), assumes one answer: it waits
