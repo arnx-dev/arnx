@@ -1,7 +1,7 @@
 // Docker end to end: real sandbox and Postgres, scripted models. Run with ARNX_DOCKER_TESTS=1.
 import { describe, expect, test } from "bun:test";
 import { blankMarks } from "./helpers/review";
-import { appendFileSync, cpSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
 import { basename, dirname, join } from "node:path";
 import { accept } from "../src/accept";
@@ -18,7 +18,7 @@ import { EVENTS_FILE } from "../src/events";
 import { exitCode } from "../src/report";
 import { runReview } from "../src/reviewer";
 import { defaultSettings } from "../src/settings";
-import { approveConfig, runSetup } from "../src/setup";
+import { approveConfig, approveFile, rerecordBaseline, runSetup } from "../src/setup";
 import { FakeJson, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
 import { useTmp } from "./helpers/tmp";
@@ -352,6 +352,9 @@ def test_hex():
     writeFileSync(join(repo, "shop/__init__.py"), "");
     writeFileSync(join(repo, "shop/settings.py"), `API_TOKEN = "${TOKEN}"\ndb_password = "${GUESS}"\n`);
     writeFileSync(join(repo, "shop/price.py"), "def price(a):\n    return a\n");
+    // The project's own test fails quoting the value, in its id and its message.
+    writeFileSync(join(repo, "tests/test_own.py"), `import pytest\nfrom shop import settings\n\n` +
+      `@pytest.mark.parametrize("v", [settings.db_password])\ndef test_own(v):\n    assert v == "x"\n\ndef test_fine():\n    pass\n`);
     writeFileSync(join(repo, ".gitignore"), "__pycache__\n.arnx/run\n");
     mkdirSync(dirname(reviewConfigPath(repo)));
     const yaml = "version: 1\nimage: python:3.12-slim\ninstall: [pip install pytest]\n" +
@@ -393,6 +396,17 @@ def test_hex():
     const again = await recheckReview(repo, rdir, settings);
     expect(again.findings.length).toBe(CANARY_NAMES.length);
     expectNoForm("arnx check --review", recheckJson(again) + recheckSummary(again)[0]);
+    // What setup records from the project's own failing test, which a commit of .arnx/ takes.
+    const [baselineSaved] = await rerecordBaseline(repo, { by: "Dev", at: "2026-11-04" });
+    expect(baselineSaved).toBe(true);
+    const baseline = readFileSync(join(repo, ".arnx/baseline.json"), "utf8");
+    expect(baseline).toContain("test_own[");
+    expectNoForm("the baseline", baseline);
+    const [proven] = await approveFile(repo, { by: "Dev", at: "2026-11-04" });
+    expect(proven).toBe(true);
+    for (const f of readdirSync(join(repo, ".arnx"), { recursive: true }) as string[]) {
+      if (statSync(join(repo, ".arnx", f)).isFile()) expectNoForm(f, readFileSync(join(repo, ".arnx", f), "utf8"));
+    }
   }, 600_000);
 
   // --- a model's stand-in, in a real test run ---------------------------------------------------------------------------

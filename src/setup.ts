@@ -271,6 +271,9 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     return output.slice(-OUTPUT_TAIL);
   };
   const said = (t: string) => boundary ? boundary.mask(t) : t;
+  // From a run on, what a test says is the stand-in's, ids too: the baseline is committed, and is compared with these.
+  const kept = (results: TestResult[] | null) => boundary && results ? results.map((t) =>
+    ({ ...t, testId: boundary.mask(t.testId), name: boundary.mask(t.name), message: boundary.mask(t.message) })) : results;
   const [ok, summary, tail, skips, failing, hints, counts] = await sessionFactory(cfg, snap, buildLog, async (session) => {
     type Out = [boolean, string, string, string[], string[], string, SuiteCounts];
     // A project with no tests of its own has nothing to list: its run below is quick.
@@ -295,13 +298,14 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
       mkdirSync(dirname(c.path), { recursive: true });
       writeFileSync(c.path, c.source);
     }
-    let result, all;
+    let result, ran;
     try {
-      [result, all] = sample ? [sample.run, sample.results]
+      [result, ran] = sample ? [sample.run, sample.results]
         : runTests(session, snap, cfg, targets, "suite.xml", SUITE_TIMEOUT);
     } finally {
       for (const c of canary) rmSync(c.path, { force: true });
     }
+    const all = kept(ran);
     if ((all ?? []).some((t) => [t.fileAttr, t.testId].some((x) => x && /(?:^|\/)\.arnx\//.test(x)))) {
       return [false, "the project's test run collects files under .arnx/ (a test arnx placed in .arnx/tests/ ran). " +
         "arnx keeps its accepted tests there so your own run never runs them: make the runner leave .arnx/ out " +
@@ -322,7 +326,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     if (again.length && !again.includes("") && again.length <= APART_MAX) {
       const passed = new Set<string>();
       const [, second] = runTests(session, snap, cfg, again, "again.xml", SUITE_TIMEOUT);
-      for (const t of second ?? []) if (t.outcome === "passed") passed.add(testKey(t.testId));
+      for (const t of kept(second) ?? []) if (t.outcome === "passed") passed.add(testKey(t.testId));
       const most = counts.unexpected.length > counts.passed;
       const flaky = counts.unexpected.filter((id) => passed.has(testKey(id)) || (passedBefore && !most));
       if (flaky.length) {
@@ -1481,7 +1485,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       state.runs.set(name, { name, digest: ranWith, env, snapshot: withSandbox(code, sandbox), untracked, summary,
         skips, counts, after: summary.startsWith(counted) ? summary.slice(counted.length) : "" });
       state.proofs.set(name, { name, summary, skips,
-        failed: counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined)),
+        failed: counts.failed.map((t) => boundary.maskValue(entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined))),
         ...(gap ? { gap: gap.line } : {}) });
       // A TypeScript project that can be type checked and has no typecheck yet: say so while the agent is here.
       const typed = cfg.language === "typescript" && !cfg.typecheck && typeCheckable(readSnap, cfg.workdir)
@@ -1933,7 +1937,7 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
       if (ok) summaries.push(f.legacy ? summary : `${cfg.name}: ${summary}`);
       const left = new Set(counts.left);
       const joined = prior ? counts.failed.filter((t) => counts.flaky.includes(t.testId))
-        .map((t) => ({ ...entryOf(t), flaky: true as const })) : [];
+        .map((t) => ({ ...boundary.maskValue(entryOf(t)), flaky: true as const })) : [];
       next.set(cfg.name, [...mine.filter((b) => !left.has(b.id)), ...joined]);
     }
     const failed = suites.filter((s) => !s.ok);
@@ -2008,7 +2012,7 @@ export async function rerecordBaseline(repo: string, o: { by: string; at: string
         summary = `${summary}; most of the suite fails (${counts.failed.length} failing, ${counts.passed} passing), ` +
           "which points to the environment, not the code: fix it, then record again";
       }
-      const tests = counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined));
+      const tests = counts.failed.map((t) => boundary.maskValue(entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined)));
       const failingIds = new Set(tests.map((t) => t.id));
       const guarded = cfg.knownFailing.length ? counts.all.filter((t) => t.outcome === "passed" && !failingIds.has(t.testId) &&
         cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))).length : 0;

@@ -38,8 +38,9 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   real guesses (below), and a test can turn a value into something no filter recognises, by reversing it, adding spaces,
   hashing it or joining it with other text before encoding it in another way. A cut of a value under 12 characters
   passes too, as does a value written with escapes in the source (`"ab\x55c"`), which nothing reads as that value.
-  Local files arnx writes for itself keep what they saw: `change.diff`, image build logs, and a project's own test ids in
-  `.arnx/baseline.json`.
+  Local files arnx writes for itself keep what they saw: `change.diff` and image build logs, neither of which `arnx init`'s
+  `.arnx/.gitignore` lets git take. What a commit of `.arnx/` takes (`review.yaml`, `baseline.json`, accepted tests) holds
+  stand-ins, apart from a value you wrote into `review.yaml` yourself.
   What the tests run depends on how sure arnx is. Key-shaped text and a password in an address get the stand-in in the
   snapshot too, wherever they appear, so no file keeps them and every file gets the same fake; the tests run with the
   fake, and one that checks a signature made with the real value (a signed license key) fails. A guess stays as it is

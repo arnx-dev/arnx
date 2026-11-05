@@ -12,6 +12,7 @@ import { ArnxError } from "../src/errors";
 import { parseReviewConfig, reviewConfigPath, stamp, stampFile, parseReviewFile } from "../src/config";
 import type { AgentModel, Block, JsonModel, Reply } from "../src/llm";
 import { recheckReview } from "../src/recheck";
+import { BASELINE_FILE } from "../src/baseline";
 import { runReview } from "../src/reviewer";
 import { DEFAULT_LIMITS, dockerfile, dockerSteps, type ExecFactory, type Runner, sandboxOptions, Session,
   type SessionFactory } from "../src/sandbox";
@@ -20,7 +21,8 @@ import { defaultSettings, type Settings, writeSettings } from "../src/settings";
 import { approveFile, runSetup } from "../src/setup";
 import { SetupExec } from "../src/setupexec";
 import { dockerSession, testRound, typecheckRound } from "../src/testround";
-import { FakeSession, text, tool } from "./helpers/fakes";
+import { Cli } from "./helpers/cli";
+import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
@@ -821,4 +823,85 @@ test("when the image is gone the failing tests are not checked before the change
   expect(review.findings[0]!.before).toMatchObject({ status: "unknown" });
   expect(review.findings[0]!.before!.detail).toContain("not checked");
   expect(review.findings[0]!.before!.detail).toContain("its test image is gone");
+});
+
+// --- what setup records from a project's own tests ------------------------------------------------------------------------
+
+const QUOTING: [string, string, string, string][] = [["tests/test_a.py", "test_a", "passed", ""],
+  ["tests/test_a.py", "test_d", "passed", ""], ["tests/test_a.py", "test_e", "passed", ""],
+  ["tests/test_a.py", `test_b[${GUESS}]`, "failed", `assert "${GUESS}" == "x"`],
+  ["tests/test_a.py", "test_c", "failed", `Error: password ${GUESS} refused`]];
+const quotingSuite = () => runningFactory(() => [junitXml(QUOTING), `E  ${GUESS}\n`, false]);
+const ENV = { ANTHROPIC_API_KEY: "a" };
+
+/** Every file under .arnx, the ones git would commit named. */
+function committable(repo: string): string[] {
+  const all = allUnder(join(repo, ".arnx")).map(([p]) => `.arnx/${p}`);
+  const ignored = spawnSync("git", ["-C", repo, "check-ignore", "--stdin"], { input: all.join("\n"), encoding: "utf8" }).stdout;
+  return all.filter((p) => !ignored.split("\n").includes(p));
+}
+
+function expectBaselineClean(repo: string): void {
+  const text = readFileSync(join(repo, BASELINE_FILE), "utf8");
+  expect(text).toContain(`test_b[${SHOWN}]`);
+  expect(text).toContain(`assert \\"${SHOWN}\\"`);
+  expect(text).toContain(`password ${SHOWN} refused`);
+  for (const [p, t] of allUnder(join(repo, ".arnx"))) expectNoReal(p, t);
+}
+
+test("setup --baseline records no real value, and the next proof matches a run's real id to it", async () => {
+  const repo = setupRepo();
+  write(repo, { ".arnx/review.yaml": APP() });
+  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: quotingSuite() });
+  expect(await cli.run("setup", "--baseline")).toBe(0);
+  expectBaselineClean(repo);
+  expect(committable(repo)).toContain(BASELINE_FILE);
+  expectNoReal("what it says", cli.stdout + cli.stderr);
+  // The same failures are the baseline's, not new ones: nothing is added, and a proof passes.
+  const again = new Cli({ cwd: repo, env: ENV, approveSessions: quotingSuite() });
+  expect(await again.run("setup", "--baseline", "--json")).toBe(0);
+  expect(JSON.parse(again.stdout)).toMatchObject({ result: "ok", changes: [] });
+  const [ok, said, suites] = await approveFile(repo, { by: "Dev", at: "2026-11-04", sessionFactory: quotingSuite() });
+  expect(ok).toBe(true);
+  expect(suites[0]!.baselineFailing).toBe(2);
+  expectNoReal("what the proof says", said);
+  expectBaselineClean(repo);
+});
+
+test("arnx setup records no real value from a suite's failures, under .arnx or in what it says", async () => {
+  const repo = setupRepo();
+  expect(await new Cli({ cwd: repo, env: ENV }).run("init")).toBe(0);
+  const yaml = APP();
+  const model = new ScriptedAgent([[tool("try_project", { yaml, project: "app" })], [tool("propose", { yaml })], [text("Done.")]]);
+  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: quotingSuite(), approveSessions: quotingSuite() });
+  expect(await cli.run("setup", "--yes")).toBe(0);
+  expectBaselineClean(repo);
+  expectNoReal("what it says", cli.stdout + cli.stderr);
+});
+
+test("canary: from setup to check, on a project whose own tests quote the value, no committable file holds it", async () => {
+  const repo = setupRepo();
+  expect(await new Cli({ cwd: repo, env: ENV }).run("init")).toBe(0);
+  const yaml = APP(`    tests_dir: tests/arnx_generated\n`);
+  const model = new ScriptedAgent([[tool("try_project", { yaml, project: "app" })], [tool("propose", { yaml })], [text("Done.")]]);
+  const cli = new Cli({ cwd: repo, env: ENV, setupModel: model, setupSessions: quotingSuite(), approveSessions: quotingSuite() });
+  expect(await cli.run("setup", "--yes")).toBe(0);
+  writeFileSync(join(repo, "app.py"), "x = 1\n");
+  commit(repo, "a change");
+  const agent = new Recording([[tool("write_file", { path: GEN, content: `x = "${SHOWN}"\n` }), tool("run_tests", {})]],
+    reportOf(["test_v"], ["test_v"]));
+  const quoting = runningFactory(() => [junitXml([[GEN, "test_v", "failed", `assert "${GUESS}" == 1`]]), `E  ${GUESS}\n`, false]);
+  const { rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: judge, sessionFactory: quoting });
+  const md = blankMarks(readFileSync(join(rdir, "review.md"), "utf8")).replaceAll("Mark: [ ] real", "Mark: [x] real");
+  writeFileSync(join(rdir, "review.md"), md);
+  await accept(repo, rdir, SETTINGS, { answerRunner: null });
+  await check(repo, SETTINGS, { sessionFactory: runningFactory((snap) => {
+    const [p] = placedTest(snap)!;
+    return [junitXml([[p, "test_v", "failed", `assert "${GUESS}" == 1`]]), `E  ${GUESS}\n`, false];
+  }) });
+  const kept = committable(repo);
+  // What a commit of .arnx/ takes.
+  for (const f of [BASELINE_FILE, ".arnx/review.yaml", ".arnx/.gitignore"]) expect(kept).toContain(f);
+  expect(kept.some((f) => f.startsWith(".arnx/tests/"))).toBe(true);
+  for (const [p, t] of allUnder(join(repo, ".arnx"))) expectNoReal(p, t);
 });

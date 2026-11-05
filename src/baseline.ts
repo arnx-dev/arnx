@@ -2,6 +2,7 @@
 // passes while every failing test is in it; a test that passes again leaves it at that proof. It grows only when
 // setup records it (`arnx setup`, `arnx setup --baseline`), never at a proof. It is committed next to review.yaml and
 // its hash is part of review.yaml's stamp, so a hand edit is proved again like an edit of review.yaml.
+// Being committed, it holds no value that looks like a secret: entries and the runs they are compared with are masked (setup.ts).
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
