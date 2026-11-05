@@ -352,8 +352,11 @@ of `DELAYS`, and says so in the progress line ("Anthropic overloaded (HTTP 503);
 streams cut after they started keep the usual attempts, because those may be billed; an error reply is not billed, so the
 budget is untouched. The role gives the schedule with `downDelays`: the full one for the reviewer, a challenger with no
 fallback and the fallback; [2, 8] for a challenger with a fallback; [2, 8, 30] for the hunters and the ranker. Once a
-provider has cost `OUTAGE_WAIT_MAX_SECONDS` (600 s) of waits in this process, its calls wait [2, 8] only. The call
-deadlines still apply. 220 s stays under the five-minute lifetime of Anthropic's prompt cache (jitter can reach 264 s).
+provider has cost `OUTAGE_WAIT_MAX_SECONDS` (600 s of wall clock; waits of parallel calls that overlap count once, and an
+answer from the provider clears the count) its calls wait [2, 8] only; a `retry-after` is honoured but not past what
+remains of that cap. A wait moves the call's deadline by its length, so waits never use up the call's own time; a call
+that really hangs still times out. 220 s stays under the five-minute lifetime of Anthropic's prompt cache (jitter can
+reach 264 s).
 
 ## Telemetry
 

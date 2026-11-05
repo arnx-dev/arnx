@@ -28,7 +28,10 @@ const tmp = useTmp();
 const KEY = "PRIVATE " + "KEY";
 const HDR = `-----BEGIN ${KEY}-----`, END = `-----END ${KEY}-----`;
 const SHOWN = "[private key]";
-const pem = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }) as string;
+// The key's last base64 character is made a digit: a last line with no digit, `+` or `/` reads as a name, which the sandbox
+// keeps and a view fakes (about 1 draw in 100), and no test here should hang on that.
+const pem = (generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }) as string)
+  .replace(/[A-Za-z0-9+/](=*\n-----END)/, "7$1");
 const lines = pem.split("\n").filter((l) => l && !l.startsWith("-----"));
 const der = lines.join("");
 const random = randomBytes(1200).toString("base64").match(/.{1,64}/g)!;
@@ -303,6 +306,16 @@ test("an uncommitted edit of a .pem holding a key is a change; of a .env it is n
 
 const pinned = (repo: string, path: string, text: string) => [{ path, matches: secretPins(text) }];
 
+/** A pattern that matches `text` as written: a random key line may start with `+` or hold `/`, which a regex reads as syntax. */
+const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+test("a key line searched for as a pattern is literal, whatever signs it holds", () => {
+  for (const line of ["+Ab3dE6gH9jK2mN5pQ8sT1vW4", "++a/b+c==", "(x)[y]{2}.*?^$|\\"]) {
+    expect(new RegExp(literal(line)).test(`before ${line} after`)).toBe(true);
+    expect(() => new RegExp(literal(line))).not.toThrow();
+  }
+});
+
 test("a pin: the sandbox holds the real key; the diff, a read and a search read as without one", async () => {
   const text = `KEY = """${pem}"""\nVERSION = 1\n`;
   const repo = project({ "keys.py": text });
@@ -320,7 +333,7 @@ test("a pin: the sandbox holds the real key; the diff, a read and a search read 
   const page = await tools.call("read_file", { path: "keys.py", start_line: 8 });
   clean("a page", page);
   expect(page).not.toContain(SHOWN);
-  clean("a search", await tools.call("grep", { pattern: lines[10]!, path: "." }));
+  clean("a search", await tools.call("grep", { pattern: literal(lines[10]!), path: "." }));
   clean("a search for anything", await tools.call("grep", { pattern: "[A-Z]", path: "keys.py" }));
   expect(await tools.call("grep", { pattern: "VERSION", path: "keys.py" })).toContain("VERSION = 1");
 });

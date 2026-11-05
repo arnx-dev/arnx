@@ -52,18 +52,29 @@ export const OUTAGE_DELAYS = [2, 8, 30, 60, 60, 60];
 /** Once a provider has had this many seconds of outage waits in this process, its calls wait [2, 8] only, and a
  * review that still finds it down ends with the resume advice. */
 export const OUTAGE_WAIT_MAX_SECONDS = 600;
-const outageWaited = new Map<string, number>();
+/** Per provider: the seconds of wall clock spent waiting out an outage (overlapping waits of parallel calls count once)
+ * and when the latest wait ends (ms on the clock). A call that gets an answer clears it. */
+const outageWaited = new Map<string, { seconds: number; until: number }>();
 /** For tests: forget the outage waits of every provider. */
 export function resetOutageWaits(): void { outageWaited.clear(); }
+const waitedSeconds = (provider: string) => outageWaited.get(provider)?.seconds ?? 0;
 /** The waits a call to `provider` follows now while the provider stays down: `delays`, or [2, 8] of them once the
  * provider has cost OUTAGE_WAIT_MAX_SECONDS. */
 function outageSchedule(provider: string, delays: number[]): number[] {
-  return (outageWaited.get(provider) ?? 0) >= OUTAGE_WAIT_MAX_SECONDS ? delays.slice(0, 2) : delays;
+  return waitedSeconds(provider) >= OUTAGE_WAIT_MAX_SECONDS ? delays.slice(0, 2) : delays;
 }
 /** `base` seconds with 20% jitter either way (`random` is in [0, 1)), to the tenth of a second. */
 const jittered = (base: number, random: () => number) => Math.round(base * (0.8 + 0.4 * random()) * 10) / 10;
-const chargeOutage = (provider: string, seconds: number) =>
-  void outageWaited.set(provider, (outageWaited.get(provider) ?? 0) + seconds);
+/** A provider-given wait (retry-after) is honoured, but not past what remains of the provider's cap. */
+const heldToCap = (provider: string, given: number) =>
+  Math.min(given, Math.max(0, OUTAGE_WAIT_MAX_SECONDS - waitedSeconds(provider)));
+/** A wait of `seconds` starting at `now` (ms): only the part no other wait already covers is counted. */
+function chargeOutage(provider: string, seconds: number, now: number): void {
+  const l = outageWaited.get(provider) ?? { seconds: 0, until: 0 }, end = now + seconds * 1000;
+  l.seconds += Math.max(0, end - Math.max(now, l.until)) / 1000;
+  l.until = Math.max(l.until, end);
+  outageWaited.set(provider, l);
+}
 /** The progress line of a wait for a provider that is down: who, what it answered, how long, which try is next. */
 function outageLine(provider: string, met: string, seconds: number, next: number, of: number): string {
   const status = /^HTTP (\d+)$/.exec(met)?.[1];
@@ -296,14 +307,16 @@ export class AnthropicAgent implements AgentModel {
   /** The waits while every attempt finds the provider down (OUTAGE_DELAYS unless the role gives fewer). */
   readonly downDelays: number[];
   private random: () => number;
+  private clock: () => number;
 
   constructor(readonly model: string, readonly effort: string, private apiKey: string, private client?: MessagesClient,
               opts: { idleSeconds?: number; firstEventSeconds?: number; totalSeconds?: number; attemptSeconds?: number;
                 timeoutAttempts?: number; fetch?: typeof fetch; sleep?: (seconds: number) => Promise<void>;
-                provider?: string; baseURL?: string; downDelays?: number[]; random?: () => number } = {}) {
+                provider?: string; baseURL?: string; downDelays?: number[]; random?: () => number; clock?: () => number } = {}) {
     this.provider = opts.provider ?? "anthropic";
     this.downDelays = opts.downDelays ?? OUTAGE_DELAYS;
     this.random = opts.random ?? Math.random;
+    this.clock = opts.clock ?? (() => performance.now());
     this.baseURL = opts.baseURL;
     this.timeoutAttempts = opts.timeoutAttempts ?? Infinity;
     this.fetch = opts.fetch ?? fetch;
@@ -318,7 +331,8 @@ export class AnthropicAgent implements AgentModel {
    * limit, is aborted and retried. `billed.unknown` counts attempts that streamed and were then cut off. */
   private async send(params: Record<string, unknown>, attempts: Attempt[], billed: { unknown: number }):
     Promise<Anthropic.Message> {
-    const deadline = performance.now() + this.total * 1000;
+    // An outage wait is not the call's time: the deadline moves by each wait taken.
+    let deadline = performance.now() + this.total * 1000;
     let timeouts = 0;
     // What each attempt met while every one found the provider down; null once one failed otherwise.
     let down: string[] | null = [];
@@ -385,6 +399,7 @@ export class AnthropicAgent implements AgentModel {
         const message = await stream.finalMessage() as Anthropic.Message;
         if (timeout) throw new Error("request timed out");
         record("ok");
+        outageWaited.delete(this.provider);
         return message;
       } catch (e) {
         // Not the SDK, its transport or our timeout: a bug in arnx, passed on as is (never retried).
@@ -411,10 +426,11 @@ export class AnthropicAgent implements AgentModel {
         // While every attempt found the provider down the outage schedule applies; otherwise today's three attempts.
         const schedule = down ? outageSchedule(this.provider, this.downDelays) : DELAYS.slice(0, ANTHROPIC_ATTEMPTS - 1);
         const base = schedule[attempt - 1];
+        const asked = e instanceof Anthropic.APIError ? retryAfter(e.headers) ?? 0 : 0;
         delay = Math.max(base === undefined ? 0 : down ? jittered(base, this.random) : base,
-          e instanceof Anthropic.APIError ? retryAfter(e.headers) ?? 0 : 0);
+          down ? heldToCap(this.provider, asked) : asked);
         const exhausted = timeout === "total" || timeouts >= this.timeoutAttempts ||
-          performance.now() + delay * 1000 >= deadline;
+          (!down && performance.now() + delay * 1000 >= deadline);
         if (!retryable || base === undefined || exhausted) {
           const err = new ModelError(`${this.model}: ${reason} (${attempt} attempts)`);
           err.timedOut = !!timeout || (retryable && exhausted);
@@ -424,7 +440,8 @@ export class AnthropicAgent implements AgentModel {
           throw err;
         }
         if (down) {
-          chargeOutage(this.provider, delay);
+          chargeOutage(this.provider, delay, this.clock());
+          deadline += delay * 1000;
           this.notice?.(outageLine(this.provider, down[down.length - 1]!, delay, attempt + 1, schedule.length + 1));
         } else {
           this.notice?.(`${this.model}: ${reason}; retrying (${attempt + 1}/${ANTHROPIC_ATTEMPTS}) in ${delay}s`);
@@ -544,6 +561,7 @@ export class ResponsesJson implements JsonModel {
   /** The waits while every attempt finds the provider down (OUTAGE_DELAYS unless the role gives fewer). */
   readonly downDelays: number[];
   private random: () => number;
+  private clock: () => number;
   private idle: number;
   private connect: number;
   private total: number;
@@ -566,10 +584,11 @@ export class ResponsesJson implements JsonModel {
               opts: { fetch?: typeof fetch; sleep?: (seconds: number) => Promise<void>; idleSeconds?: number;
                       connectSeconds?: number; totalSeconds?: number; attemptSeconds?: number;
                       timeoutAttempts?: number; tier?: string | null; store?: boolean; background?: boolean; pollSeconds?: number;
-                      graceSeconds?: number; downDelays?: number[]; random?: () => number } = {}) {
+                      graceSeconds?: number; downDelays?: number[]; random?: () => number; clock?: () => number } = {}) {
     this.ref = refString(ref);
     this.downDelays = opts.downDelays ?? OUTAGE_DELAYS;
     this.random = opts.random ?? Math.random;
+    this.clock = opts.clock ?? (() => performance.now());
     this.model = ref.model;
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.fetch = opts.fetch ?? fetch;
@@ -636,7 +655,8 @@ export class ResponsesJson implements JsonModel {
     let unknown = 0, attempt = 0, timeouts = 0;
     // What each attempt met while every one found the provider down; null once one failed otherwise.
     let down: string[] | null = [];
-    const deadline = performance.now() + this.total * 1000;
+    // An outage wait is not the call's time: the deadline moves by each wait taken.
+    let deadline = performance.now() + this.total * 1000;
     const failed = (e: ModelError) => {
       if (down?.length && down.length === attempt) e.fault = unavailable(down);
       return e;
@@ -660,6 +680,7 @@ export class ResponsesJson implements JsonModel {
         const broke = data.status === "failed" ? noCredits(providerOf(this.ref), JSON.stringify(data.error ?? "")) : null;
         if (broke) throw broke;
         traced("ok");
+        outageWaited.delete(providerOf(this.ref));
         return [data, unknown, attempt];
       } catch (e) {
         traced(e instanceof Error ? e.message : String(e));
@@ -682,10 +703,12 @@ export class ResponsesJson implements JsonModel {
           [err.timedOut, err.tries] = [e.timedOut, attempt];
           throw failed(err);
         }
-        delay = Math.max(down ? jittered(backoff, this.random) : backoff, e.retryAfter ?? 0);
-        if (performance.now() + delay * 1000 >= deadline) throw late(`retry would exceed deadline; ${e.message}`);
+        delay = Math.max(down ? jittered(backoff, this.random) : backoff,
+          down ? heldToCap(provider, e.retryAfter ?? 0) : e.retryAfter ?? 0);
+        if (!down && performance.now() + delay * 1000 >= deadline) throw late(`retry would exceed deadline; ${e.message}`);
         if (down) {
-          chargeOutage(provider, delay);
+          chargeOutage(provider, delay, this.clock());
+          deadline += delay * 1000;
           this.notice?.(outageLine(provider, down[down.length - 1]!, delay, attempt + 1, schedule.length + 1));
         } else {
           this.notice?.(`${this.ref}: ${brief(e.message)}; retrying (attempt ${attempt + 1}) in ${delay}s`);

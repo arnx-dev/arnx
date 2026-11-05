@@ -504,7 +504,7 @@ test("responses: a backoff that would pass the total deadline is a timed-out Mod
   let n = 0;
   const m = new ResponsesJson(GPT, "https://api.example/v1", "k", "medium", PRICES, { totalSeconds: 1,
     sleep: async (s) => { waits.push(s); },
-    fetch: fakeFetch(() => { n++; return new Response("busy", { status: 429, headers: { "retry-after": "100" } }); }) });
+    fetch: fakeFetch(() => { n++; return new Response("busy", { status: 408, headers: { "retry-after": "100" } }); }) });
   const err = await m.completeJson("s", "u", SCHEMA).catch((e: unknown) => e) as ModelError;
   expect(err).toBeInstanceOf(ModelError);
   expect(err.timedOut).toBe(true);
@@ -1319,20 +1319,111 @@ test("a stream cut after it started keeps three attempts", async () => {
   expect([e2.attempts!.length, e2.fault]).toEqual([3, undefined]);
 });
 
-test("waiting stops growing once a provider has cost 10 minutes", async () => {
+/** A clock the sleeps move: `sleep` waits until the clock reaches its wake time, and `run` moves the clock to the earliest
+ * wake whenever every caller is waiting. */
+function virtualTime() {
+  let now = 0;
+  const pending: { at: number; wake: () => void }[] = [];
+  return {
+    clock: () => now * 1000,
+    sleep: (s: number) => new Promise<void>((resolve) => { pending.push({ at: now + s, wake: resolve }); }),
+    async run<T>(work: Promise<T>): Promise<T> {
+      let done = false;
+      work.then(() => { done = true; }, () => { done = true; });
+      while (!done) {
+        for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+        if (done || !pending.length) continue;
+        pending.sort((x, y) => x.at - y.at);
+        const next = pending.shift()!;
+        now = Math.max(now, next.at);
+        next.wake();
+      }
+      return work;
+    },
+  };
+}
+const downAgent = (t: ReturnType<typeof virtualTime>, answer: (n: number) => Response) => {
+  let n = 0;
+  return new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, { random: () => 0.5, clock: t.clock,
+    sleep: t.sleep, fetch: fakeFetch(() => answer(++n)) });
+};
+const alwaysDown = () => errorResponse(503, "api_error");
+const attemptsOf = async (work: Promise<unknown>) => ((await work.catch((e: unknown) => e)) as ModelError).attempts!.length;
+
+test("waiting stops growing once a provider has cost 10 minutes of wall clock", async () => {
   resetOutageWaits();
   expect(OUTAGE_WAIT_MAX_SECONDS).toBe(600);
-  const down = async () => {
-    const waits: number[] = [];
-    const err = await ask(outageAgent(waits, () => errorResponse(503, "api_error"))).catch((e: unknown) => e) as ModelError;
-    expect(err.fault?.kind).toBe("unavailable");
-    return waits;
+  const t = virtualTime();
+  const counts: number[] = [];
+  for (let i = 0; i < 5; i++) counts.push(await t.run(attemptsOf(ask(downAgent(t, alwaysDown)))));
+  expect(counts).toEqual([7, 7, 6, 3, 3]); // 220, 440, 600 reached before the last wait, then [2, 8]
+});
+
+test("overlapping waits of parallel callers count once", async () => {
+  resetOutageWaits();
+  const t = virtualTime();
+  const together = await t.run(Promise.all([1, 2, 3].map(() => attemptsOf(ask(downAgent(t, alwaysDown))))));
+  expect(together).toEqual([7, 7, 7]); // 220 s of wall clock, not 660
+  expect(await t.run(attemptsOf(ask(downAgent(t, alwaysDown))))).toBe(7); // 440 s so far
+});
+
+test("an answer from a provider clears what its outage cost", async () => {
+  resetOutageWaits();
+  const t = virtualTime();
+  expect(await t.run(attemptsOf(ask(downAgent(t, alwaysDown))))).toBe(7);
+  expect(await t.run(attemptsOf(ask(downAgent(t, alwaysDown))))).toBe(7); // 440 s
+  await t.run(ask(downAgent(t, (n) => (n <= 3 ? alwaysDown() : sseResponse(anthropicEvents("hi")))))); // 480 s, answered
+  expect(await t.run(attemptsOf(ask(downAgent(t, alwaysDown))))).toBe(7); // it would be 6 with 480 s on the books
+});
+
+test("a retry-after is honoured but not past what remains of the cap", async () => {
+  resetOutageWaits();
+  const t = virtualTime();
+  const waits: number[] = [];
+  const agent = (answer: (n: number) => Response) => {
+    let n = 0;
+    return new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, { random: () => 0.5, clock: t.clock,
+      sleep: (s) => { waits.push(s); return t.sleep(s); }, fetch: fakeFetch(() => answer(++n)) });
   };
-  expect(await down()).toEqual([2, 8, 30, 60, 60, 60]);
-  expect(await down()).toEqual([2, 8, 30, 60, 60, 60]);
-  expect(await down()).toEqual([2, 8, 30, 60, 60]); // 600 s reached before the last wait
-  expect(await down()).toEqual([2, 8]);
-  expect(await down()).toEqual([2, 8]);
+  const limited = (after: string) => new Response(JSON.stringify({ type: "error",
+    error: { type: "rate_limit_error", message: "slow" } }),
+  { status: 429, headers: { "content-type": "application/json", "retry-after": after } });
+  await t.run(ask(agent((n) => (n === 1 ? limited("20") : sseResponse(anthropicEvents("hi"))))));
+  expect(waits).toEqual([20]); // well under the cap: honoured
+  resetOutageWaits();
+  await t.run(attemptsOf(ask(agent(alwaysDown)))); // 220 s
+  await t.run(attemptsOf(ask(agent(alwaysDown)))); // 440 s
+  waits.length = 0;
+  const err = await t.run(ask(agent((n) => (n <= 3 ? alwaysDown() : limited("3600")))).catch((e: unknown) => e)) as ModelError;
+  expect(waits).toEqual([2, 8, 30, 120]); // 480 s spent: the hour is cut to the 120 s left
+  expect(err.attempts).toHaveLength(5); // then the cap is reached: [2, 8] only
+});
+
+test("a slow failing provider still gets the whole schedule: the waits are not the call's time", async () => {
+  resetOutageWaits();
+  const waits: number[] = [];
+  let n = 0;
+  const slow = async (answer: (n: number) => Response) => { await new Promise((r) => setTimeout(r, 20)); return answer(++n); };
+  const agent = new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, { random: () => 0.5, totalSeconds: 0.5,
+    sleep: async (s) => { waits.push(s); },
+    fetch: (async () => slow((i) => (i <= 6 ? errorResponse(504, "api_error") : sseResponse(anthropicEvents("hi"))))) as unknown as typeof fetch });
+  expect((await ask(agent)).content[0]!.text).toBe("hi");
+  expect(waits).toEqual([2, 8, 30, 60, 60, 60]);
+  resetOutageWaits();
+  n = 0;
+  const json = new ResponsesJson(GPT, "https://api.example/v1", "k", "medium", PRICES, { random: () => 0.5, totalSeconds: 0.5,
+    sleep: async (s) => { waits.push(s); },
+    fetch: (async () => slow((i) => (i <= 6 ? new Response("down", { status: 504 }) : okReply()))) as unknown as typeof fetch });
+  expect((await json.completeJson("s", "u", SCHEMA))[0]).toEqual({ verdict: "confirmed" });
+});
+
+test("a call that really hangs still times out while outage waits are extending its deadline", async () => {
+  resetOutageWaits();
+  const agent = new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, { random: () => 0.5, idleSeconds: 0.1,
+    attemptSeconds: 0.1, totalSeconds: 0.5, sleep: noSleep,
+    fetch: fakeFetch((_u, init) => stalledResponse(init)) });
+  const err = await ask(agent).catch((e: unknown) => e) as ModelError;
+  expect(err.timedOut).toBe(true);
 });
 
 test("a second opinion with a fallback goes to it after 2 and 8 s", async () => {

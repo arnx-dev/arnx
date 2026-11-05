@@ -31,7 +31,10 @@ import { useTmp } from "./helpers/tmp";
 const tmp = useTmp();
 const KEY = "PRIVATE " + "KEY";
 const HDR = `-----BEGIN ${KEY}-----`, END = `-----END ${KEY}-----`;
-const pem = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }) as string;
+// The key's last base64 character is made a digit: a last line with no digit, `+` or `/` reads as a name, which the sandbox
+// keeps and a view fakes (about 1 draw in 100), and no test here should hang on that.
+const pem = (generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }) as string)
+  .replace(/[A-Za-z0-9+/](=*\n-----END)/, "7$1");
 const body = pem.split("\n").filter((l) => l && !l.startsWith("-----")).join("");
 const der = body;
 const wrapped = (w: number) => `${HDR}\n${body.match(new RegExp(`.{1,${w}}`, "g"))!.join("\n")}\n${END}\n`;
