@@ -139,11 +139,11 @@ function runAt(text: string, at: number): { end: number; count: number } {
   return { end, count };
 }
 
-/** What all private-key text holds, one of these: what the filter looks for first, as it runs on every string of every
- * request. */
-const KEY_SIGNS = ["PRIVATE", "LS0tLS", "b3Blbn", "MI", "CAQ"];
+/** Whether a text may hold private-key text: what the filter looks for first, as it runs on every string of every request.
+ * A few plain searches, then the starts themselves: "MI" alone is in too many files to run the whole pattern on. */
+const hasKeySign = (text: string) => text.includes("PRIVATE") ||
+  ((text.includes("MI") || text.includes("CAQ") || text.includes("LS0tLS") || text.includes("b3Blbn")) && KEY_START_GATE.test(text));
 /** A key's start stands alone, or right after a line end or tab written out (`\n`, `%0A`). */
-const hasKeySign = (text: string) => KEY_SIGNS.some((s) => text.includes(s));
 const KEY_ANY = new RegExp(`${KEY_HEADER}|(?:(?<![A-Za-z0-9])|(?<=\\\\[nrt])|(?<=%0[ADad]))(?:${KEY_START})`, "g");
 const KEY_HEAD = new RegExp(KEY_HEADER, "g");
 const KEY_END = new RegExp(`-{4,5}( |%20)?END${ARMOUR}`, "g");
