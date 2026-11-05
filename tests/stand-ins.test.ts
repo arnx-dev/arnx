@@ -144,7 +144,7 @@ test("a file .arnxignore leaves out moves beside the snapshot, also from a folde
     expect(existsSync(join(snap, "dump.csv"))).toBe(false);
   });
 
-test("sandbox-only files are in the snapshot only while a run runs, then gone with the folders made for them", () => {
+test("sandbox-only files are in the snapshot only while a run runs, then gone with the folders made for them", async () => {
   const repo = gitRepo(tmp());
   mkdirSync(join(repo, "i18n"), { recursive: true });
   writeFileSync(join(repo, "i18n/ar.json"), "{\"a\": 1}\n");
@@ -157,15 +157,15 @@ test("sandbox-only files are in the snapshot only while a run runs, then gone wi
     during.push(readFileSync(join(snap, "i18n/ar.json"), "utf8"));
     return { exitCode: 0, output: "", timedOut: false, seconds: 0 };
   } }, snap);
-  runner.run("pytest", 10);
-  runner.run("pytest", 10);
+  await runner.run("pytest", 10);
+  await runner.run("pytest", 10);
   expect(during).toEqual(["{\"a\": 1}\n", "{\"a\": 1}\n"]);
   expect(existsSync(join(snap, "i18n"))).toBe(false);
   // A run that throws takes them out too.
   const failing = withSandboxFiles({ run: () => {
     throw new Error("docker went away");
   } }, snap);
-  expect(() => failing.run("pytest", 10)).toThrow("docker went away");
+  await expect(failing.run("pytest", 10)).rejects.toThrow("docker went away");
   expect(existsSync(join(snap, "i18n"))).toBe(false);
 });
 
@@ -368,7 +368,7 @@ test("a sandbox copy gets the stand-ins the snapshot gave, for values nothing in
 });
 
 test("what a run quotes of a sandbox-only file is taken out of its output and its report; a line naming it stays",
-  () => {
+  async () => {
     const repo = gitRepo(tmp());
     writeFileSync(join(repo, "fees.csv"), "country,fee\nGermany,0.0125\nFrance,0.0175 \"intl\"\n");
     writeFileSync(join(repo, ".arnxignore"), "*.csv\n");
@@ -382,7 +382,7 @@ test("what a run quotes of a sandbox-only file is taken out of its output and it
       return { exitCode: 1, output: "FileNotFoundError: '/src/fees.csv'\nE   assert row == 'Germany,0.0125'\n" +
         "Germany,0.0125\nFrance,0.0175 \"intl\"\n1 failed\n", timedOut: false, seconds: 1 };
     } }, snap);
-    const r = runner.run("pytest", 10);
+    const r = await runner.run("pytest", 10);
     expect(r.output).toBe(`FileNotFoundError: '/src/fees.csv'\nE   assert row == '${SANDBOX_MARK}'\n${SANDBOX_MARK}\n` +
       "1 failed\n");
     expect(readFileSync(join(snap, ".arnx-run/suite.xml"), "utf8")).toBe(`<failure message="expected ` +

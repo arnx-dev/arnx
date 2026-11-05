@@ -1,15 +1,19 @@
 import { describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { python } from "../src/adapters/python";
 import { parseReviewConfig, parseReviewFile } from "../src/config";
-import { SetupRequired } from "../src/errors";
+import { ArnxError, SetupRequired } from "../src/errors";
 import {
   buildContextOf, cleanupLiveSessions, DEFAULT_LIMITS, dockerfile, ensureEnv, envKey, requireDocker, runArgv,
   sandboxOptions, Session,
   dockerSteps, keptBox, NETWORK_OPEN, networkNotice, networkRetry,
 } from "../src/sandbox";
+import { withSandboxFiles } from "../src/change";
+import { probeRun } from "../src/testround";
+import { runTypecheck } from "../src/typecheck";
+import { sleep } from "../src/util";
 import { useTmp } from "./helpers/tmp";
 import { CFG } from "./helpers/yaml";
 
@@ -237,14 +241,14 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
       const image = await ensureEnv(cfg, snap(), join(tmp(), "build.log"));
       const s = await new Session(image, cfg, snap()).start();
       try {
-        const env = s.run("env", 60).output;
+        const env = (await s.run("env", 60)).output;
         expect(env).toContain("MODE=test");
         expect(env).not.toContain("ARNX_SENTINEL");
         expect(env).not.toContain("ANTHROPIC_API_KEY");
-        expect(s.run("python -c \"import socket; socket.create_connection(('1.1.1.1', 53), 3)\"", 60).exitCode)
+        expect((await s.run("python -c \"import socket; socket.create_connection(('1.1.1.1', 53), 3)\"", 60)).exitCode)
           .not.toBe(0);
-        expect(s.run("cat /sys/fs/cgroup/pids.max", 30).output.trim()).toBe("512");
-        expect(s.run("python probe.py", 30).output.trim()).toBe("hello");
+        expect((await s.run("cat /sys/fs/cgroup/pids.max", 30)).output.trim()).toBe("512");
+        expect((await s.run("python probe.py", 30)).output.trim()).toBe("hello");
       } finally {
         s.close();
       }
@@ -259,7 +263,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     const s = await new Session(image, cfg, snap()).start();
     let r;
     try {
-      r = s.run("sleep 600", 5);
+      r = await s.run("sleep 600", 5);
     } finally {
       s.close();
     }
@@ -267,6 +271,49 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     expect(r.exitCode).toBeNull();
     expect(r.seconds).toBeLessThan(60);
   }, 600_000);
+
+  test("Ctrl-C during a run removes the container: a real one, and nothing of it is left", async () => {
+    const repoRoot = join(import.meta.dir, "..");
+    const script = join(tmp(), "interrupted.ts");
+    const source = snap();
+    // An arnx in a run, with the handling main.ts gives a signal.
+    writeFileSync(script, `
+import { parseReviewConfig } from ${JSON.stringify(join(repoRoot, "src/config"))};
+import { startInterrupt } from ${JSON.stringify(join(repoRoot, "src/interrupt"))};
+import { Session } from ${JSON.stringify(join(repoRoot, "src/sandbox"))};
+process.on("SIGINT", () => void startInterrupt("SIGINT"));
+const cfg = parseReviewConfig(${JSON.stringify(CFG.replace("workdir: app", "workdir: ."))});
+const s = await new Session("python:3.12-slim", cfg, ${JSON.stringify(source)}).start();
+console.log(s.id);
+await s.run("echo started; sleep 300", 600);
+console.log("the run answered");
+`);
+    const names = (id: string) => spawnSync("docker", ["ps", "-a", "--filter", `name=arnx-${id}-`, "--format", "{{.Names}}"],
+      { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean);
+    const child = spawn("bun", [script], { stdio: ["ignore", "pipe", "pipe"] });
+    let said = "", id = "";
+    child.stdout.setEncoding("utf8").on("data", (d: string) => { said += d; });
+    const exited = new Promise<number | null>((r) => child.on("exit", (code) => r(code)));
+    try {
+      const until = Date.now() + 120_000;
+      while (Date.now() < until) {
+        id ||= said.split("\n")[0]!.trim();
+        if (id && said.includes("\n") && names(id).length) break;
+        await sleep(100);
+      }
+      expect(names(id)).toHaveLength(1);
+      const t0 = Date.now();
+      child.kill("SIGINT");
+      expect(await exited).toBe(130);
+      expect(Date.now() - t0).toBeLessThan(30_000);
+      expect(said).not.toContain("the run answered");
+      expect(names(id)).toEqual([]);
+    } finally {
+      child.kill("SIGKILL");
+      // Only if the test failed: this run's own container, by its name.
+      if (id) for (const n of names(id)) spawnSync("docker", ["rm", "-fv", n]);
+    }
+  }, 300_000);
 
   test("test_service_reachable_internet_not", async () => {
     const cfg = parseReviewConfig(SVC);
@@ -277,9 +324,9 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
       { encoding: "utf8" }).stdout.trim().split(/\s+/).filter(Boolean);
     expect(volumes.length).toBeGreaterThan(0);
     try {
-      const ok = s.run("python -c \"import socket; socket.create_connection(('db', 5432), 5)\"", 60);
+      const ok = await s.run("python -c \"import socket; socket.create_connection(('db', 5432), 5)\"", 60);
       expect(ok.exitCode).toBe(0);
-      expect(s.run("python -c \"import socket; socket.create_connection(('1.1.1.1', 53), 3)\"", 60).exitCode)
+      expect((await s.run("python -c \"import socket; socket.create_connection(('1.1.1.1', 53), 3)\"", 60)).exitCode)
         .not.toBe(0);
     } finally {
       s.close();
@@ -300,7 +347,7 @@ test("every Docker step is logged with its duration when a log is set", async ()
     await withDockerAsync(fake, async () => {
       const cfg = parseReviewConfig(CFG);
       const image = await ensureEnv(cfg, tmp(), join(tmp(), "build.log")); // "image inspect" succeeds: reused
-      new Session(image, cfg, tmp()).run("pytest -q", 60);
+      await new Session(image, cfg, tmp()).run("pytest -q", 60);
     });
   } finally {
     dockerSteps.log = null;
@@ -349,6 +396,200 @@ test("an image build does not block: timers (the progress spinner and clock) kee
   expect(ticks).toBeGreaterThanOrEqual(5);
 });
 
+// ---- A run does not hold the process: other projects' timers, polls and streams, and a signal's handler, go on. ----
+
+test("a test run does not stop the clock for other work", async () => {
+  const fake = join(tmp(), "docker");
+  writeFileSync(fake, "#!/bin/sh\nsleep 1\necho ran\n");
+  chmodSync(fake, 0o755);
+  const s = new Session("img", parseReviewConfig(CFG), tmp());
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 50);
+  try {
+    const r = await withDockerAsync(fake, async () => s.run("pytest -q", 60));
+    expect(r).toMatchObject({ exitCode: 0, output: "ran\n", timedOut: false });
+  } finally {
+    clearInterval(timer);
+  }
+  expect(ticks).toBeGreaterThanOrEqual(5);
+});
+
+/** Waits for a fake docker to have written `path` (its pid). */
+async function pidIn(path: string): Promise<number> {
+  for (let i = 0; i < 200 && !(existsSync(path) && readFileSync(path, "utf8").includes("\n")); i++) await sleep(20);
+  return Number(readFileSync(path, "utf8").trim());
+}
+const isGone = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+};
+
+test("Ctrl-C during a run removes the container: docker is killed and the container goes by its name", async () => {
+  const pid = join(tmp(), "pid");
+  const fake = loggingDocker(tmp(), { run: `echo $$ > '${pid}'; exec sleep 3` });
+  await withDockerAsync(fake.path, async () => {
+    const s = await new Session("img", parseReviewConfig(CFG), tmp()).start();
+    let answered = false;
+    const run = Promise.resolve(s.run("pytest -q", 600)).finally(() => { answered = true; });
+    run.catch(() => {});
+    const client = await pidIn(pid);
+    cleanupLiveSessions();
+    const calls = fake.calls();
+    const name = calls[0]![calls[0]!.indexOf("--name") + 1]!;
+    expect(name).toMatch(new RegExp(`^arnx-${s.id}-run-`));
+    expect(calls.slice(1)).toEqual([["rm", "-fv", name]]);
+    await sleep(100);
+    expect(isGone(client)).toBe(true);
+    // What waits on it does not go on: the process is exiting, and the run's result would read as the code's.
+    expect(answered).toBe(false);
+    // Nor does a later run start a container that nothing would remove.
+    let later = false;
+    void Promise.resolve(s.run("pytest -q again", 600)).finally(() => { later = true; }).catch(() => {});
+    await sleep(100);
+    expect(later).toBe(false);
+    expect(fake.calls()).toHaveLength(2);
+  });
+});
+
+test("Ctrl-C just as a run starts: a container Docker makes moments later still goes", async () => {
+  const pid = join(tmp(), "pid");
+  const removals = join(tmp(), "removals");
+  const fake = join(tmp(), "docker");
+  // The first two removals find nothing yet, as one Docker says it and as another does.
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in\n  run) echo $$ > '${pid}'; exec sleep 3;;\n` +
+    `  rm) echo x >> '${removals}'; n=$(wc -l < '${removals}'); [ "$n" -eq 1 ] && exit 1; [ "$n" -eq 2 ] && exit 0; echo "$3";;\n` +
+    "esac\nexit 0\n");
+  chmodSync(fake, 0o755);
+  await withDockerAsync(fake, async () => {
+    const s = await new Session("img", parseReviewConfig(CFG), tmp()).start();
+    void s.run("pytest -q", 600);
+    await pidIn(pid);
+    cleanupLiveSessions();
+  });
+  expect(readFileSync(removals, "utf8").trim().split("\n")).toHaveLength(3);
+});
+
+test("Ctrl-C during a command in the shared container removes it and kills docker exec", async () => {
+  const pid = join(tmp(), "pid");
+  const fake = loggingDocker(tmp(), { exec: `echo $$ > '${pid}'; exec sleep 3` });
+  await withDockerAsync(fake.path, async () => {
+    const s = await new Session("img", parseReviewConfig(CFG), tmp()).start();
+    void Promise.resolve(s.exec("python --version", 600)).catch(() => {});
+    const client = await pidIn(pid);
+    cleanupLiveSessions();
+    const calls = fake.calls();
+    const box = calls[0]![calls[0]!.indexOf("--name") + 1]!;
+    expect(calls.map((c) => c[0])).toEqual(["run", "exec", "rm"]);
+    expect(calls[2]).toEqual(["rm", "-fv", box]);
+    await sleep(100);
+    expect(isGone(client)).toBe(true);
+  });
+});
+
+test("a session closed with a run in flight, outside an interrupt, answers that run with an error", async () => {
+  const pid = join(tmp(), "pid");
+  const fake = loggingDocker(tmp(), { run: `echo $$ > '${pid}'; exec sleep 3` });
+  await withDockerAsync(fake.path, async () => {
+    const s = new Session("img", parseReviewConfig(CFG), tmp());
+    const run = Promise.resolve(s.run("pytest -q", 600));
+    await pidIn(pid);
+    s.close();
+    await expect(run).rejects.toThrow("closed");
+    expect(fake.calls().map((c) => c[0])).toEqual(["run", "rm"]);
+    await expect(Promise.resolve(s.run("pytest -q", 600))).rejects.toThrow("closed");
+    expect(fake.calls()).toHaveLength(2);
+  });
+});
+
+test("a character split across two reads of a run's output arrives whole", async () => {
+  const fake = join(tmp(), "docker");
+  writeFileSync(fake, "#!/bin/sh\nprintf '\\303'\nsleep 0.2\nprintf '\\251\\n'\n");
+  chmodSync(fake, 0o755);
+  const s = new Session("img", parseReviewConfig(CFG), tmp());
+  const r = await withDockerAsync(fake, async () => s.run("pytest -q", 60));
+  expect(r.output).toBe("\u00e9\n");
+});
+
+test("a run keeps the end of its output, stdout then stderr, up to the limit", async () => {
+  const fake = join(tmp(), "docker");
+  writeFileSync(fake, "#!/bin/sh\ni=0\nwhile [ $i -lt 30 ]; do head -c 10000 /dev/zero | tr '\\0' a; i=$((i+1)); done\n" +
+    "printf end-of-out\nprintf end-of-err >&2\n");
+  chmodSync(fake, 0o755);
+  const s = new Session("img", parseReviewConfig(CFG), tmp());
+  const r = await withDockerAsync(fake, async () => s.run("pytest -q", 60));
+  expect(r.output).toHaveLength(200_000);
+  expect(r.output.endsWith("aend-of-outend-of-err")).toBe(true);
+});
+
+test("a run past its time comes back even when a process still holds its output open", async () => {
+  const fake = join(tmp(), "docker");
+  // A shell that waits on its sleep: killing the shell leaves the sleep holding the pipes.
+  writeFileSync(fake, '#!/bin/sh\ncase "$1" in run) echo partial; sleep 8;; esac\nexit 0\n');
+  chmodSync(fake, 0o755);
+  const s = new Session("img", parseReviewConfig(CFG), tmp());
+  const t0 = performance.now();
+  const r = await withDockerAsync(fake, async () => s.run("pytest -q", 1));
+  expect(r).toMatchObject({ exitCode: null, timedOut: true, output: "partial\n\n[timed out]" });
+  expect(performance.now() - t0).toBeLessThan(5000);
+});
+
+test("a run with no Docker binary says so, as before", async () => {
+  const s = new Session("img", parseReviewConfig(CFG), tmp());
+  await withDockerAsync(join(tmp(), "no-such-docker"), async () => {
+    await expect(Promise.resolve().then(() => s.run("pytest -q", 60))).rejects.toThrow(SetupRequired);
+  });
+});
+
+/** A runner that answers later, as Session does, and records what the snapshot held when its run ended. */
+const lateRunner = (seen: (command: string) => void, output = "ok") => ({ run: async (command: string) => {
+  await sleep(30);
+  seen(command);
+  return { exitCode: 0, output, timedOut: false, seconds: 0.03 };
+} });
+
+test("sandbox-only files stay in place until a run that answers later has ended, and go after it", async () => {
+  const snap = join(tmp(), "repo");
+  mkdirSync(snap);
+  mkdirSync(`${snap}.sandbox/conf`, { recursive: true });
+  writeFileSync(`${snap}.sandbox/conf/only.txt`, "only-in-the-sandbox-text\n");
+  let during = false;
+  const r = await withSandboxFiles(lateRunner(() => { during = existsSync(join(snap, "conf/only.txt")); },
+    "before only-in-the-sandbox-text after"), snap).run("x", 60);
+  expect(during).toBe(true);
+  expect(existsSync(join(snap, "conf"))).toBe(false);
+  expect(r.output).not.toContain("only-in-the-sandbox-text");
+});
+
+test("a probe's files stay until a run that answers later has ended, and go when it fails", async () => {
+  const snap = join(tmp(), "repo");
+  mkdirSync(snap);
+  const cfg = parseReviewConfig(CFG.replace("workdir: app", "workdir: ."));
+  let during = false;
+  const p = await probeRun(lateRunner(() => { during = existsSync(join(snap, "tests_arnx/test_arnx_probe.py")); }), snap, cfg,
+    "tests_arnx", "probe.xml", 60);
+  expect(during).toBe(true);
+  expect(p.seen).toBe(false);
+  expect(existsSync(join(snap, "tests_arnx/test_arnx_probe.py"))).toBe(false);
+  await expect(probeRun({ run: async () => {
+    await sleep(10);
+    throw new Error("the run failed");
+  } }, snap, cfg, "tests_arnx", "probe.xml", 60)).rejects.toThrow("the run failed");
+  expect(existsSync(join(snap, "tests_arnx/test_arnx_probe.py"))).toBe(false);
+});
+
+test("a Docker error in a run that answers later is still a failed type check", async () => {
+  const cfg = { ...parseReviewConfig(CFG), typecheck: "tsc --noEmit" };
+  const t = await runTypecheck({ run: async () => {
+    await sleep(10);
+    throw new ArnxError("docker went away");
+  } }, cfg);
+  expect(t).toMatchObject({ status: "failed", output: "docker went away", exitCode: null });
+});
+
 // ---- Rust keeps its build: the runs of one session share one container. Fake Docker only: it logs each call and
 // never runs the command it is given. ----
 
@@ -368,13 +609,14 @@ const SEP = "\x1f";
 /** A fake docker that logs its arguments (one call per line) and answers `exec` from `exec` (sh, run with the call's
  * number in $n), `image inspect` with `entrypoint`, `run -d` from `start` and the kill after a timeout from `kill`.
  * `calls` leaves out the image inspections; `inspections` counts them. */
-function loggingDocker(dir: string, o: { exec?: string; entrypoint?: string; start?: string; kill?: string } = {}) {
+function loggingDocker(dir: string, o: { exec?: string; entrypoint?: string; start?: string; kill?: string; run?: string } = {}) {
   const path = join(dir, "docker");
   const log = join(dir, "calls");
   const count = join(dir, "execs");
   writeFileSync(path, `#!/bin/sh\nprintf '%s${SEP}' "$@" >> '${log}'\necho >> '${log}'\n` +
     `case "$1" in\n  image) echo '${o.entrypoint ?? "null"}';;\n` +
-    `  run) [ "$2" = "-d" ] && { ${o.start ?? "echo cafe"}; };;\n` +
+    `  run) if [ "$2" = "-d" ]; then ${o.start ?? "echo cafe"}; else ${o.run ?? ":"}; fi;;\n` +
+    '  rm) echo "$3";;\n' +
     `  exec) case "$*" in *"kill -9 -1 2>/dev/null; exit 0"*) ${o.kill ?? "exit 0"};; esac\n` +
     `    echo x >> '${count}'; n=$(wc -l < '${count}'); ${o.exec ?? "echo ran; exit 0"};;\nesac\nexit 0\n`);
   chmodSync(path, 0o755);
@@ -384,12 +626,12 @@ function loggingDocker(dir: string, o: { exec?: string; entrypoint?: string; sta
     inspections: () => all().filter((c) => c[0] === "image").length };
 }
 
-test("a Rust session's runs share one container, so the build a run leaves is there for the next", () => {
+test("a Rust session's runs share one container, so the build a run leaves is there for the next", async () => {
   const fake = loggingDocker(tmp());
   const s = new Session("img", rustCfg(), tmp());
-  withDocker(fake.path, () => {
-    expect(s.run("cargo nextest run a", 60)).toMatchObject({ exitCode: 0, output: "ran\n", timedOut: false });
-    expect(s.run("cargo nextest run b", 60).exitCode).toBe(0);
+  await withDockerAsync(fake.path, async () => {
+    expect(await s.run("cargo nextest run a", 60)).toMatchObject({ exitCode: 0, output: "ran\n", timedOut: false });
+    expect((await s.run("cargo nextest run b", 60)).exitCode).toBe(0);
     s.close();
   });
   const calls = fake.calls();
@@ -414,12 +656,12 @@ test("a Rust session's runs share one container, so the build a run leaves is th
   }
 });
 
-test("a Python session still runs each command in a new container", () => {
+test("a Python session still runs each command in a new container", async () => {
   const fake = loggingDocker(tmp());
   const s = new Session("img", parseReviewConfig(CFG), tmp());
-  withDocker(fake.path, () => {
-    s.run("pytest -q a", 60);
-    s.run("pytest -q b", 60);
+  await withDockerAsync(fake.path, async () => {
+    await s.run("pytest -q a", 60);
+    await s.run("pytest -q b", 60);
     s.close();
   });
   const calls = fake.calls();
@@ -427,14 +669,14 @@ test("a Python session still runs each command in a new container", () => {
   expect(calls.map((c) => c.at(-1))).toEqual(["pytest -q a", "pytest -q b"]);
 });
 
-test("the head and the base session never share a container: each removes only its own", () => {
+test("the head and the base session never share a container: each removes only its own", async () => {
   const fake = loggingDocker(tmp());
   const cfg = rustCfg();
   const head = new Session("img", cfg, join(tmp(), "head"));
   const base = new Session("img", cfg, join(tmp(), "base"));
-  withDocker(fake.path, () => {
-    head.run("cargo nextest run", 60);
-    base.run("cargo nextest run", 60);
+  await withDockerAsync(fake.path, async () => {
+    await head.run("cargo nextest run", 60);
+    await base.run("cargo nextest run", 60);
     head.close();
     cleanupLiveSessions(); // an interrupt: the base session is still live
     cleanupLiveSessions();
@@ -449,13 +691,13 @@ test("the head and the base session never share a container: each removes only i
   expect(calls.filter((c) => c[0] === "rm")).toEqual([["rm", "-fv", boxes[0]!], ["rm", "-fv", boxes[1]!]]);
 });
 
-test("a run that times out in the shared container has its processes killed; the container and its build stay", () => {
+test("a run that times out in the shared container has its processes killed; the container and its build stay", async () => {
   const fake = loggingDocker(tmp(), { exec: 'case "$*" in *slow*) exec sleep 5;; esac; echo ran' });
   const s = new Session("img", rustCfg(), tmp());
   let slow, next;
-  withDocker(fake.path, () => {
-    slow = s.run("slow", 1);
-    next = s.run("cargo nextest run", 60);
+  await withDockerAsync(fake.path, async () => {
+    slow = await s.run("slow", 1);
+    next = await s.run("cargo nextest run", 60);
     s.close();
   });
   expect(slow).toMatchObject({ exitCode: null, timedOut: true });
@@ -467,13 +709,13 @@ test("a run that times out in the shared container has its processes killed; the
   expect(calls[2]).toEqual(["exec", box, "sh", "-c", "kill -9 -1 2>/dev/null; exit 0"]);
 });
 
-test("a shared container that went away is started again once, and the run goes on there", () => {
+test("a shared container that went away is started again once, and the run goes on there", async () => {
   const fake = loggingDocker(tmp(), { exec: '[ "$n" = 1 ] && { echo "Error response from daemon: No such ' +
     'container: x" >&2; exit 1; }; echo ran' });
   const s = new Session("img", rustCfg(), tmp());
   let r;
-  withDocker(fake.path, () => {
-    r = s.run("cargo nextest run", 60);
+  await withDockerAsync(fake.path, async () => {
+    r = await s.run("cargo nextest run", 60);
     s.close();
   });
   expect(r).toMatchObject({ exitCode: 0, output: "ran\n" });
@@ -483,25 +725,25 @@ test("a shared container that went away is started again once, and the run goes 
   expect(calls.filter((c) => c[0] === "rm").map((c) => c[2])).toEqual(boxes);
 });
 
-test("a test that prints Docker's words is not taken for a container that went away", () => {
+test("a test that prints Docker's words is not taken for a container that went away", async () => {
   const fake = loggingDocker(tmp(), { exec: 'echo "panicked: Error response from daemon: No such container: x"; exit 1' });
   const s = new Session("img", rustCfg(), tmp());
-  withDocker(fake.path, () => {
-    expect(s.run("cargo nextest run", 60).exitCode).toBe(1);
+  await withDockerAsync(fake.path, async () => {
+    expect((await s.run("cargo nextest run", 60)).exitCode).toBe(1);
     s.close();
   });
   expect(fake.calls().map((c) => c[0])).toEqual(["run", "exec", "rm"]);
 });
 
-test("an image whose entrypoint stays the first process runs each command in a new container, as before", () => {
+test("an image whose entrypoint stays the first process runs each command in a new container, as before", async () => {
   const fake = loggingDocker(tmp(), { entrypoint: '["/usr/bin/tini","--"]' });
   const lines: Record<string, unknown>[] = [];
   dockerSteps.log = (l) => lines.push(l);
   const s = new Session("img", rustCfg(), tmp());
   try {
-    withDocker(fake.path, () => {
-      s.run("cargo nextest run a", 60);
-      s.run("cargo nextest run b", 60);
+    await withDockerAsync(fake.path, async () => {
+      await s.run("cargo nextest run a", 60);
+      await s.run("cargo nextest run b", 60);
       s.close();
     });
   } finally {
@@ -514,7 +756,7 @@ test("an image whose entrypoint stays the first process runs each command in a n
     reason: "entrypoint" })]);
 });
 
-test("each kept run first touches, in the container, the files written since the last run there", () => {
+test("each kept run first touches, in the container, the files written since the last run there", async () => {
   const snap = join(tmp(), "snap");
   mkdirSync(join(snap, "src"), { recursive: true });
   mkdirSync(join(snap, "tests"), { recursive: true });
@@ -525,15 +767,15 @@ test("each kept run first touches, in the container, the files written since the
   }
   const fake = loggingDocker(tmp());
   const s = new Session("img", rustCfg(), snap);
-  withDocker(fake.path, () => {
-    s.run("cargo nextest run", 60);
+  await withDockerAsync(fake.path, async () => {
+    await s.run("cargo nextest run", 60);
     Bun.sleepSync(20); // a run takes longer than a file system clock tick
     writeFileSync(join(snap, "tests/arnx_generated_a.rs"), "y\n"); // rewritten
     writeFileSync(join(snap, "tests/arnx_generated_b's.rs"), "z\n"); // new
     mkdirSync(join(snap, ".arnx-run"), { recursive: true });
     writeFileSync(join(snap, ".arnx-run", "final-1.xml"), "<x/>"); // a report, no source
-    s.run("cargo nextest run", 60);
-    s.run("cargo nextest run", 60);
+    await s.run("cargo nextest run", 60);
+    await s.run("cargo nextest run", 60);
     s.close();
   });
   const execs = fake.calls().filter((c) => c[0] === "exec").map((c) => c[4]!);
@@ -546,16 +788,16 @@ test("each kept run first touches, in the container, the files written since the
   expect(execs[2]).not.toContain("touch");
 });
 
-test("a kill that Docker does not answer in time counts as the run's timeout; the container goes", () => {
+test("a kill that Docker does not answer in time counts as the run's timeout; the container goes", async () => {
   const fake = loggingDocker(tmp(), { exec: 'case "$*" in *slow*) exec sleep 5;; esac; echo ran', kill: "exec sleep 5" });
   const saved = keptBox.dockerSeconds;
   keptBox.dockerSeconds = 1;
   const s = new Session("img", rustCfg(), tmp());
   let slow, next;
   try {
-    withDocker(fake.path, () => {
-      slow = s.run("slow", 1);
-      next = s.run("cargo nextest run", 60);
+    await withDockerAsync(fake.path, async () => {
+      slow = await s.run("slow", 1);
+      next = await s.run("cargo nextest run", 60);
       s.close();
     });
   } finally {
@@ -569,15 +811,15 @@ test("a kill that Docker does not answer in time counts as the run's timeout; th
   expect(calls.filter((c) => c[0] === "rm").map((c) => c[2])).toEqual(boxes);
 });
 
-test("a container start Docker does not answer in time is removed by its name, and the run counts as timed out", () => {
+test("a container start Docker does not answer in time is removed by its name, and the run counts as timed out", async () => {
   const fake = loggingDocker(tmp(), { start: "exec sleep 5" });
   const saved = keptBox.dockerSeconds;
   keptBox.dockerSeconds = 1;
   const s = new Session("img", rustCfg(), tmp());
   let r;
   try {
-    withDocker(fake.path, () => {
-      r = s.run("cargo nextest run", 60);
+    await withDockerAsync(fake.path, async () => {
+      r = await s.run("cargo nextest run", 60);
     });
   } finally {
     keptBox.dockerSeconds = saved;
@@ -589,29 +831,29 @@ test("a container start Docker does not answer in time is removed by its name, a
   expect(calls[1]).toEqual(["rm", "-fv", name]);
 });
 
-test("a run after the session closed (an interrupt) starts no shared container", () => {
+test("a run after the session closed (an interrupt) starts no container", async () => {
   const fake = loggingDocker(tmp());
   const s = new Session("img", rustCfg(), tmp());
-  withDocker(fake.path, () => {
-    s.run("cargo nextest run a", 60);
+  await withDockerAsync(fake.path, async () => {
+    await s.run("cargo nextest run a", 60);
     cleanupLiveSessions();
-    s.run("cargo nextest run b", 60);
+    void s.run("cargo nextest run b", 60);
+    await sleep(50);
   });
-  expect(fake.calls().map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["exec", expect.any(String)], ["rm", "-fv"],
-    ["run", "--rm"]]);
+  expect(fake.calls().map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["exec", expect.any(String)], ["rm", "-fv"]]);
 });
 
 // ---- Setup's exec tool: its commands share one container, whatever the language. ----
 
-test("exec commands share one container with every limit a run has; an interrupt removes it by its name", () => {
+test("exec commands share one container with every limit a run has; an interrupt removes it by its name", async () => {
   const fake = loggingDocker(tmp());
   const lines: Record<string, unknown>[] = [];
   dockerSteps.log = (l) => lines.push(l);
   const s = new Session("img", parseReviewConfig(CFG), tmp());
   try {
-    withDocker(fake.path, () => {
-      expect(s.exec("python --version", 60)).toMatchObject({ exitCode: 0, output: "ran\n", timedOut: false });
-      s.exec("ls", 60);
+    await withDockerAsync(fake.path, async () => {
+      expect(await s.exec("python --version", 60)).toMatchObject({ exitCode: 0, output: "ran\n", timedOut: false });
+      await s.exec("ls", 60);
       cleanupLiveSessions();
     });
   } finally {
@@ -634,12 +876,12 @@ test("exec commands share one container with every limit a run has; an interrupt
   expect(lines.filter((l) => l.step === "run")).toHaveLength(0);
 });
 
-test("a project's runs still each get a new container while exec keeps its own", () => {
+test("a project's runs still each get a new container while exec keeps its own", async () => {
   const fake = loggingDocker(tmp());
   const s = new Session("img", parseReviewConfig(CFG), tmp());
-  withDocker(fake.path, () => {
-    s.exec("ls", 60);
-    s.run("pytest -q a", 60);
+  await withDockerAsync(fake.path, async () => {
+    await s.exec("ls", 60);
+    await s.run("pytest -q a", 60);
     s.close();
   });
   expect(fake.calls().map((c) => c.slice(0, 2))).toEqual([["run", "-d"], ["exec", expect.any(String)],

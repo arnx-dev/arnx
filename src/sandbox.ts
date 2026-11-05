@@ -114,7 +114,8 @@ export const DEFAULT_LIMITS: Limits = { cpus: "2", memory: "4g", pids: 512, tmp:
 
 export interface RunResult { exitCode: number | null; output: string; timedOut: boolean; seconds: number }
 export interface Runner {
-  run(command: string, timeout: number): RunResult;
+  /** Sessions answer later, and a run then does not hold the process; only a test's fake answers at once. */
+  run(command: string, timeout: number): RunResult | Promise<RunResult>;
   /** Set when the image holds a copy of the code that runs reach (baked.ts): where, and the files only it holds. */
   copies?(output: string): CopyOnly;
   /** Set when sandbox-only files are placed for each run (withSandboxFiles): a report's text with what it quotes of
@@ -431,7 +432,7 @@ const live = new Set<Session>();
 
 /** Tear down every running session; the interrupt handler calls this before exiting. */
 export function cleanupLiveSessions(): void {
-  for (const s of [...live]) s.close();
+  for (const s of [...live]) s.close(true);
 }
 
 // The first process of a container that runs share: it sleeps, reaps what runs leave behind (a shell waits for its
@@ -473,7 +474,8 @@ function changedSince(root: string, since: number, prefix = ""): string[] {
  * Why cargo stays right: it trusts a build of a workspace crate when no source file that build read is newer than it
  * (mtimes; registry dependencies are keyed by version, not by files). A session has one snapshot, so one version of
  * the code (the change's, or the base's in the before/after check, never both), and each later change to it is a
- * file arnx writes between runs (a run is synchronous: nothing writes during one). Each run first touches, inside the
+ * file arnx writes between runs (whoever holds a session waits for each run: nothing writes during one, and no two
+ * runs overlap). Each run first touches, inside the
  * container, the files changed since the last run there (found by their mtimes against the host's clock at that
  * run's start), so they are newer than every build before by the clock cargo's builds use, even when Docker's clock
  * is ahead of the host's (Docker Desktop's VM): cargo rebuilds what changed. The first run starts from the image's
@@ -498,6 +500,10 @@ export class Session implements Runner {
   private boxes = new Set<string>();
   /** When the last run in the shared container started (host clock, ms); 0 before its first. */
   private lastRun = 0;
+  /** Each run in flight: how to stop it, and its own container's name (none for a run in the shared one). */
+  private running = new Set<{ stop: () => void; container: string | null }>();
+  /** Closed by an interrupt: the process is exiting. */
+  private exiting = false;
 
   /** `swap`: what a model's text means where this session runs. review.yaml and the commands keep their stand-ins, and so
    * do the logs; only what Docker gets, with this session's network, holds real values. An image's build has network and
@@ -574,9 +580,16 @@ export class Session implements Runner {
     throw new ArnxError(`service ${service} was not ready after ${readyWait.seconds}s (ready: ${ready})`);
   }
 
-  close(): void {
+  /** `exiting`: an interrupt closes it, and the process goes next. A run in flight stops here: Docker's client goes, and
+   * its container with it, since a client killed leaves its container running. */
+  close(exiting = false): void {
     this.closed = true;
-    if (!live.delete(this)) return;
+    this.exiting ||= exiting;
+    const running = [...this.running];
+    this.running.clear();
+    for (const r of running) r.stop();
+    if (!live.delete(this) && !running.length) return;
+    for (const { container } of running) if (container) removeStarting(container);
     this.dropBox();
     for (const name of this.boxes) docker(["rm", "-fv", name]);
     this.boxes.clear();
@@ -584,31 +597,43 @@ export class Session implements Runner {
     if (this.networkCreated) docker(["network", "rm", this.network]);
   }
 
-  run(command: string, timeout: number): RunResult {
+  run(command: string, timeout: number): Promise<RunResult> {
     return this.runIn(command, timeout, adapterFor(this.cfg).keepBuild?.emptied ?? null, "run");
   }
 
   /** One command of setup's exec tool: in the session's shared container whatever the language, so a build or a cache
    * one command leaves outside /src is there for the next (an image with an entrypoint: a new container each time). */
-  exec(command: string, timeout: number): RunResult {
+  exec(command: string, timeout: number): Promise<RunResult> {
     return this.runIn(command, timeout, adapterFor(this.cfg).keepBuild?.emptied ?? [], "exec");
+  }
+
+  /** What a run gets when its session is closed. During an interrupt, no answer: what waits on it stops where it is, as
+   * with a model call in flight, so no failed run reads as the code's, no review closes as failed and no model is asked
+   * again before the exit. Otherwise an error, so nothing waits for ever. */
+  private closedAnswer(): Promise<RunResult> {
+    return this.exiting ? new Promise(() => {}) : Promise.reject(new ArnxError("the test session is closed"));
   }
 
   /** `emptied`: null runs the command in a new container; otherwise in the shared one, these directories emptied
    * first. */
-  private runIn(command: string, timeout: number, emptied: string[] | null, step: "run" | "exec"): RunResult {
+  private async runIn(command: string, timeout: number, emptied: string[] | null, step: "run" | "exec")
+    : Promise<RunResult> {
+    // A closed session (an interrupt) starts no container that nothing would remove.
+    if (this.closed) return this.closedAnswer();
     timeout = stepTimeout(timeout);
     command = depsLink(this.cfg) + command;
-    // A closed session (an interrupt) starts no container that nothing would remove.
-    if (!emptied || this.closed || !this.mayShare()) {
+    if (!emptied || !this.mayShare()) {
       const name = `arnx-${this.id}-${step}-${randomHex(3)}`;
-      return this.spawnRun(this.argv(name, this.real(command)), command, timeout, step, () => docker(["kill", name]));
+      return this.spawnRun(this.argv(name, this.real(command)), command, timeout, step, async () => {
+        await dockerAsync(["kill", name]);
+      }, name);
     }
-    let r = this.keptRun(command, timeout, emptied, step);
+    let r = await this.keptRun(command, timeout, emptied, step);
     // A container that went away (Docker restarted, removed by hand) is started again once; its build starts over.
     if (r.exitCode !== 0 && !r.timedOut && GONE.test(r.output.trim())) {
+      if (this.closed) return this.closedAnswer();
       this.dropBox();
-      r = this.keptRun(command, timeout, emptied, step);
+      r = await this.keptRun(command, timeout, emptied, step);
     }
     return r;
   }
@@ -639,7 +664,7 @@ export class Session implements Runner {
   }
 
   /** One run in the session's shared container (started on first use, with every limit a run has). */
-  private keptRun(command: string, timeout: number, emptied: string[], step: "run" | "exec"): RunResult {
+  private async keptRun(command: string, timeout: number, emptied: string[], step: "run" | "exec"): Promise<RunResult> {
     if (!this.box) {
       const name = `arnx-${this.id}-${step === "run" ? "build" : "exec"}-${randomHex(3)}`;
       const [, run, ...rest] = this.argv(name, KEEPALIVE);
@@ -676,11 +701,12 @@ export class Session implements Runner {
     const wrapped = `rm -rf ${empty} 2>/dev/null; ${touch}sh -c ${shQuote(this.real(command))}; s=$?; kill -9 -1 2>/dev/null; ` +
       "exit $s";
     this.lastRun = Date.now();
-    return this.spawnRun([sandboxOptions.docker, "exec", box, "sh", "-c", wrapped], command, timeout, step, () => {
+    return this.spawnRun([sandboxOptions.docker, "exec", box, "sh", "-c", wrapped], command, timeout, step, async () => {
       // Killing docker exec leaves the run going inside: its processes go, the container and its build stay. A
       // container Docker cannot reach in time goes too: the run counts as timed out either way.
       try {
-        if (docker(["exec", box, "sh", "-c", KILL_ALL], { timeout: keptBox.dockerSeconds }).status === 0) return;
+        const killed = await dockerAsync(["exec", box, "sh", "-c", KILL_ALL], { timeout: keptBox.dockerSeconds });
+        if (killed.status === 0) return;
       } catch {
         // not answered in time
       }
@@ -700,29 +726,99 @@ export class Session implements Runner {
     }
   }
 
-  private spawnRun(argv: string[], command: string, timeout: number, step: "run" | "exec", onTimeout: () => void)
-    : RunResult {
+  /** `container`: the run's own container, removed if the session closes during the run. */
+  private async spawnRun(argv: string[], command: string, timeout: number, step: "run" | "exec",
+                         onTimeout: () => Promise<void>, container: string | null = null): Promise<RunResult> {
     const [bin, ...args] = argv;
     const started = performance.now();
-    const r = spawnSync(bin!, args, { encoding: "utf8", timeout: timeout * 1000, killSignal: "SIGKILL",
-      maxBuffer: MAX_BUFFER });
-    const seconds = (performance.now() - started) / 1000;
-    stepLog({ step, project: this.cfg.name, secs: Math.round(seconds * 10) / 10,
-      timed_out: (r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT", exit: r.status,
-      command: command.slice(0, 160) });
-    const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
-    if (code === "ENOENT") throw new SetupRequired("Docker is not installed; arnx runs tests only inside Docker");
-    if (code === "ETIMEDOUT") {
-      onTimeout();
-      return { exitCode: null, output: (r.stdout ?? "").slice(-OUTPUT_LIMIT) + "\n[timed out]", timedOut: true, seconds };
+    let entry: { stop: () => void; container: string | null } | undefined;
+    const r = await spawned(bin!, args, timeout * 1000, (stop) => {
+      entry = { stop, container };
+      this.running.add(entry);
+    });
+    try {
+      if (r.stopped) return await this.closedAnswer();
+      const seconds = (performance.now() - started) / 1000;
+      stepLog({ step, project: this.cfg.name, secs: Math.round(seconds * 10) / 10,
+        timed_out: r.timedOut, exit: r.status, command: command.slice(0, 160) });
+      if (r.notFound) throw new SetupRequired("Docker is not installed; arnx runs tests only inside Docker");
+      if (r.timedOut) {
+        // Still listed meanwhile: a signal now removes the container this kill may not reach.
+        await onTimeout();
+        if (this.closed) return await this.closedAnswer();
+        return { exitCode: null, output: r.stdout.slice(-OUTPUT_LIMIT) + "\n[timed out]", timedOut: true, seconds };
+      }
+      return { exitCode: r.status, output: (r.stdout + r.stderr).slice(-OUTPUT_LIMIT), timedOut: false, seconds };
+    } finally {
+      this.running.delete(entry!);
     }
-    return { exitCode: r.status, output: ((r.stdout ?? "") + (r.stderr ?? "")).slice(-OUTPUT_LIMIT), timedOut: false,
-      seconds };
   }
 }
 
+/** Removes a run's container whose client was just killed. A start the client had already sent still makes it, moments
+ * later and left "Created" for good, so until Docker says it removed one (it names it; with none there it says nothing, or
+ * fails) it is asked again, for a little over a second. */
+function removeStarting(name: string): void {
+  for (const wait of [100, 200, 400, 800, 0]) {
+    const r = docker(["rm", "-fv", name]);
+    if ((r.status === 0 && r.stdout.trim()) || !wait) return;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
+  }
+}
+
+/** A command's exit and the ends of its output, without blocking; `started` gets what stops it at once. Output is read
+ * as text across reads, so a character split between two stays whole, and each stream keeps at least OUTPUT_LIMIT
+ * characters, all a run's answer uses, however much it prints. Past `ms` the command is killed. A killed command answers
+ * as soon as it has gone, even if something it started still holds its output open. */
+function spawned(bin: string, args: string[], ms: number, started: (stop: () => void) => void)
+  : Promise<{ status: number | null; stdout: string; stderr: string; timedOut: boolean; stopped: boolean; notFound: boolean }> {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "", status: number | null = null, exited = false, cut = false, timedOut = false,
+      stopped = false, notFound = false, done = false;
+    const tail = (s: string) => (s.length > 2 * OUTPUT_LIMIT ? s.slice(-OUTPUT_LIMIT) : s);
+    child.stdout.setEncoding("utf8").on("data", (t: string) => { stdout = tail(stdout + t); });
+    child.stderr.setEncoding("utf8").on("data", (t: string) => { stderr = tail(stderr + t); });
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr, timedOut, stopped, notFound });
+    };
+    const kill = () => {
+      cut = true;
+      child.kill("SIGKILL");
+      child.stdout.destroy();
+      child.stderr.destroy();
+      if (exited) finish();
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      kill();
+    }, ms);
+    child.on("error", (e: NodeJS.ErrnoException) => {
+      notFound = e.code === "ENOENT";
+      finish();
+    });
+    child.on("exit", (code) => {
+      exited = true;
+      status = code;
+      if (cut) finish();
+    });
+    child.on("close", (code) => {
+      if (!exited) status = code;
+      finish();
+    });
+    started(() => {
+      stopped = true;
+      kill();
+      finish();
+    });
+  });
+}
+
 /** What setup's exec tool runs its commands in (Session.exec), closed at the end of setup. */
-export interface ExecRunner { exec(command: string, timeout: number): RunResult; close(): void }
+export interface ExecRunner { exec(command: string, timeout: number): RunResult | Promise<RunResult>; close(): void }
 /** A started ExecRunner on `image` with `cfg`'s services and environment, `src` mounted at /src; null when the image
  * is not there: exec builds no image. */
 export type ExecFactory = (image: string, cfg: ReviewConfig, src: string, swap?: Swap) => Promise<ExecRunner | null>;

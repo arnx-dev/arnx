@@ -32,8 +32,8 @@ const few = (xs: string[], max = 3) => xs.slice(0, max).join(", ") + (xs.length 
 
 /** What the runner lists for `targets` (every test with none), and the run; null when the runner has no list form,
  * the list run timed out, or its output cannot be read for sure. */
-export function listTests(session: Runner, snap: string, cfg: ReviewConfig, targets: string[], name = "list.json")
-  : { listing: Listing; result: RunResult } | null {
+export async function listTests(session: Runner, snap: string, cfg: ReviewConfig, targets: string[], name = "list.json")
+  : Promise<{ listing: Listing; result: RunResult } | null> {
   const adapter = adapterFor(cfg);
   const command = adapter.listCommand?.(cfg.testCommand, targets, `/src/${REPORT_DIR}/${name}`, cfg.runner);
   if (!command || !adapter.parseList) return null;
@@ -41,7 +41,7 @@ export function listTests(session: Runner, snap: string, cfg: ReviewConfig, targ
   rmSync(path, { force: true });
   mkdirSync(dirname(path), { recursive: true });
   adapter.reportSetup?.(snap, cfg.runner);
-  const result = session.run(command, LIST_TIMEOUT);
+  const result = await session.run(command, LIST_TIMEOUT);
   if (result.timedOut) return null;
   const listed = existsSync(path) ? readFileSync(path, "utf8") : null;
   rmSync(path, { force: true });
@@ -104,8 +104,9 @@ export function sampleProblem(sample: string[], result: RunResult, results: Test
 
 /** The look before the whole suite, in the session it then runs in: the listing, arnx's one-line test among what the
  * runner lists from tests_dir, a few small files. Null when nothing it saw stops the try. */
-export function precheck(session: Runner, snap: string, cfg: ReviewConfig, acceptedTestsDir?: string): Early | null {
-  return look(session, snap, cfg, acceptedTestsDir).early;
+export async function precheck(session: Runner, snap: string, cfg: ReviewConfig, acceptedTestsDir?: string)
+  : Promise<Early | null> {
+  return (await look(session, snap, cfg, acceptedTestsDir)).early;
 }
 
 /** What the look saw: what stops the try (null when nothing does), how many tests and files the runner listed, and
@@ -118,27 +119,27 @@ export interface Look { early: Early | null; tests: number; files: number;
 /** precheck, with what it listed and the sample's run. `baseline`: "record" while setup's agent is trying the project;
  * in a proof, the tests recorded as failing today: a file recorded as not loading stays recorded, and nobody tries
  * again, so nothing says it. */
-export function look(session: Runner, snap: string, cfg: ReviewConfig, acceptedTestsDir?: string,
-                     baseline: BaselineTest[] | "record" = "record"): Look {
+export async function look(session: Runner, snap: string, cfg: ReviewConfig, acceptedTestsDir?: string,
+                           baseline: BaselineTest[] | "record" = "record"): Promise<Look> {
   const proof = baseline === "record" ? null : baseline;
   const again = proof ? "" : AGAIN;
   const known = (file: string) => !!proof && (proof.some((t) => t.load && t.file === file) ||
     cfg.knownFailing.some((k) => file.startsWith(k)));
   const none: Look = { early: null, tests: 0, files: 0, listed: [], sample: null };
-  const listed = listTests(session, snap, cfg, []);
+  const listed = await listTests(session, snap, cfg, []);
   if (!listed) return none;
   const { listing, result } = listed;
   const counts = { tests: listing.tests ?? listing.files.length, files: listing.files.length, listed: listing.files };
   const why = listingProblem(listing, result.exitCode, known);
   if (why) return { ...none, ...counts, early: { summary: why + again, output: result.output, hints: "" } };
   if (!listing.files.length) return { ...none, ...counts };
-  const probe = probeListed(session, snap, cfg);
+  const probe = await probeListed(session, snap, cfg);
   if (probe && !probe.seen) {
     return { ...none, ...counts, early: { summary: probeText(cfg) + again, output: probe.output, hints: "" } };
   }
   const sample = sampleOf(listing, cfg, snap, acceptedTestsDir);
   if (!sample.length) return { ...none, ...counts };
-  const [run, results] = runTests(session, snap, cfg, sample, "sample.xml", SAMPLE_TIMEOUT);
+  const [run, results] = await runTests(session, snap, cfg, sample, "sample.xml", SAMPLE_TIMEOUT);
   const stop = sampleProblem(sample, run, results);
   if (!stop) return { ...none, ...counts, sample: { files: sample, run, results: results ?? [] } };
   return { ...none, ...counts, early: { summary: stop + again, output: run.output,
@@ -149,7 +150,8 @@ export function look(session: Runner, snap: string, cfg: ReviewConfig, acceptedT
 
 /** Whether the runner lists arnx's one-line test, placed in tests_dir and given as the only target (the probe run
  * collects the same way), and the list run's output; null when the listing cannot tell. */
-export function probeListed(session: Runner, snap: string, cfg: ReviewConfig): { seen: boolean; output: string } | null {
+export async function probeListed(session: Runner, snap: string, cfg: ReviewConfig)
+  : Promise<{ seen: boolean; output: string } | null> {
   const dir = writeDirOf(cfg);
   const files = adapterFor(cfg).probes(cfg.runner).map((p) => ({ ...p, rel: posix.join(dir, p.file) }));
   try {
@@ -157,7 +159,7 @@ export function probeListed(session: Runner, snap: string, cfg: ReviewConfig): {
       mkdirSync(join(snap, dir), { recursive: true });
       writeFileSync(join(snap, p.rel), p.source);
     }
-    const listed = listTests(session, snap, cfg, files.map((p) => posix.relative(cfg.workdir, p.rel)), "probe-list.json");
+    const listed = await listTests(session, snap, cfg, files.map((p) => posix.relative(cfg.workdir, p.rel)), "probe-list.json");
     if (!listed || listed.listing.failed) return null;
     const rels = files.map((p) => p.rel);
     return { seen: listed.listing.files.some((f) => ownerFile(f, rels) !== null), output: listed.result.output };

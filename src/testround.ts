@@ -93,7 +93,7 @@ export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, e
   } else {
     guard = (s) => {
       let checked = false;
-      return { run: (command, timeout) => {
+      return { run: async (command, timeout) => {
         if (!checked) {
           checked = true;
           const baked = bakedIn(cfg, image, snap);
@@ -257,15 +257,15 @@ export function suffixReviewCopies(repo: string): number {
 
 /** Runs the adapter's one-line probe tests placed in `dir` (relative to the repository), then removes them. `seen`:
  * one was reported passing. Setup proves tests_dir with it; a round first proves the environment runs a test at all. */
-export function probeRun(session: Runner, snap: string, cfg: ReviewConfig, dir: string, report: string, timeout: number)
-  : { seen: boolean; result: RunResult; results: TestResult[] | null; files: string[] } {
+export async function probeRun(session: Runner, snap: string, cfg: ReviewConfig, dir: string, report: string, timeout: number)
+  : Promise<{ seen: boolean; result: RunResult; results: TestResult[] | null; files: string[] }> {
   const files = adapterFor(cfg).probes(cfg.runner).map((p) => ({ ...p, rel: posix.join(dir, p.file) }));
   try {
     for (const p of files) {
       mkdirSync(join(snap, dir), { recursive: true });
       writeFileSync(join(snap, p.rel), p.source);
     }
-    const [result, results] = runTests(session, snap, cfg, files.map((p) => posix.relative(cfg.workdir, p.rel)),
+    const [result, results] = await runTests(session, snap, cfg, files.map((p) => posix.relative(cfg.workdir, p.rel)),
       report, timeout);
     const seen = (results ?? []).some((t) => t.outcome === "passed" &&
       ownerFile(t.fileAttr, files.map((p) => p.rel)) !== null);
@@ -357,7 +357,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
     [agent, files, results] = await (o.sessionFactory ?? dockerSession)(cfg, snap, join(o.outDir, "env-build.log"),
       async (session) => {
         say("checking that the environment runs a test");
-        const probe = probeRun(session, snap, cfg, o.writeDir, "probe.xml", RUN_TIMEOUT);
+        const probe = await probeRun(session, snap, cfg, o.writeDir, "probe.xml", RUN_TIMEOUT);
         if (!probe.seen) {
           const log = join(o.outDir, "probe.log");
           const said = { ...probe.result, output: filter ? filter.mask(probe.result.output) : probe.result.output };
@@ -372,10 +372,10 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const expand = (targets: string[]) =>
           targets.flatMap((t) => (posix.normalize(t) === posix.normalize(o.writeDir) ? generated() : [t]))
             .map((t) => posix.relative(cfg.workdir, t) || ".");
-        const run = (targets: string[]) => {
+        const run = async (targets: string[]) => {
           const rel = expand(targets);
           if (!rel.length) return `no test files under ${o.writeDir}/ yet`;
-          const [result, results] = runTests(session, snap, cfg, rel, `agent-${++counter}.xml`, TOOL_TIMEOUT);
+          const [result, results] = await runTests(session, snap, cfg, rel, `agent-${++counter}.xml`, TOOL_TIMEOUT);
           const own = generated();
           if (results?.some((t) => ownerFile(t.fileAttr, own) !== null)) saw = true;
           return describeRun(result, results, own);
@@ -430,7 +430,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
             : target;
           say(failing ? `final run ${i + 1}/${o.runs} (${files.length} file${files.length === 1 ? "" : "s"} with failures)`
             : `final run ${i + 1}/${o.runs}`);
-          const [run, parsed] = runTests(session, snap, cfg, files.length ? files : target, `final-${i + 1}.xml`,
+          const [run, parsed] = await runTests(session, snap, cfg, files.length ? files : target, `final-${i + 1}.xml`,
             RUN_TIMEOUT);
           const got = ours(parsed), secs = Math.round(run.seconds * 10) / 10;
           if (!got || !failing || !first) {
@@ -457,7 +457,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
             break;
           }
         }
-        if (o.typecheck && cfg.typecheck) checked = typecheckHere(session, snap, cfg, o.writeDir, say);
+        if (o.typecheck && cfg.typecheck) checked = await typecheckHere(session, snap, cfg, o.writeDir, say);
         return [a, f, r] as const;
       }, undefined, undefined, swap);
     // A test failing for a file the snapshot left out, or a key it holds a fake of, says nothing about the project.
@@ -536,7 +536,7 @@ export async function typecheckRound(repo: string, head: string | null, cfg: Rev
     let baked = false;
     const run = await sessionFactory({ ...cfg, services: [] }, snap, join(o.outDir, "env-build.log"), async (session) => {
       baked = !!session.copies;
-      return typecheckHere(session, snap, cfg, writeDirOf(cfg), say);
+      return await typecheckHere(session, snap, cfg, writeDirOf(cfg), say);
     }, undefined, undefined, swap);
     return await typecheckDone(repo, cfg, run, { changed: o.changed, ...(o.base !== undefined ? { base: o.base } : {}),
       headSnap: snap, headKey, tmp, outDir: o.outDir, sessionFactory, say, ...(baked ? {} : { swap }) });
@@ -552,13 +552,13 @@ export async function typecheckRound(repo: string, head: string | null, cfg: Rev
 /** The type check on the change, in the round's session after its final runs (nothing else runs in that snapshot
  * after it). arnx's generated tests are taken out of the snapshot first rather than excluded through a tsconfig of
  * arnx's: that works for any tsconfig (extends, files, project references) and any checker. */
-function typecheckHere(session: Runner, snap: string, cfg: ReviewConfig, writeDir: string, say: (m: string) => void)
-  : TypeCheckRun {
+async function typecheckHere(session: Runner, snap: string, cfg: ReviewConfig, writeDir: string, say: (m: string) => void)
+  : Promise<TypeCheckRun> {
   say("type check");
   let run: TypeCheckRun;
   try {
     clearArnxFiles(snap, cfg, writeDir);
-    run = runTypecheck(session, cfg);
+    run = await runTypecheck(session, cfg);
   } catch (e) {
     // Whatever goes wrong here is the type check's, never the round's.
     run = { status: "failed", errors: [], output: e instanceof Error ? e.message : String(e), exitCode: null,
@@ -720,7 +720,7 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
           break;
         }
         const t = performance.now();
-        const [run, parsed] = runTests(session, snap, cfg, targets, `before-${i}.xml`, RUN_TIMEOUT);
+        const [run, parsed] = await runTests(session, snap, cfg, targets, `before-${i}.xml`, RUN_TIMEOUT);
         const took = ms(t);
         runsMs += took;
         // As in the final runs, only the generated tests count.
@@ -739,7 +739,7 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
           break;
         }
         const t = performance.now();
-        const [run, parsed] = runTests(session, snap, cfg, proofTargets, `fix-proof-${i}.xml`, RUN_TIMEOUT);
+        const [run, parsed] = await runTests(session, snap, cfg, proofTargets, `fix-proof-${i}.xml`, RUN_TIMEOUT);
         const took = ms(t);
         proofMs += took;
         const ours = parsed?.filter((x) => ownerFile(x.fileAttr, own) !== null) ?? [];

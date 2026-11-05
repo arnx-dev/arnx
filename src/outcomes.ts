@@ -97,14 +97,14 @@ const order = (o: string) => ["passed", "failed", "error", "skipped"].indexOf(o)
 
 /** Run the targets with the configured command; null results when the run timed out or wrote no readable report.
  * A report left by an earlier run never counts. */
-export function runTests(session: Runner, snap: string, cfg: ReviewConfig, targets: string[], reportName: string,
-                         timeout: number): [RunResult, TestResult[] | null] {
+export async function runTests(session: Runner, snap: string, cfg: ReviewConfig, targets: string[], reportName: string,
+                               timeout: number): Promise<[RunResult, TestResult[] | null]> {
   const adapter = adapterFor(cfg);
   const report = join(snap, REPORT_DIR, reportName);
   rmSync(report, { force: true });
   mkdirSync(dirname(report), { recursive: true }); // pytest creates it; node:test and others do not
   adapter.reportSetup?.(snap, cfg.runner);
-  const result = session.run(adapter.command(cfg.testCommand, targets, `/src/${REPORT_DIR}/${reportName}`, cfg.runner),
+  const result = await session.run(adapter.command(cfg.testCommand, targets, `/src/${REPORT_DIR}/${reportName}`, cfg.runner),
     timeout);
   if (result.timedOut) return [result, null];
   const file = existsSync(report) ? report : reportElsewhere(adapter.reportSaid?.(result.output, cfg.runner), snap);

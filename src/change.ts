@@ -973,7 +973,7 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
   const xmlPrints = sandboxPrints(from, files, true);
   const reports = join(snap, REPORT_DIR);
   const copies = runner.copies ? { copies: (output: string) => runner.copies!(output) } : {};
-  return { ...copies, clean: (report) => stripSandbox(report, xmlPrints), run: (command, timeout) => {
+  return { ...copies, clean: (report) => stripSandbox(report, xmlPrints), run: async (command, timeout) => {
     const placed: string[] = [], made: string[] = [];
     let result;
     try {
@@ -989,7 +989,7 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
         utimesSync(to, st.atime, st.mtime);
         placed.push(to);
       }
-      result = runner.run(command, timeout);
+      result = await runner.run(command, timeout);
     } finally {
       for (const p of placed) rmSync(p, { force: true });
       for (const d of made.reverse()) {

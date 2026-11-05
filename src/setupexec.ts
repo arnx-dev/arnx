@@ -186,7 +186,7 @@ export class SetupExec {
     }
     const n = ++this.calls;
     const cwd = typeof input.cwd === "string" && input.cwd.trim() ? input.cwd.trim() : "";
-    const r: RunResult = box.runner.exec(cwd ? `cd -- ${shQuote(cwd)} || exit 1; ${command}` : command, timeout);
+    const r: RunResult = await box.runner.exec(cwd ? `cd -- ${shQuote(cwd)} || exit 1; ${command}` : command, timeout);
     // A command may print the real values it was given, or that it found: neither its log nor its answer holds one.
     const masked = (text: string) => this.o.boundary ? this.o.boundary.mask(text) : text;
     // The agent gets the output with quotes of sandbox-only files taken out; the log, which no model reads, keeps it.

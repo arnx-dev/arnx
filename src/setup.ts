@@ -292,7 +292,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     let listed = "";
     let listedFiles: string[] = [];
     if (precheck && !targets.length && (cfg.language === "rust" || hasOwnTests(cfg, snap))) {
-      const seen = look(session, snap, cfg, acceptedTestsDir, baseline);
+      const seen = await look(session, snap, cfg, acceptedTestsDir, baseline);
       const early = seen.early;
       if (early) return [false, early.summary, tailOf(early.output), [], [], early.hints, none] as Out;
       if (quick && seen.sample) {
@@ -312,7 +312,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     let result, ran;
     try {
       [result, ran] = sample ? [sample.run, sample.results]
-        : runTests(session, snap, cfg, targets, "suite.xml", SUITE_TIMEOUT);
+        : await runTests(session, snap, cfg, targets, "suite.xml", SUITE_TIMEOUT);
     } finally {
       for (const c of canary) rmSync(c.path, { force: true });
     }
@@ -328,7 +328,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     // A project with no tests of its own has no suite to run: arnx's one-line test, which reviews depend on anyway,
     // proves the environment instead.
     if (!targets.length && !all?.length && cfg.language !== "rust" && !hasOwnTests(cfg, snap)) {
-      return noOwnTests(session, snap, cfg, all === null, tailOf);
+      return await noOwnTests(session, snap, cfg, all === null, tailOf);
     }
     let [ok, verdict, counts] = suiteOk(all, cfg, accepted, acceptedTestsDir, baseline);
     // Tests failing outside the baseline run once more, by file: one that passes then is flaky, not a new failure.
@@ -338,7 +338,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
       ? [...new Set((all ?? []).filter((t) => counts.unexpected.includes(t.testId)).map((t) => t.fileAttr))] : [];
     if (again.length && !again.includes("") && again.length <= APART_MAX) {
       const passed = new Set<string>();
-      const [, second] = runTests(session, snap, cfg, again, "again.xml", SUITE_TIMEOUT);
+      const [, second] = await runTests(session, snap, cfg, again, "again.xml", SUITE_TIMEOUT);
       for (const t of kept(second) ?? []) if (t.outcome === "passed") passed.add(testKey(t.testId));
       const most = counts.unexpected.length > counts.passed;
       const flaky = counts.unexpected.filter((id) => passed.has(testKey(id)) || (passedBefore && !most));
@@ -382,7 +382,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
       const apart = targets.length || sample ? [] : unexplainedFiles(results, cfg, hints);
       const others = (results ?? []).some((t) => t.fileAttr && !apart.includes(t.fileAttr));
       if (apart.length && apart.length <= APART_MAX && others) {
-        const [, again] = runTests(session, snap, cfg, apart, "apart.xml", SUITE_TIMEOUT);
+        const [, again] = await runTests(session, snap, cfg, apart, "apart.xml", SUITE_TIMEOUT);
         const alone = passingApart(apart, again);
         if (alone.length) hints.push({ kind: "order-dependent", detail: "", files: alone, evidence: "" });
       }
@@ -394,11 +394,11 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
       if (!ok) return [ok, summary, tailOf(result.output), skips, failing, said, counts] as Out;
     }
     if (targets.length) return [ok, summary, tailOf(result.output), skips, failing, said, counts] as Out;
-    const [probed, tail, ignored] = probe(session, snap, cfg);
+    const [probed, tail, ignored] = await probe(session, snap, cfg);
     if (ignored) return [false, `${summary}; but ${ignored}`, tailOf(tail), skips, failing, "", counts] as Out;
     if (probed && cfg.typecheck) {
       // The type check runs once the suite runs: type errors are information, a command that cannot run is not.
-      const t = runTypecheck(session, cfg);
+      const t = await runTypecheck(session, cfg);
       if (t.status === "failed" || t.status === "timed-out") {
         return [false, `${summary}; but the type check (typecheck) ${t.status === "failed" ? "failed without " +
           "reporting a type error: it could not start, or its output is not tsc's" : `timed out after ` +
@@ -419,10 +419,10 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
 
 /** runSuite's answer for a project with no tests of its own: its environment proven by arnx's one-line test (and the
  * type check), or why that test did not run. `silent`: the whole-suite run wrote no report. */
-function noOwnTests(session: Runner, snap: string, cfg: ReviewConfig, silent: boolean, tailOf: (s: string) => string)
-  : [boolean, string, string, string[], string[], string, SuiteCounts] {
+async function noOwnTests(session: Runner, snap: string, cfg: ReviewConfig, silent: boolean, tailOf: (s: string) => string)
+  : Promise<[boolean, string, string, string[], string[], string, SuiteCounts]> {
   const none = noCounts();
-  const [probed, tail, ignored] = probe(session, snap, cfg);
+  const [probed, tail, ignored] = await probe(session, snap, cfg);
   if (!probed) {
     return [false, `the project has no tests of its own${silent ? " (the suite wrote no report)" : ""}, and arnx's ` +
       `one-line test placed in ${writeDirOf(cfg)}/ did not run either: install the runner in install (the project may ` +
@@ -432,7 +432,7 @@ function noOwnTests(session: Runner, snap: string, cfg: ReviewConfig, silent: bo
   }
   if (ignored) return [false, `${NO_OWN_TESTS}; but ${ignored}`, tailOf(tail), [], [], "", none];
   if (cfg.typecheck) {
-    const t = runTypecheck(session, cfg);
+    const t = await runTypecheck(session, cfg);
     if (t.status === "failed" || t.status === "timed-out") {
       return [false, `${NO_OWN_TESTS}; but the type check (typecheck) ${t.status === "failed" ? "failed without " +
         "reporting a type error: it could not start, or its output is not tsc's" : `timed out after ` +
@@ -474,8 +474,8 @@ async function askModel(model: FailureModel, results: TestResult[] | null, cfg: 
 /** Generated tests go to tests_dir: prove the runner picks up a file placed there. Any probe reported passing is
  * enough; the probes are removed afterwards. The probes are the run's only targets, so it also tells whether
  * test_command runs only {targets} (see ignoredTargets). [picked up, end of the output, why it runs more] */
-export function probe(session: Pick<Runner, "run">, snap: string, cfg: ReviewConfig): [boolean, string, string] {
-  const p = probeRun(session, snap, cfg, writeDirOf(cfg), "probe.xml", SUITE_TIMEOUT);
+export async function probe(session: Pick<Runner, "run">, snap: string, cfg: ReviewConfig): Promise<[boolean, string, string]> {
+  const p = await probeRun(session, snap, cfg, writeDirOf(cfg), "probe.xml", SUITE_TIMEOUT);
   return [p.seen, maskPrivateKeys(p.result.output).slice(-OUTPUT_TAIL), p.seen ? ignoredTargets(p.results, p.files, cfg) : ""];
 }
 

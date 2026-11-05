@@ -44,7 +44,8 @@ import { buildInfo, VERSION } from "./version";
 
 export const AGENT_SHARE = 0.85;
 
-/** Projects tested at once: each runs its own sandbox, so two side by side roughly halve a two-project review. */
+/** Projects tested at once: each runs its own sandbox, and a test run does not hold the process (Session.spawnRun), so
+ * two side by side roughly halve a two-project review. */
 export const PROJECT_CONCURRENCY = 2;
 
 interface SavedVerdict { verdict: string; reason: string; dependsOn: string | null; judge: string | null;

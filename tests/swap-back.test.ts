@@ -325,8 +325,8 @@ test("a session runs on real values inside its network, and what it logs holds t
     const cfg = parseReviewConfig(ENV_YAML);
     const swap = new Boundary([GUESS]).swapFor(write(join(tmp(), "s"), { "a.py": "x\n" }));
     const session = await new Session("img", cfg, tmp(), DEFAULT_LIMITS, swap as never).start();
-    const r = session.run(`python -m pytest ${SHOWN}`, 10);
-    const e = session.exec(`echo ${SHOWN}`, 10);
+    const r = await session.run(`python -m pytest ${SHOWN}`, 10);
+    const e = await session.exec(`echo ${SHOWN}`, 10);
     session.close();
     const calls = docker.calls().join("\n");
     expect(calls).toContain(`DB_PASSWORD=${GUESS}`);
@@ -356,13 +356,13 @@ test("with no services a run keeps --network none, and without a swap it holds w
     const cfg = parseReviewConfig(`version: 1\nallow_env_names: [DB_PASSWORD]\nimage: i\ntest_command: python -m pytest {targets}\nenv: {DB_PASSWORD: ${SHOWN}}\n`);
     const swap = new Boundary([GUESS]).swapFor(write(join(tmp(), "s2"), { "a.py": "x\n" }));
     const session = await new Session("img", cfg, tmp(), DEFAULT_LIMITS, swap as never).start();
-    session.run(`echo ${SHOWN}`, 10);
+    await session.run(`echo ${SHOWN}`, 10);
     session.close();
     const runs = docker.calls().filter((l) => l.includes(`DB_PASSWORD=${GUESS}`));
     expect(runs.length).toBeGreaterThan(0);
     for (const l of runs) expect(l).toContain("--network none");
     const off = await new Session("img", cfg, tmp()).start();
-    off.run(`echo ${SHOWN}`, 10);
+    await off.run(`echo ${SHOWN}`, 10);
     off.close();
     expect(docker.calls().some((l) => l.includes(`DB_PASSWORD=${SHOWN}`) && l.includes(`echo ${SHOWN}`))).toBe(true);
   } finally {
@@ -413,7 +413,7 @@ test("a project whose tests run on a baked copy keeps stand-ins, as the copy doe
       const swap = b.swapFor(snap);
       await dockerSession(cfg, snap, join(tmp(), "b.log"), async (s) => {
         copies = !!s.copies;
-        s.run(`echo ${SHOWN}`, 10);
+        await s.run(`echo ${SHOWN}`, 10);
         return null;
       }, undefined, `key-${root}`, swap);
       return copies;

@@ -110,7 +110,7 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
             const targets = [...new Set(open.map((f) => owner(f)!))].sort()
               .map((p) => posix.relative(cfg.workdir, p) || p);
             o.progress?.(`${name}: run ${i}/${settings.runs}, ${targets.length} file${targets.length === 1 ? "" : "s"}`);
-            const [, parsed] = runTests(session, snap, cfg, targets, `recheck-${i}.xml`, RUN_TIMEOUT);
+            const [, parsed] = await runTests(session, snap, cfg, targets, `recheck-${i}.xml`, RUN_TIMEOUT);
             // The saved finding's id holds a stand-in where the run's holds the value (a parametrized test).
             const results = parsed && markUnproven(parsed.map(asError), { leftOut: lacking, fakedKeys: taken.fakedKeys, all: tree }).map((t) => ({ ...t, testId: boundary.mask(t.testId) }));
             for (const f of open) runs.get(f.id)!.push(outcomeIn(results, f));

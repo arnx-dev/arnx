@@ -222,6 +222,13 @@ whole log: real among the marked findings whose mark is `"chosen"`, with the `"d
 apart and left out of the ratio (neither says whether the owner agrees). An unmarked finding (`mark` null) is no
 verdict and counts nowhere, chosen or not.
 
+A test run or type check does not hold the process (`Session.spawnRun`): while one project's run goes on, the other
+project's timers, polls and streams go on too, and a signal's handler runs at once. Two things rest on it. Each session
+has one user, who waits for each run, so a snapshot changes only between its runs and its sandbox-only files are read by
+no model, whose tools wait on the same loop. On an interrupt, `Session.close` kills Docker's client, removes the run's
+container by its name (asking again for a little over a second, since a start already sent can still make it) and gives
+the run no answer: what waits on it stops there, so a killed run never reads as a result.
+
 ## Trace events
 
 Every review writes `.arnx/reviews/<id>/events.jsonl`, and every setup `.arnx/setup/<id>/events.jsonl` (other setup

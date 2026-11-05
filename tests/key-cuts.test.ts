@@ -108,10 +108,10 @@ test("a suite with no report: its last lines hold no key", () => {
   expect(said).not.toContain("END PRIVATE");
 });
 
-test("a probe's tail is taken after the mask", () => {
+test("a probe's tail is taken after the mask", async () => {
   const output = `${pem}${ORDINARY.repeat(Math.ceil(5900 / ORDINARY.length)).slice(0, 5900)}`;
   const session = { run: () => run(output) };
-  const [, tail] = probe(session, tmp(), CFG);
+  const [, tail] = await probe(session, tmp(), CFG);
   clean("the probe's tail", tail, pem.split("\n").filter(Boolean).slice(1, -1));
 });
 

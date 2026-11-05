@@ -415,7 +415,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: code baked into the ima
   const read = (snap: string, envFrom?: string, fill?: () => void, config = BAKED, file = "/opt/app/a.py") =>
     dockerSession(parseReviewConfig(config), snap, join(tmp(), "build.log"), async (s) => {
       fill?.();
-      return s.run(`cat ${file}`, 60).output.trim();
+      return (await s.run(`cat ${file}`, 60)).output.trim();
     }, envFrom);
 
   test("a copy older than the code is built again for it; a copy that matches is used as it is", async () => {
@@ -456,7 +456,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: code baked into the ima
     const same = join(tmp(), "same");
     expect(await dockerSession(parseReviewConfig(BAKED), same, join(tmp(), "build.log"), async (s) => {
       cpSync(head, same, { recursive: true });
-      return s.run("cat /opt/app/a.py", 60).output.trim();
+      return (await s.run("cat /opt/app/a.py", 60)).output.trim();
     }, head)).toBe(`VALUE = ${v}`);
   }, 600_000);
 

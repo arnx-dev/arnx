@@ -213,8 +213,13 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       const runs = await sayingDocker(o.progress, () => (o.sessionFactory ?? dockerSession)(cfg, snap,
         join(repo, ".arnx", "run", `check-${cfg.name}-build.log`), async (session) => {
           if (!session.copies) swapFiles(snap, [...placed], swap);
-          return groups.map((g, i) => [g, ...runTests(session, snap, cfg, files.filter((f) => reviewGroup(f) === g).map(target),
-            groups.length > 1 ? `check-${i + 1}.xml` : "check.xml", CHECK_TIMEOUT)] as const);
+          // One after another: they share the session and the snapshot.
+          const ran = [];
+          for (const [i, g] of groups.entries()) {
+            ran.push([g, ...await runTests(session, snap, cfg, files.filter((f) => reviewGroup(f) === g).map(target),
+              groups.length > 1 ? `check-${i + 1}.xml` : "check.xml", CHECK_TIMEOUT)] as const);
+          }
+          return ran;
         }, undefined, undefined, swap));
       // A test failing for a file left out, or for a key the sandbox holds a fake of, says nothing about the code.
       const lacking = taken.withheld.map((w) => w.path);

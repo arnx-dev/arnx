@@ -86,9 +86,9 @@ export function parseTsc(output: string, workdir: string): TscError[] {
 
 /** The project's type check, once, in `session` on its snapshot as it is now. Never throws: a Docker error is a
  * failed check. */
-export function runTypecheck(session: Runner, cfg: ReviewConfig): TypeCheckRun {
+export async function runTypecheck(session: Runner, cfg: ReviewConfig): Promise<TypeCheckRun> {
   try {
-    const r = session.run(cfg.typecheck!, TYPECHECK_TIMEOUT);
+    const r = await session.run(cfg.typecheck!, TYPECHECK_TIMEOUT);
     const errors = r.timedOut ? [] : parseTsc(r.output, cfg.workdir);
     const status: TypeCheckStatus = r.timedOut ? "timed-out" : errors.length ? "errors"
       : r.exitCode === 0 ? "clean" : "failed";

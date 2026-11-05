@@ -70,21 +70,21 @@ class WritingSession implements Runner {
   }
 }
 
-test("test_run_pytest", () => {
+test("test_run_pytest", async () => {
   const cfg = parseReviewConfig("version: 1\nimage: i\ntest_command: pytest -q {targets}\n");
   const s = new WritingSession(tmp(), junitXml([[F, "test_a", "failed", "boom"]]));
-  const [, results] = runTests(s, tmp(), cfg, ["tests"], "x.xml", 10);
+  const [, results] = await runTests(s, tmp(), cfg, ["tests"], "x.xml", 10);
   expect(results?.[0]?.outcome).toBe("failed");
   expect(s.commands[0]).toContain("--junitxml=/src/.arnx-run/x.xml");
 });
 
-test("test_run_pytest_no_report", () => {
+test("test_run_pytest_no_report", async () => {
   const cfg = parseReviewConfig("version: 1\nimage: i\ntest_command: pytest -q {targets}\n");
   mkdirSync(join(tmp(), ".arnx-run"));
   writeFileSync(join(tmp(), ".arnx-run", "x.xml"), junitXml([[F, "test_a", "passed", ""]]));
-  let [, results] = runTests(new WritingSession(tmp(), null), tmp(), cfg, [], "x.xml", 10);
+  let [, results] = await runTests(new WritingSession(tmp(), null), tmp(), cfg, [], "x.xml", 10);
   expect(results).toBeNull(); // a report left by an earlier run never counts
-  [, results] = runTests(new WritingSession(tmp(), "<garbage"), tmp(), cfg, [], "x.xml", 10);
+  [, results] = await runTests(new WritingSession(tmp(), "<garbage"), tmp(), cfg, [], "x.xml", 10);
   expect(results).toBeNull();
 });
 
@@ -103,14 +103,14 @@ test("nested testsuites are walked in order", () => {
   expect(parseJunit(xml, () => "x")!.map((t) => t.name)).toEqual(["a", "b", "c"]);
 });
 
-test("the report directory exists before the runner starts (not every runner creates it)", () => {
+test("the report directory exists before the runner starts (not every runner creates it)", async () => {
   const cfg = parseReviewConfig("version: 1\nimage: i\ntest_command: pytest -q {targets}\n");
   let existed = false;
   const s: Runner = { run: () => {
     existed = existsSync(join(tmp(), ".arnx-run"));
     return { exitCode: 0, output: "", timedOut: false, seconds: 0 };
   } };
-  runTests(s, tmp(), cfg, [], "x.xml", 10);
+  await runTests(s, tmp(), cfg, [], "x.xml", 10);
   expect(existed).toBe(true);
 });
 

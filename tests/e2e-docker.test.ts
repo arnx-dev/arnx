@@ -121,7 +121,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     snapshot(repo, null, snap, [], { untracked: true });
     cpSync(join(repo, ".arnx", "tests"), join(snap, ".arnx", "tests"), { recursive: true });
     const own = await dockerSession(cfg, snap, join(tmp(), "build.log"),
-      async (s) => runTests(s, snap, cfg, [], "own.xml", 600)[1]);
+      async (s) => (await runTests(s, snap, cfg, [], "own.xml", 600))[1]);
     expect(own?.length).toBeGreaterThan(0);
     expect(own!.filter((t) => t.testId.includes(".arnx"))).toEqual([]);
     const [r] = await check(repo, settings);
@@ -308,9 +308,9 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
       const first = String(made[0].Subnet).replace(/\.0\/\d+$/, ".1");
       const bridge = dockerOut("network", "inspect", "bridge", "-f", "{{(index .IPAM.Config 0).Gateway}}");
       for (const host of [first, bridge]) {
-        expect(session.run(reach(host), 30).output).not.toContain("reached");
+        expect((await session.run(reach(host), 30)).output).not.toContain("reached");
       }
-      expect(session.run(reach("cache", 6379), 30).output).toContain("reached");
+      expect((await session.run(reach("cache", 6379), 30)).output).toContain("reached");
     } finally {
       session.close();
       server.close();

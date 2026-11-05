@@ -108,21 +108,21 @@ function oneRun(snap: string, writeTo: string | null, output: string): Runner {
   };
 }
 
-test("vitest keeps a configuration's own junit outputFile: the report is read where vitest says it wrote it", () => {
+test("vitest keeps a configuration's own junit outputFile: the report is read where vitest says it wrote it", async () => {
   const snap = tmp();
   const cfg = parseReviewFile(file("typescript", "vitest", "npx vitest run {targets}")).projects[0]!;
   const elsewhere = "test-results/junit.xml";
-  const [, results] = runTests(oneRun(snap, elsewhere, `JUNIT report written to /src/${elsewhere}\n`), snap, cfg, [],
+  const [, results] = await runTests(oneRun(snap, elsewhere, `JUNIT report written to /src/${elsewhere}\n`), snap, cfg, [],
     "suite.xml", 60);
   expect(results!.map((t) => t.testId)).toEqual(["a.test.ts::adds"]);
   expect(existsSync(join(snap, elsewhere))).toBe(false);
   // Outside the code under test, or not said: no report.
-  expect(runTests(oneRun(snap, null, "JUNIT report written to /tmp/junit.xml\n"), snap, cfg, [], "suite.xml", 60)[1])
+  expect((await runTests(oneRun(snap, null, "JUNIT report written to /tmp/junit.xml\n"), snap, cfg, [], "suite.xml", 60))[1])
     .toBeNull();
-  expect(runTests(oneRun(snap, elsewhere, "done\n"), snap, cfg, [], "suite.xml", 60)[1]).toBeNull();
+  expect((await runTests(oneRun(snap, elsewhere, "done\n"), snap, cfg, [], "suite.xml", 60))[1]).toBeNull();
 });
 
-test("a report written elsewhere is cleaned like arnx's own: what it quotes of sandbox-only files goes", () => {
+test("a report written elsewhere is cleaned like arnx's own: what it quotes of sandbox-only files goes", async () => {
   const snap = tmp();
   const cfg = parseReviewFile(file("typescript", "vitest", "npx vitest run {targets}")).projects[0]!;
   const elsewhere = "test-results/junit.xml";
@@ -137,7 +137,7 @@ test("a report written elsewhere is cleaned like arnx's own: what it quotes of s
     },
     clean: (report) => report.replaceAll("token=fixture-only-value", "[sandbox-only file content]"),
   };
-  const [, results] = runTests(runner, snap, cfg, [], "suite.xml", 60);
+  const [, results] = await runTests(runner, snap, cfg, [], "suite.xml", 60);
   expect(results![0]!.message).not.toContain("fixture-only-value");
 });
 
