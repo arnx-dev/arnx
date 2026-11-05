@@ -59,7 +59,29 @@ function testSpan(source: string, func: string): { at: number; end: number } | n
   if (!Number.isFinite(at)) return null;
   const rest = source.slice(at + name.length);
   const next = /\n\s*(?:it|test)(?:\.\w+)?\s*\(|\n\s*(?:async\s+)?def\s+test|\n\s*#\[test\]|\n\s*(?:class|describe)\b/.exec(rest);
-  return { at, end: at + name.length + (next ? next.index : rest.length) };
+  return { at, end: at + name.length + (next ? withoutDecorators(rest, next.index) : rest.length) };
+}
+
+/** Where the next test's own lines start: its decorators or attributes (`@x(…)`, `#[x]`, over several lines too) are
+ * above its name, but they are not this test's. `end`: the offset in `text` of the line break before the next test. */
+function withoutDecorators(text: string, end: number): number {
+  const lines = text.slice(0, end).split("\n");
+  let cut = lines.length, open = 0;
+  const net = (l: string) => (l.match(/[)\]]/g)?.length ?? 0) - (l.match(/[([]/g)?.length ?? 0);
+  for (let k = lines.length - 1; k >= 1; k--) {
+    const l = lines[k]!.trim();
+    const starts = l.startsWith("@") || l.startsWith("#[");
+    if (open === 0 && starts && net(l) <= 0) cut = k;
+    else if (open === 0 && !starts && net(l) > 0) open = net(l);
+    else if (open > 0) {
+      open += net(l);
+      if (open <= 0) {
+        if (!starts) break;
+        [cut, open] = [k, 0];
+      }
+    } else break;
+  }
+  return lines.slice(0, cut).join("\n").length;
 }
 
 /** The test's body: from its name to the next test, or the end of the file. */

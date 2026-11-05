@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CopyDiffers } from "../src/baked";
-import { type BeforeRun, judgeBefore } from "../src/before";
+import { type Before, type BeforeRun, judgeBefore, namesAdded, newNames, sharedFailure, usesNew, vacuousBefore } from "../src/before";
+import { testBody } from "../src/shallow";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { EVENTS_FILE, type TraceEvent } from "../src/events";
 import type { TestResult } from "../src/outcomes";
@@ -418,4 +419,70 @@ test("a finding that fails the same way but uses what the change adds is judged,
   expect(add.before!.detail).toContain("the test uses `helper`, which the change adds");
   expect(add.verdict).toBe("disputed");
   expect(old.before!.status).toBe("pre-existing");
+});
+
+// Names, not words: what the change brings is read from the code of its source files, and a test uses it only in code.
+const diffOf = (path: string, added: string[]) => [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`,
+  `@@ -1 +1,${added.length + 1} @@`, " keep", ...added.map((l) => `+${l}`), ""].join("\n");
+const notTest = (n: string) => n.startsWith("test_");
+
+describe("names, not words", () => {
+  test("a word the change adds only in a comment is not a name it brings", () => {
+    const diff = diffOf("app.py", ["# SHOW the totals, then AGGREGATE them", 'MSG = "region indicated"',
+      "def total():", '    """generation of the total"""', "    return realname(1)  # trailing remark"]);
+    expect([...namesAdded(diff, notTest)].sort()).toEqual(["MSG", "def", "realname", "return", "total"].sort());
+    const block = diffOf("lib.rs", ["/* AGGREGATE", " SHOW */", 'fn go() { let s = "indicated"; run_it(s); } // region']);
+    expect([...namesAdded(block, notTest)]).not.toContain("AGGREGATE");
+    expect([...namesAdded(block, notTest)]).toContain("run_it");
+  });
+
+  test("a word from a data file in the change is not a name it brings", () => {
+    const docs = diffOf("docs/notes.md", ["AGGREGATE the region"]);
+    const data = diffOf("data/rows.json", ['{"indicated": 1}']);
+    const fixture = diffOf("tests/fixtures/sample.py", ["def generation(): pass"]);
+    const inTests = diffOf("tests/helpers.py", ["def shown(): pass"]);
+    for (const d of [docs, data, fixture, inTests]) expect([...newNames(d, notTest, () => null)]).toEqual([]);
+    expect([...newNames(diffOf("src/app.py", ["def generation(): pass"]), notTest, () => null)]).toContain("generation");
+  });
+
+  test("an assert message does not make a test use what the change adds", () => {
+    const source = 'def test_a():\n    assert total() == 3, "SHOW the region indicated"\n    # AGGREGATE later\n';
+    expect(usesNew(source, "test_a", new Set(["SHOW", "AGGREGATE", "region", "indicated"]))).toBeNull();
+    expect(usesNew(source, "test_a", new Set(["total"]))).toBe("total");
+    // A string that looks like a name (a patch target, a key) still counts.
+    const target = 'def test_b():\n    mocker.patch("app.new_helper")\n';
+    expect(usesNew(target, "test_b", new Set(["new_helper"]))).toBe("new_helper");
+    const same: Before = { status: "pre-existing", detail: "d", runs: ["failed"], message: "x" };
+    expect(vacuousBefore(same, source, "test_a", new Set(["SHOW"]))).toBe(same);
+    // No whole-file fallback: a test that cannot be found uses nothing.
+    expect(usesNew(source, "test_missing", new Set(["total"]))).toBeNull();
+  });
+
+  test("the next test's decorator is not part of this test", () => {
+    const py = 'def test_a():\n    assert 1\n\n@pytest.mark.parametrize(\n    "x",\n    [AGGREGATE],\n)\n@other\ndef test_b(x):\n    pass\n';
+    expect(testBody(py, "test_a")).not.toContain("AGGREGATE");
+    expect(testBody(py, "test_a")).not.toContain("@");
+    expect(testBody(py, "test_b")).toContain("def test_b");
+    const rs = "#[test]\nfn one() {\n    assert!(true);\n}\n\n#[should_panic]\n#[test]\nfn two() {}\n";
+    expect(testBody(rs, "one")).not.toContain("should_panic");
+  });
+
+  test("a message shared with tests the change fixes does not make a failure pre-existing", () => {
+    const fail = (name: string, message: string) => ({ testId: `t.py::${name}`, fileAttr: "t.py", name, outcome: "failed", message });
+    const same: Before = { status: "pre-existing", detail: "fails the same way", runs: ["failed"], message: "AssertionError: assert False" };
+    const base = [0, 1, 2].map(() => run(fail("test_p", "AssertionError: assert False"), fail("test_q", "AssertionError: assert False"),
+      fail("test_r", "AssertionError: other")));
+    const b = sharedFailure(same, "AssertionError: assert False", base, new Set(["t.py::test_p", "t.py::test_q", "t.py::test_r"]));
+    expect(b.status).toBe("unknown");
+    expect(b.detail).toBe("fails the same way there, but so do 2 tests that pass with the change");
+    // Another message, or no passing test failing there: the verdict stands.
+    expect(sharedFailure(same, "AssertionError: assert False", base, new Set(["t.py::test_r"]))).toBe(same);
+    expect(sharedFailure(same, "AssertionError: assert False", base, new Set())).toBe(same);
+    // A test that failed in only some runs, or errored, settles nothing.
+    const mixed = [run(fail("test_p", "AssertionError: assert False")), run({ ...fail("test_p", ""), outcome: "passed" }), base[0]!];
+    expect(sharedFailure(same, "AssertionError: assert False", mixed, new Set(["t.py::test_p"]))).toBe(same);
+    // Only a pre-existing verdict is touched.
+    const other: Before = { status: "changed", detail: "d", runs: [] };
+    expect(sharedFailure(other, "AssertionError: assert False", base, new Set(["t.py::test_p"]))).toBe(other);
+  });
 });

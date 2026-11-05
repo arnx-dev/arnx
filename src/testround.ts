@@ -11,7 +11,7 @@ import { adapterFor } from "./adapters";
 import { absentFromSnapshot, bakedError, bakedIn, imageFiles, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
   from "./baked";
 import { asFallbackBefore, asFallbackFix, BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
-  fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, newNames, notChecked, SKIP_REASONS, textBefore, textFix,
+  fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, newNames, notChecked, sharedFailure, SKIP_REASONS, textBefore, textFix,
   vacuousBefore } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
 import { type Boundary, maskedCopy, type Swap } from "./boundary";
@@ -838,9 +838,12 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
       const at = join(snap, path);
       return existsSync(at) ? readFileSync(at, "utf8") : null;
     });
+    const passing = new Set(o.proofs.map((p) => p.testId));
     return result(() => done(Object.fromEntries(o.findings.map((t) => {
       const file = ownerFile(t.fileAttr, own), b = judgeBefore(t, file, runs, envChanged);
-      const judged = asText(t, file) ? textBefore(b) : file === null ? b : vacuousBefore(b, o.files[file] ?? "", funcOf(t), brought);
+      // Tests that pass with the change and fail there with the same message: that message says nothing about this one.
+      const judged = asText(t, file) ? textBefore(b) : file === null ? b : sharedFailure(
+        vacuousBefore(b, o.files[file] ?? "", funcOf(t), brought, file), t.message, [...runs, ...proofRuns], passing, runs.length);
       return [t.testId, o.fallback ? asFallbackBefore(judged) : judged];
     }))),
     () => proofLate ? proved({}, "time") : proved(Object.fromEntries(o.proofs.map((t) => {

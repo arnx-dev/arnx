@@ -4,7 +4,9 @@
 // No model is called. The stage itself is `beforeStage` in testround.ts; this module only compares outcomes.
 import { posix } from "node:path";
 import { asError, ownerFile, type TestResult } from "./outcomes";
-import { testText } from "./shallow";
+import { codeText, inTestFolder } from "./codetext";
+import { testBody } from "./shallow";
+import { SOURCE } from "./untested";
 import { DIFF_SECTION, splitLines } from "./util";
 
 /** regression: passes before the change. pre-existing: fails the same way before it. new-code: what it tests does not
@@ -225,20 +227,29 @@ export function textFix(f: Fix): Fix {
     `the change (${plural(f.runs.length, "run")}), but it reads the code as text: no proof of a fix` };
 }
 
-/** The names a change starts using: on the added lines of its source files, not on their removed ones. */
+const WORDS = /[A-Za-z_$][\w$]*/g;
+
+/** The names a change starts using: in the code (not the comments or strings) of the added lines of its source files,
+ * not of their removed ones. Only source files count: a test, a file in a test folder, a document or a data file
+ * brings no name. Each hunk is read as code on its own, so a comment or string that opens before it is not known. */
 export function namesAdded(diff: string, isTest: (name: string) => boolean): Set<string> {
-  const names = (lines: string[]) => new Set(lines.flatMap((l) => l.slice(1).match(/[A-Za-z_$][\w$]*/g) ?? []));
-  const added: string[] = [], removed: string[] = [];
+  const added = new Set<string>(), gone = new Set<string>();
   for (const section of diff.split(DIFF_SECTION)) {
     const path = /^\+\+\+ b\/(.*)$/m.exec(section)?.[1] ?? /^--- a\/(.*)$/m.exec(section)?.[1] ?? "";
-    if (!path || isTest(posix.basename(path))) continue;
-    for (const line of section.split("\n")) {
-      if (line.startsWith("+") && !line.startsWith("+++")) added.push(line);
-      else if (line.startsWith("-") && !line.startsWith("---")) removed.push(line);
+    if (!path || !SOURCE.test(path) || isTest(posix.basename(path)) || inTestFolder(path)) continue;
+    // Per hunk, the new side (context and added lines) and the old side (context and removed ones), as code.
+    for (const hunk of section.split(/^@@.*$/m).slice(1)) {
+      const lines = hunk.split("\n");
+      for (const [mark, set] of [["+", added], ["-", gone]] as const) {
+        const side = lines.filter((l) => l.startsWith(" ") || l.startsWith(mark));
+        const code = codeText(side.map((l) => l.slice(1)).join("\n"), path).split("\n");
+        side.forEach((l, k) => {
+          if (l.startsWith(mark)) for (const w of code[k]?.match(WORDS) ?? []) set.add(w);
+        });
+      }
     }
   }
-  const gone = names(removed);
-  return new Set([...names(added)].filter((n) => !gone.has(n)));
+  return new Set([...added].filter((n) => !gone.has(n)));
 }
 
 /** The first of `names` a test file fakes: on a line that patches, mocks, spies or stubs, a quoted target
@@ -264,20 +275,52 @@ export function newNames(diff: string, isTest: (name: string) => boolean, old: (
   const before = new Set<string>();
   for (const section of diff.split(DIFF_SECTION)) {
     const path = /^\+\+\+ b\/(.*)$/m.exec(section)?.[1];
-    const text = path ? old(path) : null;
-    if (text) for (const w of text.match(/[A-Za-z_$][\w$]*/g) ?? []) before.add(w);
+    const text = path && SOURCE.test(path) ? old(path) : null;
+    if (text) for (const w of codeText(text, path!).match(WORDS) ?? []) before.add(w);
   }
   return new Set([...namesAdded(diff, isTest)].filter((n) => n.length >= 4 && !LANGUAGE.has(n) && !before.has(n)));
 }
 
+/** The first of `names` the test `func` uses: a name in its code (comments and strings left out), or in a string that
+ * looks like a name (contains `_` or a capital after the first letter, six letters or more: a patch target, a key).
+ * Only the test's own body is read; null when it cannot be found. */
+export function usesNew(source: string, func: string, names: ReadonlySet<string>, path = "test.py"): string | null {
+  const body = testBody(source, func);
+  if (body === null) return null;
+  const inStrings: string[] = [];
+  const code = codeText(body, path, (text) => inStrings.push(text));
+  const named = (w: string) => w.length >= 6 && (w.includes("_") || /[a-z0-9][A-Z]/.test(w));
+  const words = [...(code.match(WORDS) ?? []), ...inStrings.flatMap((t) => (t.match(WORDS) ?? []).filter(named))];
+  return words.find((w) => names.has(w)) ?? null;
+}
+
 /** A failure that is the same before the change says nothing when the test uses what the change adds: the code before
- * it cannot pass, whatever it does. Such a finding is judged like any other. */
-export function vacuousBefore(b: Before, source: string, func: string, names: ReadonlySet<string>): Before {
+ * it cannot pass, whatever it does. Such a finding is judged like any other. `path`: the test file (its language). */
+export function vacuousBefore(b: Before, source: string, func: string, names: ReadonlySet<string>, path?: string): Before {
   if (b.status !== "pre-existing") return b;
-  const scope = testText(source, func);
-  const name = (scope.match(/[A-Za-z_$][\w$]*/g) ?? []).find((w) => names.has(w));
+  const name = usesNew(source, func, names, path);
   return !name ? b : { ...b, status: "unknown", detail: "fails the same way on the code before the change, but the test " +
     `uses \`${name}\`, which the change adds, so that says nothing about the code before it` };
+}
+
+/** A same failure says nothing when tests that pass with the change fail the same way there: the message is shared
+ * (an `assert False`), not specific to this test. Counted: tests of `passedOnChange` that failed with `signatureOf`'s
+ * first line in each of the `each` runs they are in (default: all of `baseRuns`), and in no run otherwise. */
+export function sharedFailure(b: Before, signatureOf: string, baseRuns: BeforeRun[], passedOnChange: ReadonlySet<string>,
+  each = baseRuns.length): Before {
+  if (b.status !== "pre-existing" || !passedOnChange.size || !each) return b;
+  const sig = signature(signatureOf);
+  const seen = new Map<string, number>(); // test id -> runs it failed with that signature in; -1 once it did not
+  for (const r of baseRuns) {
+    for (const x of r.results ?? []) {
+      if (!passedOnChange.has(x.testId)) continue;
+      const before = seen.get(x.testId) ?? 0;
+      seen.set(x.testId, before >= 0 && x.outcome === "failed" && signature(x.message) === sig ? before + 1 : -1);
+    }
+  }
+  const n = [...seen.values()].filter((k) => k >= each).length;
+  return n ? { ...b, status: "unknown", detail: `fails the same way there, but so do ${n} test${n === 1 ? "" : "s"} that ` +
+    "pass with the change" } : b;
 }
 
 /** A failure of the test's own check, not a crash in the code it runs. */
