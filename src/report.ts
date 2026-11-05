@@ -48,6 +48,8 @@ export interface Finding {
   suspect?: string;
   /** The model that gave the second opinion, when it was the fallback rather than the challenger. */
   judge?: string;
+  /** The finding whose second opinion this one took: its test is the same test, the cases differing by a fixture. */
+  sameAs?: string;
   /** What its test did on the code before the change (absent when the before/after check is off). A pre-existing
    * finding is not challenged and does not set the exit code. */
   before?: Before;

@@ -6,6 +6,7 @@
 // fix unproven (before.ts `textBefore`, `textFix`).
 import { lstatSync } from "node:fs";
 import { join, posix } from "node:path";
+import { codeText } from "./codetext";
 
 export type Shallow = "source-text" | "existence";
 
@@ -82,6 +83,19 @@ function withoutDecorators(text: string, end: number): number {
     } else break;
   }
   return lines.slice(0, cut).join("\n").length;
+}
+
+/** The lines that decorate the test `func` (`@x(…)`, `#[x]`, over several lines too) and, for a JS test, what comes
+ * before its name on its own line (`it.each([…])(`), without comments; null when the test is not found. */
+export function testDecorators(source: string, func: string, path = ""): string | null {
+  const span = testSpan(source, func);
+  if (!span) return null;
+  const lineStart = source.lastIndexOf("\n", span.at - 1) + 1;
+  const own = source.slice(lineStart, span.at);
+  // A leading line break stands for the line before the file, so the first real line can be a decorator.
+  const above = "\n" + source.slice(0, Math.max(0, lineStart - 1));
+  const first = lineStart === 0 ? above.length : withoutDecorators(above, above.length);
+  return codeText(`${lineStart === 0 ? "" : above.slice(first)}\n${own}`, path);
 }
 
 /** The test's body: from its name to the next test, or the end of the file. */

@@ -24,6 +24,7 @@ import { type ModelUse, newUse, NO_USAGE } from "./llm";
 import type { Say } from "./progress";
 import { keyShownNote, leftOutNote, type Suspect } from "./prompts";
 import type { Merged } from "./questions";
+import { caseGroups, shareVerdict } from "./challenge";
 import { type AgentReport, bySeverity, type Finding, type Group, SEVERITIES } from "./report";
 import { isSecretPath } from "./secrets";
 import { asComments, standInsText } from "./standins";
@@ -474,9 +475,13 @@ export class CloudBrain implements Brain {
     // Nothing to judge and nothing to merge: no call, nothing billed.
     if (!findings.length && questions.length < 2) return { questions: null, groups: [], uses: [] };
     const qids = questions.map((_q, i) => `Q${i + 1}`);
-    const files = [...new Set(findings.map((f) => f.file).filter((p): p is string => !!p && o.sources[p] !== undefined))];
+    // Cases of one test that differ only by a fixture are sent as one; the others take its verdict.
+    const cases = caseGroups(findings.filter((f) => !skip.has(f.id)), o.sources);
+    const followers = new Set(cases.flatMap((g) => g.slice(1)));
+    const sent = findings.filter((f) => !followers.has(f));
+    const files = [...new Set(sent.map((f) => f.file).filter((p): p is string => !!p && o.sources[p] !== undefined))];
     const body = {
-      findings: findings.map((f) => ({ id: f.id, project: f.project, test_id: f.testId,
+      findings: sent.map((f) => ({ id: f.id, project: f.project, test_id: f.testId,
         test_file: f.file && o.sources[f.file] !== undefined ? f.file : null, failure: f.message,
         explanation: f.explanation, ...(f.suspect ? { suspect: f.suspect } : {}),
         before: f.before && f.before.status !== "pre-existing" ? f.before.status : null,
@@ -516,11 +521,22 @@ export class CloudBrain implements Brain {
     };
     const judgedNow = r.verdicts.filter((v) => !skip.has(v.finding));
     const each = (billed.find((x) => x.role === "challenge")?.usd ?? 0) / Math.max(1, judgedNow.length);
-    for (const f of findings) {
+    const spread = (f: Finding) => {
+      for (const g of cases.find((x) => x[0] === f)!.slice(1)) {
+        shareVerdict(f, g);
+        if (g.verdict === null) continue;
+        emit("challenge.verdict", { project: g.project, finding: g.id, test_id: g.testId,
+          hyp_id: g.suspect ? hypId(g.project, g.suspect) : null, outcome: "ok", verdict: g.verdict,
+          reason: clip(g.reason), depends_on: g.dependsOn ?? null, judge: this.label, cost_usd: 0, timed_out: false });
+        o.judged?.(g, 0);
+      }
+    };
+    for (const f of sent) {
       if (skip.has(f.id)) continue;
       const v = r.verdicts.find((x) => x.finding === f.id);
       if (!v) {
         [f.verdict, f.reason] = [null, "not challenged: arnx cloud gave no verdict"];
+        spread(f);
         continue;
       }
       const reason = String(v.reason ?? "").trim();
@@ -534,6 +550,7 @@ export class CloudBrain implements Brain {
         verdict: f.verdict, reason: clip(f.reason), depends_on: f.dependsOn ?? null, judge: this.label,
         cost_usd: round6(each), timed_out: false });
       o.judged?.(f, round6(each));
+      spread(f);
     }
     const ids = new Set(findings.map((f) => f.id));
     const groups = (r.groups ?? []).map((g) => ({ findings: g.findings.filter((x) => ids.has(x)), title: g.title,

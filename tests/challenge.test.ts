@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { challengeUser } from "../src/prompts";
-import { challenge, CONCURRENCY, inPool, oneVerdict } from "../src/challenge";
+import { challenge, CONCURRENCY, inPool } from "../src/challenge";
 import { sameTest } from "../src/report";
 import { ModelError } from "../src/errors";
 import { billedError, FallbackJson } from "../src/llm";
@@ -148,22 +148,4 @@ test("the cases of one test are one test: its parameters are left out, its proje
   expect(sameTest(a)).toBe(sameTest(b));
   expect(sameTest(a)).not.toBe(sameTest(judged("F3", "t.py::test_y[a]", "confirmed", "")));
   expect(sameTest(a)).not.toBe(sameTest({ ...a, project: "other" }));
-});
-
-test("one test's cases that disagree are all disputed, with the reason given; agreeing ones stay as they are", () => {
-  const mixed = [judged("F1", "t.py::test_x[a]", "disputed", "a race nothing guards"),
-    judged("F2", "t.py::test_x[b]", "confirmed", "a real defect")];
-  oneVerdict(mixed);
-  expect(mixed.map((f) => f.verdict)).toEqual(["disputed", "disputed"]);
-  expect(mixed[0]!.reason).toBe("a race nothing guards");
-  expect(mixed[1]!.reason).toBe("another case of this test was disputed: a race nothing guards");
-  const same = [judged("F1", "t.py::test_x[a]", "confirmed", "r"), judged("F2", "t.py::test_x[b]", "confirmed", "s")];
-  oneVerdict(same);
-  expect(same.map((f) => [f.verdict, f.reason])).toEqual([["confirmed", "r"], ["confirmed", "s"]]);
-  const apart = [judged("F1", "t.py::test_x", "disputed", "r"), judged("F2", "t.py::test_y", "confirmed", "s")];
-  oneVerdict(apart);
-  expect(apart.map((f) => f.verdict)).toEqual(["disputed", "confirmed"]);
-  const open = [judged("F1", "t.py::test_x[a]", null, "not challenged"), judged("F2", "t.py::test_x[b]", "confirmed", "s")];
-  oneVerdict(open);
-  expect(open.map((f) => f.verdict)).toEqual([null, "confirmed"]);
 });

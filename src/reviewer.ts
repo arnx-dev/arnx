@@ -7,7 +7,7 @@ import { join, posix } from "node:path";
 import { adapterFor } from "./adapters";
 import { isPreExisting } from "./before";
 import type { Billed, Brain, HuntRecord, Totals } from "./brain";
-import { inPool, oneVerdict } from "./challenge";
+import { inPool } from "./challenge";
 import { shallowKind } from "./shallow";
 import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, withRole } from "./events";
 import { added, type Change, describe, describeBlanked, describeWithheld, EMPTY_TREE, filesAt, removed, resolveChange, sliceDiff,
@@ -29,7 +29,7 @@ import { CONTEXT_LIMIT, contextPack } from "./context";
 import { elsewhereNote, leftOutNote, PROMPT_VERSION, type Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
 import { type AgentReport, type Checked, type Finding, type FixProof, hasReport, parseReports, type ProjectStat, type Review,
-  save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause, sameTest } from "./report";
+  save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause } from "./report";
 import { dockerSteps, type SessionFactory } from "./sandbox";
 import type { TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
@@ -49,7 +49,7 @@ export const AGENT_SHARE = 0.85;
 export const PROJECT_CONCURRENCY = 2;
 
 interface SavedVerdict { verdict: string; reason: string; dependsOn: string | null; judge: string | null;
-  model: string; cost: number }
+  model: string; cost: number; sameAs?: string }
 
 /** Whether a review's report says a provider outage cut work that a resume does again. A report without one finished:
  * there is nothing to resume. Not once its findings were accepted. */
@@ -747,12 +747,13 @@ export async function runReview(repo: string, o: { settings: Settings;
           [f.verdict, f.reason] = [v.verdict, v.reason];
           if (v.dependsOn) f.dependsOn = v.dependsOn;
           if (v.judge) f.judge = v.judge;
+          if (v.sameAs) f.sameAs = v.sameAs;
           emit("challenge.verdict", { project: f.project, finding: f.id, test_id: f.testId,
             hyp_id: f.suspect ? hypId(f.project, f.suspect) : null, outcome: "ok", verdict: v.verdict,
             reason: clip(v.reason), depends_on: v.dependsOn, judge: v.model, cost_usd: v.cost, resumed: true });
           let u = priorUses.find((x) => x.model === v.model);
           if (!u) priorUses.push(u = newUse(v.model));
-          u.calls += 1;
+          if (!v.sameAs) u.calls += 1;
           u.costUsd = Math.round((u.costUsd + v.cost) * 1_000_000) / 1_000_000;
         }
         return new Set(challenged.filter((f) => verdicts[`${f.project}::${f.testId}`]).map((f) => f.id));
@@ -760,17 +761,12 @@ export async function runReview(repo: string, o: { settings: Settings;
       judged: (f, cost) => {
         if (f.verdict === null) return;
         verdicts[`${f.project}::${f.testId}`] = { verdict: f.verdict, reason: f.reason, dependsOn: f.dependsOn ?? null,
-          judge: f.judge ?? null, model: label ? `${label}/challenge` : f.judge ?? challengerRef, cost };
+          judge: f.judge ?? null, model: label ? `${label}/challenge` : f.judge ?? challengerRef, cost,
+          ...f.sameAs ? { sameAs: f.sameAs } : {} };
         writeFileSync(verdictsFile, JSON.stringify(verdicts) + "\n");
         justJudged.add(f.id);
-        // A test's cases get one verdict, so a case waits for the others: nothing shown here is taken back.
-        const cases = challenged.filter((x) => sameTest(x) === sameTest(f));
-        if (cases.some((x) => x.verdict === null)) return;
-        oneVerdict(cases);
-        cases.forEach(reveal);
+        reveal(f);
       } });
-    // Cases whose others got no verdict waited until now.
-    oneVerdict(challenged);
     challenged.forEach(reveal);
     const [groups, judged] = [j.groups, j.uses];
     const second = huntSecond;

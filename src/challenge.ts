@@ -5,7 +5,9 @@ import { clip, emit, hypId, withRole } from "./events";
 import { type JsonModel, type ModelUse, newUse, tally, type Trace } from "./llm";
 import type { Say } from "./progress";
 import { CHALLENGE_SCHEMA, DEFAULT_PROMPTS, type Prompts } from "./prompts";
-import { type Finding, sameTest } from "./report";
+import { codeText } from "./codetext";
+import { type Finding, firstLine, sameTest } from "./report";
+import { testDecorators } from "./shallow";
 import { pyRepr } from "./util";
 
 /** Why the findings after a timed-out call were not sent; the reviewer then skips the explain call too. */
@@ -24,17 +26,42 @@ export async function inPool<T>(items: T[], limit: number, work: (item: T) => Pr
   await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, lane));
 }
 
-/** One test gets one verdict: when its cases disagree, all are disputed, for the developer to decide. */
-export function oneVerdict(findings: Finding[]): void {
-  const tests = new Map<string, Finding[]>();
-  for (const f of findings) tests.set(sameTest(f), [...tests.get(sameTest(f)) ?? [], f]);
-  for (const cases of tests.values()) {
-    const disputed = cases.find((f) => f.verdict === "disputed");
-    if (!disputed) continue;
-    for (const f of cases.filter((x) => x.verdict === "confirmed")) {
-      [f.verdict, f.reason] = ["disputed", `another case of this test was disputed: ${disputed.reason}`];
+/** Cases of one test that differ only by something outside it share one judgment; cases it receives as data do not. */
+const DATA_CASES = /parametrize|\.each\b|#\[\s*case\b|\btest_case\b/;
+const FIXTURE_PARAMS = /\bfixture\s*\([^)]*\bparams\s*=/;
+
+/** The findings split into groups judged once: the first of a group is judged, the others take its verdict. Findings
+ * are grouped only when they are cases of one test (same project, file, image and first failure line) whose own
+ * decorators bring no data, and whose file has no fixture with params (the cases differ by a fixture, not by what the
+ * test checks). Order is kept. */
+export function caseGroups(findings: Finding[], sources: Record<string, string>): Finding[][] {
+  const groups: Finding[][] = [], at = new Map<string, Finding[]>();
+  for (const f of findings) {
+    const source = f.file ? sources[f.file] : undefined;
+    let key: string | null = null;
+    if (source !== undefined && !FIXTURE_PARAMS.test(codeText(source, f.file!))) {
+      const decorators = testDecorators(source, f.func, f.file!);
+      if (decorators !== null && !DATA_CASES.test(decorators)) {
+        key = [sameTest(f), f.file, f.fallback ? "fallback" : "", firstLine(f.message)].join("\u0000");
+      }
+    }
+    const group = key === null ? undefined : at.get(key);
+    if (group) group.push(f);
+    else {
+      const made = [f];
+      groups.push(made);
+      if (key !== null) at.set(key, made);
     }
   }
+  return groups;
+}
+
+/** The verdict of `from` onto `to`, a case judged by the same call. */
+export function shareVerdict(from: Finding, to: Finding): void {
+  [to.verdict, to.reason] = [from.verdict, from.reason];
+  if (from.dependsOn) to.dependsOn = from.dependsOn;
+  if (from.judge) to.judge = from.judge;
+  to.sameAs = from.id;
 }
 
 export async function challenge(findings: Finding[], o: { model: JsonModel; diff: string;
@@ -58,7 +85,8 @@ export async function challenge(findings: Finding[], o: { model: JsonModel; diff
   // Findings are judged CONCURRENCY at a time. One timed-out call leaves only its finding unchecked; after two
   // timeouts in a row the model is taken to be down, and findings not yet sent are skipped rather than waited for.
   let timeouts = 0, started = 0;
-  const pending = findings.filter((f) => !o.skip?.has(f.id));
+  const groups = caseGroups(findings.filter((f) => !o.skip?.has(f.id)), o.sources);
+  const pending = groups.map((g) => g[0]!);
   const verdictEvent = (f: Finding, outcome: string, cost: number, timedOut = false) => emit("challenge.verdict", {
     project: f.project, finding: f.id, test_id: f.testId, hyp_id: f.suspect ? hypId(f.project, f.suspect) : null,
     outcome, verdict: f.verdict, reason: clip(f.reason), depends_on: f.dependsOn ?? null,
@@ -110,6 +138,17 @@ export async function challenge(findings: Finding[], o: { model: JsonModel; diff
     verdictEvent(f, "ok", callCost);
     o.onJudged?.(f, callCost);
   };
-  await inPool(pending, o.concurrency ?? CONCURRENCY, judge);
+  // The others of a group take the verdict of the one judged, without a call of their own.
+  const judgeGroup = async (leader: Finding) => {
+    await judge(leader);
+    for (const f of groups.find((g) => g[0] === leader)!.slice(1)) {
+      shareVerdict(leader, f);
+      if (o.timedOut?.has(leader.id)) o.timedOut.add(f.id);
+      if (leader.verdict === null) continue;
+      verdictEvent(f, "ok", 0);
+      o.onJudged?.(f, 0);
+    }
+  };
+  await inPool(pending, o.concurrency ?? CONCURRENCY, judgeGroup);
   return use;
 }

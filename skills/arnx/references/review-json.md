@@ -80,6 +80,7 @@ Also written, for arnx and people: `prompt_version`, `write_dir`, `write_dirs`, 
 | `suspect` | string | Optional. The hunt's suspect (`S1`) this test checked. |
 | `shallow` | string | Optional. `source-text`: the test matches the code's text; `existence`: it checks only that something exists. A change can pass such a test without fixing the behaviour. Absent: the test exercises behaviour. |
 | `judge` | string | Optional. The model that judged it, when it was the fallback. |
+| `same_as` | string | Optional. The finding (`F2`) whose second opinion this one took: its test is the same test, the cases differing only by a fixture outside the test. Verdict, reason, `depends_on` and `judge` are that finding's. |
 | `before` | object | Optional (absent when the before/after check is off). The test on the code before the change: `{status, detail, runs, message?, as_text?, vacuous?}`; `status` is `regression`, `pre-existing`, `new-code`, `changed` or `unknown`. `as_text: true`: it passes there, but the test reads the code as text, so it is `unknown`, not a regression. `vacuous`: `new-name` (the test uses a name the change adds) or `background-error` (a background thread died there on missing code); the pass is `unknown`, not a regression. |
 
 ## Each group
