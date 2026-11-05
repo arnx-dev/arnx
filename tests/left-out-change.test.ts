@@ -1,5 +1,5 @@
-// A changed file holding a private key leaves the change, and the rest is reviewed. What each party sees: no model gets a
-// section, a read, a search hit or a sandbox file of it; only its path and a label go anywhere.
+// A changed file holding a private key stays in the change, and only the key is replaced. What each party sees: the sandbox and
+// the saved diff a fake, a model `[private key]`. A file a fake cannot reach leaves the change, named by path and label.
 import { afterEach, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync }
@@ -15,7 +15,7 @@ import { nextStep } from "../src/setupview";
 import { DEFAULT_PROMPTS, leftOutNote, PROMPT_VERSION } from "../src/prompts";
 import { load } from "../src/report";
 import { runReview } from "../src/reviewer";
-import { secretPins } from "../src/secrets";
+import { maskPrivateKeys, secretPins } from "../src/secrets";
 import { defaultSettings, type Settings, writeSettings } from "../src/settings";
 import { type FakeCloud, fakeCloud, type StepScript, TOKEN } from "./helpers/cloudfake";
 import { AWS_KEY, PRIVATE_KEY, PRIVATE_KEY_BLOCK } from "./helpers/fakekeys";
@@ -64,7 +64,7 @@ afterEach(() => {
 
 // --- what the input names ---------------------------------------------------------------------------------------------
 
-test("a changed file holding a private key is left out and the rest is reviewed", async () => {
+test("a changed file holding a private key stays, with a fake, and all of it is reviewed", async () => {
   const repo = configured();
   editApp(repo);
   writeFileSync(join(repo, "keys.ts"), IN_CODE);
@@ -81,9 +81,10 @@ test("a changed file holding a private key is left out and the rest is reviewed"
     }, seen) });
 
   const c = resolveChange(repo);
-  expect(c.files).toEqual(["app.py"]);
-  expect(c.withheld).toEqual([{ path: "keys.ts", line: 1, label: "a private key" }]);
-  expect(c.diff).not.toContain("keys.ts");
+  expect(c.files).toEqual(["app.py", "keys.ts"]);
+  expect(c.withheld).toBeUndefined();
+  expect(c.diff).toContain("+export const a = 1;");
+  expect(c.diff).not.toContain(BODY);
   expect(c.diff).toContain("-    return a + b");
 
   // No body line in any message a model got, in the sandbox, or in what is saved.
@@ -96,26 +97,26 @@ test("a changed file holding a private key is left out and the rest is reviewed"
   const saved = treeText(rdir);
   expect(saved).toContain("-    return a + b");
   expect(saved).not.toContain(BODY);
-  expect(readFileSync(join(rdir, "change.diff"), "utf8")).not.toContain("keys.ts");
+  expect(readFileSync(join(rdir, "change.diff"), "utf8")).toContain("keys.ts");
 
-  // Told, by path and label, to each model; the one read of it says nothing.
-  expect(agent.bodies[0]).toContain("`keys.ts` (a private key)");
-  expect(judge.bodies.join("\n")).toContain("`keys.ts` (a private key)");
+  // A model reads what the key is and that it is hidden.
+  expect(agent.bodies[0]).toContain("[private key]");
+  expect(agent.bodies[0]).toContain("`[private key]` stands where");
 
-  // The report and the progress line name it, with the way out.
-  expect(review.notSent).toEqual(["keys.ts"]);
-  expect(review.filesChanged).toBe(1);
+  // The report names it, with the way to the real key.
+  expect(review.notSent).toEqual([]);
+  expect(review.fakedKeys).toEqual(["keys.ts"]);
+  expect(review.filesChanged).toBe(2);
   expect(review.findings.length).toBe(1);
   const md = readFileSync(join(rdir, "review.md"), "utf8").replace(/\s+/g, " ");
-  expect(md).toContain("Files left out because they looked like secrets: `keys.ts` (a private key, line 1).");
+  expect(md).toContain("Private keys faked in the sandbox: `keys.ts`.");
   expect(md).toContain(WAY_OUT);
   // Read back, as triage and the fix prompt read it.
-  expect(load(rdir).leftOutFiles).toEqual([{ path: "keys.ts", line: 1, label: "a private key" }]);
-  expect(said).toContain("left out as secret-looking: keys.ts (a private key, line 1); if one is a test fixture, allow it " +
-    "with `arnx allow-secret PATH`");
+  expect(load(rdir).fakedKeys).toEqual(["keys.ts"]);
+  expect(said.join("\n")).not.toContain("left out");
 });
 
-test("a key only on the removed side leaves the section out", () => {
+test("a key only on the removed side: the section stays, with a fake", () => {
   const repo = gitRepo(tmp());
   writeFileSync(join(repo, "keys.ts"), IN_CODE);
   commit(repo, "a key");
@@ -123,10 +124,10 @@ test("a key only on the removed side leaves the section out", () => {
   editApp(repo);
   // Uncommitted, and then the same as a commit.
   for (const c of [resolveChange(repo), (commit(repo, "the key goes"), resolveChange(repo))]) {
-    expect(c.files).toEqual(["app.py"]);
-    expect(c.withheld?.map((w) => w.path)).toEqual(["keys.ts"]);
+    expect(c.files).toEqual(["app.py", "keys.ts"]);
+    expect(c.withheld).toBeUndefined();
     expect(c.diff).not.toContain(BODY);
-    expect(c.diff).not.toContain("keys.ts");
+    expect(c.diff).toContain("keys.ts");
   }
   // A file deleted with its key, likewise.
   const gone = gitRepo(join(tmp(), "gone"));
@@ -135,11 +136,11 @@ test("a key only on the removed side leaves the section out", () => {
   rmSync(join(gone, "keys.ts"));
   editApp(gone);
   const c = resolveChange(gone);
-  expect([c.files, c.withheld?.map((w) => w.path), c.diff.includes(BODY)]).toEqual([["app.py"], ["keys.ts"], false]);
+  expect([c.files, c.withheld, c.diff.includes(BODY)]).toEqual([["app.py", "keys.ts"], undefined, false]);
 });
 
-test("a change of only such files stops with the way out", () => {
-  const repo = gitRepo(tmp());
+test("with stand-ins off, a change of only such files stops with the way out", () => {
+  const repo = configured({ standIns: false });
   writeFileSync(join(repo, "keys.ts"), IN_CODE);
   commit(repo, "a key");
   expect(() => resolveChange(repo)).toThrow("the change contains text that looks like a secret (a key or token) in " +
@@ -157,24 +158,24 @@ test("a change of only such files stops with the way out", () => {
   expect(nextStep(repo)).not.toContain(BODY);
 });
 
-test("a pinned file is sent, with `[private key]` for its key", () => {
+test("a pinned file's diff holds a fake; an edit or another file with the same strings reads the same", () => {
   const repo = gitRepo(tmp());
   writeFileSync(join(repo, "keys.ts"), IN_CODE);
   const allow = [{ path: "keys.ts", matches: secretPins(IN_CODE) }];
   runGit(repo, "add", "keys.ts");
   const c = resolveChange(repo, null, allow);
   expect([c.files, c.withheld, c.diff.includes(BODY)]).toEqual([["keys.ts"], undefined, false]);
-  expect(c.diff).toContain("+[private key]");
+  expect(c.diff).not.toContain("[private key]");
   expect(c.diff).toContain("+export const a = 1;");
-  // Any edit withholds it again.
+  expect(maskPrivateKeys(c.diff)).toContain("+const PEM = `[private key]`;");
   writeFileSync(join(repo, "keys.ts"), `${IN_CODE}// an edit\n`);
-  expect(() => resolveChange(repo, null, allow)).toThrow("keys.ts (a private key)");
-  // Another file with the same strings is not pinned.
+  const edited = resolveChange(repo, null, allow);
+  expect([edited.withheld, edited.diff.includes(BODY)]).toEqual([undefined, false]);
   writeFileSync(join(repo, "keys.ts"), IN_CODE);
   writeFileSync(join(repo, "more.ts"), IN_CODE);
   runGit(repo, "add", "more.ts");
   const both = resolveChange(repo, null, allow);
-  expect([both.files, both.withheld?.map((w) => w.path)]).toEqual([["keys.ts"], ["more.ts"]]);
+  expect([both.files, both.withheld, both.diff.includes(BODY)]).toEqual([["keys.ts", "more.ts"], undefined, false]);
 });
 
 test("a key-shaped string gets one stand-in in diff and snapshot", async () => {
@@ -235,7 +236,7 @@ test("with stand-ins off the file is left out", async () => {
   expect(() => resolveChange(alone)).toThrow("creds.py (AKIA…)");
 });
 
-test("a file over the scan limit holding a private key is left out", () => {
+test("a file over the scan limit holding a private key stays, with a fake", () => {
   const repo = gitRepo(tmp());
   const filler = "# just some long text that is not code\n".repeat(Math.ceil(SCAN_LIMIT / 39) + 10);
   const big = (first: string) => `${first}\n${filler}const PEM = \`${PRIVATE_KEY_BLOCK}\`;\n`;
@@ -245,10 +246,10 @@ test("a file over the scan limit holding a private key is left out", () => {
   writeFileSync(join(repo, "big.ts"), big("// two"));
   editApp(repo);
   const check = (c: ReturnType<typeof resolveChange>) => {
-    expect(c.files).toEqual(["app.py"]);
-    expect(c.withheld?.map((w) => [w.path, w.label])).toEqual([["big.ts", "a private key"]]);
-    expect(c.diff).not.toContain("big.ts");
-    expect(c.diff).not.toContain("just some long text");
+    expect(c.files).toEqual(["app.py", "big.ts"]);
+    expect(c.withheld).toBeUndefined();
+    expect(c.diff).toContain("+// two");
+    expect(c.diff).not.toContain(BODY);
   };
   check(resolveChange(repo));
   // On both sides, from the repository's history.
@@ -258,14 +259,15 @@ test("a file over the scan limit holding a private key is left out", () => {
   for (const rev of [null, "HEAD"]) {
     const snap = join(tmp(), `snap-${rev}`);
     const taken = takeSnapshot(repo, rev, snap, [], { standIns: true });
-    expect(taken.withheld.map((w) => w.path)).toEqual(["big.ts"]);
-    expect(existsSync(join(snap, "big.ts"))).toBe(false);
+    expect(taken.withheld).toEqual([]);
+    expect(taken.fakedKeys).toEqual(["big.ts"]);
+    expect(readFileSync(join(snap, "big.ts"), "utf8")).not.toContain(BODY);
   }
-});
+}, 30_000);
 
 // --- each way a section could keep a body -----------------------------------------------------------------------------
 
-test("a section shows a body with no header in its hunk: left out, as the snapshot leaves the file out", () => {
+test("a section shows a body with no header in its hunk: the same fake as the snapshot's", () => {
   const repo = gitRepo(tmp());
   const rows = ["a", "b", "c", "d", "e"].map((c) => `MIIEowIBAAKCAQEA${c.repeat(48)}`);
   const file = (tail: string) => `const PEM = \`${PRIVATE_KEY}\n${rows.join("\n")}\n-----END RSA ${"PRIVATE KEY"}-----\`;\n${tail}\n`;
@@ -275,11 +277,14 @@ test("a section shows a body with no header in its hunk: left out, as the snapsh
   editApp(repo);
   const c = resolveChange(repo);
   expect(c.diff).not.toContain("MIIEowIBAAKCAQEA");
-  expect(c.withheld?.map((w) => w.path)).toEqual(["k.ts"]);
-  expect(takeSnapshot(repo, null, join(tmp(), "s"), [], { standIns: true }).withheld.map((w) => w.path)).toEqual(["k.ts"]);
+  expect(c.withheld).toBeUndefined();
+  const snap = join(tmp(), "s");
+  expect(takeSnapshot(repo, null, snap, [], { standIns: true }).withheld).toEqual([]);
+  const held = readFileSync(join(snap, "k.ts"), "utf8");
+  for (const line of c.diff.split("\n").filter((l) => l.startsWith(" ") && l.length === 65)) expect(held).toContain(line.slice(1));
 });
 
-test("a key far from the hunk leaves the section out: no part of a withheld file is sent", () => {
+test("a key far from the hunk: the section stays as it is", () => {
   const repo = gitRepo(tmp());
   const pad = Array.from({ length: 30 }, (_, i) => `a${i}();`).join("\n");
   const file = (first: string) => `${first}\n${pad}\n${IN_CODE}`;
@@ -288,12 +293,12 @@ test("a key far from the hunk leaves the section out: no part of a withheld file
   writeFileSync(join(repo, "k.ts"), file("y();"));
   editApp(repo);
   const c = resolveChange(repo);
-  expect(c.withheld?.map((w) => w.path)).toEqual(["k.ts"]);
-  expect(c.diff).not.toContain("k.ts");
-  expect(c.diff).not.toContain("x();");
+  expect(c.withheld).toBeUndefined();
+  expect(c.diff).toContain("-x();");
+  expect(c.diff).not.toContain(BODY);
 });
 
-test("a private key header with no body on either side leaves the file out, as in a snapshot", () => {
+test("a private key header with no body on either side keeps the file, as in a snapshot", () => {
   const repo = gitRepo(tmp());
   const form = `const HINT = "${PRIVATE_KEY}";\n`;
   writeFileSync(join(repo, "form.ts"), form);
@@ -301,21 +306,22 @@ test("a private key header with no body on either side leaves the file out, as i
   writeFileSync(join(repo, "form.ts"), `${form}export const a = 1;\n`);
   editApp(repo);
   const c = resolveChange(repo);
-  expect([c.files, c.withheld?.map((w) => w.path)]).toEqual([["app.py"], ["form.ts"]]);
-  expect(takeSnapshot(repo, null, join(tmp(), "s"), [], { standIns: true }).withheld.map((w) => w.path)).toEqual(["form.ts"]);
+  expect([c.files, c.withheld]).toEqual([["app.py", "form.ts"], undefined]);
+  const snap = join(tmp(), "s");
+  const taken = takeSnapshot(repo, null, snap, [], { standIns: true });
+  expect([taken.withheld, taken.fakedKeys]).toEqual([[], []]);
+  expect(readFileSync(join(snap, "form.ts"), "utf8")).toContain(PRIVATE_KEY);
 });
 
-test("the last guard: private-key text left in a section, or a section with no path, refuses the change", () => {
+test("the filter has the last word on a section no side vouches for; a section with no path refuses the change", () => {
   const section = (path: string, ...lines: string[]) => `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n` +
     `@@ -0,0 +1,2 @@\n${lines.map((l) => `+${l}`).join("\n")}\n`;
   const none = () => null;
-  // Neither side could be read, so nothing says what the file holds.
-  expect(() => sealDiff(section("k.ts", PRIVATE_KEY, BODY), [], none, none, true)).toThrow("k.ts (a private key)");
-  expect(() => sealDiff(section("k.ts", PRIVATE_KEY, BODY), [], none, none, true)).toThrow("arnx allow-secret k.ts");
+  // Neither side could be read, so nothing says what the file holds: the filter still hides it on the way out.
+  const shown = sealDiff(section("k.ts", PRIVATE_KEY, BODY), [], none, none, true).diff;
+  expect(maskPrivateKeys(shown)).not.toContain(BODY);
+  expect(new Boundary().mask(shown)).toContain("[private key]");
   expect(sealDiff(section("k.ts", "x = 1"), [], none, none, true).withheld).toEqual([]);
-  // A pin cannot vouch for a file it did not read.
-  const pinned = [{ path: "k.ts", matches: secretPins(section("k.ts", PRIVATE_KEY, BODY)) }];
-  expect(() => sealDiff(section("k.ts", PRIVATE_KEY, BODY), pinned, none, none, true)).toThrow("k.ts (a private key)");
   expect(() => sealDiff(`diff --git something odd\n+x = 1\n`, [], none, none, true)).toThrow("cannot place");
   // A read that fails says so, and the section goes.
   const failed = () => ({ line: 1, label: "could not be read" });
@@ -334,14 +340,15 @@ test("a path git quotes or ends with a tab is read all the same, under any prefi
     ["color.ui", "always"], ["diff.external", "false"], ["grep.patternType", "fixed"]] as const) {
     runGit(repo, "config", k, v);
     const c = resolveChange(repo);
-    expect(c.files).toEqual(["app.py"]);
-    expect(c.withheld?.map((w) => w.path)).toEqual([...names].sort());
-    expect(c.diff).not.toContain("export const b");
+    expect(c.files).toEqual(["app.py", ...names].sort());
+    expect(c.withheld).toBeUndefined();
+    expect(c.diff).toContain("export const b");
+    expect(c.diff).not.toContain(BODY);
     // From the commits' sides too, and with the search's own settings.
     runGit(repo, "add", "-A");
     runGit(repo, "commit", "-q", "-m", "edit");
     const done = resolveChange(repo);
-    expect(done.withheld?.map((w) => w.path)).toEqual([...names].sort());
+    expect([done.withheld, done.diff.includes(BODY)]).toEqual([undefined, false]);
     runGit(repo, "reset", "-q", "--soft", "HEAD~1");
     runGit(repo, "reset", "-q");
     runGit(repo, "config", "--unset", k);
@@ -399,11 +406,11 @@ test("every armour a private key comes in is one: PGP, SSH2's four dashes, a dig
     editApp(repo);
     commit(repo, "a key");
     const c = resolveChange(repo);
-    expect(c.withheld?.map((w) => [w.path, w.label])).toEqual([["k.txt", "a private key"]]);
+    expect(c.withheld).toBeUndefined();
     expect(c.diff).not.toContain(random.slice(0, 64));
     const snap = join(tmp(), `armour-${i}-snap`);
     takeSnapshot(repo, "HEAD", snap, [], { standIns: true });
-    expect(existsSync(join(snap, "k.txt"))).toBe(false);
+    expect(readFileSync(join(snap, "k.txt"), "utf8")).not.toContain(random.slice(0, 64));
   });
   const repo = gitRepo(join(tmp(), "ppk"));
   writeFileSync(join(repo, "k.ppk"), `PuTTY-User-Key-File-3: ssh-ed25519\nPrivate-Lines: 1\n${random.slice(0, 44)}\n`);
@@ -422,10 +429,11 @@ test("bytes that are not text beside a key do not hide it from the search", () =
   writeFileSync(join(repo, "latin.txt"), Buffer.concat([latin, Buffer.from("more\n")]));
   editApp(repo);
   commit(repo, "edit");
-  expect(resolveChange(repo).withheld?.map((w) => w.path)).toEqual(["latin.txt"]);
+  const c = resolveChange(repo);
+  expect([c.withheld, c.diff.includes(BODY)]).toEqual([undefined, false]);
 });
 
-test("a rename, a mode change and a binary file: left out with their key, whatever the section shows", () => {
+test("a rename and a mode change stay, whatever the section shows; a binary file with a key is left out", () => {
   const repo = gitRepo(tmp());
   writeFileSync(join(repo, "keys.ts"), IN_CODE);
   writeFileSync(join(repo, "run.ts"), IN_CODE);
@@ -437,11 +445,12 @@ test("a rename, a mode change and a binary file: left out with their key, whatev
   writeFileSync(join(repo, "blob.bin"), Buffer.concat([Buffer.from([0, 1, 3]), Buffer.from(PRIVATE_KEY_BLOCK)]));
   editApp(repo);
   const c = resolveChange(repo);
-  expect(c.files).toEqual(["app.py"]);
-  expect(c.withheld?.map((w) => w.path)).toEqual(["blob.bin", "moved.ts", "run.ts"]);
-  expect(c.diff).not.toContain("moved.ts");
-  expect(c.diff).not.toContain("run.ts");
+  expect(c.files).toEqual(["app.py", "moved.ts", "run.ts"]);
+  expect(c.withheld?.map((w) => w.path)).toEqual(["blob.bin"]);
+  expect(c.diff).toContain("moved.ts");
+  expect(c.diff).toContain("run.ts");
   expect(c.diff).not.toContain("blob.bin");
+  expect(c.diff).not.toContain(BODY);
 });
 
 test("a file too large for any scan: a key found piece by piece leaves it out; without one its section stays", () => {
@@ -465,7 +474,7 @@ test("a file too large for any scan: a key found piece by piece leaves it out; w
 });
 
 test("a withheld file's size does not count against the change", () => {
-  const repo = gitRepo(tmp());
+  const repo = configured({ standIns: false });
   const rows = "x".repeat(70) + "\n";
   writeFileSync(join(repo, "keys.ts"), `${IN_CODE}${rows.repeat(Math.ceil(MAX_DIFF_BYTES / 71) + 10)}`);
   editApp(repo);
@@ -479,6 +488,7 @@ test("a withheld file's size does not count against the change", () => {
 // --- what follows the change ------------------------------------------------------------------------------------------
 
 test("no project is asked to cover a withheld file, and a project with only that file gets no round", async () => {
+  const settings = { ...SETTINGS, standIns: false };
   const repo = gitRepo(tmp());
   mkdirSync(join(repo, "svc"));
   mkdirSync(join(repo, "secrets"));
@@ -487,14 +497,14 @@ test("no project is asked to cover a withheld file, and a project with only that
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile("version: 1\nprojects:\n  svc:\n    root: svc\n" +
     "    image: python:3.12-slim\n    test_command: python -m pytest {targets}\n  vault:\n    root: secrets\n" +
     "    image: python:3.12-slim\n    test_command: python -m pytest {targets}\n"), "Dev", "2026-11-04"));
-  writeSettings(repo, SETTINGS);
+  writeSettings(repo, settings);
   commit(repo, "layout");
   writeFileSync(join(repo, "svc/app.py"), "def add(a, b):\n    return a - b\n");
   writeFileSync(join(repo, "secrets/keys.ts"), IN_CODE);
   commit(repo, "edit");
   const agent = new RecordingAgent(PRYING("../secrets/keys.ts").slice(1), JSON.stringify({ tests: [],
     suspected_defects: [], questions: [] }));
-  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson(),
+  const { review } = await runReview(repo, { settings, agentModel: agent, challenger: new RecordingJson(),
     sessionFactory: fakeFactory(() => failing()) });
   expect(review.projectStats?.map((p) => p.name)).toEqual(["svc"]);
   expect(review.notSent).toEqual(["secrets/keys.ts"]);
@@ -527,12 +537,13 @@ test("the code before the change holds no key either, and the proof runs on the 
 
 test("a test needing a left-out file reads as one that could not run, never as a defect of the project", async () => {
   // Loaded inside the test, so the runner reports a plain failure in every run.
-  const repo = configured();
+  const settings = { ...SETTINGS, standIns: false };
+  const repo = configured({ standIns: false });
   editApp(repo);
   writeFileSync(join(repo, "keys.py"), `PEM = """${PRIVATE_KEY_BLOCK}"""\n`);
   commit(repo, "a key and an edit");
   const missing = `E   ModuleNotFoundError: No module named 'keys'`;
-  const { review, rdir } = await runReview(repo, { settings: SETTINGS,
+  const { review, rdir } = await runReview(repo, { settings,
     agentModel: new RecordingAgent(PRYING("keys.py"), REPORT), challenger: new RecordingJson(),
     sessionFactory: fakeFactory(() => failing(missing)) });
   expect(review.findings).toEqual([]);
@@ -541,14 +552,15 @@ test("a test needing a left-out file reads as one that could not run, never as a
   expect(md).toContain(`Errors (the test could not run): \`${GEN}::test_add\``);
   expect(md).toContain("`keys.py` (a private key, line 1)");
   // Anything else stays what it was.
-  const other = await runReview(repo, { settings: SETTINGS, agentModel: new RecordingAgent(PRYING("keys.py"), REPORT),
+  const other = await runReview(repo, { settings, agentModel: new RecordingAgent(PRYING("keys.py"), REPORT),
     challenger: new RecordingJson(),
     sessionFactory: fakeFactory(() => failing("E   ModuleNotFoundError: No module named 'other'")) });
   expect(other.review.findings.length).toBe(1);
 });
 
 test("arnx cloud gets no new field: it hears of the file in the diff it already takes", async () => {
-  const repo = configured();
+  const settings = { ...SETTINGS, standIns: false };
+  const repo = configured({ standIns: false });
   editApp(repo);
   writeFileSync(join(repo, "keys.ts"), IN_CODE);
   commit(repo, "a key and an edit");
@@ -559,7 +571,7 @@ test("arnx cloud gets no new field: it hears of the file in the diff it already 
   ];
   const cloud = fakeCloud({ rounds: { "*": rounds } });
   clouds.push(cloud);
-  await runReview(repo, { settings: SETTINGS, brain: new CloudBrain({ boundary: new Boundary(),
+  await runReview(repo, { settings, brain: new CloudBrain({ boundary: new Boundary(),
     client: new CloudClient(cloud.url, { token: TOKEN, delays: [0] }), tier: "medium" }),
     sessionFactory: fakeFactory(() => failing()) });
   const wire = JSON.stringify(cloud.seen.map((x) => [x.path, x.body]));
@@ -600,8 +612,8 @@ test("only a real line end starts a diff section: a CR or U+2028 before `diff --
     writeFileSync(join(repo, "k.txt"), file("two"));
     editApp(repo);
     const c = resolveChange(repo);
-    expect(c.withheld?.map((w) => w.path)).toEqual(["k.txt"]);
+    expect(c.withheld).toBeUndefined();
+    expect(c.files).toEqual(["app.py", "k.txt"]);
     expect(c.diff).not.toContain(rows[4]!);
-    expect(c.diff).not.toContain("s.txt");
   }
 });

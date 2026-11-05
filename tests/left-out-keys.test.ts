@@ -1,5 +1,5 @@
-// Real keys, built at run time, in every shape a repository holds them: no line of a body reaches a model, the sandbox, or
-// what a review saves. Each row goes the whole way, through a model's place at the outermost layer.
+// Real keys, built at run time, in every shape a repository holds them: the file stays in, and no line of a body reaches a model,
+// the sandbox, or what a review saves. Each row goes the whole way, through a model's place at the outermost layer.
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
@@ -68,8 +68,9 @@ const big = (s: string, n: number) => `${"// padding line\n".repeat(Math.ceil(n 
 const nul = (s: string, n = 10) => Buffer.concat([Buffer.alloc(n), Buffer.from(s)]);
 const asB64 = (s: string) => Buffer.from(s).toString("base64");
 
-/** `out`: the file leaves the change. `absent`: it never was in the change. */
-type Want = "out" | "absent";
+/** `kept`: the file stays, its key a fake (the default). `out`: it holds a key no fake can reach, and leaves the change. `absent`:
+ * it never was in the change. */
+type Want = "kept" | "out" | "absent";
 interface Row { name: string; key: string; path: string; want?: Want; content?: string | Buffer | null;
   setup?: (repo: string) => void; worktree?: boolean; untracked?: boolean; settings?: Partial<Settings> }
 const wrap32 = rewrap(pk8, 32);
@@ -128,23 +129,28 @@ const ROWS: Row[] = [
     `const P = "-----BEGIN PRIV" + "ATE KEY-----\\n" + \n${bodyOf(pk8).map((l) => `  "${l}\\n" +`).join("\n")}\n  "-----END PRIV" + "ATE KEY-----";\n` },
   { name: "bare body under a name", key: pk8, path: "c.toml", content: `signing_key = "${bodyOf(pk8).join("")}"\n` },
   { name: "bare body in an array", key: pk8, path: "s.ts", content: `const parts = [\n${bodyOf(pk8).map((l) => `  "${l}",`).join("\n")}\n];\n` },
-  { name: "a small binary", key: pk8, path: "k.bin", content: nul(pk8) },
+  { name: "a .pem file", key: pk8, path: "certs/server.pem" },
+  { name: "a .key file", key: pk8, path: "certs/server.key" },
+  { name: "an id_rsa file", key: pk1, path: "deploy/id_rsa" },
+  { name: "a .env file holding a key", key: pk8, path: ".env", want: "absent" },
+  { name: "a credentials file holding a key", key: pk8, path: "credentials.json", want: "absent", content: `${JSON.stringify({ private_key: pk8 })}\n` },
+  { name: "a small binary", key: pk8, path: "k.bin", want: "out", content: nul(pk8) },
   { name: "a byte that is not text, then a PEM", key: pk8, path: "k.txt", content: Buffer.concat([Buffer.from([0xe9, 0xff, 10]), Buffer.from(pk8)]) },
-  { name: "UTF-16", key: pk8, path: "k.txt", content: Buffer.from(`﻿${pk8}`, "utf16le") },
-  { name: "UTF-16 past git's binary check", key: pk8, path: "k.txt", content: Buffer.concat([Buffer.from("A\n".repeat(4100)), Buffer.from(pk8, "utf16le")]) },
-  { name: "text, then NUL past 8000, then a PEM", key: pk8, path: "k.txt", content: Buffer.concat([Buffer.from("A\n".repeat(4100)), Buffer.alloc(3), Buffer.from(pk8)]) },
-  { name: "over 1 MB", key: pk8, path: "b.ts", content: big(pk8, 1_100_000) },
-  { name: "over 1 MB, wrapped at 32", key: wrap32, path: "b.ts", content: big(wrap32, 1_100_000) },
-  { name: "over 1 MB, NUL first", key: pk8, path: "b.bin", content: Buffer.concat([Buffer.alloc(16), Buffer.from(big(pk8, 1_100_000))]) },
-  { name: "over 1 MB, NUL first, diffed as text", key: pk8, path: "b.bin", content: Buffer.concat([Buffer.alloc(16), Buffer.from(big(pk8, 1_100_000))]),
+  { name: "UTF-16", key: pk8, path: "k.txt", want: "out", content: Buffer.from(`﻿${pk8}`, "utf16le") },
+  { name: "UTF-16 past git's binary check", key: pk8, path: "k.txt", want: "out", content: Buffer.concat([Buffer.from("A\n".repeat(4100)), Buffer.from(pk8, "utf16le")]) },
+  { name: "text, then NUL past 8000, then a PEM", key: pk8, path: "k.txt", want: "out", content: Buffer.concat([Buffer.from("A\n".repeat(4100)), Buffer.alloc(3), Buffer.from(pk8)]) },
+  { name: "over 1 MB", key: pk8, path: "b.ts", content: big(pk8, 1_100_000), setup: (r) => put(r, "b.ts", big("", 1_100_000)) },
+  { name: "over 1 MB, wrapped at 32", key: wrap32, path: "b.ts", content: big(wrap32, 1_100_000), setup: (r) => put(r, "b.ts", big("", 1_100_000)) },
+  { name: "over 1 MB, NUL first", key: pk8, path: "b.bin", want: "out", content: Buffer.concat([Buffer.alloc(16), Buffer.from(big(pk8, 1_100_000))]) },
+  { name: "over 1 MB, NUL first, diffed as text", key: pk8, path: "b.bin", want: "out", content: Buffer.concat([Buffer.alloc(16), Buffer.from(big(pk8, 1_100_000))]),
     setup: (r) => writeFileSync(join(r, ".gitattributes"), "*.bin diff\n") },
-  { name: "small NUL, diffed as text", key: pk8, path: "b.bin", content: nul(pk8), setup: (r) => writeFileSync(join(r, ".gitattributes"), "*.bin diff\n") },
+  { name: "small NUL, diffed as text", key: pk8, path: "b.bin", want: "out", content: nul(pk8), setup: (r) => writeFileSync(join(r, ".gitattributes"), "*.bin diff\n") },
   { name: ".arnxignore", key: pk8, path: "ign/k.txt", want: "absent", setup: (r) => writeFileSync(join(r, ".arnxignore"), "ign/\n") },
   { name: "untracked, not opted in", key: pk8, path: "u.txt", want: "absent", worktree: true, untracked: false },
   { name: "untracked, opted in", key: pk8, path: "u.txt", worktree: true, untracked: true },
   { name: "untracked, opted in, wrapped at 32", key: wrap32, path: "u.txt", worktree: true, untracked: true },
   { name: "staged in the working tree", key: pk8, path: "w.txt", worktree: true },
-  { name: "stand-ins off, wrapped at 32", key: wrap32, path: "k.txt", settings: { standIns: false } },
+  { name: "stand-ins off, wrapped at 32", key: wrap32, path: "k.txt", want: "out", settings: { standIns: false } },
 ];
 
 const probesOf = (key: string) => {
@@ -190,7 +196,7 @@ for (const row of ROWS) {
 
     const c = resolveChange(repo, null, [], { untracked });
     leaked("change.diff", c.diff, probes);
-    const want = row.want ?? "out";
+    const want = row.want ?? "kept";
     const state = c.withheld?.some((w) => w.path === row.path) ? "out" : c.diff.includes(row.path) ? "kept" : "absent";
     expect(state).toBe(want);
 
@@ -238,7 +244,7 @@ const PLACEHOLDERS: [string, string][] = [
   ["code that looks for it", `const a = pem.startsWith("${HDR}");\nconst b = pem.endsWith("${END}");\n`],
 ];
 for (const [name, text] of PLACEHOLDERS) {
-  test(`a placeholder header leaves its file out until it is allowed: ${name}`, () => {
+  test(`a placeholder header keeps its file: ${name}`, () => {
     expect(holdsPrivateKey(text, [])).toBe(true);
     const repo = gitRepo(tmp());
     const long = "docs/Guides/AuthenticationAndSecurity/Certificates/README.md";
@@ -246,8 +252,8 @@ for (const [name, text] of PLACEHOLDERS) {
     editApp(repo);
     commit(repo, "a doc");
     const c = resolveChange(repo);
-    expect([c.files, c.withheld?.map((w) => [w.path, w.label])]).toEqual([["app.py"], [[long, "a private key"]]]);
-    expect(takeSnapshot(repo, "HEAD", join(tmp(), "s"), [], { standIns: true }).withheld.map((w) => w.path)).toEqual([long]);
+    expect([c.files, c.withheld]).toEqual([["app.py", long], undefined]);
+    expect(takeSnapshot(repo, "HEAD", join(tmp(), "s"), [], { standIns: true }).withheld).toEqual([]);
     const allowed = resolveChange(repo, null, [{ path: long, matches: secretPins(text) }]);
     expect([allowed.files, allowed.withheld]).toEqual([["app.py", long], undefined]);
   });
@@ -299,7 +305,7 @@ test("a header removed from one file and the body added to another leave nothing
   editApp(repo);
   commit(repo, "the body elsewhere");
   const c = resolveChange(repo);
-  expect(c.withheld?.map((w) => w.path)).toEqual(["x.txt", "y.txt"]);
+  expect([c.files, c.withheld]).toEqual([["app.py", "x.txt", "y.txt"], undefined]);
   leaked("the diff", c.diff, probesOf(pk8));
   const same = gitRepo(join(tmp(), "same"));
   put(same, "x.txt", `old\n${HDR}\nend\n`);
@@ -308,11 +314,11 @@ test("a header removed from one file and the body added to another leave nothing
   editApp(same);
   commit(same, "the body in its place");
   const one = resolveChange(same);
-  expect(one.withheld?.map((w) => w.path)).toEqual(["x.txt"]);
+  expect(one.withheld).toBeUndefined();
   leaked("the diff", one.diff, probesOf(pk8));
 });
 
-test("wrapped at 32 on the removed side, or in a 3 MB file with a small hunk: the section goes", () => {
+test("wrapped at 32 on the removed side, or in a 3 MB file with a small hunk: the section stays, with a fake", () => {
   const repo = gitRepo(tmp());
   put(repo, "x.txt", wrap32);
   commit(repo, "a key");
@@ -320,7 +326,7 @@ test("wrapped at 32 on the removed side, or in a 3 MB file with a small hunk: th
   editApp(repo);
   commit(repo, "the key goes");
   const c = resolveChange(repo);
-  expect(c.withheld?.map((w) => w.path)).toEqual(["x.txt"]);
+  expect([c.files, c.withheld]).toEqual([["app.py", "x.txt"], undefined]);
   leaked("the diff", c.diff, probesOf(wrap32));
 
   const pad = "// padding line\n".repeat(200_000);
@@ -331,17 +337,18 @@ test("wrapped at 32 on the removed side, or in a 3 MB file with a small hunk: th
   editApp(big3);
   commit(big3, "a key in it");
   const d = resolveChange(big3);
-  expect(d.withheld?.map((w) => w.path)).toEqual(["b.ts"]);
+  expect([d.files, d.withheld]).toEqual([["app.py", "b.ts"], undefined]);
   leaked("the diff", d.diff, probesOf(wrap32));
 });
 
-test("a comment with a wrapped key and no END line: the file leaves the change", () => {
+test("a comment with a wrapped key and no END line: the file stays, with a fake", () => {
   const repo = gitRepo(tmp());
   put(repo, "k.py", `${lines(wrap32).slice(0, -1).map((l) => `# ${l}`).join("\n")}\nx = 1\n`);
   editApp(repo);
   commit(repo, "a key in a comment");
   const c = resolveChange(repo);
-  expect(c.withheld?.map((w) => w.path)).toEqual(["k.py"]);
+  expect(c.withheld).toBeUndefined();
+  expect(c.diff).toContain("+x = 1");
   leaked("the diff", c.diff, probesOf(wrap32));
 });
 
@@ -425,8 +432,9 @@ test("a failed search of a commit's files reads every file: the key is still fou
   commit(repo, "a key");
   withBroken('for a in "$@"; do [ "$a" = grep ] && exit 2; done', () => {
     const c = resolveChange(repo);
-    expect(c.withheld?.map((w) => w.path)).toEqual(["keys.ts"]);
-    expect(c.files).toEqual(["app.py"]);
+    expect(c.withheld).toBeUndefined();
+    expect(c.files).toEqual(["app.py", "keys.ts"]);
+    leaked("the diff", c.diff, probesOf(pk8));
   });
 });
 
@@ -445,8 +453,8 @@ test("a failed read of a file too large to hold leaves it out", () => {
 
 // --- what is said --------------------------------------------------------------------------------------------------------
 
-test("a change whose only key is on its removed side points to --range, not to allow-secret", () => {
-  const repo = gitRepo(tmp());
+test("with stand-ins off, a change whose only key is on its removed side points to --range too", () => {
+  const repo = configured({ standIns: false });
   put(repo, "k.txt", pk8);
   commit(repo, "a key");
   put(repo, "k.txt", "clean\n");

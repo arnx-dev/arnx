@@ -9,6 +9,8 @@ export const SECRET_FILE_GLOBS: readonly string[] = [
   ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "*.jks", "id_rsa*", "id_ecdsa*",
   "id_ed25519*", "*.ppk", ".netrc", ".npmrc", ".pypirc", "credentials*.json", "service-account*.json", "*.session",
   "*.session-journal"];
+/** The names of those that hold a key and nothing else: one holding a key stays in, the key replaced. */
+const KEY_FILES = ["*.pem", "*.key", "id_rsa*", "id_ecdsa*", "id_ed25519*"];
 /** What follows BEGIN or END in a private key's armour (PEM, PGP's block, SSH2's four dashes), plain or URL-encoded, a label
  * of any words up to PRIVATE KEY. A label's length is bounded, so a failed match stays quick. */
 const ARMOUR = "( |%20|\\+)[A-Z0-9 %+-]{0,64}PRIVATE( |%20|\\+)KEY(( |%20|\\+)BLOCK)?( |%20)?-{4,5}";
@@ -143,95 +145,216 @@ function runAt(text: string, at: number): { end: number; count: number } {
  * A few plain searches, then the starts themselves: "MI" alone is in too many files to run the whole pattern on. */
 const hasKeySign = (text: string) => text.includes("PRIVATE") ||
   ((text.includes("MI") || text.includes("CAQ") || text.includes("LS0tLS") || text.includes("b3Blbn")) && KEY_START_GATE.test(text));
+const KEY_END_PATTERN = `-{4,5}( |%20)?END${ARMOUR}`;
 /** A key's start stands alone, or right after a line end or tab written out (`\n`, `%0A`). */
-const KEY_ANY = new RegExp(`${KEY_HEADER}|(?:(?<![A-Za-z0-9])|(?<=\\\\[nrt])|(?<=%0[ADad]))(?:${KEY_START})`, "g");
-const KEY_HEAD = new RegExp(KEY_HEADER, "g");
-const KEY_END = new RegExp(`-{4,5}( |%20)?END${ARMOUR}`, "g");
-/** The most a header with no END hides: a plain limit, more than the longest key. */
-const NO_END_MOST = 16_384;
+const KEY_ANY = new RegExp(`${KEY_HEADER}|${KEY_END_PATTERN}|(?:(?<![A-Za-z0-9])|(?<=\\\\[nrt])|(?<=%0[ADad]))(?:${KEY_START})`, "g");
+const KEY_END = new RegExp(KEY_END_PATTERN, "g");
+const isEnd = (armour: string) => /^-{4,5}(?: |%20)?E/.test(armour);
+/** A line that starts the next file of a diff, in what goes out: a header's END lies before it. */
+const DIFF_LINE = /(?<=\n)diff --git /g;
+/** The shortest piece of a key's text taken for a token: below this, one is too likely to be something else. */
+const KEY_TOKEN_MIN = 8;
 
-/** Past a header with no END in a pinned file, all it holds of a key: the rest of its line, and the lines after it that are
- * all base64. A pin keeps a file to be read, so a doc comment's bare header takes no code with it. */
-function ownLines(text: string, from: number): number {
-  let to = text.indexOf("\n", from);
-  if (to < 0) return text.length;
+/** How many base64 characters stand at `at`; `\/` is a slash a JSON text escaped. */
+function tokenLength(text: string, at: number): number {
+  let i = at, n = 0;
+  for (; i < text.length; i++) {
+    if (isRunChar(text.charCodeAt(i))) n++;
+    else if (text[i] === "\\" && text[i + 1] === "/") i++;
+    else break;
+  }
+  return n;
+}
+
+/** Past what may stand between a key's tokens: blanks, line ends (real or written out), quotes, commas, a lone `+` or `.`.
+ * `closed`: a line end or a quote lies among them, so what follows no longer shares the token's line or string. */
+function pastSeparators(text: string, from: number): { at: number; closed: boolean } {
+  let i = from, closed = false;
+  while (i < text.length) {
+    const c = text[i]!;
+    if (c === "\n" || c === "\r" || c === '"' || c === "'" || c === "`") {
+      closed = true;
+      i++;
+    } else if (c === " " || c === "\t" || c === "," || c === "." || (c === "+" && !isRunChar(text.charCodeAt(i + 1)))) {
+      i++;
+    } else if (c === "\\") {
+      let k = i + 1;
+      while (text[k] === "\\" && k - i < 16) k++;
+      const next = text[k];
+      if (next !== "n" && next !== "r" && next !== '"' && next !== "'") break;
+      closed = true;
+      i = k + 1;
+    } else break;
+  }
+  return { at: i, closed };
+}
+
+/** The end of the tokens of KEY_TOKEN_MIN or more after `from`, with only separators among them; `from` when none stands
+ * there. Tokens sharing a line with anything else (a name assigned or called) are no key's. */
+function tokenRun(text: string, from: number): number {
+  let end = from, at = pastSeparators(text, from).at;
   for (;;) {
-    const next = text.indexOf("\n", to + 1);
-    const line = text.slice(to + 1, next < 0 ? text.length : next).replace(/^[\s*#/>;]*/, "").replace(/[\s"'`,;]*$/, "");
-    if (!/^[A-Za-z0-9+/=_-]{8,}$/.test(line)) return to;
-    if (next < 0) return text.length;
-    to = next;
+    const n = tokenLength(text, at);
+    if (n < KEY_TOKEN_MIN) return end;
+    let past = at;
+    while (past < text.length && (isRunChar(text.charCodeAt(past)) || (text[past] === "\\" && text[past + 1] === "/"))) past++;
+    const next = pastSeparators(text, past);
+    if (next.at >= text.length || next.closed) end = past;
+    else if (tokenLength(text, next.at) < KEY_TOKEN_MIN) return end;
+    at = next.at;
   }
 }
 
-/** Where `text` holds private-key text, first to last, from `from`: from a header to its END line, or with no END up to
- * NO_END_MOST (`pinned`: its own lines); a run of KEY_RUN_MIN or more that starts as a key. Linear in `text`. */
-function privateKeySpans(text: string, o: { from?: number; pinned?: boolean } = {}): [number, number][] {
+/** Whether a line holds only base64, in the marks a language, a comment or a diff puts around it. */
+function base64Only(line: string): boolean {
+  const pieces = line.split(/\\[nr]/).map((p) => p.replace(/^[\s"'`,;#*>|+.]+/, "").replace(/[\s"'`,;+.]+$/, ""));
+  return pieces.some(Boolean) && pieces.every((p) => !p || /^[A-Za-z0-9+/=_-]+$/.test(p));
+}
+
+/** Where a key that a stray END at `end` closes starts, no further back than `floor`: the base64-only lines before it. What
+ * shares the END's line goes only when it is itself base64 (a cut that keeps written line ends). */
+function strayStart(text: string, end: number, floor: number): number {
+  const lineAt = Math.max(text.lastIndexOf("\n", end - 1) + 1, floor);
+  const before = text.slice(lineAt, end);
+  if (before.trim() && !base64Only(before)) {
+    let at = end;
+    for (;;) {
+      let k = at;
+      while (k > lineAt && "\"'`, \t+.".includes(text[k - 1]!)) k--;
+      if (k - 2 < lineAt || text[k - 2] !== "\\" || (text[k - 1] !== "n" && text[k - 1] !== "r")) return at;
+      k -= 2;
+      const piece = k;
+      while (k > lineAt && isRunChar(text.charCodeAt(k - 1))) k--;
+      if (k === piece) return at;
+      at = k;
+    }
+  }
+  let at = lineAt;
+  while (at > floor) {
+    const from = Math.max(text.lastIndexOf("\n", at - 2) + 1, floor);
+    if (!base64Only(text.slice(from, at - 1))) break;
+    at = from;
+  }
+  return at;
+}
+
+/** Private-key text in a text. `body` to `bodyEnd`: what may hold its tokens. `end`: a stray END, and what it closes. */
+interface KeySpan { from: number; to: number; kind: "header" | "start" | "end"; body: number; bodyEnd: number }
+
+/** Where `text` holds private-key text, first to last: from a header to its END line, or with no END to the end of its run of
+ * tokens (tokenRun); a run of KEY_RUN_MIN or more that starts as a key, with such a run after it; an END with no header, and
+ * the base64-only lines before it. `sections`: an END past the next `diff --git` line is another file's. Linear in `text`. */
+function privateKeySpans(text: string, sections = false): KeySpan[] {
   if (!hasKeySign(text)) return [];
-  const out: [number, number][] = [];
-  KEY_ANY.lastIndex = o.from ?? 0;
-  /** The next END, kept while it lies ahead; null once there is none. */
+  const out: KeySpan[] = [];
+  KEY_ANY.lastIndex = 0;
+  /** The next END and the next file of a diff, each kept while it lies ahead; null once there is none. */
   let end: RegExpExecArray | null | undefined;
+  let file: RegExpExecArray | null | undefined;
+  let floor = 0;
   for (let m = KEY_ANY.exec(text); m; m = KEY_ANY.exec(text)) {
-    let to: number;
-    if (isHeader(m[0])) {
-      const after = m.index + m[0].length;
-      if (end === undefined || (end !== null && end.index < after)) {
-        KEY_END.lastIndex = after;
+    let span: KeySpan;
+    const stop = m.index + m[0].length;
+    if (isHeader(m[0]) && isEnd(m[0])) {
+      span = { from: strayStart(text, m.index, floor), to: stop, kind: "end", body: stop, bodyEnd: stop };
+    } else if (isHeader(m[0])) {
+      if (end === undefined || (end !== null && end.index < stop)) {
+        KEY_END.lastIndex = stop;
         end = KEY_END.exec(text);
       }
-      to = end ? end.index + end[0].length : o.pinned ? ownLines(text, after) : Math.min(after + NO_END_MOST, text.length);
+      if (sections && end && (file === undefined || (file !== null && file.index < stop))) {
+        DIFF_LINE.lastIndex = stop;
+        file = DIFF_LINE.exec(text);
+      }
+      const closed = end && (!file || end.index < file.index);
+      const to = closed ? end!.index + end![0].length : tokenRun(text, stop);
+      span = { from: m.index, to, kind: "header", body: stop, bodyEnd: closed ? end!.index : to };
     } else {
       const run = runAt(text, m.index);
       if (run.count < KEY_RUN_MIN) {
         KEY_ANY.lastIndex = Math.max(run.end, m.index + 1);
         continue;
       }
-      to = run.end;
+      const to = tokenRun(text, run.end);
+      span = { from: m.index, to, kind: "start", body: m.index, bodyEnd: to };
     }
-    out.push([m.index, to]);
-    KEY_ANY.lastIndex = Math.max(to, m.index + 1);
+    out.push(span);
+    floor = span.to;
+    KEY_ANY.lastIndex = Math.max(span.to, m.index + 1);
   }
   return out;
-}
-
-/** Where text that starts inside a key ends that key: its first END, with no header before it (a cut, a page of a file). 0
- * when it starts otherwise. */
-function strayEnd(text: string): number {
-  KEY_END.lastIndex = 0;
-  const end = KEY_END.exec(text);
-  if (!end) return 0;
-  KEY_HEAD.lastIndex = 0;
-  const head = KEY_HEAD.exec(text);
-  return head && head.index < end.index ? 0 : end.index + end[0].length;
 }
 
 /** What a model reads in place of a private key. */
 export const KEY_SHOWN = "[private key]";
 /** What it means, for a model and for what a model wrote. */
-export const KEY_SHOWN_MEANS = `\`${KEY_SHOWN}\` stands where arnx hides a private key from you; it is no value: a test that needs ` +
-  "the key must read the file at run time.";
+export const KEY_SHOWN_MEANS = `\`${KEY_SHOWN}\` stands where arnx hides a private key from you, and only that key; it is no value. The ` +
+  "sandbox holds a fake of it, unless its file is allowed: a test that needs the key must read the file at run time.";
 
-/** `text` with its private-key text replaced, for all that leaves arnx. NULs go first when there is any to replace (UTF-16). */
+/** `text` with its private-key text replaced, for all that leaves arnx: what a person or a model reads holds no header and no
+ * END, however often it passes here. NULs go first when there is any to replace (UTF-16). */
 export function maskPrivateKeys(text: string): string {
   const plain = text.includes("\0") ? text.replaceAll("\0", "") : text;
-  if (!hasKeySign(plain)) return text;
-  const stray = strayEnd(plain);
-  const spans = privateKeySpans(plain, { from: stray });
-  if (!stray && !spans.length) return text;
-  const parts: string[] = stray ? [KEY_SHOWN] : [];
-  let from = stray;
-  for (const [a, b] of spans) {
-    parts.push(plain.slice(from, a), KEY_SHOWN);
-    from = b;
+  const spans = privateKeySpans(plain, true);
+  if (!spans.length) return text;
+  const parts: string[] = [];
+  let from = 0;
+  for (const s of spans) {
+    // Keys with only blanks between them read as one.
+    if (!parts.length || plain.slice(from, s.from).trim()) parts.push(plain.slice(from, s.from), KEY_SHOWN);
+    from = s.to;
   }
   parts.push(plain.slice(from));
   return parts.join("");
 }
 
+/** In a key's text, what is no token: a header inside it, a written escape, and what a template fills in. */
+const KEY_TOKEN = new RegExp(`(${KEY_HEADER}|\\\\+[^]|%[0-9A-Fa-f]{2}|\\$?\\{[^{}\\n]{0,200}\\}|<[^<>\\n]{0,200}>)|[A-Za-z0-9+/=_-]{${KEY_TOKEN_MIN},}`, "g");
+/** Past this many tokens a file with an unallowed key is left out: each fake takes a slow hash. */
+export const BIG_KEYS_MOST = 2000;
+/** Each token's fake, for the life of this process. A fake is its own fake, so a text that holds fakes reads the same. */
+const KEY_FAKES = new Map<string, string>();
+function keyFake(token: string): string {
+  const out = fake(token, KEY_FAKES);
+  KEY_FAKES.set(out, out);
+  return out;
+}
+
+/** The different tokens of `text`'s private keys. */
+export const keyTokens = (text: string) => tokensIn(text, privateKeySpans(text));
+function tokensIn(text: string, spans: readonly KeySpan[]): Set<string> {
+  const out = new Set<string>();
+  for (const s of spans) {
+    for (const m of text.slice(s.body, s.bodyEnd).matchAll(KEY_TOKEN)) if (m[1] === undefined) out.add(m[0]);
+  }
+  return out;
+}
+
+/** `text` with each token of its private keys given a fake of the same length: all else stays, a header and an END too, so it
+ * still reads as a key and its lines do not move. `count`: the tokens replaced. The same token gets the same fake anywhere.
+ * Past BIG_KEYS_MOST, in an allowed file that only a tool shows, letters do for a fake. */
+export function fakeKeys(text: string): { text: string; count: number } {
+  const spans = privateKeySpans(text).filter((s) => s.kind !== "end");
+  if (!spans.length) return { text, count: 0 };
+  const many = tokensIn(text, spans).size > BIG_KEYS_MOST;
+  const parts: string[] = [];
+  let from = 0, count = 0;
+  for (const s of spans) {
+    parts.push(text.slice(from, s.body), text.slice(s.body, s.bodyEnd).replace(KEY_TOKEN, (m: string, skip: string | undefined) => {
+      if (skip !== undefined) return m;
+      const out = many ? m.replace(/[A-Za-z0-9]/g, "x") : keyFake(m);
+      if (out !== m) count++;
+      return out;
+    }));
+    from = s.bodyEnd;
+  }
+  parts.push(text.slice(from));
+  return { text: parts.join(""), count };
+}
+
 /** The keys known by how they start, on a run of KEY_RUN_MIN or more, whole or wrapped, outside a header's text. */
-const headerlessKeys = (text: string): Hit[] => privateKeySpans(text).filter(([a]) => !text.startsWith("----", a))
-  .map(([a, b]) => ({ 0: /^[A-Za-z0-9+/=]+/.exec(text.slice(a, b))![0], index: a, start: true }));
+const headerlessKeys = (text: string): Hit[] => privateKeySpans(text).filter((s) => s.kind === "start")
+  .map((s) => ({ 0: /^[A-Za-z0-9+/=]+/.exec(text.slice(s.from, s.to))![0], index: s.from, start: true }));
 
 /** fnmatch.fnmatchcase for the simple globs above: * and ? only. */
 export function globRegex(glob: string): RegExp {
@@ -245,6 +368,9 @@ export function isSecretPath(rel: string): boolean {
   const name = posix.basename(rel);
   return SECRET_FILES.some((r) => r.test(name));
 }
+
+const KEY_FILE_NAMES = KEY_FILES.map(globRegex);
+export const isKeyFileName = (rel: string) => KEY_FILE_NAMES.some((r) => r.test(posix.basename(rel)));
 
 export function hasSecretContent(text: string): boolean {
   return CONTENT.test(text) || addressPasswords(text).length > 0 || headerlessKeys(text).length > 0;
@@ -757,40 +883,7 @@ export function holdsPrivateKey(text: string, pins: readonly string[]): boolean 
 }
 
 /** Where a piece of a file holds private-key text; -1 when it holds none. */
-export const privateKeyIn = (text: string) => privateKeySpans(text)[0]?.[0] ?? -1;
-
-/** The lines of a pinned file holding private-key text, by number: a hunk may show them with no header. */
-export function keyLines(text: string): number[] {
-  const spans = privateKeySpans(text, { pinned: true });
-  if (!spans.length) return [];
-  const out: number[] = [];
-  let line = 1, at = 0;
-  for (const [a, b] of spans) {
-    for (; at < a; at++) if (text.charCodeAt(at) === 10) line++;
-    out.push(line);
-    for (; at < b; at++) {
-      if (text.charCodeAt(at) === 10) {
-        line++;
-        if (at + 1 < b) out.push(line);
-      }
-    }
-  }
-  return [...new Set(out)];
-}
-
-/** A pinned file as a tool shows it: its key's lines read KEY_SHOWN, and the rest reads as it is. */
-export function withKeyLines(text: string): string {
-  const lines = keyLines(text);
-  if (!lines.length) return text;
-  const all = text.split("\n");
-  for (const n of lines) all[n - 1] = KEY_SHOWN;
-  return all.join("\n");
-}
-
-/** The pieces of a pinned file's private-key text, for the filter: a search or a page of the file can show a line of it with
- * no header. Below 8 characters, or in one case, a piece is too likely to be something else. */
-export const keyPieces = (text: string) => [...new Set(privateKeySpans(text, { pinned: true }).flatMap(([a, b]) =>
-  text.slice(a, b).match(/[A-Za-z0-9+/=_-]{8,}/g) ?? []).filter((t) => /[a-z]/.test(t) && /[A-Z]/.test(t)))];
+export const privateKeyIn = (text: string) => privateKeySpans(text).find((s) => s.kind !== "end")?.from ?? -1;
 
 /** `text` (the file at `path`) with a stand-in for each of its suspects, or null when no stand-in can keep the real
  * value out: a private key. `count`: the strings replaced. */

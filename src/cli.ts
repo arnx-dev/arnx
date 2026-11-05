@@ -27,7 +27,7 @@ import { type Account, byokHint, CloudClient, credentialsPath, deleteCredentials
   type Fetch, tokenFor, usd } from "./cloud";
 import { dockerSession, suffixReviewCopies } from "./testround";
 import type { SessionFactory } from "./sandbox";
-import { branchBase, describe, describeBlanked, describeWithheld, git, hasCommits, repoRoot, resolveChange } from "./change";
+import { branchBase, changeLimits, describe, describeBlanked, describeWithheld, fakedKeysText, git, hasCommits, pinOfFile, repoRoot, resolveChange } from "./change";
 import { NOT_SET_UP } from "./draft";
 import { route } from "./route";
 import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, readSecretPins, type ReviewFile,
@@ -55,7 +55,7 @@ import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSetting
 import { type ModelRef, providerLines, providerName, refString, setupRef, setupSettings, unusedKeysNote }
   from "./settings";
 import { providerHost, resolveProvider } from "./providers";
-import { isSecretPath, secretHits, secretPins } from "./secrets";
+import { filePin, isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageMap, describeCoverage, type NeededFile, type ProjectProof,
   NOTHING_TO_TEST, proofBefore, type ProofBefore, rerecordBaseline, runSetup, type SetupResult, type SetupRun, stillRed,
   WEB_UI_STOP } from "./setup";
@@ -937,6 +937,7 @@ class Commands {
       this.d.out(`Left out as secret-looking (not sent, not in the sandbox): ${describeWithheld(result.withheld)}. ` +
         "If one is a test fixture, not a secret: `arnx allow-secret PATH`, then run setup again.");
     }
+    if (result.fakedKeys.length) this.d.out(fakedKeysText(result.fakedKeys));
     if (result.blanked.length) {
       this.d.out(`Comment lines blanked as secret-looking (not sent): ${describeBlanked(result.blanked)}.`);
     }
@@ -1282,30 +1283,32 @@ class Commands {
       const full = realpathSync(resolve(this.d.cwd, p));
       if (!full.startsWith(repo + sep)) throw new ArnxError(`${p} is outside the repository`);
       const rel = relative(repo, full).split(sep).join("/");
-      if (isSecretPath(rel)) throw new ArnxError(`${rel}: files named like this are never sent, allowed or not`);
-      const text = readFileSync(full, "utf8");
+      // A file left out whatever it holds, by its name or its size, is pinned as it stands.
+      const tooBig = statSync(full).size > changeLimits.maxScanBytes;
+      const whole = isSecretPath(rel) || tooBig;
+      const text = tooBig ? "" : readFileSync(full, "utf8");
       const hits = secretHits(text);
-      if (!hits.length) throw new ArnxError(`${rel} holds nothing that looks like a key; nothing to allow`);
+      if (!hits.length && !whole) throw new ArnxError(`${rel} holds nothing that looks like a key; nothing to allow`);
       const shown = hits.slice(0, 5).map((h) => `${h.label} line ${h.line}`).join(", ") + (hits.length > 5 ? ", …" : "");
-      this.d.out(`! ${rel}: ${hits.length} key-like string${hits.length === 1 ? "" : "s"} (${shown})`);
+      if (hits.length) this.d.out(`! ${rel}: ${hits.length} key-like string${hits.length === 1 ? "" : "s"} (${shown})`);
       // Each side of a change must be allowed: the file as it stands, as committed, before the last commit, where its branch
       // left, and as allowed before.
-      const earlier = hasCommits(repo) ? ["HEAD", "HEAD^", branchBase(repo)?.base].flatMap((rev) => rev
+      const earlier = hasCommits(repo) && !tooBig ? ["HEAD", "HEAD^", branchBase(repo)?.base].flatMap((rev) => rev
         ? [git(repo, ["show", `${rev}:${rel}`], [0, 128])] : []) : [];
       const before = (existsSync(reviewConfigPath(repo)) ? readSecretPins(repo) : []).find((x) => x.path === rel)?.matches ?? [];
-      return { path: rel, matches: [...new Set([...secretPins(text), ...earlier.flatMap(secretPins), ...before])].sort(), hits };
+      const wholePins = whole ? [pinOfFile(full)!, ...earlier.filter(Boolean).map(filePin)] : [];
+      return { path: rel, matches: [...new Set([...secretPins(text), ...earlier.flatMap(secretPins), ...wholePins, ...before])].sort(), hits, whole };
     });
     const path = reviewConfigPath(repo);
     const seed = !existsSync(path) || isSeedFile(repo);
     mkdirSync(join(repo, ".arnx"), { recursive: true });
     writeFileSync(path, withSecretPins(existsSync(path) ? readFileSync(path, "utf8") : null,
       pins.map(({ path: p, matches }) => ({ path: p, matches }))));
-    // Allowing is not sending: the file goes out with the next command that calls a model or runs the sandbox.
-    this.d.out(`✓ Allowed in ${REVIEW_FILE}: from now on, model calls and the sandbox may include ` +
-      `${pins.length === 1 ? "this file" : "these files"}.`);
+    this.d.out(`✓ Allowed in ${REVIEW_FILE}.`);
     this.d.out(pins.some((p) => p.hits.some((h) => h.label === "a private key"))
-      ? "  A private key reaches models as `[private key]`; any edit withholds the file again."
-      : "  A new key-like string in it withholds the file again.");
+      ? "  The sandbox keeps the real key, so tests that parse it run. Models still read `[private key]`. Any edit ends this."
+      : pins.some((p) => p.whole) ? "  The sandbox and model calls may hold it as it is. Any edit leaves it out again."
+      : "  Model calls and the sandbox may hold it. A new key-like string in it withholds the file again.");
     this.d.out(`Next: ${seed ? "arnx setup" : "arnx review"}`);
     // Never the matched text, nor its pins: where each key-like string is, and what kind it looks like.
     this.emit("ok", 0, { files: pins.map((p) => ({ path: p.path, matches: p.hits.length,
@@ -1331,7 +1334,7 @@ class Commands {
     const text = withoutSecretPins(readFileSync(path, "utf8"), rels);
     if (seed && readSecretPins(repo).every((p) => rels.includes(p.path))) rmSync(path);
     else writeFileSync(path, text);
-    this.d.out(`✓ No longer allowed: ${rels.join(", ")} (withheld again from model calls and the sandbox).`);
+    this.d.out(`✓ No longer allowed: ${rels.join(", ")} (a key is a fake again; other text as it was before).`);
     const next = seed ? "arnx setup" : "arnx review";
     this.d.out(`Next: ${next}`);
     this.emit("ok", 0, { removed: rels, review_yaml: REVIEW_FILE, next: [next] });

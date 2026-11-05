@@ -328,7 +328,7 @@ export class CloudBrain implements Brain {
         evidence: c.evidence })), workspaces: d.workspaces, ci: d.ci, compose: d.compose, services: d.services,
       languages: d.languages }, draft: x.draft || null, tree: x.tree ?? "", existing_yaml: x.current || null,
       withheld: withheld.map((w) => w.path), withheld_files: withheld.map((w) => ({ path: w.path, label: w.label,
-        line: w.line })),
+        line: Math.max(w.line, 1) })),
       project: x.project ?? null, add: !!x.add, budget_cap_micro_usd: micro(x.budgetUsd) },
     { ...stream, idempotencyKey: randomUUID() });
     const { agent } = await this.drive({ first: Promise.resolve(started.step), path: `/v1/setup/${started.setup_id}/steps`,

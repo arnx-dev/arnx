@@ -14,8 +14,8 @@ import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { AdapterId, TestResult } from "./adapters/types";
-import { addToSandbox, type Blanked, describeBlanked, describeWithheld, filesAt, hasCommits, snapshotDigest, someNames,
-  takeSnapshot, tooLargeText, type Withheld, workingTreeFiles } from "./change";
+import { addToSandbox, type Blanked, describeBlanked, describeWithheld, fakedKeysText, filesAt, hasCommits, snapshotDigest, someNames,
+  takeSnapshot, type Withheld, workingTreeFiles } from "./change";
 import { configSuspects,
   loadReviewFile, parseReviewFile, plainReviewYaml, projectDigest, readSecretPins, restDigest, runDigest, type ReviewConfig,
   reviewConfigPath,
@@ -525,6 +525,8 @@ export interface SetupResult {
   blanked: Blanked[];
   /** Files kept with a stand-in for each key-shaped string (the real values never left this machine). */
   standIns: string[];
+  /** Files kept with a fake for their private key. */
+  fakedKeys: string[];
   /** Files .arnxignore leaves out that the tests need: in the sandbox only (review.yaml sandbox_only). */
   sandboxed: string[];
   /** The failing tests (outside known_failing) of the last suite that ran with some tests passing: setup got the
@@ -1131,9 +1133,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     // Files .arnxignore leaves out that the tests need: in the sandbox only. A fresh setup finds them again.
     const sandbox = new Set(existing ? sandboxOnlyOf(existing.raw) : []);
     const sandboxKey = () => [...sandbox].sort().join("\n");
-    const { withheld, blanked, standIns, secrets: replaced, suspects: found, tooLarge } = takeSnapshot(repo, null, snap, pins,
+    const { withheld, blanked, standIns, fakedKeys, secrets: replaced, suspects: found } = takeSnapshot(repo, null, snap, pins,
       { untracked, sandbox: [...sandbox] });
-    if (tooLarge.length) say(tooLargeText(tooLarge));
     boundary.addScrubbed({ suspects: found, secrets: replaced });
     boundary.add(configSuspects(repo));
     // What the agent's file, commands and paths mean here. review.yaml keeps its stand-ins: only a run reads them as values.
@@ -1174,6 +1175,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     }
     if (blanked.length) say(`comment lines blanked as secret-looking: ${describeBlanked(blanked)}`);
     if (standIns.length) say(`stand-ins for key-shaped text, the real values kept here: ${someNames(standIns)}`);
+    if (fakedKeys.length) say(fakedKeysText(fakedKeys));
     if (withheld.length || blanked.length || standIns.length) {
       emit("setup.withheld", { files: withheld.map((w) => w.path), blanked: blanked.map((b) => b.path),
         stand_ins: standIns });
@@ -1387,6 +1389,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           if (r.standIns.length) {
             say(`stand-ins for key-shaped text, the real values kept here: ${someNames(r.standIns)}`);
           }
+          if (r.fakedKeys.length) say(fakedKeysText(r.fakedKeys));
           if (r.sandboxed.length && !r.withheld.length) {
             say(`${name}: the tests need ${someNames(r.sandboxed)}, which .arnxignore leaves out: copied into the ` +
               "sandbox, not sent to the model");
@@ -1719,7 +1722,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         emit("setup.completed", { ok: false, stop: NOTHING_TO_TEST, cost_usd: 0, attempts: 0, projects: [],
           summary: state.problem });
         return { ok: false, yamlText: null, summary: state.problem, costUsd: 0, stop: NOTHING_TO_TEST, notes: "",
-          projects: [], withheld, blanked, standIns, sandboxed: [], failing: [], failingProject: null,
+          projects: [], withheld, blanked, standIns, fakedKeys, sandboxed: [], failing: [], failingProject: null,
           problem: state.problem, runs: [] };
       }
       emit("setup.quick", { projects: q.names, files: o.quick.files.length });
@@ -1765,7 +1768,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       ...(aside ? { uncovered_projects: aside } : {}) });
     return { ok: state.accepted !== null, yamlText: state.accepted ?? state.lastTried, summary: state.summary,
       costUsd: result.costUsd, stop, notes: result.finalText, projects, withheld,
-      blanked, standIns, sandboxed: [...sandbox].sort(),
+      blanked, standIns, fakedKeys, sandboxed: [...sandbox].sort(),
       failing: state.accepted !== null ? [] : state.failing, failingProject: state.accepted !== null ? null
         : state.failingProject, problem: state.problem, ...(state.needed ? { needed: state.needed } : {}),
       ...(running ? { running } : {}), ...(aside ? { setAside: aside } : {}),

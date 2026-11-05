@@ -1,14 +1,14 @@
-// The rules for a private key in a file: a header leaves the file out, whatever is under it; a long run that starts as a key
+// The rules for a private key in a file: it stays, its tokens a fake, whatever is under a header; a long run that starts as a key
 // does too; a pin is for one file's whole text and sends no key; a read that fails counts as a hit. Keys are built at run time.
 import { afterEach, expect, test } from "bun:test";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { changeLimits, fileSide, keyInStream, resolveChange, takeSnapshot } from "../src/change";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
-import { holdsPrivateKey, scanKeys, secretPins } from "../src/secrets";
+import { holdsPrivateKey, maskPrivateKeys, scanKeys, secretPins } from "../src/secrets";
 import { defaultSettings, type Settings, writeSettings } from "../src/settings";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { fakeFactory, type FakeSession, tool } from "./helpers/fakes";
@@ -39,7 +39,7 @@ afterEach(() => {
   changeLimits.maxScanBytes = 32_000_000;
 });
 
-// --- a header means out -------------------------------------------------------------------------------------------------
+// --- a header means a fake, and `[private key]` on the wire ---------------------------------------------------------------
 
 const lit = (lines: string[], sep: string) => [HDR, ...lines, END].join(sep);
 const FORMS: [string, (l: string[]) => string][] = [
@@ -63,21 +63,26 @@ const FORMS: [string, (l: string[]) => string][] = [
 ];
 for (const [name, form] of FORMS) {
   for (const w of [64, 32, 7]) {
-    test(`a header leaves the file out: ${name}, wrapped at ${w}`, () => {
+    test(`a key stays with a fake, and no body on the wire: ${name}, wrapped at ${w}`, () => {
       const lines = wrap(random, w);
       const repo = gitRepo(tmp());
       put(repo, "k.py", form(lines));
       editApp(repo);
       commit(repo, "a key");
       const c = resolveChange(repo);
-      expect(c.withheld?.map((w2) => [w2.path, w2.label])).toEqual([["k.py", "a private key"]]);
-      clean("the diff", c.diff, lines);
-      expect(takeSnapshot(repo, "HEAD", join(tmp(), "s"), [], { standIns: true }).withheld.map((x) => x.path)).toEqual(["k.py"]);
+      expect([c.files, c.withheld]).toEqual([["app.py", "k.py"], undefined]);
+      clean("the wire", maskPrivateKeys(c.diff), lines);
+      const snap = join(tmp(), "s");
+      expect(takeSnapshot(repo, "HEAD", snap, [], { standIns: true }).withheld).toEqual([]);
+      // A token under 8 characters stays in the sandbox and the saved diff: stated, and the wire above hides it.
+      const long = lines.filter((l) => l.length >= 8);
+      clean("the diff", c.diff, long);
+      clean("the snapshot", readFileSync(join(snap, "k.py"), "utf8"), long);
     });
   }
 }
 
-test("Ed25519 in JSON with `/` and `+` escaped: out, with no body rule to miss it", () => {
+test("Ed25519 in JSON with `/` and `+` escaped: a key, with no body rule to miss it", () => {
   for (let i = 0; i < 40; i++) {
     const pem = generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }) as string;
     const line = pem.split("\n")[1]!;
@@ -89,7 +94,7 @@ test("Ed25519 in JSON with `/` and `+` escaped: out, with no body rule to miss i
   }
 });
 
-test("a placeholder header leaves its file out too, a hyphen in the label counts, and a comment does not save a file", () => {
+test("a placeholder header counts, a hyphen in the label counts, a comment too, and its file stays", () => {
   for (const text of [`${HDR}\n...\n${END}\n`, `assert "${HDR}" in pem\n`, `const a = "${HDR}";\n`,
     `-----BEGIN ML-DSA-65 ${KEY}-----\n${wrap(random, 64).join("\n")}\n-----END ML-DSA-65 ${KEY}-----\n`]) {
     expect(holdsPrivateKey(text, [])).toBe(true);
@@ -99,7 +104,9 @@ test("a placeholder header leaves its file out too, a hyphen in the label counts
   put(repo, "README.md", `Set it:\n\n\`\`\`\n${HDR}\n...\n${END}\n\`\`\`\n`);
   editApp(repo);
   commit(repo, "a doc");
-  expect(resolveChange(repo).withheld?.map((w) => w.path)).toEqual(["README.md"]);
+  const c = resolveChange(repo);
+  expect([c.files, c.withheld]).toEqual([["README.md", "app.py"], undefined]);
+  expect(c.diff).toContain(HDR);
 });
 
 // --- no header ------------------------------------------------------------------------------------------------------------
@@ -135,7 +142,7 @@ function configured(o: Partial<Settings> = {}): string {
 }
 const pemOf = (b: string) => `${HDR}\n${wrap(b, 64).join("\n")}\n${END}\n`;
 
-test("a pin is a hash of the whole file: another key, another edit, an old string pin: each is left out", () => {
+test("a pin is a hash of the whole file: another key, another edit, an old string pin: none is allowed", () => {
   const text = pemOf(b64);
   const pins = secretPins(text);
   expect(holdsPrivateKey(text, pins)).toBe(false);
@@ -149,7 +156,7 @@ test("a pin is a hash of the whole file: another key, another edit, an old strin
   expect(holdsPrivateKey(text, old)).toBe(true);
 });
 
-test("a pinned file stays in the diff, and `[private key]` stands in its key lines though the hunk shows no header", () => {
+test("a pinned file's diff reads as any other's: a fake on its key lines, though the hunk shows no header", () => {
   const repo = configured();
   const lines = wrap(b64, 64);
   const v1 = `# fixture\n${pemOf(b64)}x = 1\n`;
@@ -163,13 +170,12 @@ test("a pinned file stays in the diff, and `[private key]` stands in its key lin
   const allow = [{ path: "fix.txt", matches: [...secretPins(v1), ...secretPins(v2)] }];
   const c = resolveChange(repo, null, allow);
   expect([c.files, c.withheld]).toEqual([["app.py", "fix.txt"], undefined]);
-  expect(c.diff).toContain(`-${SHOWN}`);
-  expect(c.diff).toContain(`+${SHOWN}`);
+  expect(c.diff).not.toContain(SHOWN);
   clean("change.diff", c.diff, lines);
-
+  expect(resolveChange(repo).diff).toBe(c.diff);
 });
 
-test("a re-pinned file's diff works when its old side's hash was pinned earlier; its old side alone unpinned leaves it out", () => {
+test("a re-pinned file's diff reads the same whichever of its sides is pinned", () => {
   const repo = gitRepo(tmp());
   const v1 = pemOf(b64), v2 = `${v1}# edit\n`;
   put(repo, "fix.txt", v1);
@@ -181,7 +187,7 @@ test("a re-pinned file's diff works when its old side's hash was pinned earlier;
   expect([both.files, both.withheld]).toEqual([["app.py", "fix.txt"], undefined]);
   expect(both.diff).toContain("+# edit");
   const newOnly = resolveChange(repo, null, [{ path: "fix.txt", matches: secretPins(v2) }]);
-  expect(newOnly.withheld?.map((w) => w.path)).toEqual(["fix.txt"]);
+  expect(newOnly.diff).toBe(both.diff);
 });
 
 // --- a read that fails ---------------------------------------------------------------------------------------------------
@@ -235,7 +241,7 @@ test("a read that fails on a path the diff names counts as a hit: from a commit,
   expect(fileSide(repo, "no-such-file")).toEqual({ line: 1, label: "could not be read" });
 });
 
-test("a pure rename counts both its paths: a pin on each lets it through, a pin on the new one alone does not", () => {
+test("a pure rename reads both its paths, pinned or not", () => {
   const repo = gitRepo(tmp());
   const text = `${pemOf(b64)}extra\nline\n`;
   put(repo, "old.txt", text);
@@ -247,7 +253,7 @@ test("a pure rename counts both its paths: a pin on each lets it through, a pin 
   const both = resolveChange(repo, null, [{ path: "old.txt", matches: pins }, { path: "new.txt", matches: pins }]);
   expect([both.files, both.withheld]).toEqual([["app.py", "new.txt"], undefined]);
   const one = resolveChange(repo, null, [{ path: "new.txt", matches: pins }]);
-  expect([one.files, one.withheld?.map((w) => w.path)]).toEqual([["app.py"], ["new.txt"]]);
+  expect([one.files, one.withheld]).toEqual([["app.py", "new.txt"], undefined]);
 });
 
 test("a stream that cannot read a file counts as a hit", () => {

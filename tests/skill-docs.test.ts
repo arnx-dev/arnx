@@ -53,7 +53,7 @@ function full(): Record<string, unknown> {
   untested: [{ project: "main", files: ["a.py"], of: 2 }],
   // Never both in one review (one is opted in, the other not); here only to see each written.
   untrackedIncluded: ["notes.md"], untrackedLeftOut: 1,
-  leftOutFiles: [{ path: "k.ts", line: 1, label: "a private key" }], couldNotRun: [{ test: "t.py::a", needs: "k.ts" }],
+  leftOutFiles: [{ path: "k.ts", line: 1, label: "a private key" }], couldNotRun: [{ test: "t.py::a", needs: "k.ts" }], fakedKeys: ["f.ts"],
       blankedLines: [{ path: "src/auth.ts", lines: [4] }],
   usage: [{ model: "anthropic:m", calls: 1, unknownCalls: 0, input: 1, output: 1, cacheRead: 0, cacheWrite: 0,
     costUsd: 0.1 }] as Review["usage"],

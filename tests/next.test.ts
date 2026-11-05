@@ -75,6 +75,7 @@ test("a change over the size limit is next's answer, not 'nothing to review'", (
 
 test("a change that cannot be sent is shown as the error itself", () => {
   const repo = approved();
+  writeSettings(repo, { ...defaultSettings(), standIns: false });
   writeFileSync(join(repo, "svc/key.py"), `KEY = """${PRIVATE_KEY_BLOCK}"""\n`);
   runGit(repo, "add", "svc/key.py");
   const n = whatNext(repo);

@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
 import { Boundary, maskedCopy, STAND_INS_NOTE } from "./boundary";
-import { markLeftOut } from "./diagnose";
+import { markUnproven, unprovenText } from "./diagnose";
 import { filesAt, git, hasCommits, takeSnapshot, type Withheld } from "./change";
 import { configSuspects, loadReviewFile, type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
@@ -27,7 +27,7 @@ export const CHECK_TIMEOUT = 900;
  * `reviews`: a failed test → the review that accepted its file, when known. */
 export interface ProjectCheck { /** Something in it was masked. */ standInsShown?: boolean;
   /** Files the snapshot left out as secret-looking; tests that failed for one, which could not run. */
-  leftOut?: Withheld[]; couldNotRun?: { testId: string; needs: string }[]; project: string; files: string[];
+  leftOut?: Withheld[]; fakedKeys?: string[]; couldNotRun?: { testId: string; needs: string; faked?: boolean }[]; project: string; files: string[];
   passed: string[]; failed: TestResult[];
   skipped: number; noReport: boolean; accepted?: string[]; reason?: string; log?: string | null;
   reviews?: Record<string, string>; workdir?: string }
@@ -214,9 +214,10 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
           return groups.map((g, i) => [g, ...runTests(session, snap, cfg, files.filter((f) => reviewGroup(f) === g).map(target),
             groups.length > 1 ? `check-${i + 1}.xml` : "check.xml", CHECK_TIMEOUT)] as const);
         }, undefined, undefined, swap));
-      // A test failing for a file left out says nothing about the code: it could not run.
+      // A test failing for a file left out, or for a key the sandbox holds a fake of, says nothing about the code.
       const lacking = taken.withheld.map((w) => w.path);
-      const results = markLeftOut(runs.flatMap(([, , r]) => r ?? []), lacking, lacking.length ? filesAt(repo, null, true) : []);
+      const results = markUnproven(runs.flatMap(([, , r]) => r ?? []), { leftOut: lacking, fakedKeys: taken.fakedKeys,
+        all: lacking.length || taken.fakedKeys.length ? filesAt(repo, null, true) : [] });
       const missing = runs.filter(([, , r]) => r === null);
       const log = checkLog(cfg.name);
       rmSync(join(repo, log), { force: true });
@@ -232,7 +233,7 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       }
       known ??= acceptedIds(repo);
       const ran = results.filter((t) => t.outcome !== "skipped");
-      const couldNotRun = ran.filter((t) => t.needs).map((t) => ({ testId: t.testId, needs: t.needs! }));
+      const couldNotRun = ran.filter((t) => t.needs).map((t) => ({ testId: t.testId, needs: t.needs!, ...(t.fakedKey ? { faked: true } : {}) }));
       const failed = ran.filter((t) => !t.needs && (t.outcome === "failed" || t.outcome === "error"));
       const reviews = Object.fromEntries(failed.map((t) => [t.testId, reviewOf(known!, cfg.workdir, t.testId)])
         .filter(([, r]) => r));
@@ -240,7 +241,8 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
         passed: ran.filter((t) => t.outcome === "passed").map((t) => t.testId), failed, reviews,
         skipped: results.filter((t) => t.outcome === "skipped").length,
         accepted: ran.filter((t) => !t.needs && isAccepted(known!, cfg.workdir, t.testId)).map((t) => t.testId),
-        ...(taken.withheld.length ? { leftOut: taken.withheld } : {}), ...(couldNotRun.length ? { couldNotRun } : {}),
+        ...(taken.withheld.length ? { leftOut: taken.withheld } : {}), ...(taken.fakedKeys.length ? { fakedKeys: taken.fakedKeys } : {}),
+        ...(couldNotRun.length ? { couldNotRun } : {}),
         ...(reason ? { reason, log } : { log: null }) } as ProjectCheck);
       out.push(said.shown ? { ...said.value, standInsShown: true } : said.value);
     } finally {
@@ -439,18 +441,23 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
         ...failingList(othFail, multi));
     }
   }
-  // A file left out: what could not run for it says so, and whatever else went wrong may have it for a cause.
+  // A file left out or a key faked: what could not run for it says so, and whatever else went wrong may have it for a cause.
   const blocked = results.flatMap((r) => r.couldNotRun ?? []);
   const allowFile = (paths: string[]) => `\`arnx allow-secret ${paths.length === 1 ? paths[0] : "PATH"}\``;
   if (blocked.length) {
     const needs = [...new Set(blocked.map((x) => x.needs))];
-    lines.push(`✗ ${count(blocked.length, "test")} could not run: ${blocked.length === 1 ? "it needs" : "they need"} ` +
-      `${needs.slice(0, 5).join(", ")}, left out as secret-looking. If it is a test fixture: ${allowFile(needs)}, then \`arnx check\` again.`);
+    lines.push(`✗ ${count(blocked.length, "test")} ${unprovenText(blocked.length, blocked, (p) => p.slice(0, 5).join(", "))}. ` +
+      `If it is a test fixture: ${allowFile(needs)}, then \`arnx check\` again.`);
   }
   const leftOut = [...new Set(results.flatMap((r) => (r.leftOut ?? []).map((w) => w.path)))];
   if (leftOut.length && !blocked.length && (missing.length || failed.length)) {
     lines.push(`Left out as secret-looking, which these tests may need: ${leftOut.slice(0, 5).join(", ")}${leftOut.length > 5 ? ", …" : ""}. ` +
       `If one is a test fixture: ${allowFile(leftOut)}.`);
+  }
+  const fakedKeys = [...new Set(results.flatMap((r) => r.fakedKeys ?? []))];
+  if (fakedKeys.length && !blocked.length && (missing.length || failed.length)) {
+    lines.push(`A fake private key is in the sandbox, which these tests may need real: ${fakedKeys.slice(0, 5).join(", ")}${fakedKeys.length > 5 ? ", …" : ""}. ` +
+      `If one is a test fixture: ${allowFile(fakedKeys)}.`);
   }
   if (missing.length) {
     const timeout = missing.every((r) => r.reason?.startsWith("the tests timed out"));
@@ -801,7 +808,8 @@ export function checkJson(results: ProjectCheck[], code: number, changed: Change
           accepted: acc(t.testId) })),
         skipped: r.skipped,
         ...(r.leftOut ? { left_out: r.leftOut } : {}),
-        ...(r.couldNotRun ? { could_not_run: r.couldNotRun.map((x) => ({ test_id: x.testId, needs: x.needs })) } : {}) };
+        ...(r.fakedKeys ? { faked_keys: r.fakedKeys } : {}),
+        ...(r.couldNotRun ? { could_not_run: r.couldNotRun.map((x) => ({ test_id: x.testId, needs: x.needs, ...(x.faked ? { faked_key: true } : {}) })) } : {}) };
     }),
     changed, may_contradict: contradict, stand_ins_shown: results.some((r) => !!r.standInsShown) }, null, 2);
 }

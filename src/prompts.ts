@@ -12,7 +12,7 @@ import { adapterFor } from "./adapters";
 import type { Words } from "./adapters/types";
 import type { Withheld } from "./change";
 import type { ReviewConfig } from "./config";
-import { KEY_SHOWN, KEY_SHOWN_MEANS } from "./secrets";
+import { KEY_SHOWN, KEY_SHOWN_MEANS, maskPrivateKeys } from "./secrets";
 
 // The reviewer sees its project's whole part of the change: arnx refuses changes over MAX_DIFF_BYTES instead of
 // cutting them (a cut diff once hid two thirds of a branch while the review said "Complete").
@@ -155,8 +155,8 @@ export function leftOutNote(files: readonly Withheld[]): string {
 export const scopeTold = (scoped: boolean, scope: Scope): Scope | undefined =>
   scoped ? scope : scope.leftOut?.length ? { owned: [], used: [], leftOut: scope.leftOut } : undefined;
 
-/** Said when a diff shows what the filter hid. In code, and absent otherwise, so the prompts' templates stand. */
-export const keyShownNote = (diff: string) => diff.includes(KEY_SHOWN) ? KEY_SHOWN_MEANS : "";
+/** Said when a diff shows what the filter hides. In code, and absent otherwise, so the prompts' templates stand. */
+export const keyShownNote = (diff: string) => diff.includes(KEY_SHOWN) || maskPrivateKeys(diff) !== diff ? KEY_SHOWN_MEANS : "";
 const withKeyNote = (scope: string, diff: string) => keyShownNote(diff) ? `${scope}\n${keyShownNote(diff)}\n` : scope;
 
 function scopeText(cfg: ReviewConfig, scope: Scope | undefined): string {

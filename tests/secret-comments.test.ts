@@ -194,7 +194,8 @@ test("a review's diff never carries a key in a hunk header's function context", 
   writeFileSync(join(repo, "b.ts"), file("neu();"));
   writeFileSync(join(repo, "app.py"), "x = 2\n");
   const c = resolveChange(repo);
-  expect(c.withheld?.map((w) => w.path)).toEqual(["b.ts"]);
+  expect(c.withheld).toBeUndefined();
+  expect(c.diff).toMatch(/^@@ -\d+,\d+ \+\d+,\d+ @@$/m);
   expect(c.diff).not.toContain(BODY);
   // A pinned one: its hunks lose their function context, and its key lines read the same.
   const pinned = resolveChange(repo, null, [{ path: "b.ts", matches: [...secretPins(file("old();")), ...secretPins(file("neu();"))] }]);
@@ -204,7 +205,7 @@ test("a review's diff never carries a key in a hunk header's function context", 
   expect(pinned.diff).toContain("+    neu();");
 });
 
-test("a review's diff showing a key body of a withheld file refuses, though the header is outside the hunk", () => {
+test("a review's diff showing a key body has a fake there, though the header is outside the hunk", () => {
   const repo = gitRepo(tmp());
   const RSA = "-----BEGIN RSA " + "PRIVATE KEY-----", RSA_END = "-----END RSA " + "PRIVATE KEY-----";
   const rows = ["a", "b", "c", "d", "e"].map((c) => "MIIEowIBAAKCAQEA" + c.repeat(48));
@@ -212,8 +213,10 @@ test("a review's diff showing a key body of a withheld file refuses, though the 
   writeFileSync(join(repo, "k.ts"), file("x();"));
   commit(repo, "key in code");
   writeFileSync(join(repo, "k.ts"), file("y();"));
-  expect(() => resolveChange(repo)).toThrow("the change contains text that looks like a secret (a key or token) in " +
-    "k.ts (a private key)");
+  const c = resolveChange(repo);
+  expect(c.withheld).toBeUndefined();
+  expect(c.diff).toContain("+y();");
+  expect(c.diff).not.toContain("MIIEowIBAAKCAQEA");
 });
 
 test("the review names the files whose comment lines were blanked", () => {

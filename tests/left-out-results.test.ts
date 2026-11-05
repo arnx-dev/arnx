@@ -24,7 +24,8 @@ const LIB = `def is_key(s):\n    return s.startswith("-----BEGIN ${KEY}-----")\n
 const YAML = "version: 1\nimage: python:3.12-slim\ntest_command: python -m pytest -q {targets}\n";
 const GEN = "tests/arnx_generated/test_add.py";
 const OTHER = "tests/arnx_generated/test_other.py";
-const SETTINGS: Settings = { ...defaultSettings(), beforeCheck: false, consentAt: "2026-11-04T00:00:00Z" };
+// With stand-ins off a file holding a key is left out, as a file left out by its name or size is: the same path, rule 7's.
+const SETTINGS: Settings = { ...defaultSettings(), beforeCheck: false, standIns: false, consentAt: "2026-11-04T00:00:00Z" };
 const REPORT = JSON.stringify({ tests: [{ test: `${GEN}::test_add`, expects: "add sums" }],
   suspected_defects: [{ test: `${GEN}::test_add`, explanation: "add subtracts." }], questions: [] });
 const SOURCE = "from app import add\n\ndef test_add():\n    assert add(2, 3) == 5\n";

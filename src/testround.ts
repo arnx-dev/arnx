@@ -15,10 +15,10 @@ import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type Be
   vacuousBefore } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
 import { type Boundary, maskedCopy, type Swap } from "./boundary";
-import { filesAt, snapshot, takeSnapshot, tooLargeText, type Withheld, withSandboxFiles } from "./change";
+import { filesAt, snapshot, takeSnapshot, type Withheld, withSandboxFiles } from "./change";
 import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
-import { markLeftOut } from "./diagnose";
+import { markUnproven } from "./diagnose";
 import { clip, emit, testMessage } from "./events";
 import { type Classified, classify, describeRun, funcOf, ownerFile, runTests, type TestResult } from "./outcomes";
 import { DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
@@ -41,6 +41,8 @@ export interface Round {
   removed: string[];
   /** Those files, with what they hold and where. */
   leftOut?: Withheld[];
+  /** Files the snapshot holds with a fake for their private key. */
+  fakedKeys?: string[];
   /** True when a run_tests call showed the agent results from its own files (or it wrote no tests). */
   sawResults: boolean;
   /** Changed files with SQL that no generated test ran against the project's database (absent without one). */
@@ -306,7 +308,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   mkdirSync(o.outDir, { recursive: true });
   const tmp = mkdtempSync(join(tmpdir(), "arnx-"));
   let agent: AgentResult, files: Record<string, string>, results: (TestResult[] | null)[], removed: string[];
-  let leftOut: Withheld[] = [];
+  let leftOut: Withheld[] = [], fakedKeys: string[] = [];
   let saw = false, dbLeft: string[] | undefined, before: BeforeCheck | undefined, headKey = "";
   let hunt: RoundHunt | undefined;
   let fixProof: FixCheck | undefined;
@@ -319,12 +321,12 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
       untracked: !!o.untracked });
     removed = taken.withheld.map((w) => w.path);
     leftOut = taken.withheld;
+    ({ fakedKeys } = taken);
     // Before the brain hears anything from this snapshot.
     const filter = o.brain.boundary;
     filter?.addScrubbed(taken);
     // What the tests directory holds from here on is a model's or arnx's.
     const swap = filter && swapIn(filter, snap, (rel) => rel === o.writeDir || rel.startsWith(`${o.writeDir}/`));
-    if (taken.tooLarge.length) say(tooLargeText(taken.tooLarge));
     // Clear earlier generated files only: for some languages the tests directory also holds the project's own tests.
     mkdirSync(join(snap, o.writeDir), { recursive: true });
     for (const rel of collect(snap, o.writeDir, adapter.writable)) rmSync(join(snap, rel), { force: true });
@@ -452,9 +454,9 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         if (o.typecheck && cfg.typecheck) checked = typecheckHere(session, snap, cfg, o.writeDir, say);
         return [a, f, r] as const;
       }, undefined, undefined, swap);
-    // A test failing for a file the snapshot left out says nothing about the project.
-    const tree = removed.length ? filesAt(repo, head, !!o.untracked) : [];
-    results = results.map((run) => run && markLeftOut(run, removed, tree));
+    // A test failing for a file the snapshot left out, or a key it holds a fake of, says nothing about the project.
+    const tree = removed.length || fakedKeys.length ? filesAt(repo, head, !!o.untracked) : [];
+    results = results.map((run) => run && markUnproven(run, { leftOut: removed, fakedKeys, all: tree }));
     const classes = o.before ? classify(results) : null;
     const failing = classes?.findings ?? [];
     // Chosen by test id, so the same tests are checked whatever order the runner reported them in.
@@ -489,7 +491,8 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         message: testMessage(t.message) });
     }
   }
-  const round: Round = { agent, files, classified, removed, ...(leftOut.length ? { leftOut } : {}), sawResults: saw || !hasTests,
+  const round: Round = { agent, files, classified, removed, ...(leftOut.length ? { leftOut } : {}),
+    ...(fakedKeys.length ? { fakedKeys } : {}), sawResults: saw || !hasTests,
     ...(dbLeft ? { dbUntested: dbLeft } : {}), ...(before ? { before } : {}), ...(fixProof ? { fixProof } : {}),
     ...(typecheck ? { typecheck } : {}) };
   // All a round says from here on is saved and read by people and coding agents, none of it through a model's filter.

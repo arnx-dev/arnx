@@ -15,7 +15,7 @@ import { parseReviewConfig, parseReviewFile, reviewConfigPath, stamp } from "../
 import { describeRun } from "../src/outcomes";
 import { DEFAULT_PROMPTS } from "../src/prompts";
 import { runReview } from "../src/reviewer";
-import { holdsPrivateKey, keyPieces, maskPrivateKeys, secretHits, secretPins } from "../src/secrets";
+import { fakeKeys, holdsPrivateKey, maskPrivateKeys, secretHits, secretPins } from "../src/secrets";
 import { defaultSettings, type Settings, writeSettings } from "../src/settings";
 import { noReport, probe } from "../src/setup";
 import { Cli } from "./helpers/cli";
@@ -113,21 +113,20 @@ test("a probe's tail is taken after the mask", () => {
   clean("the probe's tail", tail, pem.split("\n").filter(Boolean).slice(1, -1));
 });
 
-test("an END with no header before it hides from the start of the text: a cut, or a page inside a key", () => {
+test("an END with no header before it hides the base64-only lines before it: a cut, or a page inside a key", () => {
   expect(maskPrivateKeys(`abc\ndef\n${END}\nafter\n`)).toBe(`${SHOWN}\nafter\n`);
-  // A later END, after a whole key, is not that.
-  expect(maskPrivateKeys(`before\n${HDR}\nabc\n${END}\nmiddle\n${END}\nafter`)).toBe(`before\n${SHOWN}\nmiddle\n${END}\nafter`);
+  // A later END, after a whole key, likewise, and text that is not base64 stays.
+  expect(maskPrivateKeys(`before\n${HDR}\nabc\n${END}\nthe middle\n${END}\nafter`)).toBe(`before\n${SHOWN}\nthe middle\n${SHOWN}\nafter`);
   // The cut in a sandbox's output.
   const cut = printed(random, 100).slice(600);
   clean("the cut", maskPrivateKeys(cut), bodyLines(random).slice(10, -1));
 });
 
-test("a header with no END hides at most 16 KB; the limit is plain, with no reading of the shape", () => {
-  const out = maskPrivateKeys(`a\n${HDR}\n${"x".repeat(16_383)}tail`);
-  expect(out).toBe(`a\n${SHOWN}tail`);
-  // No file boundary stops it: a body after a line that reads like the next file goes too.
+test("a header with no END hides its run of tokens and no more; a body after other text is a stated limit", () => {
+  expect(maskPrivateKeys(`a\n${HDR}\n${"x".repeat(16_383)}\nsome other text\n`)).toBe(`a\n${SHOWN}\nsome other text\n`);
+  // A body after a line that reads like the next file, with its END, goes as lines before a stray END.
   const lines = bodyLines(random);
-  clean("past `diff --git`", maskPrivateKeys(`${HDR}\ndiff --git a/x b/x\n${lines.join("\n")}\n`), lines);
+  clean("past `diff --git`", maskPrivateKeys(`${HDR}\ndiff --git a/x b/x\n${lines.join("\n")}\n${END}\n`), lines);
   // A stray END in a body is a stated limit.
   const stray = maskPrivateKeys(`${HDR}\nabc\n${END}\nrest of it\n`);
   expect(stray).toBe(`${SHOWN}\nrest of it\n`);
@@ -198,8 +197,8 @@ const CRED = (version: number) => ["/**", " * A service credential.", " * @examp
   "export interface Cred { clientEmail: string; projectId: string }", `export const version = ${version};`,
   "export const getSignedUrl = (c: Cred) => c.clientEmail;", ""].join("\n");
 
-test("a pinned file with a bare header in a doc comment reads as it is, but for that line, and its names stay names", async () => {
-  expect(keyPieces(CRED(1))).toEqual([]);
+test("a pinned file with a bare header in a doc comment reads as it is, and its names stay names", async () => {
+  expect(fakeKeys(CRED(1)).text).toBe(CRED(1));
   const repo = configured();
   put(repo, "cred.ts", CRED(1));
   put(repo, "other.ts", "import { getSignedUrl } from './cred';\nexport const a = 1;\n");
@@ -212,8 +211,7 @@ test("a pinned file with a bare header in a doc comment reads as it is, but for 
   const c = resolveChange(repo, null, [{ path: "cred.ts", matches: pins }]);
   expect(c.diff).toContain("+export const version = 2;");
   expect(c.diff).toContain("export const getSignedUrl");
-  expect(c.diff).not.toContain(HDR);
-  expect(c.diff.split(SHOWN).length - 1).toBeLessThanOrEqual(2);
+  expect(c.diff).not.toContain(SHOWN);
 
   const agent = new RecordingAgent([[tool("read_file", { path: "cred.ts" }), tool("grep", { pattern: "privateKey|getSignedUrl", path: "." })]], REPORT);
   await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson(), progress: () => {},
@@ -229,10 +227,11 @@ test("a pinned file with a bare header in a doc comment reads as it is, but for 
   for (const name of ["clientEmail", "getSignedUrl", "projectId"]) expect(sent).toContain(name);
 });
 
-test("a pinned header's own lines: the base64 after it goes with it, and pieces come only from those", () => {
+test("a pinned header's own run: the base64 after it gets its fake, and only that", () => {
   const lines = bodyLines(random);
   const text = `# note\n${HDR}\n${lines.join("\n")}\nnext = clientEmail\n`;
-  expect(keyPieces(text).sort()).toEqual([...lines].filter((l) => /[a-z]/.test(l) && /[A-Z]/.test(l)).sort());
+  clean("the fake", fakeKeys(text).text, lines);
+  expect(fakeKeys(text).text).toContain("next = clientEmail\n");
   const repo = gitRepo(tmp());
   put(repo, "fix.txt", text);
   commit(repo, "a fixture");
@@ -257,7 +256,9 @@ test("a key's start after a literal \\n, \\r, \\t, %0A or %0D counts, in the sca
   put(repo, "conf.json", `{"signing_key": "\\n${lines.join("\\n")}"}\n`);
   editApp(repo);
   commit(repo, "a key");
-  expect(resolveChange(repo).withheld?.map((w) => w.path)).toEqual(["conf.json"]);
+  const c = resolveChange(repo);
+  expect(c.withheld).toBeUndefined();
+  clean("the diff", c.diff, lines);
 });
 
 // --- allow-secret's way out ------------------------------------------------------------------------------------------------------
@@ -281,8 +282,9 @@ test("on the default branch: allow-secret frees the last commit, and a range ove
   expect([range.files, range.withheld]).toEqual([["doc.md"], undefined]);
 });
 
-test("the stop's advice works where it is given", async () => {
+test("with stand-ins off, the stop's advice works where it is given", async () => {
   const repo = gitRepo(tmp());
+  writeSettings(repo, { ...defaultSettings(), standIns: false });
   put(repo, "doc.md", `${HDR}\n...\n`);
   commit(repo, "a doc");
   put(repo, "doc.md", "clean\n");

@@ -149,15 +149,42 @@ export function missingLeftOut(texts: string[], leftOut: string[], all: string[]
   });
 }
 
-/** `results` with each failure that names a file of `leftOut` (a test that needs it) marked: it could not run, however the
- * runner reports it (an import inside a test is a plain failure). */
-export function markLeftOut(results: TestResult[], leftOut: string[], all: string[]): TestResult[] {
-  if (!leftOut.length) return results;
+/** The files of `files` a text names, by their whole name on any line. A name that another file of `all` shares counts only
+ * with its folder in front. */
+function namedIn(text: string, files: string[], all: string[]): string[] {
+  const count = new Map<string, number>();
+  for (const p of all) count.set(posix.basename(p), (count.get(posix.basename(p)) ?? 0) + 1);
+  return files.filter((p) => {
+    const name = posix.basename(p), dir = posix.basename(posix.dirname(p));
+    const before = (count.get(name) ?? 0) > 1 && dir !== "." ? String.raw`${escaped(dir)}[/.\\]` : String.raw`(?:^|[\s'"\x60/\\(=:])`;
+    return new RegExp(`${before}${escaped(name)}(?=$|[\\s'"\\x60):,\\]])`, "m").test(text);
+  });
+}
+
+/** What a private key failing to parse says, in the words of the common libraries: a fake is no key. */
+const KEY_PARSE = /could not (?:deserialize|parse|load|decode|read)[^\n]{0,60}key|(?:invalid|malformed|bad|unsupported|unable to (?:load|parse|read|decode)|failed to (?:load|parse|read|decode)|not a valid)[^\n]{0,60}\b(?:key|pem|der|asn\.?1)\b|\bPEM\b|\bASN\.?1\b|\bPKCS ?#?\d|InvalidKey|DECODER routines|ERR_OSSL|OSSL_|MalformedFraming|secretOrPrivateKey|base64|binascii/i;
+
+/** `results` with each failure that says nothing about the project marked. It names a file of `leftOut`: it could not run,
+ * however the runner reports it (an import inside a test is a plain failure). It names a file of `fakedKeys`, or reads as a key
+ * that does not parse while the snapshot holds a fake: it may need the real key. */
+export function markUnproven(results: TestResult[], o: { leftOut: string[]; fakedKeys: string[]; all: string[] }): TestResult[] {
+  if (!o.leftOut.length && !o.fakedKeys.length) return results;
   return results.map((t) => {
     if (!failed(t)) return t;
-    const [needs] = missingLeftOut([t.message], leftOut, all);
-    return needs ? { ...t, outcome: "error", needs, message: `needs ${needs}, left out as secret-looking: ${t.message}` } : t;
+    const needs = missingLeftOut([t.message], o.leftOut, o.all)[0] ?? namedIn(t.message, o.leftOut, o.all)[0];
+    if (needs) return { ...t, outcome: "error", needs, message: `needs ${needs}, left out as secret-looking: ${t.message}` };
+    const key = namedIn(t.message, o.fakedKeys, o.all)[0] ?? (o.fakedKeys.length && KEY_PARSE.test(t.message) ? o.fakedKeys[0] : undefined);
+    return key ? { ...t, outcome: "error", needs: key, fakedKey: true, message: `may need the real key in ${key}, a fake in the sandbox: ${t.message}` } : t;
   });
+}
+
+/** What unproven tests need, for a person: `n` tests, the files left out, the files holding a fake. */
+export function unprovenText(n: number, items: readonly { needs: string; faked?: boolean }[], names: (paths: string[]) => string): string {
+  const of = (faked: boolean) => [...new Set(items.filter((x) => !!x.faked === faked).map((x) => x.needs))];
+  const out = of(false), real = of(true);
+  const they = (one: string, many: string) => n === 1 ? one : many;
+  return [...out.length ? [`could not run: ${they("it needs", "they need")} ${names(out)}, left out as secret-looking`] : [],
+    ...real.length ? [`${out.length ? "or " : ""}unproven: ${they("it may need", "they may need")} the real key in ${names(real)}, a fake in the sandbox`] : []].join(", ");
 }
 
 /** The package npx tried to download because it is not installed where the command ran ("@scope/name" decoded), or

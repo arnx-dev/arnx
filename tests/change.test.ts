@@ -137,13 +137,15 @@ test("test_arnx_dir_is_not_a_change", () => {
   expect(resolveChange(repo).kind).toBe("commit");
 });
 
-test("test_secret_content_in_diff_refused: only a private key's body stops a change, the rest is the filter's", () => {
+test("test_secret_content_in_diff_refused: no key stops a change: a private key gets its fake, the rest is the filter's", () => {
   const repo = gitRepo(tmp());
   writeFileSync(join(repo, "app.py"), `KEY = '${AWS_KEY_2}'\n`);
   const c = resolveChange(repo);
   expect([c.files, c.withheld]).toEqual([["app.py"], undefined]);
   writeFileSync(join(repo, "app.py"), `KEY = """${PRIVATE_KEY_BLOCK}"""\n`);
-  expect(() => resolveChange(repo)).toThrow(/looks like a secret.*app\.py \(a private key\)/);
+  const held = resolveChange(repo);
+  expect([held.files, held.withheld]).toEqual([["app.py"], undefined]);
+  expect(held.diff).not.toContain(PRIVATE_KEY_BLOCK.split("\n")[1]!);
 });
 
 test("a change to an allowed file passes the secret check only with its pinned strings", () => {
@@ -152,12 +154,12 @@ test("a change to an allowed file passes the secret check only with its pinned s
   writeFileSync(join(repo, "detect.py"), held);
   runGit(repo, "add", "detect.py");
   const allow = [{ path: "detect.py", matches: secretPins(held) }];
-  expect(() => resolveChange(repo)).toThrow("detect.py (a private key)");
-  expect(() => resolveChange(repo)).toThrow("arnx allow-secret detect.py");
+  expect(resolveChange(repo).withheld).toBeUndefined();
   expect(resolveChange(repo, null, allow).files).toEqual(["detect.py"]);
   writeFileSync(join(repo, "app.py"), held); // same string, another file
   const c = resolveChange(repo, null, allow);
-  expect([c.files, c.withheld?.map((w) => w.path)]).toEqual([["detect.py"], ["app.py"]]);
+  expect([c.files, c.withheld]).toEqual([["app.py", "detect.py"], undefined]);
+  expect(c.diff).not.toContain(PRIVATE_KEY_BLOCK.split("\n")[1]!);
 });
 
 test("test_empty_repo", () => {
@@ -186,9 +188,9 @@ test("test_snapshot_worktree_scrubs", () => {
   expect(readFileSync(join(dest, "app.py"), "utf8")).toBe("changed = True\n");
   expect(existsSync(join(dest, ".env")) || existsSync(join(dest, ".git")) || existsSync(join(dest, "link")))
     .toBe(false);
-  expect(removedFiles).toEqual([{ path: "conf.py", line: 1, label: "a private key" }]);
-  // With stand-ins (the default) too: a private key header leaves its file out, body or not.
-  expect(snapshot(repo, null, join(tmp(), "kept"), [], { untracked: true })).toEqual(removedFiles);
+  expect(removedFiles).toEqual([{ path: ".env", line: 0, label: "named like a secret" }, { path: "conf.py", line: 1, label: "a private key" }]);
+  // With stand-ins (the default) a private key stays, with a fake.
+  expect(snapshot(repo, null, join(tmp(), "kept"), [], { untracked: true })).toEqual([removedFiles[0]!]);
 });
 
 const FIXTURE = `AWS = '${AWS_KEY}'\n`;

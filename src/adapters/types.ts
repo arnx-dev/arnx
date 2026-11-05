@@ -5,8 +5,10 @@ export type AdapterId = "python" | "typescript" | "rust" | "csharp";
 
 /** One test in one run, from the runner's report. */
 export interface TestResult {
-  /** The file left out of the snapshot this failure needs: it could not run, which says nothing about the project. */
+  /** The file left out of the snapshot this failure needs, or the file whose private key it may need (`fakedKey`, a fake in
+   * the snapshot): it is unproven, which says nothing about the project. */
   needs?: string;
+  fakedKey?: true;
   testId: string;
   fileAttr: string;
   name: string;

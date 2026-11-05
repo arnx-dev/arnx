@@ -6,7 +6,8 @@ import { STAND_INS_NOTE } from "./boundary";
 import { join } from "node:path";
 import type { AdapterId } from "./adapters/types";
 import { type Before, type FixStatus, isPreExisting } from "./before";
-import { type Blanked, describeBlanked, someNames, type Withheld } from "./change";
+import { type Blanked, describeBlanked, someNames, type Withheld, withheldWhat } from "./change";
+import { unprovenText } from "./diagnose";
 import { ArnxError } from "./errors";
 import { type ModelUse, parseJsonObject } from "./llm";
 import { type ProviderFailure, resumes } from "./outage";
@@ -151,8 +152,11 @@ export interface Review {
   blankedLines?: Blanked[];
   /** Changed files left out as secret-looking: what they hold and where, never the text. */
   leftOutFiles?: Withheld[];
-  /** Tests that failed for a file left out: they could not run, which leaves the review incomplete. */
-  couldNotRun?: { test: string; needs: string }[];
+  /** Tests that failed for a file left out, or (`faked`) for a private key the sandbox holds a fake of: unproven, which leaves
+   * the review incomplete. */
+  couldNotRun?: { test: string; needs: string; faked?: boolean }[];
+  /** Files whose private key the sandbox holds as a fake. */
+  fakedKeys?: string[];
   /** Untracked files the review sent because the owner opted in (--untracked); absent when none. */
   untrackedIncluded?: string[];
   /** How many untracked files the review left out (not sent, not in the sandbox); absent when none. */
@@ -343,9 +347,7 @@ function statusOf(r: Review): { problems: string[]; notes: string[] } {
     }
   }
   if (r.couldNotRun?.length) {
-    const needs = [...new Set(r.couldNotRun.map((x) => x.needs))];
-    problems.push(`${plural(r.couldNotRun.length, "test")} could not run: ${r.couldNotRun.length === 1 ? "it needs" : "they need"} ` +
-      `${someNames(needs, 5)}, left out as secret-looking`);
+    problems.push(`${plural(r.couldNotRun.length, "test")} ${unprovenText(r.couldNotRun.length, r.couldNotRun, (p) => someNames(p, 5))}`);
   }
   const untried = neverTested(r);
   if (!problems.length && untried.length && r.stop === "end_turn" && !r.missingRuns) {
@@ -687,14 +689,21 @@ export function render(r: Review): string {
   if (r.blankedLines?.length) {
     out.push(`- Comment lines blanked as secret-looking (not sent): ${describeBlanked(r.blankedLines)}`);
   }
-  for (const x of r.couldNotRun ?? []) out.push(`- Could not run: \`${x.test}\` needs \`${x.needs}\`, left out.`);
+  for (const x of r.couldNotRun ?? []) {
+    out.push(x.faked ? `- Unproven: \`${x.test}\` may need the real key in \`${x.needs}\`, a fake in the sandbox.`
+      : `- Could not run: \`${x.test}\` needs \`${x.needs}\`, left out.`);
+  }
+  if (r.fakedKeys?.length) {
+    out.push(`- Private keys faked in the sandbox: ${ticks(r.fakedKeys)}. A test that parses one needs \`arnx allow-secret PATH\`, then \`arnx review\` again`);
+  }
   if (r.notSent.length) {
     const named = r.notSent.map((p) => {
       const w = r.leftOutFiles?.find((x) => x.path === p);
-      return `\`${p}\`${w ? ` (${w.label}, line ${w.line})` : ""}`;
+      return `\`${p}\`${w ? ` (${withheldWhat(w)})` : ""}`;
     }).join(", ");
     out.push(`- Files left out because they looked like secrets: ${named}. If one is a test fixture, not a ` +
-      "secret: `arnx allow-secret PATH`, then `arnx review` again");
+      "secret: `arnx allow-secret PATH`, then `arnx review` again. A test can fail for one of these with no name in its message, " +
+      "and then reads as any other failure");
   }
   const stats = r.projectStats ?? [];
   if (stats.length && (multi(r) || stats.some(troubled))) {
@@ -959,8 +968,11 @@ export function summary(r: Review, reviewMd: string): string {
   if (r.notSent.length) {
     out.push(`  Left out as secret-looking: ${someNames(r.notSent.map((p) => {
       const w = r.leftOutFiles?.find((x) => x.path === p);
-      return w ? `${p} (${w.label}, line ${w.line})` : p;
+      return w ? `${p} (${withheldWhat(w)})` : p;
     }), 10)}; if one is a test fixture, allow it with \`arnx allow-secret PATH\``);
+  }
+  if (r.fakedKeys?.length) {
+    out.push(`  Private keys faked in the sandbox: ${someNames(r.fakedKeys, 10)}; a test that parses one needs \`arnx allow-secret PATH\``);
   }
   for (const u of (r.untested ?? []).filter((x) => x.files.length)) {
     const shown = u.files.slice(0, 8).join(", ") + (u.files.length > 8 ? `, … (${u.files.length - 8} more)` : "");

@@ -101,11 +101,12 @@ test("a snapshot keeps a file with stand-ins and says so; the real key reaches n
   const snap = join(tmp(), "snap");
   const r = takeSnapshot(repo, null, snap, [], { sandbox: ["rates.csv"] });
   expect(r.standIns).toEqual(["rates.csv", "tests/test_mask.py"]);
-  expect(r.withheld.map((w) => w.path)).toEqual(["key.py"]);
+  expect(r.withheld).toEqual([]);
+  expect(r.fakedKeys).toEqual(["key.py"]);
   expect(r.sandboxed).toEqual(["rates.csv"]);
   expect(existsSync(join(snap, "rates.csv"))).toBe(false);
   for (const text of [allText(snap), allText(sandboxDir(snap))]) {
-    for (const real of [SLACK_TOKEN, AWS_KEY, PRIVATE_KEY]) expect(text).not.toContain(real);
+    for (const real of [SLACK_TOKEN, AWS_KEY, PRIVATE_KEY_BLOCK.split("\n")[1]!]) expect(text).not.toContain(real);
   }
   expect(readFileSync(join(sandboxDir(snap), "rates.csv"), "utf8")).toMatch(/^fee,AKIA[0-9A-Z]{16}\n$/);
   // The same snapshot of a commit.
@@ -177,9 +178,10 @@ test("setup's copy of a needed file is scrubbed like the snapshot: secret files 
   const snap = join(tmp(), "snap");
   mkdirSync(snap);
   const r = addToSandbox(repo, snap, ["rates.csv", "big.csv", ".env", "missing.csv"]);
-  expect([r.sandboxed, r.standIns, r.withheld.map((w) => w.path)]).toEqual([["rates.csv"], ["rates.csv"],
-    ["big.csv"]]);
+  expect([r.sandboxed, r.standIns, r.fakedKeys, r.withheld.map((w) => w.path)]).toEqual([["big.csv", "rates.csv"], ["rates.csv"],
+    ["big.csv"], [".env"]]);
   expect(allText(sandboxDir(snap))).not.toContain(AWS_KEY);
+  expect(allText(sandboxDir(snap))).not.toContain(PRIVATE_KEY_BLOCK.split("\n")[1]!);
   expect(existsSync(join(sandboxDir(snap), ".env"))).toBe(false);
 });
 

@@ -15,7 +15,7 @@ import { recheckJson, recheckReview, recheckSummary } from "../src/recheck";
 import { CloudClient } from "../src/cloud";
 import { clipOutput as cutForBrain, CloudBrain } from "../src/cloudbrain";
 import { loadReviewFile, parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
-import { BIG_KEYS_MOST, changeLimits, takeSnapshot, tooLargeText } from "../src/change";
+import { BIG_KEYS_MOST, changeLimits, takeSnapshot } from "../src/change";
 import { ModelError } from "../src/errors";
 import { EventLog } from "../src/events";
 import { classify, describeHints, errorLine, firstLine } from "../src/diagnose";
@@ -1574,8 +1574,7 @@ test("a big file's values are found: the key-shaped one gets its stand-in, a gue
   const repo = bigRepo("big.json", bigJson());
   const snap = join(tmp(), "snap");
   const r = takeSnapshot(repo, null, snap, [], { standIns: true });
-  expect(r.withheld).toEqual([]);
-  expect(r.tooLarge).toEqual([]);
+  expect(r.withheld).toEqual([{ path: ".env", line: 0, label: "named like a secret" }]);
   expect([...r.suspects]).toEqual(expect.arrayContaining([AWS, UNCHANGED]));
   const kept = readFileSync(join(snap, "big.json"), "utf8");
   expect(kept).not.toContain(AWS);
@@ -1609,20 +1608,22 @@ for (const standIns of [true, false]) {
     });
 }
 
-test("a private key with its body in a big text file leaves the file out", () => {
+test("a private key with its body in a big text file stays, with a fake", () => {
   const header = `-----BEGIN ${"PRIVATE"} KEY-----`;
   const body = "MIIEvQIBADANBgkq" + "hkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj";
   const repo = bigRepo("dump.txt", `${header}\n${body}\n-----END ${"PRIVATE"} KEY-----\n${padding(1_100_000)}`);
-  const r = takeSnapshot(repo, null, join(tmp(), "snap"), [], { standIns: true });
-  expect(r.withheld.map((w) => w.path)).toEqual(["dump.txt"]);
-  expect(existsSync(join(tmp(), "snap", "dump.txt"))).toBe(false);
+  const snap = join(tmp(), "snap");
+  const r = takeSnapshot(repo, null, snap, [], { standIns: true });
+  expect(r.withheld).toEqual([{ path: ".env", line: 0, label: "named like a secret" }]);
+  expect(r.fakedKeys).toEqual(["dump.txt"]);
+  expect(readFileSync(join(snap, "dump.txt"), "utf8")).not.toContain(body);
 });
 
 test("a big file full of keys is left out: each stand-in takes a slow hash", () => {
   const keys = Array.from({ length: BIG_KEYS_MOST + 1 }, (_, i) => `"sk-${"a".repeat(32)}${String(i).padStart(8, "0")}"`).join("\n");
   const repo = bigRepo("keys.json", `${keys}\n${padding(1_100_000)}`);
   const r = takeSnapshot(repo, null, join(tmp(), "snap"), [], { standIns: true });
-  expect(r.withheld).toEqual([{ path: "keys.json", line: 1, label: `over ${BIG_KEYS_MOST} key-shaped strings` }]);
+  expect(r.withheld).toEqual([{ path: ".env", line: 0, label: "named like a secret" }, { path: "keys.json", line: 1, label: `over ${BIG_KEYS_MOST} key-shaped strings` }]);
   expect(existsSync(join(tmp(), "snap", "keys.json"))).toBe(false);
   // Its values still count wherever else they stand.
   expect(r.suspects.size).toBeGreaterThan(BIG_KEYS_MOST);
@@ -1632,7 +1633,7 @@ test("a big file full of keys is left out: each stand-in takes a slow hash", () 
 test("a big binary file stays and is not scanned: no model can read it, and its bytes are not text", () => {
   const repo = bigRepo("data.bin", `\0binary\n"api_token": "${AWS}"\n${padding(1_100_000)}`);
   const r = takeSnapshot(repo, null, join(tmp(), "snap"), [], { standIns: true });
-  expect([r.withheld, r.tooLarge]).toEqual([[], []]);
+  expect(r.withheld).toEqual([{ path: ".env", line: 0, label: "named like a secret" }]);
   expect(existsSync(join(tmp(), "snap", "data.bin"))).toBe(true);
   expect(r.suspects.has(AWS)).toBe(false);
 });
@@ -1649,20 +1650,18 @@ test("a text file past the higher cap is left out with a clear line; a binary on
     commit(repo, "more big files");
     const snap = join(tmp(), "snap");
     const r = takeSnapshot(repo, null, snap, [], { standIns: true, sandbox: ["aside/seed.json"] });
-    expect(r.tooLarge).toEqual(["huge.json"]);
+    expect(r.withheld).toEqual([{ path: ".env", line: 0, label: "named like a secret" }, { path: "huge.json", line: 0, label: "too large to scan" }]);
     expect(existsSync(join(snap, "huge.json"))).toBe(false);
     expect(existsSync(join(snap, "huge.bin"))).toBe(true);
     expect(r.sandboxed).toEqual(["aside/seed.json"]);
     expect(existsSync(join(`${snap}.sandbox`, "aside/seed.json"))).toBe(true);
-    expect(tooLargeText(r.tooLarge)).toBe("too large to scan (over 1 MB), so not in the sandbox or the files a model can open: huge.json; if tests need one, list it in " +
-      ".arnxignore and sandbox_only");
 
     writeFileSync(join(repo, "settings.py"), `api_token = "${REMOVED}"\n`);
-    const said: string[] = [];
     const agent = new RecordingAgent([[tool("read_file", { path: "huge.json" })]]);
-    await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson("openai:x", VERDICT),
-      sessionFactory: fakeFactory(leakyRun), progress: (m) => said.push(m) });
-    expect(said.join("\n")).toContain("too large to scan");
+    const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson("openai:x", VERDICT),
+      sessionFactory: fakeFactory(leakyRun), progress: () => {} });
+    expect(review.leftOutFiles).toEqual([{ path: ".env", line: 0, label: "named like a secret" }, { path: "huge.json", line: 0, label: "too large to scan" }]);
+    expect(agent.bodies[0]).toContain("`huge.json` (too large to scan)");
     expect(agent.bodies.join("\n")).not.toContain(AWS);
   } finally {
     changeLimits.maxScanBytes = saved;

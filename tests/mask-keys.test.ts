@@ -66,9 +66,10 @@ for (const [name, shape] of SHAPES) {
   }
 }
 
-test("from a header to its END; with no END, to the end of the text", () => {
+test("from a header to its END; with no END, its line and the run of tokens after it", () => {
   expect(mask(`a\n${HDR}\nabc\n${END}\nb\n`)).toBe(`a\n${SHOWN}\nb\n`);
-  expect(mask(`a\n${HDR}\nabc\nb\n`)).toBe(`a\n${SHOWN}`);
+  expect(mask(`a\n${HDR}\nabc\nb\n`)).toBe(`a\n${SHOWN}\nabc\nb\n`);
+  expect(mask(`a\n${HDR}\nabcdefgh\nijklmnop\nb\n`)).toBe(`a\n${SHOWN}\nb\n`);
   // A placeholder too: the filter does not read what is under a header.
   expect(mask(`${HDR}\n...\n${END}`)).toBe(SHOWN);
   const twice = `${HDR}\none\n${END}\nmiddle\n${HDR}\ntwo\n${END}\nend`;
@@ -86,12 +87,11 @@ test("each armour: PGP's block, SSH2's four dashes, a digit or a hyphen in the l
   clean("URL-encoded", mask(`x=${url}&y=1`), [encodeURIComponent(random.slice(0, 64))]);
 });
 
-test("a header with no END in a diff hides at most 16 KB, whatever file comes next", () => {
+test("a header with no END in a diff hides its own run, and the file after it stays", () => {
   const next = "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n";
-  const near = `diff --git a/k.txt b/k.txt\n--- a/k.txt\n+++ b/k.txt\n@@ -0,0 +1,2 @@\n+${HDR}\n+abc\n${next}`;
-  expect(mask(near)).not.toContain("+abc");
-  const far = `diff --git a/k.txt b/k.txt\n--- a/k.txt\n+++ b/k.txt\n@@ -0,0 +1,2 @@\n+${HDR}\n+abc\n+${"y".repeat(16_400)}\n${next}`;
-  expect(mask(far)).toContain("+a = 2\n");
+  const near = `diff --git a/k.txt b/k.txt\n--- a/k.txt\n+++ b/k.txt\n@@ -0,0 +1,2 @@\n+${HDR}\n+abcdefgh12345678\n${next}`;
+  expect(mask(near)).not.toContain("abcdefgh12345678");
+  expect(mask(near)).toContain(next);
 });
 
 test("a run of 64 or more that starts as a key goes, whole or wrapped, in a diff's marks too", () => {

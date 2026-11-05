@@ -16,8 +16,9 @@ import { dirname, join, posix, resolve, sep } from "node:path";
 import { configSuspects, loadReviewFile, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
-import { excludePathspecs, filePin, holdsPrivateKey, isCertainRule, isCodePath, isSecretPath, KEY_SHOWN, keyLines, keyPieces,
-  type KeyScan, MAY_HOLD_KEY, mayShowPrivateKey, privateKeyIn, scanKeys, type SecretPin, standInsFor, suspects, usedAsName, WORD_RULE } from "./secrets";
+import { BIG_KEYS_MOST, excludePathspecs, fakeKeys, filePin, holdsPrivateKey, isCertainRule, isCodePath, isKeyFileName, isSecretPath,
+  type KeyScan, keyTokens, MAY_HOLD_KEY, mayShowPrivateKey, privateKeyIn, scanKeys, type SecretPin, standInsFor, suspects, usedAsName,
+  WORD_RULE } from "./secrets";
 import { buildContextDir, manifestRule, REPORT_DIR, type Runner } from "./sandbox";
 import { standInsSetting } from "./settings";
 import { DIFF_SECTION, splitLines } from "./util";
@@ -30,7 +31,7 @@ export const SCAN_LIMIT = 1_000_000;
  * size, on every snapshot of a review. */
 export const BIG_SCAN_LIMIT = 32_000_000;
 /** The most key-shaped strings a file over SCAN_LIMIT may hold and stay: about 5 s of stand-ins on each snapshot. */
-export const BIG_KEYS_MOST = 2000;
+export { BIG_KEYS_MOST };
 /** Mutable so tests can lower it. */
 export const changeLimits = { maxSnapshotFiles: 20_000, maxScanBytes: BIG_SCAN_LIMIT };
 const MAX_BUFFER = 1 << 30;
@@ -161,15 +162,36 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
     throw new ArnxError("the repository has no commits yet, so --range has nothing to name; commit first");
   }
   const ex = excludePathspecs();
+  const ours = [":(exclude).arnx", ":(exclude).arnxignore"];
   const ignored = loadIgnore(repo);
   const ignoredOut = new Set<string>(), lockOut = new Set<string>();
+  const standIns = standInsSetting(repo);
+  /** Whether a snapshot keeps this side of a file named like a secret (scrub). */
+  const namedSideStays = (path: string, side: FileSide) => !!side && !("label" in side) && (
+    (allow.find((a) => a.path === path)?.matches ?? []).includes(filePin(side.text)) ||
+    (standIns && isKeyFileName(path) && !side.binary && holdsPrivateKey(side.text, [])));
+  /** The section of a changed file named like a secret, when a snapshot keeps it on each side it has. */
+  const namedSection = (path: string, revs: string[]): string | null => {
+    const section = git(repo, ["diff", ...DIFF_FORM, ...revs, "--", `:(literal)${path}`]);
+    const { old, now } = sectionPaths(section);
+    if (old === null && now === null) return null;
+    const stays = (old === null || namedSideStays(old, blobSide(repo, revs[0]!, old))) &&
+      (now === null || namedSideStays(now, revs[1] ? blobSide(repo, revs[1], now) : fileSide(repo, now)));
+    return stays ? section : null;
+  };
   const trackedDiff = (...revs: string[]): [string, string[]] => {
     const changed = names(git(repo, ["diff", "-z", "--name-only", ...revs, "--", ".", ...ex]));
     changed.filter(ignored).forEach((p) => ignoredOut.add(p));
     changed.filter((p) => !ignored(p) && isLockfile(p)).forEach((p) => lockOut.add(p));
     const out = (p: string) => ignored(p) || isLockfile(p);
     const skip = changed.filter(out).map((p) => `:(exclude,literal)${p}`);
-    return [git(repo, ["diff", ...DIFF_FORM, ...revs, "--", ".", ...ex, ...skip]), changed.filter((p) => !out(p))];
+    const named = names(git(repo, ["diff", "-z", "--name-only", ...revs, "--", ".", ...ours]))
+      .filter((p) => isSecretPath(p) && !out(p)).flatMap((p) => {
+        const section = namedSection(p, revs);
+        return section ? [[p, section] as const] : [];
+      });
+    return [git(repo, ["diff", ...DIFF_FORM, ...revs, "--", ".", ...ex, ...skip]) + named.map(([, section]) => section).join(""),
+      [...changed.filter((p) => !out(p)), ...named.map(([p]) => p)]];
   };
   let kind: Change["kind"], base: string, head: string | null, diff: string, files: string[];
   let branch: Change["branch"];
@@ -179,10 +201,12 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
   // A status line's path (the new one of a rename); files .arnxignore leaves out do not make the tree dirty either.
   const pathOf = (l: string) => (l.slice(3).split(" -> ").at(-1) ?? "").replace(/^"|"$/g, "");
   // Untracked files make the tree dirty only when they are sent.
-  const dirty = () => git(repo, ["status", "--porcelain", "--untracked-files=all", "--", ".", ...ex]).split("\n")
+  const dirty = () => git(repo, ["status", "--porcelain", "--untracked-files=all", "--", ".", ...ours]).split("\n")
     .some((l) => l.trim() && !ignored(pathOf(l)) && !(l.startsWith("?? ") && (!withUntracked ||
-      ACCEPTED_TEST.test(pathOf(l)))));
-  const others = () => names(git(repo, ["ls-files", "-z", "--others", "--exclude-standard", "--", ".", ...ex]));
+      ACCEPTED_TEST.test(pathOf(l)))) && (!isSecretPath(pathOf(l)) ||
+      (l.startsWith("?? ") ? namedSideStays(pathOf(l), fileSide(repo, pathOf(l))) : namedSection(pathOf(l), ["HEAD"]) !== null)));
+  const others = () => names(git(repo, ["ls-files", "-z", "--others", "--exclude-standard", "--", ".", ...ours]))
+    .filter((p) => !isSecretPath(p) || (withUntracked && namedSideStays(p, fileSide(repo, p))));
   const included: string[] = [], notSent: string[] = [];
   const untracked = () => {
     for (const path of others()) {
@@ -265,7 +289,6 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
           : "Narrow it with --range"), root);
     }
   };
-  const standIns = standInsSetting(repo);
   // What is left out does not count, but reading every file of a huge change only to refuse it would take minutes.
   if (standIns && !mayShowPrivateKey(diff)) notTooLarge(diff);
   const atRev = blobSides(repo, diff);
@@ -308,9 +331,9 @@ function secretStop(files: readonly { path: string; label: string }[], beforeOnl
     `${command}, then \`arnx review\` again`;
 }
 
-/** Why a snapshot leaves out `rel` holding `scan`'s key-shaped strings; null when it stays. `fakes`: it may get stand-ins.
- * Text with a NUL is scanned without them (UTF-16), and any key leaves it out: it is never edited. sealDiff and scrub both
- * decide here, so a diff and a snapshot agree. */
+/** Why a snapshot leaves out `rel` holding `scan`'s key-shaped strings; null when it stays. `fakes`: it may get stand-ins, and a
+ * private key its fake. Text with a NUL is scanned without them (UTF-16), and any key leaves it out: it is never edited.
+ * sealDiff and scrub both decide here, so a diff and a snapshot agree. */
 function leftOutReason(rel: string, read: { text: string; binary: boolean }, scan: KeyScan | null, pins: readonly string[],
                        fakes: boolean): { line: number; label: string } | null {
   const nul = read.binary || read.text.includes("\0");
@@ -319,8 +342,11 @@ function leftOutReason(rel: string, read: { text: string; binary: boolean }, sca
   const held = nul ? scanKeys(rel, plain, pins.includes(filePin(read.text)) ? [...pins, filePin(plain)] : pins) : scan;
   if (!held) return null;
   if (nul) return "withhold" in held ? held.withhold : { line: held.blank[0]!, label: "key-shaped text" };
-  // A file that gets no stand-ins (a lockfile, or stand-ins off) is left out, as is a private key.
-  return "withhold" in held && (!fakes || holdsPrivateKey(read.text, pins)) ? held.withhold : null;
+  if ("blank" in held) return null;
+  // A file that gets no stand-ins (a lockfile, or stand-ins off) is left out.
+  if (!fakes) return held.withhold;
+  return holdsPrivateKey(read.text, pins) && keyTokens(read.text).size > BIG_KEYS_MOST
+    ? { line: 1, label: `over ${BIG_KEYS_MOST} key tokens` } : null;
 }
 
 /** One side of a changed file, for sealDiff: its content; why it counts as holding a key (a file no scan reads whole, or one
@@ -465,14 +491,13 @@ function sectionPaths(section: string): { old: string | null; now: string | null
     ? { old: added ? null : path, now: gone ? null : path } : { old: null, now: null };
 }
 
-/** `diff` as it may leave arnx. A section goes whole when a snapshot of either side would leave its file out (a private key
- * wherever it stands in the file; without `standIns`, any key-shaped text in code), or when a side cannot be read: `withheld`.
- * In a pinned file, the lines of a private key read `[private key]`, with no header in the hunk to go by. Lines each
- * side blanks (scanKeys, key-shaped text in comments of source files) are blanked, and their section loses its hunk
- * headers' function context, which git may take from a key's body: `files`, numbered in the side each diff line comes
- * from. Everything else may be a secret too, and is the outbound filter's (boundary.ts). `before` and `after` read each
- * side of a file by path. `beforeOnly`: files left out for what only their removed side holds. Last guard: private-key text
- * left in what a section shows, or a section with no path, refuses the change. */
+/** `diff` as it may leave arnx. A section goes whole when a snapshot of either side would leave its file out (rule of
+ * leftOutReason), or when a side cannot be read: `withheld`. A private key's tokens read as its fake, the same one a snapshot
+ * holds, pinned or not, by line, so a hunk with no header is safe too; the filter hides the rest on the way out. Lines each
+ * side blanks (scanKeys, key-shaped text in comments of source files) are blanked. A section with either loses its hunk
+ * headers' function context, which git may take from a key's body. `files`: the lines blanked, numbered in the side each diff
+ * line comes from. Everything else may be a secret too, and is the outbound filter's (boundary.ts). `before` and `after` read
+ * each side of a file by path. `beforeOnly`: files left out for what only their removed side holds. */
 export function sealDiff(diff: string, allow: readonly SecretPin[], before: (path: string) => FileSide,
                          after: (path: string) => FileSide, standIns: boolean)
   : { diff: string; files: Blanked[]; withheld: Withheld[]; beforeOnly: Set<string> } {
@@ -482,7 +507,7 @@ export function sealDiff(diff: string, allow: readonly SecretPin[], before: (pat
   const kept = diff.split(DIFF_SECTION).flatMap((section) => {
     const { old: oldPath, now: newPath, link } = sectionPaths(section);
     const path = newPath ?? oldPath ?? "";
-    /** Why this side leaves the file out; otherwise its lines to replace by number, and which of them are a pinned key's. */
+    /** Why this side leaves the file out; otherwise its lines to replace by number, and which of them are a key's. */
     const side = (p: string | null, read: (p: string) => FileSide)
       : { out?: { line: number; label: string }; blank: Map<number, string>; keys: Set<number> } => {
       const blank = new Map<number, string>(), keys = new Set<number>();
@@ -498,9 +523,15 @@ export function sealDiff(diff: string, allow: readonly SecretPin[], before: (pat
         const lines = scan.text.split("\n");
         for (const n of scan.blank) blank.set(n, lines[n - 1]!);
       }
-      for (const n of keyLines(got.text.replaceAll("\0", ""))) {
-        blank.set(n, KEY_SHOWN);
-        keys.add(n);
+      const plain = got.text.replaceAll("\0", "");
+      const faked = fakeKeys(plain);
+      if (faked.count) {
+        const real = plain.split("\n");
+        faked.text.split("\n").forEach((line, i) => {
+          if (line === real[i]) return;
+          blank.set(i + 1, line);
+          keys.add(i + 1);
+        });
       }
       return { blank, keys };
     };
@@ -537,24 +568,10 @@ export function sealDiff(diff: string, allow: readonly SecretPin[], before: (pat
       }).join("\n");
       if (blanked.size) files.push({ path, lines: [...blanked].sort((x, y) => x - y) });
     }
-    if (holdsPrivateKey(shownText(done), [])) throw new ArnxError(secretStop([{ path: path || "the change", label: "a private key" }]));
     return [done];
   });
   return { diff: kept.join(""), files, withheld: withheld.sort((x, y) => x.path < y.path ? -1 : x.path > y.path ? 1 : 0),
     beforeOnly };
-}
-
-/** Git's own lines in a diff section: paths and names, not the file's text. */
-const GIT_LINE = /^(?:diff --git |index |old mode |new mode |new file mode |deleted file mode |similarity index |dissimilarity index |rename |copy |--- |\+\+\+ |Binary files |GIT binary patch)/;
-
-/** What a diff section shows of its file: its hunks' lines without their marks, and each hunk's function context, which is a
- * line of the file. A section with no hunk (a binary or mode-only one) shows whatever is not git's own. */
-function shownText(section: string): string {
-  const lines = section.split("\n");
-  const first = lines.findIndex((l) => l.startsWith("@@ "));
-  if (first < 0) return lines.filter((l) => !GIT_LINE.test(l)).join("\n");
-  return lines.slice(first).filter((l) => !l.startsWith("\\"))
-    .map((l) => l.startsWith("@@ ") ? l.replace(/^@@ [^@]* @@ ?/, "") : l.slice(1)).join("\n");
 }
 
 /** The three files taking most of a diff, with their sizes ("package-lock.json 173 KB, README.md 25 KB, …"). */
@@ -622,8 +639,32 @@ export interface Withheld { path: string; line: number; label: string }
  * comment (scanKeys). */
 export interface Blanked { path: string; lines: number[] }
 
-/** Files left out, for a person: path, what they hold and where. Never the text. */
-export const describeWithheld = (w: readonly Withheld[]) => w.map((x) => `${x.path} (${x.label}, line ${x.line})`).join(", ");
+/** What a file left out holds and where, for a person. Never the text. Line 0: the whole file counts (its name, its size). */
+export const withheldWhat = (w: Withheld) => w.line ? `${w.label}, line ${w.line}` : w.label;
+/** Files left out, for a person. */
+export const describeWithheld = (w: readonly Withheld[]) => w.map((x) => `${x.path} (${withheldWhat(x)})`).join(", ");
+/** What setup says of files holding a key's fake. */
+export const fakedKeysText = (paths: readonly string[]) =>
+  `private keys faked in the sandbox: ${someNames(paths, 5)}; a test that parses one needs \`arnx allow-secret PATH\``;
+/** The label of a file left out for its name, holding no private key. */
+export const NAMED_OUT = "named like a secret";
+/** The label of a file no scan reads whole. */
+export const TOO_LARGE = "too large to scan";
+
+/** The pin of a file as it stands, read a piece at a time: for valid text it is `filePin` of that text. */
+export function pinOfFile(p: string): string | null {
+  const hash = createHash("sha256"), piece = Buffer.alloc(1 << 20);
+  let fd: number | null = null;
+  try {
+    fd = openSync(p, "r");
+    for (let n = readSync(fd, piece, 0, piece.length, null); n > 0; n = readSync(fd, piece, 0, piece.length, null)) hash.update(piece.subarray(0, n));
+    return hash.digest("hex").slice(0, 16);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
 
 /** Blanked files for a person: path and the lines blanked, runs as ranges ("src/a.ts (lines 3-5, 9)"). */
 export function describeBlanked(b: Blanked[]): string {
@@ -650,6 +691,8 @@ export interface SnapshotOptions { untracked?: boolean; standIns?: boolean; sand
 /** What a snapshot left out or changed: files left out for their content, files kept with comment lines blanked,
  * files kept with stand-ins (for the certain values), and the sandbox-only files it holds beside it. */
 export interface Scrubbed { withheld: Withheld[]; blanked: Blanked[]; standIns: string[]; sandboxed: string[];
+  /** Files kept with a fake for their private key's tokens (secrets.ts fakeKeys). */
+  fakedKeys: string[];
   /** The values given stand-ins where tests run, the certain ones (secrets.ts isCertainRule): kept in memory for a later
    * copy into the sandbox (addToSandbox), never logged. */
   secrets: ReadonlySet<string>;
@@ -659,15 +702,7 @@ export interface Scrubbed { withheld: Withheld[]; blanked: Blanked[]; standIns: 
   /** Every value that looks like a secret, in memory only: all of `secrets` and `guesses`, and those of files that get no
    * stand-ins, of secret files and of files left out, none of them changed. What leaves arnx is masked for each
    * (boundary.ts). */
-  suspects: ReadonlySet<string>;
-  /** Text files left out because no scan reads them (over changeLimits.maxScanBytes). */
-  tooLarge: string[] }
-
-/** What a run says about `paths`, files left out of its snapshot for their size. */
-export const tooLargeText = (paths: readonly string[]) =>
-  `too large to scan (over ${Math.round(changeLimits.maxScanBytes / 1_000_000)} MB), so not in the sandbox or the files a ` +
-  `model can open: ${someNames(paths, 5)}; ` +
-  "if tests need one, list it in .arnxignore and sandbox_only";
+  suspects: ReadonlySet<string> }
 
 /** Where a snapshot's sandbox-only files are kept: beside it, so nothing that reads the snapshot sees them. */
 export const sandboxDir = (snap: string) => `${snap}.sandbox`;
@@ -970,10 +1005,10 @@ function linkTree(from: string, to: string, skip: ReadonlySet<string>, rel = "")
  * it appears, so no file keeps it and the files agree. The guesses stay real here, since a wrong one must not change code
  * that runs, and a model reads them only through the filter (boundary.ts). A build has network, so with `build` the image
  * gets its own tree beside this one (buildContextOf), with a stand-in for each guess too, in every file but a project's
- * manifest and a lockfile: a stand-in there can break an install. A file is left out only when
- * no stand-in keeps a key out (a private key), or, without `standIns`, when it holds key-shaped text in
- * code. Returns those files, the files blanked, given stand-ins and moved beside the tree, and the values (in memory only:
- * never logged or sent). */
+ * manifest and a lockfile: a stand-in there can break an install. Each token of a private key gets its fake (secrets.ts
+ * fakeKeys), unless the file is pinned, in both trees. A file is left out for its name unless `namedStays`, for its size, when
+ * binary and holding a key, or, without `standIns`, when it holds key-shaped text in code. Returns those files, the files
+ * blanked, given stand-ins or a key's fake and moved beside the tree, and the values (in memory only: never logged or sent). */
 function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly SecretPin[],
                o: { standIns: boolean; sandbox: ReadonlySet<string>; known?: ReadonlySet<string>;
                  /** All of `root` goes beside a snapshot, where no model reads. */
@@ -988,6 +1023,7 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   const removedFiles: Withheld[] = [];
   const blanked: Blanked[] = [];
   const standIns: string[] = [];
+  const fakedKeys: string[] = [];
   const sandboxed = new Set<string>();
   const beside = sandboxDir(root);
   const inside = (p: string) => p === realRoot || p.startsWith(realRoot + sep);
@@ -995,6 +1031,15 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   /** Regular files kept: where they are now, and their path in the repository. */
   const kept: { p: string; rel: string }[] = [];
   const pinsOf = (rel: string) => allow.find((a) => a.path === rel)?.matches ?? [];
+  /** A pin of the whole file, read a piece at a time: only for a file a pin may keep although no scan reads it. */
+  const pinnedWhole = (p: string, rel: string) => !!pinsOf(rel).length && pinsOf(rel).includes(pinOfFile(p) ?? "");
+  /** A file named like a secret stays only when allowed, or when it is a key file holding a key, which gets its fake. */
+  const namedStays = (p: string, rel: string) => {
+    if (pinnedWhole(p, rel)) return true;
+    if (!o.standIns || !isKeyFileName(rel)) return false;
+    const read = scrubText(p, changeLimits.maxScanBytes);
+    return !!read && !read.binary && holdsPrivateKey(read.text, []);
+  };
   const seen = new Set<string>(o.known ?? []);
   const guesses = new Set<string>();
   /** A file about to be left out: its value may stand elsewhere with no name beside it. */
@@ -1038,8 +1083,11 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
         if (!inside(target) || isSecretPath(name)) unlinkSync(p);
         continue;
       }
-      if (isSecretPath(name)) {
-        if (st.isFile()) leaving(p, rel);
+      if (isSecretPath(name) && !(st.isFile() && namedStays(p, rel))) {
+        if (st.isFile()) {
+          leaving(p, rel);
+          removedFiles.push({ path: rel, line: 0, label: NAMED_OUT });
+        }
         unlinkSync(p);
         continue;
       }
@@ -1061,10 +1109,11 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   }
   const blanks = new Map<string, number[]>();
   const scanned: { p: string; rel: string }[] = [];
-  const tooLarge: string[] = [];
   for (const f of kept) {
     const big = overScanLimit(f.p);
-    // A file no scan reads whole is still looked through for a key: tests may print any file the sandbox holds.
+    // A file no scan reads whole stays only when allowed as it stands.
+    if ((big === "binary" || big === "too large") && pinnedWhole(f.p, f.rel)) continue;
+    // Else it is still looked through for a key: tests may print any file the sandbox holds.
     const key = big === "binary" || big === "too large" ? keyInStream(f.p) : null;
     if (key) {
       unlinkSync(f.p);
@@ -1078,13 +1127,14 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
       // Beside the tree no model reads it either.
       if (!sandboxed.has(f.rel) && !o.aside) {
         unlinkSync(f.p);
-        tooLarge.push(f.rel);
+        removedFiles.push({ path: f.rel, line: 0, label: TOO_LARGE });
       }
       continue;
     }
     const read = scrubText(f.p, changeLimits.maxScanBytes);
     if (read === null) continue;
-    const { text, binary } = read;
+    const { binary } = read;
+    let { text } = read;
     const pins = pinsOf(f.rel);
     const scan = scanKeys(f.rel, text, pins);
     const out = leftOutReason(f.rel, read, scan, pins, fakes(f.rel));
@@ -1096,8 +1146,15 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
       continue;
     }
     if (binary) continue;
-    // A pinned file keeps its key, for its tests: the filter is told each piece, as a search can show one with no header.
-    for (const v of keyPieces(text)) seen.add(v);
+    // Each token of a private key gets its fake here, before anything reads the file on; a pinned file keeps its key.
+    if (scan && "withhold" in scan && holdsPrivateKey(text, pins)) {
+      const faked = fakeKeys(text);
+      if (faked.count) {
+        writeFileSync(f.p, faked.text);
+        fakedKeys.push(f.rel);
+        ({ text } = faked);
+      }
+    }
     const blank = scan && "blank" in scan ? scan : null;
     if (blank) blanks.set(f.rel, blank.blank);
     const why = new Map<string, string>();
@@ -1170,8 +1227,8 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   // Last: a hard link must not see the writes above.
   if (toBuild) linkTree(root, context, notBuilt);
   const byPath = (a: { path: string }, b: { path: string }) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
-  return { withheld: removedFiles.sort(byPath), blanked: blanked.sort(byPath), standIns: standIns.sort(),
-    sandboxed: [...sandboxed].sort(), secrets: values, guesses, suspects: seen, tooLarge: tooLarge.sort() };
+  return { withheld: removedFiles.sort(byPath), blanked: blanked.sort(byPath), standIns: standIns.sort(), fakedKeys: fakedKeys.sort(),
+    sandboxed: [...sandboxed].sort(), secrets: values, guesses, suspects: seen };
 }
 
 /** A text file's content (scrubText); null for a binary file. */

@@ -13,7 +13,7 @@ import { ModelError, NoCredits } from "./errors";
 import { clip, emitModelCall, emitTurn } from "./events";
 import { recordCall } from "./outage";
 import { type AgentModel, addUsage, type Block, costUsd, type Message, NO_USAGE, type Tool, type Usage } from "./llm";
-import { isSecretPath, KEY_SHOWN, KEY_SHOWN_MEANS, withKeyLines } from "./secrets";
+import { fakeKeys, isSecretPath, KEY_SHOWN, KEY_SHOWN_MEANS } from "./secrets";
 import type { Prices } from "./settings";
 import { splitLines } from "./util";
 
@@ -372,7 +372,7 @@ export class Workspace {
     if (!existsSync(full) || !statSync(full).isFile()) throw new ToolError(`not a file: ${path}`);
     const data = readFileSync(full);
     if (isBinary(data)) return `(binary file, ${data.length} bytes)`;
-    const lines = splitLines(withKeyLines(data.toString("utf8")));
+    const lines = splitLines(fakeKeys(data.toString("utf8")).text);
     const n = startLine === undefined || startLine === null || startLine === 0 ? 1 : Number(startLine);
     if (!Number.isFinite(n)) throw new ToolError("start_line: a number is required");
     const start = Math.max(1, Math.trunc(n));
@@ -441,7 +441,7 @@ export class Workspace {
         continue;
       }
       if (isBinary(data)) continue;
-      batch.push({ fp, lines: splitLines(withKeyLines(data.toString("utf8"))) });
+      batch.push({ fp, lines: splitLines(fakeKeys(data.toString("utf8")).text) });
       size += data.length;
       if (size >= GREP_BATCH_BYTES && await send()) return end();
     }
