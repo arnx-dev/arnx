@@ -68,7 +68,9 @@ export function swapFiles(snap: string, rels: readonly string[], swap: Swap): vo
 // whoever places a test. A test there that reads /src and compares with a stand-in fails: /src holds the value.
 export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, envFrom, key, swap) => {
   requireDocker();
-  let image = await ensureEnv(cfg, envFrom ?? snap, buildLog, key);
+  // Another snapshot's image was built for that snapshot's session. That snapshot now holds a model's tests, with real values
+  // when there is no build context to copy instead, and a build has network: it is never built from now.
+  let image = await ensureEnv(cfg, envFrom ?? snap, buildLog, key, { built: !!envFrom });
   // An image holding an older copy of the code (baked.ts) is built again for the code in the snapshot, once per version
   // of that code (keyed on it: later sessions and reviews of the same code reuse it). The before/after check copies its
   // code in once the session is up: a copy that differs from it then refuses the first run.

@@ -356,15 +356,17 @@ export function dockerfile(cfg: ReviewConfig, { cache = false, mark }: { cache?:
 /** The tag of the environment image with key `key` (envKey). */
 export const envTag = (key: string) => `arnx-env:${key}`;
 
-/** `mark`: the image is made from the code under test (baked.ts); its build is marked with its tag. */
+/** `mark`: the image is made from the code under test (baked.ts); its build is marked with its tag. `built`: it must be there
+ * already; nothing is built. */
 export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: string, key?: string,
-                                { mark = false }: { mark?: boolean } = {}): Promise<string> {
+                                { mark = false, built = false }: { mark?: boolean; built?: boolean } = {}): Promise<string> {
   const tag = envTag(key ?? envKey(cfg, snapshot));
   const t0 = performance.now();
   if (docker(["image", "inspect", tag]).status === 0) {
     stepLog({ step: "image", project: cfg.name, tag, built: false, secs: secsSince(t0) });
     return tag;
   }
+  if (built) throw new ArnxError(`${cfg.name}: its test image is gone`);
   dockerSteps.say?.(`${cfg.name}: building its test image (minutes on a first build)`);
   const text = dockerfile(cfg, { cache: buildkit(), ...(mark ? { mark: tag } : {}) });
   const labels = envLabels(cfg);

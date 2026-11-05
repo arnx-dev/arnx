@@ -8,6 +8,7 @@ import { Workspace } from "../src/agent";
 import { Boundary, type Swap } from "../src/boundary";
 import { takeSnapshot } from "../src/change";
 import { check } from "../src/check";
+import { ArnxError } from "../src/errors";
 import { parseReviewConfig, reviewConfigPath, stamp, stampFile, parseReviewFile } from "../src/config";
 import type { AgentModel, Block, JsonModel, Reply } from "../src/llm";
 import { recheckReview } from "../src/recheck";
@@ -766,3 +767,58 @@ test("canary: a whole review with stand-ins in every tool input leaves no real v
   void rdir;
 });
 
+
+// --- an image made while a test holds a real value ----------------------------------------------------------------------
+
+/** A docker with no image at all, which keeps its calls. */
+function noImageDocker(): { calls: () => string[] } {
+  const dir = tmp();
+  writeFileSync(join(dir, "docker"), `#!/bin/sh
+printf '%s\\n' "$*" >> '${join(dir, "calls")}'
+case "$1" in
+  info) echo 29;;
+  image) exit 1;;
+esac
+exit 0
+`);
+  chmodSync(join(dir, "docker"), 0o755);
+  sandboxOptions.docker = join(dir, "docker");
+  return { calls: () => readFileSync(join(dir, "calls"), "utf8").split("\n") };
+}
+
+test("a session on another snapshot's image never builds one: the snapshot it names may hold a real value in a test", async () => {
+  const saved = { docker: sandboxOptions.docker, buildkit: sandboxOptions.buildkit };
+  try {
+    sandboxOptions.buildkit = false;
+    const docker = noImageDocker();
+    const cfg = parseReviewConfig(YAML);
+    const head = write(join(tmp(), "head"), { "requirements.txt": "x\n", [GEN]: `x = "${GUESS}"\n` });
+    await expect(dockerSession(cfg, join(tmp(), "base"), join(tmp(), "b.log"), async () => null, head, "somekey"))
+      .rejects.toThrow("its test image is gone");
+    expect(docker.calls().some((c) => c.startsWith("build"))).toBe(false);
+    // Its own snapshot is still what an image is built from.
+    await dockerSession(cfg, head, join(tmp(), "b.log"), async () => null);
+    expect(docker.calls().some((c) => c.startsWith("build"))).toBe(true);
+  } finally {
+    Object.assign(sandboxOptions, saved);
+  }
+});
+
+test("when the image is gone the failing tests are not checked before the change, and the review goes on", async () => {
+  const repo = valueRepo();
+  commit(repo, "the change");
+  const agent = new Recording(WROTE(SHOWN), reportOf(["test_v"], ["test_v"]));
+  let sessions = 0;
+  const failing = runningFactory(() => [junitXml([[GEN, "test_v", "failed", "boom"]]), "1 failed", false]);
+  const factory = (async (...a: Parameters<SessionFactory>) => {
+    if (++sessions > 1) throw new ArnxError("app: its test image is gone");
+    return failing(...a);
+  }) as unknown as SessionFactory;
+  const { review } = await runReview(repo, { settings: { ...SETTINGS, beforeCheck: true }, agentModel: agent, challenger: judge,
+    sessionFactory: factory });
+  expect(sessions).toBe(2);
+  expect(review.findings.length).toBe(1);
+  expect(review.findings[0]!.before).toMatchObject({ status: "unknown" });
+  expect(review.findings[0]!.before!.detail).toContain("not checked");
+  expect(review.findings[0]!.before!.detail).toContain("its test image is gone");
+});
