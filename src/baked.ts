@@ -154,7 +154,7 @@ function scopesOf(cfg: ReviewConfig, snap: string): { scope: string; files: stri
 const listed = new Map<string, string[]>();
 
 /** The image's files outside the pruned paths, listed once per image (a tag never changes what it holds). */
-function imageFiles(image: string): string[] {
+export function imageFiles(image: string): string[] {
   let paths = listed.get(image);
   if (!paths) {
     try {
@@ -379,6 +379,30 @@ export function onlyInCopies(copies: BakedCopy[], imagePaths: string[], snap: st
   const depth = (p: string) => p.split("/").length;
   return [...new Set([...named.sort(),
     ...beside.sort((a, b) => depth(a) - depth(b) || a.localeCompare(b))])];
+}
+
+/** What an install or a run leaves in a copy of the code that is no source: a folder of build output, a compiled or
+ * cached file. The one list: a copy holding only these has nothing this commit removed. */
+const BUILD_OUTPUT_DIRS = new Set(["__pycache__", "build", "dist", "target", ".pytest_cache", ".tox", ".mypy_cache",
+  ".ruff_cache", ".eggs", ".cache"]);
+export const isBuildOutput = (rel: string): boolean => /\.(pyc|pyo)$/.test(rel) ||
+  rel.split("/").some((seg) => BUILD_OUTPUT_DIRS.has(seg) || seg.endsWith(".egg-info"));
+
+/** Files (repository paths) the copies hold that the snapshot lacks, build output and the generated tests' folder `tests`
+ * aside: what this code removed, or never had. */
+export function absentFromSnapshot(cfg: ReviewConfig, copies: BakedCopy[], imagePaths: string[], snap: string): string[] {
+  const tests = posix.normalize(posix.join(cfg.workdir, cfg.testsDir));
+  const out: string[] = [];
+  for (const c of copies) {
+    const prefix = c.root === "/" ? "/" : `${c.root}/`;
+    for (const p of imagePaths) {
+      if (!p.startsWith(prefix)) continue;
+      const rel = inScope(c.scope, p.slice(prefix.length));
+      if (rel.startsWith(`${tests}/`) || isBuildOutput(rel) || existsSync(join(snap, rel))) continue;
+      out.push(rel);
+    }
+  }
+  return [...new Set(out)].sort();
 }
 
 /** The image's copies reached by runs, and the files only they hold (the output's first). */

@@ -122,7 +122,7 @@ export function repoRoot(cwd: string): string {
 
 const names = (out: string) => out.split("\0").filter(Boolean);
 
-function commitOf(repo: string, rev: string): string {
+export function commitOf(repo: string, rev: string): string {
   const sha = git(repo, ["rev-parse", "--verify", "-q", rev + "^{commit}"], [0, 1]).trim();
   if (!sha) throw new ArnxError(`unknown revision '${rev}'`);
   return sha;

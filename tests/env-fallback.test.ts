@@ -358,3 +358,93 @@ test("a failing install runs once: the session reuses the indexer's verdict", as
     forgetFailedBuilds();
   }
 });
+
+const stat = (env: NonNullable<import("../src/report").ProjectStat["env"]>, over: object = {}) => ({ name: "svc", testFiles: 0, tests: 0, passed: 0, missingRuns: 0,
+  sawResults: true, stop: "env_failed: build", env, ...over });
+const failedEnv = (old?: true) => ({ state: "failed" as const, kind: "build" as const, log: "projects/svc/env-build.log",
+  ...(old ? { old } : {}) });
+
+test("setup is offered only when the failing commit is the checked-out one", async () => {
+  const { sampleReview } = await import("./helpers/review");
+  const say = (old?: true) => render(sampleReview({ findings: [], questions: [], questionProjects: [], flaky: [],
+    passed: 0, testsWritten: 0, projects: ["svc"], projectStats: [stat(failedEnv(old))] })).replace(/\s+/g, " ");
+  expect(say()).toContain("Review a later commit, or `arnx setup --project svc` from this one.");
+  const old = say(true);
+  expect(old).toContain("Review a later commit.");
+  expect(old).not.toContain("arnx setup");
+});
+
+test("a review of an older commit records it, and next says only to review a later commit", async () => {
+  const repo = gitRepo(tmp());
+  for (const n of ["x", "y"]) {
+    writeFileSync(join(repo, "app.py"), `V = '${n}'\n`);
+    commit(repo, n);
+  }
+  mkdirSync(join(repo, ".arnx"));
+  writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(
+    "version: 1\nprojects:\n  svc:\n    root: .\n    image: python:3.12-slim\n    test_command: pytest {targets}\n"),
+  "Dev", "2026-10-12"));
+  commit(repo, "config");
+  const { runGit } = await import("./helpers/gitutil");
+  const range = `${runGit(repo, "rev-parse", "HEAD~2").trim()}..${runGit(repo, "rev-parse", "HEAD~1").trim()}`;
+  const mk = async (r: string | null) => (await runReview(repo, { range: r, settings: SETTINGS,
+    agentModel: new ScriptedAgent([]), challenger: new FakeJson([]),
+    sessionFactory: async () => { throw broken(); } })).review;
+  expect((await mk(range)).projectStats[0]!.env).toMatchObject({ state: "failed", old: true });
+  const { whatNext } = await import("../src/next");
+  const { writeSettings } = await import("../src/settings");
+  writeSettings(repo, SETTINGS);
+  expect(whatNext(repo)).toMatchObject({ command: "arnx review" });
+  expect(whatNext(repo).why).toContain("later commit");
+  expect((await mk(`${runGit(repo, "rev-parse", "HEAD~2").trim()}..${runGit(repo, "rev-parse", "HEAD").trim()}`))
+    .projectStats[0]!.env?.old).toBeUndefined();
+});
+
+test("a finding from a fallback is labelled in the summary and in the review --json rows", async () => {
+  const { sampleReview } = await import("./helpers/review");
+  const { summary, summaryRows } = await import("../src/report");
+  const { reviewJson } = await import("../src/cli");
+  const r = sampleReview();
+  r.findings[0]!.fallback = true;
+  expect(summaryRows(r)[0]!.fallback).toBe(true);
+  expect(summary(r, "review.md")).toContain("ran on another commit's image");
+  const rows = (reviewJson(r, "review.md", "review.json")[2] as { findings: { fallback?: boolean }[] }).findings;
+  expect(rows[0]!.fallback).toBe(true);
+  expect(rows.slice(1).every((x) => x.fallback === undefined)).toBe(true);
+});
+
+test("an environment problem beside another is not followed by 'review again'", async () => {
+  const { sampleReview } = await import("./helpers/review");
+  const md = render(sampleReview({ findings: [], questions: [], questionProjects: [], flaky: [], passed: 0,
+    testsWritten: 0, projects: ["svc", "b"], projectStats: [stat(failedEnv()),
+      { name: "b", testFiles: 2, tests: 1, passed: 1, missingRuns: 0, sawResults: true, stop: "end_turn",
+        hungFiles: ["t/x.py"] }] })).replace(/\s+/g, " ");
+  expect(md).toContain("did not finish");
+  expect(md).not.toContain("Run `arnx review` again");
+});
+
+test("a fallback is refused for a removed whole folder but not for build output alone", async () => {
+  const BAKED = parseReviewConfig("version: 1\nimage: i\nworkdir: app\ninstall: [\"mkdir -p /opt/app && cp -r . /opt/app\"]\n" +
+    "test_command: cd /opt/app && python -m pytest -q {targets}\n");
+  const run = async (tag: string, extra: string) => {
+    mkdirSync(join(tmp(), tag));
+    const repo = gitRepo(join(tmp(), tag));
+    mkdirSync(join(repo, "app"));
+    for (const f of ["a.py", "b.py", "c.py"]) writeFileSync(join(repo, "app", f), `${f} = 1\n`);
+    commit(repo, "one");
+    envOwner.repo = repo;
+    fakeDocker([{ tag: `arnx-env:${tag}`, labels: labelsFor(BAKED, repo, "2026-10-20T00:00:00Z") }], {
+      files: `/opt/app/a.py\n/opt/app/b.py\n/opt/app/c.py\n${extra}`,
+      hashes: ["a.py", "b.py", "c.py"].map((f) => `${sha(`${f} = 1\n`)}  /opt/app/${f}\n`).join("") });
+    const asked: (string | undefined)[] = [];
+    await round(repo, BAKED, async (_c, snap, _l, body, _f, key) => {
+      asked.push(key);
+      if (!key) throw broken("probe");
+      return body(passing(snap));
+    }, new ScriptedAgent([[text('{"tests": []}')]]));
+    return asked;
+  };
+  expect(await run("7777777777777777", "/opt/app/old/mod.py\n")).toEqual([undefined]);
+  expect(await run("6666666666666666", "/opt/app/__pycache__/a.cpython-312.pyc\n/opt/app/build/lib/x.py\n" +
+    "/opt/app/pkg.egg-info/PKG-INFO\n/opt/app/dist/p.whl\n/opt/app/.pytest_cache/v/c\n")).toEqual([undefined, "6666666666666666"]);
+});

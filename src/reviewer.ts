@@ -11,7 +11,7 @@ import { inPool, oneVerdict } from "./challenge";
 import { shallowKind } from "./shallow";
 import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, withRole } from "./events";
 import { added, type Change, describe, describeBlanked, describeWithheld, EMPTY_TREE, filesAt, removed, resolveChange, sliceDiff,
-  someNames, treeSuspects, untrackedLine } from "./change";
+  someNames, treeSuspects, untrackedLine, commitOf } from "./change";
 import { maskedCopy } from "./boundary";
 import { configSuspects, fileDigest, loadReviewFile, parseReviewFile, type ReviewConfig, reviewConfigPath, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
@@ -577,6 +577,8 @@ export async function runReview(repo: string, o: { settings: Settings;
       soFar.flaky += c.flaky.length;
       return { i, rnd, hunted, second: projSecond, extras: projExtras, resumed: kept };
     };
+    // A range ending anywhere but the checked-out commit tests an older tree: setup (which proves this one) cannot mend it.
+    const atCheckedOut = change.kind !== "range" || change.head === commitOf(repo, "HEAD");
     const done: Done[] = [];
     await inPool(routing.routed.map((_r, i) => i), o.projectConcurrency ?? PROJECT_CONCURRENCY, async (i) => {
       done[i] = await runProject(i);
@@ -670,7 +672,8 @@ export async function runReview(repo: string, o: { settings: Settings;
         ...(rnd.hungFiles?.length ? { hungFiles: rnd.hungFiles } : {}),
         ...(rnd.notRunFiles?.length ? { notRunFiles: rnd.notRunFiles } : {}), sawResults: rnd.sawResults, stop: rnd.agent.stop,
         // A round whose environment could not be had made no model call: it gave no report because it was never asked.
-        ...(rnd.env ? { env: { ...rnd.env, log: file.legacy ? rnd.env.log : `projects/${cfg.name}/${rnd.env.log}` } } : {}),
+        ...(rnd.env ? { env: { ...rnd.env, log: file.legacy ? rnd.env.log : `projects/${cfg.name}/${rnd.env.log}`,
+          ...(atCheckedOut ? {} : { old: true as const }) } } : {}),
         // A round with no report and no test that ran is not a finished one (tests that ran speak for themselves).
         ...(tests === 0 && !rnd.env && !hasReport([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]) ? { noReport: true } : {}) });
       agentCost += rnd.agent.costUsd;

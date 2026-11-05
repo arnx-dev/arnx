@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import { type AgentResult, Workspace } from "./agent";
 import { adapterFor } from "./adapters";
-import { bakedError, bakedIn, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
+import { absentFromSnapshot, bakedError, bakedIn, imageFiles, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
   from "./baked";
 import { asFallbackBefore, asFallbackFix, BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
   fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, newNames, notChecked, SKIP_REASONS, textBefore, textFix,
@@ -66,7 +66,9 @@ export interface Round {
   env?: EnvState;
 }
 
-export interface EnvState { state: "failed" | "fallback"; kind: "build" | "probe"; log: string }
+export interface EnvState { state: "failed" | "fallback"; kind: "build" | "probe"; log: string;
+  /** The failing commit is not the checked-out one (a range or an older commit): setup would prove another tree. */
+  old?: true }
 
 /** What a model's text means in the snapshot `snap`, `ours` (and the runners' reports) not being real text. */
 export const swapIn = (b: Boundary, snap: string, ours: (rel: string) => boolean = () => false): Swap =>
@@ -140,7 +142,7 @@ export function usableFallback(cfg: ReviewConfig, snap: string): string | null {
   const baked = existsSync(snap) && readdirSync(snap).length ? bakedIn(cfg, image.tag, snap) : null;
   if (baked?.differ.length) return null;
   // A copy holding files this commit removed would run (or leak) what is gone.
-  if (baked && copyOnly(cfg, image.tag, baked.copies, snap, "").files.length) return null;
+  if (baked && absentFromSnapshot(cfg, baked.copies, imageFiles(image.tag), snap).length) return null;
   return image.tag.slice(image.tag.indexOf(":") + 1);
 }
 

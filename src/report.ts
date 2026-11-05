@@ -100,7 +100,7 @@ export interface ProjectStat {
   noReport?: boolean;
   /** This commit's own environment could not be had: `failed` (nothing was tested) or `fallback` (tested on the image
    * built for another commit; its findings do not fail the run). `log` is a file under the review's folder. */
-  env?: { state: "failed" | "fallback"; kind: "build" | "probe"; log: string };
+  env?: { state: "failed" | "fallback"; kind: "build" | "probe"; log: string; old?: true };
 }
 
 /** Findings that share one cause, explained in plain language by the second model (report only: verdicts, marks and
@@ -356,7 +356,7 @@ function why(stop: string, r?: Review): string {
 }
 
 /** What kept the review from being complete, per project where known; then notes that do not make it incomplete. */
-function statusOf(r: Review): { problems: string[]; notes: string[]; envOnly: boolean } {
+function statusOf(r: Review): { problems: string[]; notes: string[]; hasEnv: boolean } {
   const problems: string[] = [], notes: string[] = [];
   let envProblems = 0;
   const stats = r.projectStats ?? [];
@@ -364,7 +364,7 @@ function statusOf(r: Review): { problems: string[]; notes: string[]; envOnly: bo
     if (p.env) {
       const log = `.arnx/reviews/${r.id}/${p.env.log}`;
       problems.push(p.env.state === "failed"
-        ? `\`${p.name}\` not tested: this commit's ${p.env.kind === "build" ? "install does not build" : "environment runs no test"}; that is the commit, not your setup. Review a later commit, or \`arnx setup --project ${p.name}\` from this one`
+        ? `\`${p.name}\` not tested: this commit's ${p.env.kind === "build" ? "install does not build" : "environment runs no test"}; that is the commit, not your setup. Review a later commit${p.env.old ? "" : `, or \`arnx setup --project ${p.name}\` from this one`}`
         : `\`${p.name}\`: this commit's own ${p.env.kind === "build" ? "install does not build" : "environment runs no test"} (see ${log}). Tested on the image built for another commit: its dependencies may differ`);
       envProblems++;
       if (p.env.state === "failed") continue;
@@ -399,7 +399,7 @@ function statusOf(r: Review): { problems: string[]; notes: string[]; envOnly: bo
   } else if (!problems.length && incomplete(r)) {
     problems.push(r.stop !== "end_turn" ? why(r.stop, r) : `${plural(r.missingRuns, "run")} gave no report`);
   }
-  return { problems, notes, envOnly: problems.length > 0 && problems.length === envProblems };
+  return { problems, notes, hasEnv: envProblems > 0 };
 }
 
 /** What the work of each role is, when all of it is missing. */
@@ -434,11 +434,11 @@ const FIX_WITH_FAKE = "Fix the code; if this test needs a real key: `arnx allow-
 const skippedNote = (r: Review) => r.skippedTests ? `; ${plural(r.skippedTests, "test")} skipped, which may be why` : "";
 
 function statusLines(r: Review): string[] {
-  const { problems, notes, envOnly } = statusOf(r);
+  const { problems, notes, hasEnv } = statusOf(r);
   const names = r.projects.length > 1 ? ` (${ticks(r.projects)})` : "";
   // When a resume redoes what an outage cut, the outage line below says so: no fresh review here.
   // The same install fails again: reviewing again covers nothing.
-  const again = (r.providerFailures ?? []).some(resumes) || envOnly ? ""
+  const again = (r.providerFailures ?? []).some(resumes) || hasEnv ? ""
     : r.couldNotRun?.length ? " If it is a test fixture, allow it with `arnx allow-secret PATH`, then `arnx review` again."
     : " Run `arnx review` again to cover it.";
   const out = [problems.length ? `Incomplete: ${problems.join("; ")}.${again}`
@@ -927,7 +927,7 @@ export function parseMarks(md: string, findingIds: string[], o: { reasons?: bool
  * `said` the ids as the summary shows them, each finding's state after it unless it is confirmed ("F3; F4 depends on
  * Q1"). */
 export interface SummaryRow { mark: "✗" | "!" | "?" | "·"; ids: string[]; projects: string[]; state: string;
-  regression: boolean; title: string; said: string; severity?: Severity }
+  regression: boolean; fallback: boolean; title: string; said: string; severity?: Severity }
 
 /** The summary's rows, in its order (summary() and `arnx review --json` show the same). */
 export function summaryRows(r: Review): SummaryRow[] {
@@ -957,6 +957,7 @@ export function summaryRows(r: Review): SummaryRow[] {
     return { mark, ids: findings.map((f) => f.id), projects: [...new Set(findings.map((f) => f.project))],
       state: counts.length === 1 ? states[0]! : counts.join(", "),
       regression: findings.some((f) => f.before?.status === "regression"),
+      fallback: findings.some((f) => f.fallback),
       title: group?.title || f0.explanation || firstLine(f0.message), said,
       ...(group?.severity ? { severity: group.severity } : {}) };
   });
@@ -993,7 +994,7 @@ export function summary(r: Review, reviewMd: string): string {
   }
   const num = String(issues.length).length;
   const rows = issues.map((row, i) => {
-    const where = multi(r) ? ` (${row.projects.join(", ")})` : "";
+    const where = (multi(r) ? ` (${row.projects.join(", ")})` : "") + (row.fallback ? ` · ${FALLBACK_LABEL}` : "");
     return [`  ${row.mark} ${String(i + 1).padStart(num)}`,
       shorten((row.regression ? "regression: " : "") + row.title, 100), row.said + where] as const;
   });
