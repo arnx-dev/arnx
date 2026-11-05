@@ -86,6 +86,8 @@ export interface ProjectStat {
   missingRuns: number;
   /** Test files that did not finish alone in their time; each counts as an error and leaves the review incomplete. */
   hungFiles?: string[];
+  /** Test files the time ran out before; each counts as an error and leaves the review incomplete. */
+  notRunFiles?: string[];
   sawResults: boolean;
   /** Why this project's reviewer stopped ("end_turn", "budget", "api_error: ..."); absent in older reviews. */
   stop?: string;
@@ -238,7 +240,7 @@ export const notChecked = (r: Review) => active(r).filter((f) => f.verdict !== "
 const neverTested = (r: Review) => r.testsWritten === 0 ? (r.suspects ?? []).filter((s) => s.outcome === "not tested")
   : [];
 export const incomplete = (r: Review) => r.stop !== "end_turn" || r.missingRuns > 0 || neverTested(r).length > 0 ||
-  !!r.couldNotRun?.length || (r.projectStats ?? []).some((p) => p.noReport || !!p.hungFiles?.length);
+  !!r.couldNotRun?.length || (r.projectStats ?? []).some((p) => p.noReport || !!p.hungFiles?.length || !!p.notRunFiles?.length);
 export const exitCode = (r: Review) => (confirmed(r).length || notChecked(r).length ? 1 : incomplete(r) ? 2 : 0);
 
 export interface Marks {
@@ -356,6 +358,8 @@ function statusOf(r: Review): { problems: string[]; notes: string[] } {
       problems.push(`\`${p.name}\`: ${noReportWhy(p, r)}`);
     } else if (p.hungFiles?.length) {
       problems.push(`\`${p.name}\`: ${plural(p.hungFiles.length, "test file")} did not finish (${someNames(p.hungFiles, 3)}); their tests have no result`);
+    } else if (p.notRunFiles?.length) {
+      problems.push(`\`${p.name}\`: ${plural(p.notRunFiles.length, "test file")} not run, out of time (${someNames(p.notRunFiles, 3)}); their tests have no result`);
     } else if (p.missingRuns) {
       problems.push(`\`${p.name}\`: ${plural(p.missingRuns, "run")} gave no report (timed out or crashed)`);
     } else if (!p.tests) {
@@ -792,7 +796,7 @@ export function sameCause(sus: SuspectOutcome[], groups: Group[], findings: Find
   }
 }
 
-const troubled = (p: ProjectStat) => p.missingRuns > 0 || !!p.hungFiles?.length || !p.sawResults || !!p.noReport;
+const troubled = (p: ProjectStat) => p.missingRuns > 0 || !!p.hungFiles?.length || !!p.notRunFiles?.length || !p.sawResults || !!p.noReport;
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /** Why a round has no report: a provider outage cut it, or the reviewer gave none. */

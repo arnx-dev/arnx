@@ -13,23 +13,28 @@ const tmp = useTmp();
 const dir = "tests/arnx_generated";
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"].map((n) => `${dir}/test_${n}.py`);
 const cfg = parseReviewConfig("version: 1\nimage: i\ntest_command: pytest -q {targets}\n");
-const LIMITS = { together: 300, file: 180, total: 600 };
+const LIMITS = { together: 600, file: 180, total: 600 };
 
 /** A fake runner. `slow(files)` says whether a run over exactly these files times out; every other run writes a
  * report with a passing test per file, and a failing one for the files in `failing`. */
 class Runs implements Runner {
   calls: { files: string[]; timeout: number }[] = [];
-  constructor(readonly snap: string, readonly slow: (files: string[]) => boolean, readonly failing: string[] = []) {}
+  constructor(readonly snap: string, readonly slow: (files: string[]) => boolean, readonly failing: string[] = [],
+              readonly cost: number = 0) {}
   run(command: string, timeout: number): RunResult {
     const files = FILES.filter((f) => command.includes(f));
     this.calls.push({ files, timeout });
+    // with a cost per file, a run takes that long and times out when its limit is shorter
+    if (this.cost && files.length * this.cost > timeout) {
+      return { exitCode: null, output: "slow", timedOut: true, seconds: timeout };
+    }
     if (this.slow(files)) return { exitCode: null, output: `slow ${files.join(",")}`, timedOut: true, seconds: timeout };
     const m = /--junitxml=\/src\/(\S+)/.exec(command)!;
     const path = join(this.snap, m[1]!);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, junitXml(files.map((f) => [f, "test_x", this.failing.includes(f) ? "failed" : "passed",
       "boom"] as [string, string, string, string])));
-    return { exitCode: 0, output: `ran ${files.join(",")}`, timedOut: false, seconds: 1 };
+    return { exitCode: 0, output: `ran ${files.join(",")}`, timedOut: false, seconds: this.cost || 1 };
   }
 }
 
@@ -37,11 +42,11 @@ test("files that hang together are run apart and every result is kept", async ()
   const s = new Runs(tmp(), (f) => f.length > 1, [FILES[6]!, FILES[7]!]);
   const got = await runBounded(s, tmp(), cfg, FILES, "final-1.xml", LIMITS);
   // together once at 300 s, then each file alone
-  expect(s.calls[0]).toEqual({ files: FILES, timeout: 300 });
+  expect(s.calls[0]).toEqual({ files: FILES, timeout: 600 });
   expect(s.calls.slice(1).map((c) => c.files)).toEqual(FILES.map((f) => [f]));
   expect(s.calls.slice(1).every((c) => c.timeout <= 180)).toBe(true);
   expect(got.apart).toBe(true);
-  expect(got.hung).toEqual([]);
+  expect(got.hung).toEqual({});
   expect(got.run.timedOut).toBe(false);
   const c = classify([got.results]);
   expect(c.passed.length).toBe(6);
@@ -52,7 +57,7 @@ test("files that hang together are run apart and every result is kept", async ()
 test("a file that hangs alone is one error and the others keep their results", async () => {
   const s = new Runs(tmp(), (f) => f.length > 1 || f[0] === FILES[2]);
   const got = await runBounded(s, tmp(), cfg, FILES, "final-1.xml", LIMITS);
-  expect(got.hung).toEqual([FILES[2]!]);
+  expect(got.hung).toEqual({ [FILES[2]!]: 180 });
   const errors = got.results!.filter((t) => t.outcome === "error");
   expect(errors.length).toBe(1);
   expect(errors[0]!.fileAttr).toBe(FILES[2]!);
@@ -65,13 +70,14 @@ test("a file that hangs alone is one error and the others keep their results", a
 
 test("a hung file is not run again", async () => {
   const s = new Runs(tmp(), (f) => f[0] === FILES[2]);
-  const got = await runBounded(s, tmp(), cfg, FILES, "final-2.xml", { ...LIMITS, apart: true, hung: [FILES[2]!] });
+  const got = await runBounded(s, tmp(), cfg, FILES, "final-2.xml", { ...LIMITS, apart: true, hung: { [FILES[2]!]: 180 } });
   // file by file, no run together, and the hung file not at all
   expect(s.calls.length).toBe(7);
   expect(s.calls.every((c) => c.files.length === 1 && c.files[0] !== FILES[2])).toBe(true);
   // its error is carried so every repeat reports it
-  expect(got.hung).toEqual([FILES[2]!]);
-  expect(got.results!.filter((t) => t.outcome === "error").map((t) => t.fileAttr)).toEqual([FILES[2]!]);
+  expect(got.hung).toEqual({ [FILES[2]!]: 180 });
+  expect(got.results!.filter((t) => t.outcome === "error").map((t) => [t.fileAttr, t.message])).toEqual([[FILES[2]!,
+    "did not finish in 180 s; its tests have no result"]]);
 });
 
 test("the before check runs apart once the round did", async () => {
@@ -87,15 +93,59 @@ test("the before check runs apart once the round did", async () => {
   expect(ok.apart).toBe(false);
 });
 
-test("the whole repeat stays within its limit", async () => {
+test("the whole repeat stays within its limits: today's run limit, then the apart budget", async () => {
   const s = new Runs(tmp(), () => true);
   const got = await runBounded(s, tmp(), cfg, FILES, "final-1.xml", LIMITS);
   const asked = s.calls.reduce((sum, c) => sum + c.timeout, 0);
-  expect(asked).toBeLessThanOrEqual(600);
-  expect(s.calls.every((c) => c.timeout <= 300)).toBe(true);
-  // every file ends as an error, none is lost, and no run overlaps another (the fake answers one at a time)
-  expect(got.hung.sort()).toEqual([...FILES].sort());
+  expect(asked).toBeLessThanOrEqual(600 + 600);
+  expect(s.calls.slice(1).every((c) => c.timeout === 180)).toBe(true);
+  // every file ends as an error; the ones the budget reached are hung, the others are not run
+  expect(s.calls.length).toBe(1 + 3);
+  expect(Object.keys(got.hung).length).toBe(3);
+  expect(got.notRun.length).toBe(5);
   expect(got.results!.filter((t) => t.outcome === "error").length).toBe(FILES.length);
+});
+
+test("a suite that fits today's limit passes together in one run", async () => {
+  for (const [n, cost] of [[3, 150], [2, 200]] as const) {
+    const s = new Runs(tmp(), () => false, [], cost);
+    const got = await runBounded(s, tmp(), cfg, FILES.slice(0, n), "final-1.xml", LIMITS);
+    expect(s.calls.length).toBe(1);
+    expect(got.apart).toBe(false);
+    expect(got.hung).toEqual({});
+    expect(got.results!.filter((t) => t.outcome === "passed").length).toBe(n);
+  }
+});
+
+test("a file the budget never reached is not run, not hung, and says so", async () => {
+  const names = Array.from({ length: 40 }, (_, i) => `${dir}/test_n${i}.py`);
+  const seen: string[][] = [];
+  const s: Runner = { run: (command, timeout) => {
+    const files = names.filter((f) => command.includes(`${f}'`) || command.includes(`${f} `) || command.endsWith(f));
+    seen.push(files);
+    if (files.length * 170 > timeout) return { exitCode: null, output: "slow", timedOut: true, seconds: timeout };
+    const m = /--junitxml=\/src\/(\S+)/.exec(command)!;
+    mkdirSync(dirname(join(tmp(), m[1]!)), { recursive: true });
+    writeFileSync(join(tmp(), m[1]!), junitXml(files.map((f) => [f, "test_x", "passed", ""] as [string, string, string, string])));
+    return { exitCode: 0, output: "", timedOut: false, seconds: 170 };
+  } };
+  const got = await runBounded(s, tmp(), cfg, names, "final-1.xml", LIMITS);
+  expect(Object.keys(got.hung)).toEqual([]);
+  expect(got.notRun.length).toBe(37); // 600 s hold three files of 170 s, a fourth would not get its 180 s
+  const notRun = got.results!.filter((t) => t.message.includes("not run"));
+  expect(notRun.length).toBe(37);
+  expect(notRun.every((t) => t.message === "was not run: out of time; its tests have no result")).toBe(true);
+  expect(got.results!.some((t) => t.message.includes("did not finish"))).toBe(false);
+  expect(got.results!.filter((t) => t.outcome === "passed").length).toBe(3);
+});
+
+test("a hung file carries the same words in every repeat, a single file with the limit it had", async () => {
+  const s = new Runs(tmp(), (f) => f.length === 1);
+  const first = await runBounded(s, tmp(), cfg, [FILES[0]!], "final-1.xml", LIMITS);
+  expect(first.hung).toEqual({ [FILES[0]!]: 600 });
+  const again = await runBounded(s, tmp(), cfg, [FILES[0]!], "final-2.xml", { ...LIMITS, hung: first.hung });
+  expect(again.results!.map((t) => t.message)).toEqual(first.results!.map((t) => t.message));
+  expect(first.results![0]!.message).toBe("did not finish in 600 s; its tests have no result");
 });
 
 test("a round keeps the files that ran, names the one that hung, saves the log and does not run it twice", async () => {

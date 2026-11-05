@@ -32,8 +32,8 @@ import { projectSource, shallowKind } from "./shallow";
 
 export const TOOL_TIMEOUT = 300;
 export const RUN_TIMEOUT = 600;
-/** One repeat of a round's files: together first, then apart (outcomes.ts runBounded). */
-export const RUN_BOUNDS = { together: 300, file: 180, total: RUN_TIMEOUT };
+/** One repeat of a round's files: together within today's run limit, and only after that times out apart (outcomes.ts runBounded). */
+export const RUN_BOUNDS = { together: RUN_TIMEOUT, file: 180, total: 600 };
 
 export interface Round {
   /** Something in it was masked (boundary.ts). */
@@ -48,6 +48,8 @@ export interface Round {
   fakedKeys?: string[];
   /** Test files that did not finish alone within their time (each is one error, never a finding). */
   hungFiles?: string[];
+  /** Test files the time ran out before (each is one error; the review is incomplete). */
+  notRunFiles?: string[];
   /** True when a run_tests call showed the agent results from its own files (or it wrote no tests). */
   sawResults: boolean;
   /** Changed files with SQL that no generated test ran against the project's database (absent without one). */
@@ -319,7 +321,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   // Once a round's files have run apart, every later run goes file by file; a file that did not finish alone is not
   // run again.
   let apart = false;
-  const hungSet = new Set<string>();
+  const hungLimits: Record<string, number> = {}, notRunSet = new Set<string>();
   let fixProof: FixCheck | undefined;
   let baked = false;
   let checked: TypeCheckRun | undefined, typecheck: TypeCheck | undefined;
@@ -439,11 +441,16 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
           say(failing ? `final run ${i + 1}/${o.runs} (${files.length} file${files.length === 1 ? "" : "s"} with failures)`
             : `final run ${i + 1}/${o.runs}`);
           const bounded = await runBounded(session, snap, cfg, files.length ? files : target, `final-${i + 1}.xml`,
-            { ...RUN_BOUNDS, apart, hung: [...hungSet] });
+            { ...RUN_BOUNDS, apart, hung: hungLimits });
           const [run, parsed] = [bounded.run, bounded.results];
           apart = bounded.apart;
-          bounded.hung.forEach((h) => hungSet.add(h));
-          if (bounded.hung.length) say(`${bounded.hung.length === 1 ? "a test file" : `${bounded.hung.length} test files`} did not finish`);
+          Object.assign(hungLimits, bounded.hung);
+          // Files that ran this time are no longer unrun.
+          for (const t of files.length ? files : target) notRunSet.delete(t);
+          bounded.notRun.forEach((t) => notRunSet.add(t));
+          const nh = Object.keys(bounded.hung).length;
+          if (nh) say(`${nh === 1 ? "a test file" : `${nh} test files`} did not finish`);
+          if (bounded.notRun.length) say(`${bounded.notRun.length === 1 ? "a test file" : `${bounded.notRun.length} test files`} not run: out of time`);
           // Masked before it is saved, as the probe's log is.
           if (run.output) writeFileSync(join(o.outDir, `final-${i + 1}.log`), filter ? filter.mask(run.output) : run.output);
           const got = ours(parsed), secs = Math.round(run.seconds * 10) / 10;
@@ -500,9 +507,9 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         message: testMessage(t.message) });
     }
   }
-  const hungFiles = [...hungSet].sort();
+  const hungFiles = Object.keys(hungLimits).sort(), notRunFiles = [...notRunSet].sort();
   const round: Round = { agent, files, classified, removed, ...(leftOut.length ? { leftOut } : {}),
-    ...(fakedKeys.length ? { fakedKeys } : {}), ...(hungFiles.length ? { hungFiles } : {}), sawResults: saw || !hasTests,
+    ...(fakedKeys.length ? { fakedKeys } : {}), ...(hungFiles.length ? { hungFiles } : {}), ...(notRunFiles.length ? { notRunFiles } : {}), sawResults: saw || !hasTests,
     ...(dbLeft ? { dbUntested: dbLeft } : {}), ...(before ? { before } : {}), ...(fixProof ? { fixProof } : {}),
     ...(typecheck ? { typecheck } : {}) };
   // All a round says from here on is saved and read by people and coding agents, none of it through a model's filter.
@@ -709,7 +716,7 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
       const out: BeforeRun[] = [];
       // Files go one at a time once the round's did; a file that hangs alone is not run again.
       let apartNow = !!o.apart;
-      const hungBefore = new Set<string>(), hungProof = new Set<string>();
+      const hungBefore: Record<string, number> = {}, hungProof: Record<string, number> = {};
       for (let i = 1; ids.length && i <= o.runs; i++) {
         if (o.deadline !== undefined && performance.now() >= o.deadline) {
           late = true;
@@ -717,10 +724,10 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
         }
         const t = performance.now();
         const bounded = await runBounded(session, snap, cfg, targets, `before-${i}.xml`,
-          { ...RUN_BOUNDS, apart: apartNow, hung: [...hungBefore] });
+          { ...RUN_BOUNDS, apart: apartNow, hung: hungBefore });
         const [run, parsed] = [bounded.run, bounded.results];
         apartNow = bounded.apart;
-        bounded.hung.forEach((h) => hungBefore.add(h));
+        Object.assign(hungBefore, bounded.hung);
         const took = ms(t);
         runsMs += took;
         // As in the final runs, only the generated tests count.
@@ -736,10 +743,10 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
         }
         const t = performance.now();
         const bounded = await runBounded(session, snap, cfg, proofTargets, `fix-proof-${i}.xml`,
-          { ...RUN_BOUNDS, apart: apartNow, hung: [...hungProof] });
+          { ...RUN_BOUNDS, apart: apartNow, hung: hungProof });
         const [run, parsed] = [bounded.run, bounded.results];
         apartNow = bounded.apart;
-        bounded.hung.forEach((h) => hungProof.add(h));
+        Object.assign(hungProof, bounded.hung);
         const took = ms(t);
         proofMs += took;
         const ours = parsed?.filter((x) => ownerFile(x.fileAttr, own) !== null) ?? [];

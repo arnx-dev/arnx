@@ -126,70 +126,82 @@ function reportElsewhere(said: string | null | undefined, snap: string): string 
 }
 
 export interface Bounds {
-  /** Seconds for all the files in one run, for each file alone, and for the whole repeat. */
+  /** Seconds for one run of all the files (today's run limit), for each file alone, and for all the files run apart. */
   together: number;
   file: number;
   total: number;
   /** Set when an earlier repeat already ran the files apart: they go file by file from the start. */
   apart?: boolean;
-  /** Files that did not finish alone in an earlier repeat: not run again, each still one error. */
-  hung?: string[];
+  /** Files that did not finish alone in an earlier repeat, with the seconds they had: not run again, each still one error. */
+  hung?: Record<string, number>;
+}
+export interface Bounded {
+  results: TestResult[] | null;
+  run: RunResult;
+  /** Every file that did not finish alone (earlier repeats' too), with the seconds it had. */
+  hung: Record<string, number>;
+  /** Files the apart stage had no time left for: not hung, each one error, and the review is incomplete. */
+  notRun: string[];
+  apart: boolean;
 }
 
-const hungError = (file: string, message: string): TestResult =>
-  ({ testId: file, fileAttr: file, name: file, outcome: "error", message });
+const hungError = (file: string, limit: number): TestResult => ({ testId: file, fileAttr: file, name: file,
+  outcome: "error", message: `did not finish in ${limit} s; its tests have no result` });
+const notRunError = (file: string): TestResult => ({ testId: file, fileAttr: file, name: file, outcome: "error",
+  message: "was not run: out of time; its tests have no result" });
 
-/** One repeat of the targets within `bounds.total` seconds. They run together first, so the usual case costs nothing.
- * When that times out they run apart, each within `bounds.file` and what is left of the total, and the reports are
- * merged; a file that does not finish alone is one error (never a finding) and is listed in `hung`. Runs are one at
- * a time. The output is as the runs gave it: the caller masks it before it is cut or saved. */
+/** One repeat of the targets. They run together first within `bounds.together`, so the usual case, and a suite that
+ * fits today's limit, costs nothing more. When that times out they run apart: each within `bounds.file`, all within
+ * `bounds.total` of their own, and the reports are merged. A file that does not finish alone is one error (never a
+ * finding) listed in `hung`; one the time ran out before is one error listed in `notRun`. Runs are one at a time. The
+ * output is as the runs gave it: the caller masks it before it is cut or saved. */
 export async function runBounded(session: Runner, snap: string, cfg: ReviewConfig, targets: string[], report: string,
-                                 bounds: Bounds): Promise<{ results: TestResult[] | null; run: RunResult; hung: string[]; apart: boolean }> {
-  const priorHung = (bounds.hung ?? []).filter((h) => targets.includes(h));
-  const live = targets.filter((t) => !priorHung.includes(t));
-  const carried = priorHung.map((h) => hungError(h, `did not finish in ${bounds.file} s; its tests have no result`));
-  if (!bounds.apart && !priorHung.length) {
-    const [run, results] = await runTests(session, snap, cfg, targets, report, targets.length > 1 ? bounds.together : bounds.total);
-    if (!run.timedOut) return { results, run, hung: [], apart: false };
+                                 bounds: Bounds): Promise<Bounded> {
+  const prior = bounds.hung ?? {};
+  const live = targets.filter((t) => !(t in prior));
+  const carried = targets.filter((t) => t in prior);
+  if (!bounds.apart && !carried.length) {
+    const [run, results] = await runTests(session, snap, cfg, targets, report, bounds.together);
+    if (!run.timedOut) return { results, run, hung: {}, notRun: [], apart: false };
     if (targets.length === 1) {
-      const limit = bounds.total;
-      return { results: [hungError(targets[0]!, `did not finish in ${limit} s; its tests have no result`)], run: { ...run, timedOut: false },
-        hung: [targets[0]!], apart: false };
+      return { results: [hungError(targets[0]!, bounds.together)], run: { ...run, timedOut: false },
+        hung: { [targets[0]!]: bounds.together }, notRun: [], apart: false };
     }
-    return await apartRuns(session, snap, cfg, targets, report, bounds, run.seconds, run.output, []);
+    return await apartRuns(session, snap, cfg, targets, report, bounds, run.seconds, run.output, {});
   }
-  return await apartRuns(session, snap, cfg, live, report, bounds, 0, "", carried, priorHung);
+  return await apartRuns(session, snap, cfg, live, report, bounds, 0, "", prior, carried);
 }
 
-async function apartRuns(session: Runner, snap: string, cfg: ReviewConfig, targets: string[], report: string, bounds: Bounds,
-                         spent: number, output: string, carried: TestResult[], priorHung: string[] = [])
-  : Promise<{ results: TestResult[] | null; run: RunResult; hung: string[]; apart: boolean }> {
-  // A run that timed out used all it was given.
-  let used = spent;
-  const results: TestResult[] = [...carried], hung: string[] = [...priorHung];
-  const out = [output], started = spent;
-  let seconds = 0, seen = carried.length > 0;
+async function apartRuns(session: Runner, snap: string, cfg: ReviewConfig, targets: string[], report: string,
+                         bounds: Bounds, spent: number, output: string, prior: Record<string, number>,
+                         carried: string[] = []): Promise<Bounded> {
+  // The apart stage has a budget of its own; what the run together used is not taken from it.
+  let used = 0;
+  const hung: Record<string, number> = { ...prior }, notRun: string[] = [];
+  const results: TestResult[] = carried.map((h) => hungError(h, prior[h]!));
+  const out = [output];
+  let seconds = spent, seen = carried.length > 0;
   for (const [k, target] of targets.entries()) {
-    const left = bounds.total - used;
-    if (left < 1) {
-      hung.push(target);
-      results.push(hungError(target, `was not run: the ${bounds.total} s for this run were used; its tests have no result`));
+    // A file always gets its whole time, or is not run.
+    if (bounds.total - used < bounds.file) {
+      notRun.push(target);
+      results.push(notRunError(target));
       continue;
     }
-    const limit = Math.min(bounds.file, Math.floor(left));
-    const [run, parsed] = await runTests(session, snap, cfg, [target], report.replace(/\.xml$/, `-${k + 1}.xml`), limit);
-    used += run.timedOut ? limit : run.seconds;
+    const [run, parsed] = await runTests(session, snap, cfg, [target], report.replace(/\.xml$/, `-${k + 1}.xml`), bounds.file);
+    used += run.timedOut ? bounds.file : run.seconds;
     seconds += run.seconds;
     out.push(`== ${target} ==\n${run.output}`);
     if (run.timedOut) {
-      hung.push(target);
-      results.push(hungError(target, `did not finish in ${limit} s; its tests have no result`));
+      hung[target] = bounds.file;
+      results.push(hungError(target, bounds.file));
     } else if (parsed) {
       results.push(...parsed);
       seen = true;
     }
   }
-  const run: RunResult = { exitCode: hung.length ? null : 0, output: out.filter(Boolean).join("\n"), timedOut: false,
-    seconds: seconds + started };
-  return { results: seen || hung.length ? results : null, run, hung, apart: true };
+  const run: RunResult = { exitCode: Object.keys(hung).length || notRun.length ? null : 0,
+    output: out.filter(Boolean).join("\n"), timedOut: false, seconds };
+  const any = seen || Object.keys(hung).length > 0 || notRun.length > 0;
+  return { results: any ? results : null, run, hung, notRun, apart: true };
 }

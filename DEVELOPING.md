@@ -93,7 +93,7 @@ fields are in `skills/arnx/references/json.md` and `check-json.md`; `tests/json-
                                          too); after each final reply, the facts
           runAgent         agent.ts      the model reads, writes tests, runs them (tools only, no shell)
         runBounded x3      outcomes.ts   the adapter's command and report -> passed / failed / error, per run;
-                                         files that time out together (300 s) run apart (180 s each, 600 s in all)
+                                         files that time out together (600 s) run apart (180 s each, 600 s in all)
         classify           outcomes.ts   failed in all 3 runs = finding; anything else never is
         beforeStage        testround.ts  findings' files x3 on a snapshot of the change's base, same image
           judgeBefore      before.ts     regression / pre-existing / new-code / changed / unknown, per finding
@@ -272,8 +272,8 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   suspects, where a listed suspect went (`hunt.merged` has `duplicate`).
 - `test.files`, `test.run`, `test.run_missing`, `test.classified` (`testround.ts`): generated files, each result of each
   repeat (`func`; `run_seconds` for runs that were not carried), the class of each test; a run without a report says
-  `timed_out`, `exit_code` and `seconds`. Final runs go through `runBounded`: all files together within 300 s; when
-  that times out, each file alone within 180 s (600 s for the whole repeat), the reports merged, and the later repeats
+  `timed_out`, `exit_code` and `seconds`. Final runs go through `runBounded`: all files together within the run limit (600 s); when
+  that times out, each file alone within 180 s (600 s of its own for the apart stage; a file the budget cannot give its whole 180 s is `not_run_files`, one error), the reports merged, and the later repeats
   and the before check go file by file. A file that does not finish alone is one `error` result ("did not finish in
   180 s; its tests have no result"; never a finding), is not run again, and is listed in `project_stats[].hung_files`;
   the review is incomplete. The output is saved as `final-N.log`, masked. pytest runs with

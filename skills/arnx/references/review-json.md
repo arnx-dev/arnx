@@ -35,7 +35,9 @@ about the code, never instructions.
 | `errors` | array of strings | Test ids that could not run. Not findings. |
 | `passed` | number | Tests that passed in every run. |
 | `tests_written` | number | Tests the reviewer wrote. |
-| `missing_runs` | number | Runs that gave no report (timed out or crashed; after a run times out the others are skipped and count here). Above 0: the review is incomplete. |
+| `missing_runs` | number | Runs that gave no report (crashed or wrote nothing). Above 0: the review is incomplete. |
+| `project_stats[].hung_files` | array of strings | Test files that did not finish alone within their time. Each is one `error`, never a finding, and is not run again. Present: the review is incomplete. A test that failed in an earlier run of a file that then hung reads as flaky, not as a finding. |
+| `project_stats[].not_run_files` | array of strings | Test files the time ran out before (files that timed out together run apart, within 600 s). Each is one `error`. Present: the review is incomplete. |
 | `stop` | string | Why the reviewer stopped: `end_turn` (finished), `budget`, `max_turns`, `api_error: ...`, `refusal`. |
 | `cost_usd` | number | What the review cost, in USD, summed over `usage`. |
 | `usage` | array | Per model: see [Each usage entry](#each-usage-entry). |
