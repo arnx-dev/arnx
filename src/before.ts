@@ -231,20 +231,35 @@ const WORDS = /[A-Za-z_$][\w$]*/g;
 
 /** The names a change starts using: in the code (not the comments or strings) of the added lines of its source files,
  * not of their removed ones. Only source files count: a test, a file in a test folder, a document or a data file
- * brings no name. Each hunk is read as code on its own, so a comment or string that opens before it is not known. */
-export function namesAdded(diff: string, isTest: (name: string) => boolean): Set<string> {
+ * brings no name. `read(path, side)`: the file's whole text after ("new") or before ("old") the change, null when it
+ * cannot be read: the code is then told from the whole file, so a comment or string that opens above a hunk is known.
+ * Without it, each hunk is read on its own. */
+export function namesAdded(diff: string, isTest: (name: string) => boolean,
+  read?: (path: string, side: "new" | "old") => string | null): Set<string> {
   const added = new Set<string>(), gone = new Set<string>();
   for (const section of diff.split(DIFF_SECTION)) {
     const path = /^\+\+\+ b\/(.*)$/m.exec(section)?.[1] ?? /^--- a\/(.*)$/m.exec(section)?.[1] ?? "";
     if (!path || !SOURCE.test(path) || isTest(posix.basename(path)) || inTestFolder(path)) continue;
-    // Per hunk, the new side (context and added lines) and the old side (context and removed ones), as code.
-    for (const hunk of section.split(/^@@.*$/m).slice(1)) {
-      const lines = hunk.split("\n");
-      for (const [mark, set] of [["+", added], ["-", gone]] as const) {
-        const side = lines.filter((l) => l.startsWith(" ") || l.startsWith(mark));
-        const code = codeText(side.map((l) => l.slice(1)).join("\n"), path).split("\n");
-        side.forEach((l, k) => {
-          if (l.startsWith(mark)) for (const w of code[k]?.match(WORDS) ?? []) set.add(w);
+    const whole = new Map<string, string[] | null>();
+    const lines = (side: "new" | "old") => {
+      if (!whole.has(side)) {
+        const text = read?.(path, side) ?? null;
+        whole.set(side, text === null ? null : codeText(text, path).split("\n"));
+      }
+      return whole.get(side)!;
+    };
+    for (const hunk of section.split(/^(?=@@ )/m).slice(1)) {
+      const head = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(hunk);
+      const rows = hunk.split("\n").slice(1).filter((l) => l.startsWith(" ") || l.startsWith("+") || l.startsWith("-"));
+      for (const [mark, other, set, side, first] of [["+", "-", added, "new", head?.[2]], ["-", "+", gone, "old", head?.[1]]] as const) {
+        const file = head ? lines(side) : null;
+        const mine = rows.filter((l) => !l.startsWith(other));
+        const at = Number(first) - 1;
+        // The whole file's line for each row, else the hunk read alone.
+        const code = file ? null : codeText(mine.map((l) => l.slice(1)).join("\n"), path).split("\n");
+        mine.forEach((l, k) => {
+          if (!l.startsWith(mark)) return;
+          for (const w of (file ? file[at + k] : code![k])?.match(WORDS) ?? []) set.add(w);
         });
       }
     }
@@ -271,14 +286,15 @@ const LANGUAGE = new Set(["async", "await", "class", "const", "elif", "else", "e
 
 /** The names a change brings in: on its added source lines (namesAdded), and in no old version of the files it changes.
  * `old`: a file's text before the change, null when it is new. */
-export function newNames(diff: string, isTest: (name: string) => boolean, old: (path: string) => string | null): Set<string> {
+export function newNames(diff: string, isTest: (name: string) => boolean, old: (path: string) => string | null,
+  read?: (path: string, side: "new" | "old") => string | null): Set<string> {
   const before = new Set<string>();
   for (const section of diff.split(DIFF_SECTION)) {
     const path = /^\+\+\+ b\/(.*)$/m.exec(section)?.[1];
     const text = path && SOURCE.test(path) ? old(path) : null;
     if (text) for (const w of codeText(text, path!).match(WORDS) ?? []) before.add(w);
   }
-  return new Set([...namesAdded(diff, isTest)].filter((n) => n.length >= 4 && !LANGUAGE.has(n) && !before.has(n)));
+  return new Set([...namesAdded(diff, isTest, read)].filter((n) => n.length >= 4 && !LANGUAGE.has(n) && !before.has(n)));
 }
 
 /** The first of `names` the test `func` uses: a name in its code (comments and strings left out), or in a string that
@@ -305,9 +321,9 @@ export function vacuousBefore(b: Before, source: string, func: string, names: Re
 
 /** A same failure says nothing when tests that pass with the change fail the same way there: the message is shared
  * (an `assert False`), not specific to this test. Counted: tests of `passedOnChange` that failed with `signatureOf`'s
- * first line in each of the `each` runs they are in (default: all of `baseRuns`), and in no run otherwise. */
-export function sharedFailure(b: Before, signatureOf: string, baseRuns: BeforeRun[], passedOnChange: ReadonlySet<string>,
-  each = baseRuns.length): Before {
+ * first line in every run of `baseRuns`, and in no run otherwise. */
+export function sharedFailure(b: Before, signatureOf: string, baseRuns: BeforeRun[], passedOnChange: ReadonlySet<string>): Before {
+  const each = baseRuns.length;
   if (b.status !== "pre-existing" || !passedOnChange.size || !each) return b;
   const sig = signature(signatureOf);
   const seen = new Map<string, number>(); // test id -> runs it failed with that signature in; -1 once it did not
@@ -319,8 +335,15 @@ export function sharedFailure(b: Before, signatureOf: string, baseRuns: BeforeRu
     }
   }
   const n = [...seen.values()].filter((k) => k >= each).length;
-  return n ? { ...b, status: "unknown", detail: `fails the same way there, but so do ${n} test${n === 1 ? "" : "s"} that ` +
-    "pass with the change" } : b;
+  return n ? { ...b, status: "unknown", detail: `fails the same way there, but so ${n === 1 ? "does 1 test that passes" :
+    `do ${n} tests that pass`} with the change` } : b;
+}
+
+/** `sharedFailure` over groups of runs (the findings' files' runs, the fix proof's own): a test counts in its own group,
+ * whatever number of runs that group has. */
+export function sharedInGroups(b: Before, signatureOf: string, groups: BeforeRun[][], passedOnChange: ReadonlySet<string>)
+  : Before {
+  return groups.reduce((acc, g) => sharedFailure(acc, signatureOf, g, passedOnChange), b);
 }
 
 /** A failure of the test's own check, not a crash in the code it runs. */

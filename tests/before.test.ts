@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CopyDiffers } from "../src/baked";
-import { type Before, type BeforeRun, judgeBefore, namesAdded, newNames, sharedFailure, usesNew, vacuousBefore } from "../src/before";
+import { type Before, type BeforeRun, judgeBefore, namesAdded, newNames, sharedFailure, sharedInGroups, usesNew, vacuousBefore } from "../src/before";
 import { testBody } from "../src/shallow";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { EVENTS_FILE, type TraceEvent } from "../src/events";
@@ -485,4 +485,58 @@ describe("names, not words", () => {
     const other: Before = { status: "changed", detail: "d", runs: [] };
     expect(sharedFailure(other, "AssertionError: assert False", base, new Set(["t.py::test_p"]))).toBe(other);
   });
+});
+
+describe("fix round: whole files, shared messages", () => {
+  const HEAD = ["def a():", '    """Docs that', "    mention AGGREGATE and SHOW", "    go on and on", '    """', "    return brand_new(1)", ""].join("\n");
+  const BASE = ["def a():", '    """Docs that', "    go on and on", '    """', "    return 1", ""].join("\n");
+  const hunkDiff = (hunks: string[]) => ["diff --git a/lib/a.py b/lib/a.py", "--- a/lib/a.py", "+++ b/lib/a.py", ...hunks, ""].join("\n");
+  const read = (_path: string, side: "new" | "old") => side === "new" ? HEAD : BASE;
+
+  test("a hunk that starts inside a docstring is read with the whole file around it", () => {
+    // Lines 3-6 of the head: the docstring's inside, its end, then a line of code.
+    const code = hunkDiff(["@@ -3,3 +3,4 @@", "+    mention AGGREGATE and SHOW", "     go on and on", '     """', "-    return 1", "+    return brand_new(1)"]);
+    const names = [...namesAdded(code, notTest, read)];
+    expect(names).toContain("brand_new");
+    expect(names).not.toContain("AGGREGATE");
+    expect(names).not.toContain("SHOW");
+    // Without the file, the hunk alone gets both wrong (the fallback keeps working, with that limit).
+    expect([...namesAdded(code, notTest)]).toContain("AGGREGATE");
+    // A file that cannot be read falls back to its hunks.
+    expect([...namesAdded(code, notTest, () => null)]).toContain("AGGREGATE");
+    expect([...newNames(code, notTest, () => BASE, read)]).toEqual(["brand_new"]);
+  });
+
+  const fail = (name: string, message: string) => ({ testId: `t.py::${name}`, fileAttr: "t.py", name, outcome: "failed", message });
+  test("shared messages are counted across the finding files' runs and the fix proof's own, however many runs each has", () => {
+    const same: Before = { status: "pre-existing", detail: "d", runs: ["failed"], message: "x" };
+    const m = "AssertionError: assert False";
+    const own = [0, 1, 2].map(() => run(fail("test_q", m)));
+    const proofRuns = [run(fail("test_p", m))]; // cut after one run
+    const b = sharedInGroups(same, m, [own, proofRuns], new Set(["t.py::test_p"]));
+    expect(b.status).toBe("unknown");
+    expect(b.detail).toBe("fails the same way there, but so does 1 test that passes with the change");
+    expect(sharedInGroups(same, m, [own, []], new Set(["t.py::test_p"]))).toBe(same);
+    expect(sharedInGroups(same, m, [own, proofRuns], new Set(["t.py::test_z"]))).toBe(same);
+  });
+
+  const SHARED = junitXml([[GEN, "test_add", "passed", ""], [GEN, "test_old", "failed", "assert 0 == 1"],
+    [GEN, "test_ok", "failed", "assert 0 == 1"], [GEN, "test_aaa", "passed", ""]]);
+  const writes = () => new ScriptedAgent([
+    [tool("write_file", { path: GEN, content: "from app import add, old\n\ndef test_aaa():\n    pass\n\ndef test_add():\n    assert add(2, 3) == 5\n" +
+      "\ndef test_old():\n    assert old() == 1\n\ndef test_ok():\n    pass\n" })],
+    [text(REPORT.replace("}]", "}, { \"test\": \"" + GEN + "::test_aaa\", \"expects\": \"a\" }]"))]]);
+  const AFTER_SHARED = junitXml([[GEN, "test_add", "failed", "assert -1 == 5"], [GEN, "test_old", "failed", "assert 0 == 1"],
+    [GEN, "test_ok", "passed", ""], [GEN, "test_aaa", "passed", ""]]);
+  const factory: SessionFactory = async (_cfg, snap, _log, body) =>
+    body(new FakeSession(snap, () => [snap.endsWith("/before") ? SHARED : AFTER_SHARED, "", false]));
+  for (const [name, fixProofMax] of [["with the fix proof on", 20], ["with the fix proof off", 0], ["past the fix proof's cap", 1]] as const) {
+    test(`a message shared with a test that passes with the change settles nothing, ${name}`, async () => {
+      const { review } = await runReview(repo, { settings: { ...SETTINGS, fixProofMax }, agentModel: writes(),
+        challenger: new FakeJson([{ verdict: "confirmed", reason: "x" }]), sessionFactory: factory });
+      const old = review.findings.find((f) => f.func === "test_old")!;
+      expect(old.before!.status).toBe("unknown");
+      expect(old.before!.detail).toBe("fails the same way there, but so does 1 test that passes with the change");
+    });
+  }
 });

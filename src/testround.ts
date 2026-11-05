@@ -11,7 +11,7 @@ import { adapterFor } from "./adapters";
 import { absentFromSnapshot, bakedError, bakedIn, imageFiles, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
   from "./baked";
 import { asFallbackBefore, asFallbackFix, BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
-  fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, newNames, notChecked, sharedFailure, SKIP_REASONS, textBefore, textFix,
+  fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, newNames, notChecked, sharedInGroups, SKIP_REASONS, textBefore, textFix,
   vacuousBefore } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
 import { type Boundary, maskedCopy, type Swap } from "./boundary";
@@ -533,7 +533,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
     const proofs = o.before?.fixProofMax ? [...classes!.passed]
       .sort((a, b) => (a.testId < b.testId ? -1 : a.testId > b.testId ? 1 : 0)).slice(0, o.before.fixProofMax) : [];
     if (o.before && (failing.length || proofs.length)) {
-      ({ before, fixProof } = await beforeStage(repo, cfg, { ...o.before, findings: failing, proofs, files,
+      ({ before, fixProof } = await beforeStage(repo, cfg, { ...o.before, findings: failing, proofs, passed: [...(classes?.passed ?? [])].map((x) => x.testId), files,
         writeDir: o.writeDir, runs: o.runs, apart, headSnap: snap, headKey, tmp, outDir: o.outDir, fallback: env?.state === "fallback",
         sessionFactory: o.sessionFactory ?? dockerSession, say, ...(baked ? {} : { swap }),
         ...(o.brain.boundary ? { boundary: o.brain.boundary } : {}) }));
@@ -682,7 +682,7 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
  * The fix proof shares its session: `proofs` (tests that passed in every run) in those files are judged from the same
  * runs; the files holding the others run `runs` times more, after the findings' runs, so they cannot change them. */
 async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | null; diff?: string; deadline?: number;
-  findings: TestResult[]; proofs: TestResult[]; files: Record<string, string>; writeDir: string; runs: number;
+  findings: TestResult[]; proofs: TestResult[]; passed: string[]; files: Record<string, string>; writeDir: string; runs: number;
   headSnap: string; headKey: string; tmp: string; fallback?: boolean;
   apart?: boolean; outDir: string; sessionFactory: SessionFactory; say: (m: string) => void; boundary?: Boundary; swap?: Swap })
   : Promise<{ before?: BeforeCheck; fixProof?: FixCheck }> {
@@ -832,18 +832,23 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
       shallowKind(o.files[file], funcOf(t), (p) => source(file, p)) === "source-text";
     // Nor does a test that fakes what only the change uses prove a fix.
     const isTest = (name: string) => adapterFor(cfg).isTestFile(name);
-    const added = namesAdded(o.diff ?? "", isTest);
+    // The whole files give the code its comments and strings: the change's side is the one under review, the other the base.
+    const readSide = (path: string, side: "new" | "old") => {
+      const at = join(side === "new" ? o.headSnap : snap, path);
+      return existsSync(at) ? readFileSync(at, "utf8") : null;
+    };
+    const added = namesAdded(o.diff ?? "", isTest, readSide);
     // And failing the same way there says nothing when the test uses what the change adds.
     const brought = newNames(o.diff ?? "", isTest, (path) => {
       const at = join(snap, path);
       return existsSync(at) ? readFileSync(at, "utf8") : null;
-    });
-    const passing = new Set(o.proofs.map((p) => p.testId));
+    }, readSide);
+    const passing = new Set(o.passed);
     return result(() => done(Object.fromEntries(o.findings.map((t) => {
       const file = ownerFile(t.fileAttr, own), b = judgeBefore(t, file, runs, envChanged);
       // Tests that pass with the change and fail there with the same message: that message says nothing about this one.
-      const judged = asText(t, file) ? textBefore(b) : file === null ? b : sharedFailure(
-        vacuousBefore(b, o.files[file] ?? "", funcOf(t), brought, file), t.message, [...runs, ...proofRuns], passing, runs.length);
+      const judged = asText(t, file) ? textBefore(b) : file === null ? b : sharedInGroups(
+        vacuousBefore(b, o.files[file] ?? "", funcOf(t), brought, file), t.message, [runs, proofRuns], passing);
       return [t.testId, o.fallback ? asFallbackBefore(judged) : judged];
     }))),
     () => proofLate ? proved({}, "time") : proved(Object.fromEntries(o.proofs.map((t) => {

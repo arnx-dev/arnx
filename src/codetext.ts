@@ -8,31 +8,50 @@ interface Lang {
   slash?: true; // `//` and `/* */` comments
   nest?: true; // block comments nest (Rust, Kotlin, Swift)
   char?: true; // `'` holds one character, not a string (and is a lifetime or label in Rust)
-  triple?: true; // `"""` or `'''` strings across lines
+  triple?: true; // triple-quoted strings across lines
   backtick?: "template" | "raw"; // JS template string with `${}`, Go raw string
-  raw?: true; // Rust raw strings r#"…"#
-  ruby?: true; // =begin … =end
+  raw?: true; // Rust raw strings r#"..."#
+  ruby?: true; // =begin ... =end
   php?: true; // `#[` is an attribute, not a comment
+  regex?: true; // /.../ regular expression literals (JS)
+  fstr?: true; // Python: only an f-string holds code
+  interp?: Interp; // how a double-quoted string holds code
 }
-const JS: Lang = { slash: true, backtick: "template" };
+/** Code inside a string: "brace" `{x}` (Python f-strings, C# `$"..."`), "hash" `#{x}` (Ruby), "kt" `${x}` and `$x`,
+ * "dollar" `$x` (PHP), "swift" backslash-paren, "rust" `{x}` naming a variable, "tpl" `${x}` (JS template). */
+type Interp = "brace" | "hash" | "kt" | "dollar" | "swift" | "rust" | "tpl";
+const JS: Lang = { slash: true, backtick: "template", regex: true, interp: "tpl" };
 const C: Lang = { slash: true, char: true };
 const LANGS: Record<string, Lang> = {
-  py: { hash: true, triple: true }, rb: { hash: true, ruby: true }, php: { hash: true, slash: true, php: true },
+  py: { hash: true, triple: true, interp: "brace", fstr: true }, rb: { hash: true, ruby: true, interp: "hash" },
+  php: { hash: true, slash: true, php: true, interp: "dollar" },
   js: JS, jsx: JS, mjs: JS, cjs: JS, ts: JS, tsx: JS, mts: JS, cts: JS,
-  rs: { slash: true, nest: true, char: true, raw: true }, go: { ...C, backtick: "raw" },
-  java: { ...C, triple: true }, kt: { ...C, nest: true, triple: true }, cs: { ...C, triple: true },
-  swift: { ...C, nest: true, triple: true }, c: C, h: C, cpp: C, hpp: C,
+  rs: { slash: true, nest: true, char: true, raw: true, interp: "rust" }, go: { ...C, backtick: "raw" },
+  java: { ...C, triple: true }, kt: { ...C, nest: true, triple: true, interp: "kt" },
+  cs: { ...C, triple: true, interp: "brace" }, swift: { ...C, nest: true, triple: true, interp: "swift" },
+  c: C, h: C, cpp: C, hpp: C,
 };
 /** The languages codeText reads: every one a project's sources (untested.ts SOURCE) can be in. */
 export const CODE_LANGUAGES = Object.keys(LANGS);
 
-const NL = 10, BACKSLASH = 92, DQ = 34, SQ = 39, TICK = 96, HASH = 35, SLASH = 47, STAR = 42, LBRACE = 123, RBRACE = 125;
+const NL = 10, BACKSLASH = 92, DQ = 34, SQ = 39, TICK = 96, HASH = 35, SLASH = 47, STAR = 42, LBRACE = 123, RBRACE = 125,
+  LPAREN = 40, RPAREN = 41, DOLLAR = 36;
 const isWord = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || c === 95 || (c >= 97 && c <= 122) || c > 127;
+const isStart = (c: number) => (c >= 65 && c <= 90) || c === 95 || (c >= 97 && c <= 122) || c > 127;
+/** After these a `/` starts a regular expression; after a name, number, `)`, `]` or `}` it divides. Where it cannot be
+ * told (after `)` or `}`), it is taken as a division: code is kept, so a name is never lost. */
+const BEFORE_REGEX = new Set(["(", ",", "=", ":", "[", "!", "&", "|", "?", "{", ";", "+", "-", "*", "%", "<", ">", "~", "^"]);
+const KEYWORDS = new Set(["return", "typeof", "case", "do", "else", "in", "of", "instanceof", "void", "delete", "throw",
+  "new", "yield", "await"]);
+
+/** A string being read: how it ends and how code enters it. */
+interface Str { quote: number; triple: boolean; multi: boolean; mode: Interp | null }
 
 /** `source` without comments and string contents, in the language of `path` (its extension). Lines stay where they are:
- * what is cut leaves its line breaks, so line n of the result is line n of the source. Quotes stay, empty. A file of a
- * type not listed in CODE_LANGUAGES is returned unchanged: nothing is known about what is code in it. `strings`, when
- * given, receives each string's text. */
+ * what is cut leaves its line breaks, so line n of the result is line n of the source. Quotes stay, empty. Code inside
+ * a string (an f-string's `{x}`, a template's `${x}`, Ruby's `#{x}`) stays. A file of a type not listed in
+ * CODE_LANGUAGES is returned unchanged: nothing is known about what is code in it. `strings`, when given, receives each
+ * string's text. */
 export function codeText(source: string, path: string, strings?: (text: string) => void): string {
   const lang = LANGS[posix.extname(path).slice(1).toLowerCase()];
   if (!lang) return source;
@@ -48,55 +67,97 @@ export function codeText(source: string, path: string, strings?: (text: string) 
   const cut = (a: number, b: number, keep = "") => {
     if (a > run) out.push(s.slice(run, a));
     const k = newlines(a, b);
-    out.push(keep + (k ? "\n".repeat(k) : ""));
+    if (keep || k) out.push(keep + (k ? "\n".repeat(k) : ""));
     run = b;
-  };
-  // Ends of strings: each returns the index of the closing delimiter (n when there is none).
-  const upTo = (from: number, quote: number, multi: boolean) => {
-    let j = from;
-    for (; j < n; j++) {
-      const c = s.charCodeAt(j);
-      if (c === BACKSLASH) j++;
-      else if (c === quote) return j;
-      else if (c === NL && !multi) return j;
-    }
-    return n;
-  };
-  const tripleEnd = (from: number, quote: number) => {
-    for (let j = from; j < n; j++) {
-      const c = s.charCodeAt(j);
-      if (c === BACKSLASH) j++;
-      else if (c === quote && s.charCodeAt(j + 1) === quote && s.charCodeAt(j + 2) === quote) return j;
-    }
-    return n;
   };
   const take = (a: number, b: number) => {
     if (strings) strings(s.slice(a, Math.min(b, n)));
   };
-  const braces: number[] = []; // JS: the brace depth at each open `${`
-  let depth = 0;
-  // A template's text from `from`: to the closing backtick (returned, run resumes there), or to a `${` (returned after
-  // it, with the brace depth pushed so that its `}` brings the text back).
-  const template = (from: number): number => {
-    let j = from;
+  const stack: Str[] = []; // strings whose code we are in
+  const depths: number[] = []; // and the open brackets of that code
+  let skip = 0; // after body(): the closing quote's length, 0 when the string ended otherwise or code starts
+  // A string's text from `from`: returns where reading goes on. At the string's end (skip is the quote's length) or at
+  // code inside it (`st` is then on the stack, unless the code is one name, which is left in the run).
+  const body = (from: number, st: Str): number => {
+    let j = from, seg = from;
+    skip = 0;
+    const code = (at: number, resume: number) => { // the text [seg, at) is cut, the code goes on at `resume`
+      take(seg, at);
+      cut(seg, resume);
+    };
+    const name = (at: number) => { // `$x` or `{x}`: the name is code, the text goes on after it
+      code(at, at + 1);
+      let e = at + 2;
+      while (e < n && isWord(s.charCodeAt(e))) e++;
+      seg = e;
+      j = e - 1;
+    };
     for (; j < n; j++) {
-      const c = s.charCodeAt(j);
-      if (c === BACKSLASH) j++;
-      else if (c === TICK) {
-        take(from, j);
-        cut(from, j);
-        return j + 1;
-      } else if (c === 36 && s.charCodeAt(j + 1) === LBRACE) {
-        take(from, j);
-        cut(from, j + 2);
-        braces.push(depth);
+      const c = s.charCodeAt(j), d = s.charCodeAt(j + 1);
+      if (c === BACKSLASH) {
+        if (st.mode === "swift" && d === LPAREN) {
+          code(j, j + 2);
+          stack.push(st), depths.push(0);
+          return j + 2;
+        }
+        j++;
+      } else if (c === st.quote && (!st.triple || (d === c && s.charCodeAt(j + 2) === c))) {
+        take(seg, j);
+        cut(seg, j);
+        skip = st.triple ? 3 : 1;
+        return j;
+      } else if (c === NL && !st.multi) {
+        take(seg, j);
+        cut(seg, j);
+        return j;
+      } else if ((st.mode === "tpl" || st.mode === "kt") && c === DOLLAR && d === LBRACE) {
+        code(j, j + 2);
+        stack.push(st), depths.push(0);
         return j + 2;
+      } else if ((st.mode === "kt" || st.mode === "dollar") && c === DOLLAR && isStart(d)) name(j);
+      else if (st.mode === "hash" && c === HASH && d === LBRACE) {
+        code(j, j + 2);
+        stack.push(st), depths.push(0);
+        return j + 2;
+      } else if ((st.mode === "brace" || st.mode === "rust") && c === LBRACE) {
+        if (d === LBRACE) j++;
+        else if (st.mode === "brace") {
+          code(j, j + 1);
+          stack.push(st), depths.push(0);
+          return j + 1;
+        } else if (isStart(d)) name(j);
       }
     }
-    take(from, n);
-    cut(from, n);
+    take(seg, n);
+    cut(seg, n);
     return n;
   };
+  const modeOf = (i: number, c: number): Interp | null => {
+    const m = lang.interp;
+    if (!m) return null;
+    if (c === TICK) return lang.backtick === "template" ? "tpl" : null;
+    if (c === DQ && m === "tpl") return null;
+    if (c !== DQ && !(lang.fstr && c === SQ)) return null;
+    if (lang.fstr) { // Python: an f among the prefix letters, at a word's start
+      let k = i - 1, f = false;
+      for (; k >= 0 && i - k <= 2 && "fFrRbBuU".includes(s[k]!); k--) if (s[k] === "f" || s[k] === "F") f = true;
+      return f && (k < 0 || !isWord(s.charCodeAt(k))) ? "brace" : null;
+    }
+    if (m === "brace") { // C#: $"..." or $@"..." or @$"..."
+      return s.charCodeAt(i - 1) === DOLLAR || (s.charCodeAt(i - 1) === 64 && s.charCodeAt(i - 2) === DOLLAR) ? "brace" : null;
+    }
+    return m;
+  };
+  const regexOk = (i: number): boolean => {
+    let k = i - 1;
+    while (k >= 0 && [32, 9, 10, 13].includes(s.charCodeAt(k))) k--;
+    if (k < 0 || BEFORE_REGEX.has(s[k]!)) return true;
+    if (!isWord(s.charCodeAt(k))) return false;
+    let w = k;
+    while (w >= 0 && k - w < 12 && isWord(s.charCodeAt(w))) w--;
+    return KEYWORDS.has(s.slice(w + 1, k + 1));
+  };
+  let noRegexTo = -1; // a regex with no end on this line leaves the rest of the line as code
   let i = 0;
   while (i < n) {
     const c = s.charCodeAt(i), d = s.charCodeAt(i + 1);
@@ -130,18 +191,11 @@ export function codeText(source: string, path: string, strings?: (text: string) 
       if (end < 0) end = n;
       cut(i, end, " ");
       i = end;
-    } else if (c === DQ || (c === SQ && !lang.char)) {
-      if (lang.triple && s.charCodeAt(i + 1) === c && s.charCodeAt(i + 2) === c) {
-        const e = tripleEnd(i + 3, c);
-        take(i + 3, e);
-        cut(i + 3, e);
-        i = Math.min(e + 3, n);
-      } else {
-        const e = upTo(i + 1, c, false);
-        take(i + 1, e);
-        cut(i + 1, e);
-        i = s.charCodeAt(e) === c ? e + 1 : e;
-      }
+    } else if (c === DQ || (c === SQ && !lang.char) || (c === TICK && lang.backtick === "template")) {
+      const triple = !!lang.triple && c !== TICK && d === c && s.charCodeAt(i + 2) === c;
+      const st: Str = { quote: c, triple, multi: triple || c === TICK, mode: modeOf(i, c) };
+      i = body(i + (triple ? 3 : 1), st);
+      i = Math.min(i + skip, n);
     } else if (c === SQ) {
       // A character, `'a'` or `'\n'`; else a lifetime or label (`'a`), which is code.
       let e = -1;
@@ -153,17 +207,14 @@ export function codeText(source: string, path: string, strings?: (text: string) 
         cut(i + 1, e);
         i = e + 1;
       }
-    } else if (c === TICK && lang.backtick) {
-      if (lang.backtick === "template") i = template(i + 1);
-      else {
-        const e = s.indexOf("`", i + 1);
-        const end = e < 0 ? n : e;
-        take(i + 1, end);
-        cut(i + 1, end);
-        i = e < 0 ? n : e + 1;
-      }
+    } else if (c === TICK && lang.backtick === "raw") {
+      const e = s.indexOf("`", i + 1);
+      const end = e < 0 ? n : e;
+      take(i + 1, end);
+      cut(i + 1, end);
+      i = e < 0 ? n : e + 1;
     } else if (lang.raw && (c === 114 || (c === 98 && d === 114)) && (i === 0 || !isWord(s.charCodeAt(i - 1)))) {
-      // Rust: r"…", r#"…"#, br"…"
+      // Rust: r"...", r#"..."#, br"..."
       let j = i + (c === 98 ? 2 : 1), hashes = 0;
       while (s.charCodeAt(j) === HASH) { hashes++; j++; }
       if (s.charCodeAt(j) !== DQ) i++;
@@ -175,19 +226,43 @@ export function codeText(source: string, path: string, strings?: (text: string) 
         cut(j + 1, end);
         i = e < 0 ? n : e + close.length;
       }
+    } else if (lang.regex && c === SLASH && i >= noRegexTo && regexOk(i)) {
+      // A regular expression literal: to its closing `/` on this line, past classes and escapes; no end: code.
+      let j = i + 1, cls = false, end = -1;
+      for (; j < n; j++) {
+        const x = s.charCodeAt(j);
+        if (x === NL) break;
+        if (x === BACKSLASH) j++;
+        else if (x === 91) cls = true;
+        else if (x === 93) cls = false;
+        else if (x === SLASH && !cls) {
+          end = j;
+          break;
+        }
+      }
+      if (end < 0 || end === i + 1) {
+        noRegexTo = j;
+        i++;
+      } else {
+        cut(i + 1, end);
+        i = end + 1;
+      }
     } else {
-      if (lang.backtick === "template") {
-        if (c === LBRACE) depth++;
-        else if (c === RBRACE) {
-          if (braces.length && braces[braces.length - 1] === depth) {
-            braces.pop();
-            // The expression ends: the `}` goes with the template's text.
+      const top = stack.at(-1);
+      if (top) {
+        const [open, close] = top.mode === "swift" ? [LPAREN, RPAREN] : [LBRACE, RBRACE];
+        if (c === open) depths[depths.length - 1]!++;
+        else if (c === close) {
+          if (depths[depths.length - 1] === 0) {
+            // The code inside the string ends: the bracket goes with its text.
+            stack.pop();
+            depths.pop();
             if (i > run) out.push(s.slice(run, i));
             run = i + 1;
-            i = template(i + 1);
+            i = Math.min(body(i + 1, top) + skip, n);
             continue;
           }
-          depth--;
+          depths[depths.length - 1]!--;
         }
       }
       i++;
