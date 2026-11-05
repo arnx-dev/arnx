@@ -9,11 +9,35 @@ export const SECRET_FILE_GLOBS: readonly string[] = [
   ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "*.jks", "id_rsa*", "id_ecdsa*",
   "id_ed25519*", "*.ppk", ".netrc", ".npmrc", ".pypirc", "credentials*.json", "service-account*.json", "*.session",
   "*.session-journal"];
-/** What a text holding any key-shaped string must hold, as a pattern (QUICK, and an address's `://`). */
-export const MAY_HOLD_KEY = "-{4,5} ?BEGIN|AKIA|sk-|gh[pousr]_|xox[abpr]-|://";
-/** A private key's header in any armour (PEM, PGP's block, SSH2's four dashes), as a pattern. */
-export const KEY_HEADER = "-{4,5} ?BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)? ?-{4,5}";
+/** A private key's header in any armour (PEM, PGP's block, SSH2's four dashes), plain or URL-encoded, as a pattern. */
+export const KEY_HEADER = "-{4,5}( |%20)?BEGIN( |%20|\\+)[A-Z0-9 %+]*PRIVATE( |%20|\\+)KEY(( |%20|\\+)BLOCK)?( |%20)?-{4,5}";
 const isHeader = (s: string) => s.startsWith("----");
+const B64 = "[A-Za-z0-9+/]";
+/** What a private key's base64 must start with when no header says so, as a pattern: a whole PEM's base64, an OpenSSH
+ * body, and the DER of PKCS1 (a version, then the modulus), PKCS8 (a version, then an algorithm), SEC1, encrypted PKCS8. A
+ * certificate or a public key starts otherwise. */
+const KEY_START = [
+  `LS0tLS[1B]CRUdJTi${B64}{0,40}(UFJJVkFURSBLRVk|BSSVZBVEUgS0VZ|QUklWQVRFIEtFW)`,
+  "b3BlbnNzaC1rZXktdjE",
+  `MII${B64}{2}[AQgw]IBAA[JK]`,
+  `MII${B64}{2}[AQgw]IBAD(A${B64}Bgkq|CC)`,
+  `M${B64}{2}CAQEE`,
+  `MI[GH]${B64}AgEBB`,
+  `MI[GH]${B64}AgEAMB[AM]GByqGSM49`,
+  `M${B64}{2}CAQAwBQYDK2V`,
+  `MII${B64}{5}BgkqhkiG9w0BBQ`,
+  `MI[GH]${B64}M${B64}{3}CSqGSIb3DQEF`,
+].join("|");
+/** A private key in a piece of a file no scan reads whole, as a pattern: any header, or a key's start with enough after it. */
+export const KEY_ANYWHERE = `${KEY_HEADER}|(${KEY_START})${B64}{40,}`;
+/** What a text holding any key-shaped string must hold, as a pattern (QUICK, a key's start, an address's `://`), also with
+ * a NUL after each character (UTF-16). */
+export const MAY_HOLD_KEY = `-[^B]?[^B]?[^B]?B[^B]?E[^E]?G[^G]?I[^I]?N|AKIA|sk-|gh[pousr]_|xox[abpr]-|://|${KEY_START}`;
+/** Whether a diff may show a private key at all, cheaply. */
+export const mayShowPrivateKey = (text: string) => text.includes("PRIVATE") || KEY_START_GATE.test(text);
+const KEY_START_GATE = new RegExp(KEY_START);
+const KEY_START_AT = new RegExp(`^(?:${KEY_START})`);
+const KEY_START_ANY = new RegExp(`(?<!${B64})(?:${KEY_START})`, "g");
 // A key starts a token: no letter or digit right before it, so `task-…` or `desk-…` is not an `sk-` key.
 const CONTENT = new RegExp(
   `${KEY_HEADER}|` + "(?<![A-Za-z0-9])(?:AKIA[0-9A-Z]{16}|sk-ant-[A-Za-z0-9_-]{20,}" +
@@ -35,8 +59,8 @@ const HOST_NAME = /^$|\.|^(?:localhost|local)$/i;
  * A template host (none read) may be any. */
 const OWN_HOST = /^(?:[^.]+|127\..*|0\.0\.0\.0)$|(?:^|\.)(?:localhost|local|test|invalid|example|example\.(?:com|net|org))$/i;
 
-/** A match of a secret in a text: the string, and where it starts. */
-interface Hit { 0: string; index: number }
+/** A match of a secret in a text: the string, and where it starts. `start`: a private key known by how it starts. */
+interface Hit { 0: string; index: number; start?: true }
 
 /** Each password in an address in `text`, with the @ after it. On a host of one's own (`postgres:postgres@localhost`) only
  * one that looks random counts: tests connect with the others, and a stand-in would break them. */
@@ -54,9 +78,80 @@ function addressPasswords(text: string): Hit[] {
 }
 
 /** Every secret-shaped string in `text`, first to last: what CONTENT matches, and passwords in addresses. */
-const contentMatches = (text: string): Hit[] => [
-  ...(QUICK.test(text) ? [...text.matchAll(new RegExp(CONTENT, "g"))] as Hit[] : []), ...addressPasswords(text)]
-  .sort((a, b) => a.index - b.index);
+const contentMatches = (text: string): Hit[] => {
+  const found = QUICK.test(text) ? [...text.matchAll(new RegExp(CONTENT, "g"))] as Hit[] : [];
+  return [...found, ...headerlessKeys(text, found), ...addressPasswords(text)].sort((a, b) => a.index - b.index);
+};
+
+/** How far after a header a key's body may start and end. */
+const BODY_WINDOW = 65536;
+/** The most headers and key starts a text gets its bodies read for: each read may take a window. A text with more headers
+ * counts as holding a body, and is no one's code. */
+const BODIES_READ = 1000;
+const LINE_END = /\\+[rn]|\r\n?|\n/g;
+const TRAILING = new Set("\"'`,;+\\)] \t");
+/** A line without what a language, a comment, a quote or a diff puts around it. */
+function bareLine(raw: string): string {
+  let end = raw.length;
+  while (end > 0 && TRAILING.has(raw[end - 1]!)) end--;
+  return raw.slice(0, end).replace(/^[\s+\-*/#>;!|%]*(?:[bBrRuUfF]?["'`])?/, "");
+}
+
+/** The body at the start of `after`, however it is wrapped: on real or escaped line ends, up to the END line or the first
+ * line that is not whole tokens of base64. `pool`: its base64. `length`: how far it runs. Blank lines and a `Proc-Type:`
+ * style line are passed over. */
+function bodyAt(after: string): { pool: string; length: number } {
+  let pool = "", length = 0;
+  for (let from = 0; from <= after.length;) {
+    LINE_END.lastIndex = from;
+    const eol = LINE_END.exec(after);
+    const to = eol ? eol.index : after.length;
+    const raw = after.slice(from, to);
+    const end = /-{4,5} ?END /.exec(raw);
+    const line = bareLine(end ? raw.slice(0, end.index) : raw);
+    if (line && !/^[A-Za-z][A-Za-z0-9-]*: /.test(line)) {
+      const tokens = line.split(/\s+/);
+      if (!tokens.every((t) => /^[A-Za-z0-9+/=]{8,}$/.test(t))) break;
+      pool += tokens.join("");
+      length = to;
+    }
+    if (end || !eol) break;
+    from = to + eol[0].length;
+  }
+  return { pool, length };
+}
+/** Enough of it, in both cases, not one letter over and over: a key's base64 and no placeholder. */
+const isKeyBody = (pool: string) => pool.length >= 40 && /[a-z]/.test(pool) && /[A-Z]/.test(pool) && new Set(pool).size >= 16;
+/** What stands after a header. A URL-encoded one has its body encoded too. */
+function bodyAfter(text: string, m: Hit): { pool: string; length: number } {
+  const after = text.slice(m.index + m[0].length, m.index + m[0].length + BODY_WINDOW);
+  return bodyAt(m[0].includes("%") || /BEGIN\+/.test(m[0])
+    ? after.replace(/%([0-9A-Fa-f]{2})/g, (_, h: string) => String.fromCharCode(parseInt(h, 16))) : after);
+}
+
+/** The keys known by how they start, whole or wrapped, with no header before them. */
+function headerlessKeys(text: string, found: readonly Hit[]): Hit[] {
+  if (!KEY_START_GATE.test(text)) return [];
+  const blocks = found.filter((m) => isHeader(m[0])).slice(0, BODIES_READ).map((m) => {
+    const from = m.index + m[0].length;
+    return [from, from + bodyAfter(text, m).length] as const;
+  });
+  const out: Hit[] = [];
+  let reads = 0;
+  for (const m of text.matchAll(KEY_START_ANY)) {
+    if (blocks.some(([a, b]) => m.index >= a && m.index < b)) continue;
+    const rest = text.slice(m.index, m.index + BODY_WINDOW);
+    const run = /^[A-Za-z0-9+/=]+/.exec(rest)![0];
+    if (run.length >= 64 || (reads++ < BODIES_READ && bodyAt(rest).pool.length >= 64)) {
+      out.push({ 0: run, index: m.index, start: true });
+    }
+  }
+  return out;
+}
+
+/** Runs like a key's body: 40 or more base64 characters in both cases. */
+const bodyRuns = (text: string) => [...text.matchAll(/[A-Za-z0-9+/=]{40,}/g)].map(([run]) => run)
+  .filter((run) => /[a-z]/.test(run) && /[A-Z]/.test(run));
 
 /** fnmatch.fnmatchcase for the simple globs above: * and ? only. */
 export function globRegex(glob: string): RegExp {
@@ -72,7 +167,7 @@ export function isSecretPath(rel: string): boolean {
 }
 
 export function hasSecretContent(text: string): boolean {
-  return CONTENT.test(text) || addressPasswords(text).length > 0;
+  return CONTENT.test(text) || addressPasswords(text).length > 0 || headerlessKeys(text, []).length > 0;
 }
 
 /** A file the user allowed although it holds key-shaped text (a detector's fixtures): `matches` pins each such
@@ -83,25 +178,51 @@ const pinOf = (s: string) => createHash("sha256").update(s).digest("hex").slice(
 /** Whether `pins` allows this key-shaped string. */
 export const isPinned = (s: string, pins: readonly string[]) => pins.includes(pinOf(s));
 
-/** The pins of every key-shaped string in `text`, unique and sorted. */
+/** What a file shows of a private key's body beside its headers: each block after a header, and any run like a body. A
+ * pin of a header alone would let another key in under it. */
+function keyPieces(text: string, all: readonly Hit[]): string[] {
+  if (!all.some((m) => isHeader(m[0]))) return [];
+  return [...all.filter((m) => isHeader(m[0])).slice(0, BODIES_READ).map((m) => bodyAfter(text, m).pool).filter(isKeyBody),
+    ...bodyRuns(withoutKeys(text, all))];
+}
+
+/** `text` with its key-shaped strings out, headers aside: any run left may be a private key's. */
+function withoutKeys(text: string, all: readonly Hit[]): string {
+  const parts: string[] = [];
+  let from = 0;
+  for (const m of all.filter((x) => !isHeader(x[0]))) {
+    parts.push(text.slice(from, m.index), " ");
+    from = m.index + m[0].length;
+  }
+  parts.push(text.slice(from));
+  return parts.join("");
+}
+
+/** The pins of every key-shaped string in `text` and of what a private key there holds, unique and sorted. */
 export function secretPins(text: string): string[] {
-  return [...new Set(contentMatches(text).map((m) => pinOf(m[0])))].sort();
+  const all = contentMatches(text);
+  return [...new Set([...all.map((m) => m[0]), ...keyPieces(text, all)].map(pinOf))].sort();
+}
+
+/** The key-shaped strings of a whole file that `pins` does not allow. A private key's header counts as allowed only while
+ * what the file holds of a body is pinned too. */
+function unpinned(text: string, all: readonly Hit[], pins: readonly string[]): Hit[] {
+  if (!pins.length) return [...all];
+  const bodies = keyPieces(text, all).every((p) => pins.includes(pinOf(p)));
+  return all.filter((m) => !pins.includes(pinOf(m[0])) || (isHeader(m[0]) && !bodies));
 }
 
 /** Names a match without repeating it: its well-known prefix. */
 function label(match: string): string {
-  if (isHeader(match)) return "a private key";
+  if (isHeader(match) || KEY_START_AT.test(match)) return "a private key";
   const prefix = /^(sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|AKIA|gh[pousr]_|xox[abpr]-)/.exec(match)?.[0];
   return prefix ? `${prefix}…` : "a password in an address";
 }
 
 /** The first key-shaped string in `text` that `pins` does not allow, with its line, or null. */
 export function firstUnpinned(text: string, pins: readonly string[]): { line: number; label: string } | null {
-  for (const m of contentMatches(text)) {
-    if (pins.includes(pinOf(m[0]))) continue;
-    return { line: text.slice(0, m.index).split("\n").length, label: label(m[0]) };
-  }
-  return null;
+  const m = unpinned(text, contentMatches(text), pins)[0];
+  return m ? { line: text.slice(0, m.index).split("\n").length, label: label(m[0]) } : null;
 }
 
 /** The index in `sorted` (ascending by `key`) of the last item whose key is at most `x`; -1 when none is. */
@@ -123,11 +244,16 @@ export type KeyScan = { withhold: { line: number; label: string } } | { blank: n
 /** A private key's END line. */
 const KEY_END = /-{4,5} ?END [A-Z0-9 ]*PRIVATE KEY( BLOCK)? ?-{4,5}/;
 /** Something like a key body anywhere: a run of 40 or more base64 characters in both cases. */
-export const hasKeyBody = (text: string) => [...text.matchAll(/[A-Za-z0-9+/=]{40,}/g)]
-  .some(([run]) => /[a-z]/.test(run) && /[A-Z]/.test(run));
+export const hasKeyBody = (text: string) => bodyRuns(text).length > 0;
+/** A key's body in `text`: such a run, or however wrapped, after a header. */
+const holdsBody = (text: string) => {
+  if (hasKeyBody(text)) return true;
+  const headers = [...text.matchAll(new RegExp(KEY_HEADER, "g"))] as Hit[];
+  return headers.length > BODIES_READ || headers.some((m) => isKeyBody(bodyAfter(text, m).pool));
+};
 
 export function scanKeys(path: string, text: string, pins: readonly string[]): KeyScan | null {
-  const hits = contentMatches(text).filter((m) => !pins.includes(pinOf(m[0])));
+  const hits = unpinned(text, contentMatches(text), pins);
   if (!hits.length) return null;
   const lines = text.split("\n");
   const starts: number[] = [];
@@ -140,7 +266,9 @@ export function scanKeys(path: string, text: string, pins: readonly string[]): K
     const s = spans[lastAtOrBefore(spans, (x) => x.start, a)];
     return s && b <= s.end ? s : undefined;
   };
-  const inCode = hits.find((m) => !within(m.index, m.index + m[0].length));
+  // A key with no header has no block to blank.
+  const inCode = hits.some((m) => m.start) ? hits.find((m) => m.start || isHeader(m[0]))
+    : hits.find((m) => !within(m.index, m.index + m[0].length));
   if (inCode) return { withhold: { line: lineOf(inCode.index), label: label(inCode[0]) } };
   // A line holding nothing but comment: every non-blank character in a comment, each comment on it opened with only
   // blanks before it on its line. A comment after code may be a misread regex, string or JSX text, so a key on such a
@@ -183,13 +311,13 @@ export function scanKeys(path: string, text: string, pins: readonly string[]): K
     const end = walked.end;
     if (end < 0) {
       anyEnd ??= KEY_END.test(text);
-      anyBody ??= hasKeyBody(text);
+      anyBody ??= holdsBody(text);
       if (anyEnd || anyBody) return withhold;
       continue;
     }
     // A block with no body in it: a body elsewhere (in code) withholds the file.
-    anyBody ??= hasKeyBody(text);
-    if (anyBody && !hasKeyBody(lines.slice(at, end + 1).join("\n"))) return withhold;
+    anyBody ??= holdsBody(text);
+    if (anyBody && !holdsBody(lines.slice(at, end + 1).join("\n"))) return withhold;
     // A line of comment marks alone (a closing */) holds nothing to blank.
     for (let i = at + 1; i <= end; i++) if (!/^[\s*/#!]*$/.test(lines[i]!)) blank.add(i);
   }
@@ -607,20 +735,17 @@ export function fakeAll(text: string, values: Iterable<string>, pins: readonly s
   return standInsFor(values, made)(text, pins);
 }
 
-/** A private key whose body may be in `text` (beside its header): no stand-in can keep it out. */
-export function privateKeyBody(text: string, pins: readonly string[]): boolean {
+/** A private key whose body may be in `text`: one known by how it starts, or a header with a body after it, however
+ * wrapped, or with any run like a key's body beside it. No stand-in can keep it out. `part`: `text` is what a diff shows of a
+ * file, whose whole was read: there a pin is for the string it names, as a part cannot match a whole body's pin. */
+export function privateKeyBody(text: string, pins: readonly string[], part = false): boolean {
   const all = contentMatches(text);
-  const header = (m: Hit) => isHeader(m[0]);
-  if (!all.some((m) => header(m) && !pins.includes(pinOf(m[0])))) return false;
-  // Key-shaped strings aside, any run like a key body may be the private key's.
-  const parts: string[] = [];
-  let from = 0;
-  for (const m of all.filter((x) => !header(x))) {
-    parts.push(text.slice(from, m.index), " ");
-    from = m.index + m[0].length;
-  }
-  parts.push(text.slice(from));
-  return hasKeyBody(parts.join(""));
+  const open = part ? all.filter((m) => !pins.includes(pinOf(m[0]))) : unpinned(text, all, pins);
+  if (open.some((m) => m.start)) return true;
+  const headers = open.filter((m) => isHeader(m[0]));
+  if (!headers.length) return false;
+  return headers.length > BODIES_READ || headers.some((m) => isKeyBody(bodyAfter(text, m).pool)) ||
+    hasKeyBody(withoutKeys(text, all));
 }
 
 /** `text` (the file at `path`) with a stand-in for each of its suspects, or null when no stand-in can keep the real

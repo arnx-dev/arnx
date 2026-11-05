@@ -144,8 +144,8 @@ export function elsewhereNote(files: readonly string[]): string {
 export function leftOutNote(files: readonly Withheld[]): string {
   if (!files.length) return "";
   const named = files.slice(0, ELSEWHERE_MAX).map((x) => `\`${x.path}\` (${x.label})`).join(", ");
-  return "This change also edits files left out of the diff, the code you can read and the sandbox, because they look " +
-    `like secrets, so never conclude that they are missing: ${named}` +
+  return "This change also edits files left out of this diff because they look like secrets, so never conclude that an " +
+    "edit to them is missing; a copy holding the secret is in neither the code you can read nor the sandbox: " + named +
     `${files.length > ELSEWHERE_MAX ? `, and ${files.length - ELSEWHERE_MAX} more` : ""}.`;
 }
 

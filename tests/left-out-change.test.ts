@@ -2,7 +2,7 @@
 // section, a read, a search hit or a sandbox file of it; only its path and a label go anywhere.
 import { afterEach, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync }
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync }
   from "node:fs";
 import { dirname, join } from "node:path";
 import { Boundary } from "../src/boundary";
@@ -10,7 +10,7 @@ import { changeLimits, MAX_DIFF_BYTES, resolveChange, SCAN_LIMIT, sealDiff, slic
 import { CloudClient } from "../src/cloud";
 import { CloudBrain } from "../src/cloudbrain";
 import { parseReviewConfig, parseReviewFile, reviewConfigPath, stamp, stampFile } from "../src/config";
-import type { AgentModel, Block, JsonModel, JsonReply, Reply } from "../src/llm";
+import type { Block } from "../src/llm";
 import { nextStep } from "../src/setupview";
 import { DEFAULT_PROMPTS, leftOutNote, PROMPT_VERSION } from "../src/prompts";
 import { load } from "../src/report";
@@ -19,9 +19,10 @@ import { secretPins } from "../src/secrets";
 import { defaultSettings, type Settings, writeSettings } from "../src/settings";
 import { type FakeCloud, fakeCloud, type StepScript, TOKEN } from "./helpers/cloudfake";
 import { AWS_KEY, PRIVATE_KEY, PRIVATE_KEY_BLOCK } from "./helpers/fakekeys";
-import { fakeFactory, type FakeSession, text, tool } from "./helpers/fakes";
+import { fakeFactory, type FakeSession, tool } from "./helpers/fakes";
 import { commit, gitRepo, runGit } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
+import { RecordingAgent, RecordingJson, treeText } from "./helpers/recording";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -32,25 +33,6 @@ const YAML = "version: 1\nimage: python:3.12-slim\ntest_command: python -m pytes
 const GEN = "tests/arnx_generated/test_add.py";
 const SETTINGS: Settings = { ...defaultSettings(), beforeCheck: false, consentAt: "2026-11-04T00:00:00Z" };
 
-class RecordingAgent implements AgentModel {
-  model = "claude-sonnet-5-5";
-  bodies: string[] = [];
-  constructor(private steps: Block[][], private last = REPORT) {}
-  async create(a: Parameters<AgentModel["create"]>[0]): Promise<Reply> {
-    this.bodies.push(JSON.stringify(a));
-    const blocks = this.steps.shift() ?? [text(this.last)];
-    return { content: blocks, usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 }, raw: blocks,
-      stopReason: blocks.some((b) => b.type === "tool_use") ? "tool_use" : "end_turn" };
-  }
-}
-class RecordingJson implements JsonModel {
-  ref = "openai:x";
-  bodies: string[] = [];
-  async completeJson(system: string, user: string): Promise<JsonReply> {
-    this.bodies.push(JSON.stringify({ system, user }));
-    return [{ verdict: "confirmed", reason: "It subtracts.", groups: [] }, 0.01];
-  }
-}
 const REPORT = JSON.stringify({ tests: [{ test: `${GEN}::test_add`, expects: "add sums" }],
   suspected_defects: [{ test: `${GEN}::test_add`, explanation: "add subtracts." }], questions: [] });
 const SOURCE = "from app import add\n\ndef test_add():\n    assert add(2, 3) == 5\n";
@@ -73,15 +55,6 @@ function configured(o: Partial<Settings> = {}, under = tmp()): string {
 }
 const editApp = (repo: string) => writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a - b\n");
 
-/** Every file under `dir` as text. */
-function treeText(dir: string): string {
-  if (!existsSync(dir)) return "";
-  return readdirSync(dir).map((name) => {
-    const p = join(dir, name);
-    return lstatSync(p).isDirectory() ? treeText(p) : lstatSync(p).isFile() ? readFileSync(p, "latin1") : "";
-  }).join("\n");
-}
-
 let clouds: FakeCloud[] = [];
 afterEach(() => {
   for (const c of clouds) c.stop();
@@ -99,7 +72,7 @@ test("a changed file holding a private key is left out and the rest is reviewed"
   const seen: FakeSession[] = [];
   const inSandbox: string[] = [];
   const said: string[] = [];
-  const agent = new RecordingAgent(PRYING("keys.ts")), judge = new RecordingJson();
+  const agent = new RecordingAgent(PRYING("keys.ts"), REPORT), judge = new RecordingJson();
   const { review, rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: judge,
     progress: (m) => said.push(m),
     sessionFactory: fakeFactory(() => {
@@ -212,7 +185,7 @@ test("a key-shaped string gets one stand-in in diff and snapshot", async () => {
 
   const seen: FakeSession[] = [];
   let inSandbox = "";
-  const agent = new RecordingAgent([[tool("read_file", { path: "creds.py" })], ...PRYING("creds.py").slice(1)]);
+  const agent = new RecordingAgent([[tool("read_file", { path: "creds.py" })], ...PRYING("creds.py").slice(1)], REPORT);
   await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson(),
     sessionFactory: fakeFactory(() => {
       inSandbox = treeText(seen.at(-1)!.snap);
@@ -245,7 +218,7 @@ test("with stand-ins off the file is left out", async () => {
 
   const seen: FakeSession[] = [];
   let inSandbox = "";
-  const agent = new RecordingAgent(PRYING("creds.py"));
+  const agent = new RecordingAgent(PRYING("creds.py"), REPORT);
   await runReview(repo, { settings: { ...SETTINGS, standIns: false }, agentModel: agent, challenger: new RecordingJson(),
     sessionFactory: fakeFactory(() => {
       inSandbox = treeText(seen.at(-1)!.snap);
@@ -485,9 +458,8 @@ test("a file too large for any scan: a key found piece by piece leaves it out; w
   check(resolveChange(repo));
   commit(repo, "edit");
   check(resolveChange(repo));
-  // A pin keeps it, in a file no scan reads as in any other.
-  expect(resolveChange(repo, null, [{ path: "big.txt", matches: secretPins(PRIVATE_KEY) }]).files)
-    .toEqual(["big.txt", "clean.txt"]);
+  // A pin cannot vouch for what no scan reads.
+  check(resolveChange(repo, null, [{ path: "big.txt", matches: secretPins(PRIVATE_KEY) }]));
 });
 
 test("a withheld file's size does not count against the change", () => {
@@ -539,7 +511,7 @@ test("the code before the change holds no key either, and the proof runs on the 
   commit(repo, "edit");
   const seen: FakeSession[] = [];
   const trees: string[] = [];
-  const agent = new RecordingAgent(PRYING("keys.ts"));
+  const agent = new RecordingAgent(PRYING("keys.ts"), REPORT);
   const { review, rdir } = await runReview(repo, { settings: { ...SETTINGS, beforeCheck: true }, agentModel: agent,
     challenger: new RecordingJson(), sessionFactory: fakeFactory(() => {
       trees.push(...seen.map((s) => treeText(s.snap)));
@@ -559,7 +531,7 @@ test("a test needing a left-out file reads as one that could not run, never as a
   commit(repo, "a key and an edit");
   const missing = `E   ModuleNotFoundError: No module named 'keys'`;
   const { review, rdir } = await runReview(repo, { settings: SETTINGS,
-    agentModel: new RecordingAgent(PRYING("keys.py")), challenger: new RecordingJson(),
+    agentModel: new RecordingAgent(PRYING("keys.py"), REPORT), challenger: new RecordingJson(),
     sessionFactory: fakeFactory(() => failing(missing)) });
   expect(review.findings).toEqual([]);
   expect(review.errors).toEqual([`${GEN}::test_add`]);
@@ -567,7 +539,7 @@ test("a test needing a left-out file reads as one that could not run, never as a
   expect(md).toContain(`Errors (the test could not run): \`${GEN}::test_add\``);
   expect(md).toContain("`keys.py` (a private key, line 1)");
   // Anything else stays what it was.
-  const other = await runReview(repo, { settings: SETTINGS, agentModel: new RecordingAgent(PRYING("keys.py")),
+  const other = await runReview(repo, { settings: SETTINGS, agentModel: new RecordingAgent(PRYING("keys.py"), REPORT),
     challenger: new RecordingJson(),
     sessionFactory: fakeFactory(() => failing("E   ModuleNotFoundError: No module named 'other'")) });
   expect(other.review.findings.length).toBe(1);

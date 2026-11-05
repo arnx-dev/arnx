@@ -1611,7 +1611,7 @@ for (const standIns of [true, false]) {
 
 test("a private key with its body in a big text file leaves the file out", () => {
   const header = `-----BEGIN ${"PRIVATE"} KEY-----`;
-  const body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj";
+  const body = "MIIEvQIBADANBgkq" + "hkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj";
   const repo = bigRepo("dump.txt", `${header}\n${body}\n-----END ${"PRIVATE"} KEY-----\n${padding(1_100_000)}`);
   const r = takeSnapshot(repo, null, join(tmp(), "snap"), [], { standIns: true });
   expect(r.withheld.map((w) => w.path)).toEqual(["dump.txt"]);
@@ -1654,7 +1654,7 @@ test("a text file past the higher cap is left out with a clear line; a binary on
     expect(existsSync(join(snap, "huge.bin"))).toBe(true);
     expect(r.sandboxed).toEqual(["aside/seed.json"]);
     expect(existsSync(join(`${snap}.sandbox`, "aside/seed.json"))).toBe(true);
-    expect(tooLargeText(r.tooLarge)).toBe("left out, too large to scan (over 1 MB): huge.json; if tests need one, list it in " +
+    expect(tooLargeText(r.tooLarge)).toBe("too large to scan (over 1 MB), so not in the sandbox or the files a model can open: huge.json; if tests need one, list it in " +
       ".arnxignore and sandbox_only");
 
     writeFileSync(join(repo, "settings.py"), `api_token = "${REMOVED}"\n`);

@@ -16,8 +16,8 @@ import { dirname, join, posix, resolve, sep } from "node:path";
 import { configSuspects, loadReviewFile, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
-import { excludePathspecs, hasKeyBody, isCertainRule, isCodePath, isPinned, isSecretPath, KEY_HEADER, type KeyScan,
-  MAY_HOLD_KEY, privateKeyBody, scanKeys, type SecretPin, standInsFor, suspects, usedAsName, WORD_RULE } from "./secrets";
+import { excludePathspecs, hasKeyBody, isCertainRule, isCodePath, isSecretPath, KEY_ANYWHERE, type KeyScan,
+  MAY_HOLD_KEY, mayShowPrivateKey, privateKeyBody, scanKeys, type SecretPin, standInsFor, suspects, usedAsName, WORD_RULE } from "./secrets";
 import { buildContextDir, manifestRule, REPORT_DIR, type Runner } from "./sandbox";
 import { standInsSetting } from "./settings";
 import { splitLines } from "./util";
@@ -39,7 +39,7 @@ const MAX_BUFFER = 1 << 30;
 const DIFF_FORM = ["--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "--src-prefix=a/", "--dst-prefix=b/"];
 /** What a search of file contents needs, whatever the owner's git settings: bytes, plain output. */
 const SEARCH = (repo: string) => ["--literal-pathspecs", "-C", repo, "grep", "--no-color", "-a", "-E"];
-const SEARCH_ENV = { ...process.env, LC_ALL: "C" };
+const searchEnv = () => ({ ...process.env, LC_ALL: "C" });
 
 export interface Change {
   kind: "worktree" | "commit" | "range" | "branch" | "no-commits";
@@ -267,12 +267,11 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
   };
   const standIns = standInsSetting(repo);
   // What is left out does not count, but reading every file of a huge change only to refuse it would take minutes.
-  if (standIns && !diff.includes("PRIVATE KEY")) notTooLarge(diff);
-  const pinsOf = (path: string) => allow.find((a) => a.path === path)?.matches ?? [];
-  const atRev = blobSides(repo, diff, pinsOf);
+  if (standIns && !mayShowPrivateKey(diff)) notTooLarge(diff);
+  const atRev = blobSides(repo, diff);
   const sealed = sealDiff(diff, allow, (path) => base === EMPTY_TREE ? null : atRev(base, path),
-    (path) => head === null ? fileSide(repo, path, pinsOf(path)) : atRev(head, path), standIns);
-  if (!sealed.diff.trim()) throw new ArnxError(secretStop(sealed.withheld));
+    (path) => head === null ? fileSide(repo, path) : atRev(head, path), standIns);
+  if (!sealed.diff.trim()) throw new ArnxError(secretStop(sealed.withheld, sealed.beforeOnly));
   notTooLarge(sealed.diff);
   diff = sealed.diff;
   const left = new Set(sealed.withheld.map((w) => w.path));
@@ -286,32 +285,39 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
     ...(sealed.withheld.length ? { withheld: sealed.withheld } : {}) };
 }
 
-/** What a change refuses to send, and the way out. */
-function secretStop(files: readonly { path: string; label: string }[]): string {
+/** What a change refuses to send, and the way out. `allow-secret` reads the working tree, so a key only the code before the
+ * change holds (`beforeOnly`) has none but another range. */
+function secretStop(files: readonly { path: string; label: string }[], beforeOnly: ReadonlySet<string> = new Set()): string {
   const one = files.length === 1;
-  return `the change contains text that looks like a secret (a key or token) in ${
-    someNames(files.map((f) => `${f.path} (${f.label})`), 5)}; arnx will not send it to a model. If ${
-    one ? "it is" : "one is"} a test fixture, not a secret, allow the file: \`arnx allow-secret ${
-    one ? files[0]!.path : "PATH"}\`, then \`arnx review\` again`;
+  const named = someNames(files.map((f) => `${f.path} (${f.label})`), 5);
+  if (files.every((f) => beforeOnly.has(f.path))) {
+    return `the change contains text that looks like a secret (a key or token) in ${named}, on the side it removes; arnx ` +
+      "will not send it to a model. Review what comes after it: `arnx review --range A..B`";
+  }
+  return `the change contains text that looks like a secret (a key or token) in ${named}; arnx will not send it to a model. ` +
+    `If ${one ? "it is" : "one is"} a test fixture, not a secret, allow the file: \`arnx allow-secret ${
+      one ? files[0]!.path : "PATH"}\`, then \`arnx review\` again`;
 }
 
-/** Why a snapshot leaves out a file holding `scan`'s key-shaped strings; null when it stays. `fakes`: it may get stand-ins.
- * sealDiff and scrub both decide here, so a diff and a snapshot agree. */
-function leftOutReason(read: { text: string; binary: boolean }, scan: KeyScan | null, pins: readonly string[], fakes: boolean)
-  : { line: number; label: string } | null {
-  if (!scan) return null;
-  // A binary file is never edited: any key in it leaves it out.
-  if (read.binary) return "withhold" in scan ? scan.withhold : { line: scan.blank[0]! + 1, label: "key-shaped text" };
+/** Why a snapshot leaves out `rel` holding `scan`'s key-shaped strings; null when it stays. `fakes`: it may get stand-ins.
+ * Text with a NUL is scanned without them (UTF-16), and any key leaves it out: it is never edited. sealDiff and scrub both
+ * decide here, so a diff and a snapshot agree. */
+function leftOutReason(rel: string, read: { text: string; binary: boolean }, scan: KeyScan | null, pins: readonly string[],
+                       fakes: boolean): { line: number; label: string } | null {
+  const nul = read.binary || read.text.includes("\0");
+  const held = nul ? scanKeys(rel, read.text.replaceAll("\0", ""), pins) : scan;
+  if (!held) return null;
+  if (nul) return "withhold" in held ? held.withhold : { line: held.blank[0]!, label: "key-shaped text" };
   // A file that gets no stand-ins (a lockfile, or stand-ins off) is left out, as is a private key's body.
-  return "withhold" in scan && (!fakes || privateKeyBody(read.text, pins)) ? scan.withhold : null;
+  return "withhold" in held && (!fakes || privateKeyBody(read.text, pins)) ? held.withhold : null;
 }
 
 /** One side of a changed file, for sealDiff: its content; where a file no scan reads whole holds a key; or null, with
- * nothing to read (not on this side, not a file, a binary file over SCAN_LIMIT) or no key found. */
+ * nothing to read (not on this side, not a file) or no key found. */
 export type FileSide = { text: string; binary: boolean } | { line: number; label: string } | null;
 
 /** The working tree's side, what a snapshot of it copies. A link is its target's path: nothing here follows it. */
-function fileSide(repo: string, path: string, pins: readonly string[]): FileSide {
+function fileSide(repo: string, path: string): FileSide {
   const p = join(repo, path);
   try {
     if (!lstatSync(p).isFile()) return null;
@@ -319,26 +325,22 @@ function fileSide(repo: string, path: string, pins: readonly string[]): FileSide
     return null;
   }
   const big = overScanLimit(p);
-  if (big === "binary") return null;
-  return big === "too large" ? keyInBigFile(repo, null, path, pins) : scrubText(p, changeLimits.maxScanBytes);
+  return big === "binary" || big === "too large" ? keyInStream(p) : scrubText(p, changeLimits.maxScanBytes);
 }
 
 /** A commit's side, read no further than the largest file a scan takes. */
-function blobSide(repo: string, rev: string, path: string, pins: readonly string[]): FileSide {
+function blobSide(repo: string, rev: string, path: string): FileSide {
   const r = spawnSync("git", ["-C", repo, "show", `${rev}:${path}`], { maxBuffer: changeLimits.maxScanBytes });
-  const bytes = r.stdout as unknown as Buffer;
-  const binary = !!bytes?.subarray(0, 8000).includes(0);
-  if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ENOBUFS") {
-    return binary ? null : keyInBigFile(repo, rev, path, pins);
-  }
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ENOBUFS") return keyInBigFile(repo, rev, path);
   if (r.error) throw new SetupRequired(`git could not run: ${r.error.message}`);
-  if (r.status !== 0 || (binary && bytes.length > SCAN_LIMIT)) return null;
-  return { text: bytes.toString("utf8"), binary };
+  if (r.status !== 0) return null;
+  const bytes = r.stdout as unknown as Buffer;
+  return { text: bytes.toString("utf8"), binary: bytes.subarray(0, 8000).includes(0) };
 }
 
 /** Each commit's side of the files of `diff`. One search first says which files may hold a key at all: a read per file
  * takes seconds on a big change. A search that fails leaves every file to read. */
-function blobSides(repo: string, diff: string, pinsOf: (path: string) => readonly string[]) {
+function blobSides(repo: string, diff: string) {
   const paths = [...new Set(diff.split(/^(?=diff --git )/m).flatMap((section) => {
     const { old, now } = sectionPaths(section);
     return [old, now].filter((p): p is string => p !== null);
@@ -348,7 +350,7 @@ function blobSides(repo: string, diff: string, pinsOf: (path: string) => readonl
     const out = new Set<string>();
     for (let i = 0; i < paths.length; i += 500) {
       const r = spawnSync("git", [...SEARCH(repo), "-l", "-z", "-e", MAY_HOLD_KEY, rev, "--", ...paths.slice(i, i + 500)],
-        { encoding: "utf8", maxBuffer: MAX_BUFFER, env: SEARCH_ENV });
+        { encoding: "utf8", maxBuffer: MAX_BUFFER, env: searchEnv() });
       if (r.error || (r.status !== 0 && r.status !== 1)) return null;
       for (const hit of r.stdout.split("\0")) if (hit) out.add(hit.slice(rev.length + 1));
     }
@@ -357,22 +359,48 @@ function blobSides(repo: string, diff: string, pinsOf: (path: string) => readonl
   return (rev: string, path: string): FileSide => {
     if (!searched.has(rev)) searched.set(rev, search(rev));
     const found = searched.get(rev);
-    return found && !found.has(path) ? null : blobSide(repo, rev, path, pinsOf(path));
+    return found && !found.has(path) ? null : blobSide(repo, rev, path);
   };
 }
 
-/** Where a file over every scan's limit holds a private key `pins` does not allow, searched by git, which keeps none of
- * it here. A search that fails counts as a hit. */
-function keyInBigFile(repo: string, rev: string | null, path: string, pins: readonly string[]): { line: number; label: string } | null {
-  const r = spawnSync("git", [...SEARCH(repo), "-n", "-o", "-e", KEY_HEADER, ...(rev === null ? ["--no-index"] : [rev]), "--", path],
-    { encoding: "utf8", maxBuffer: MAX_BUFFER, env: SEARCH_ENV });
-  if (r.error || (r.status !== 0 && r.status !== 1)) return { line: 1, label: "too large to scan" };
-  for (const line of r.stdout.split("\n")) {
-    const hit = new RegExp(`:(\\d+):(${KEY_HEADER})$`).exec(line);
-    if (hit && !isPinned(hit[2]!, pins)) return { line: Number(hit[1]), label: "a private key" };
-  }
-  return null;
+/** What a file too large or too binary for a whole scan says when it cannot be searched. */
+const UNREAD = { line: 1, label: "too large to scan" };
+
+/** Where a commit's file over every scan's limit holds a private key, searched by git, which keeps none of it here. A pin
+ * cannot vouch for what no scan reads. A search that fails counts as a hit. */
+function keyInBigFile(repo: string, rev: string, path: string): { line: number; label: string } | null {
+  const r = spawnSync("git", [...SEARCH(repo), "-n", "-o", "-e", KEY_ANYWHERE, rev, "--", path],
+    { encoding: "utf8", maxBuffer: MAX_BUFFER, env: searchEnv() });
+  if (r.error || (r.status !== 0 && r.status !== 1)) return UNREAD;
+  const hit = /:(\d+):[^:\n]*$/m.exec(r.stdout);
+  return hit ? { line: Number(hit[1]), label: "a private key" } : null;
 }
+
+/** Where a file on disk over a whole scan's limit holds a private key, read a piece at a time, without its NULs (UTF-16). A
+ * pin cannot vouch for what no scan reads. A file that cannot be read counts as a hit. */
+function keyInStream(p: string): { line: number; label: string } | null {
+  const piece = Buffer.alloc(1 << 20);
+  const key = new RegExp(KEY_ANYWHERE);
+  let fd: number | null = null;
+  try {
+    fd = openSync(p, "r");
+    let held = "", line = 1;
+    for (let n = readSync(fd, piece, 0, piece.length, null); n > 0; n = readSync(fd, piece, 0, piece.length, null)) {
+      const text = held + piece.toString("latin1", 0, n).replaceAll("\0", "");
+      const at = key.exec(text)?.index;
+      if (at !== undefined) return { line: line + newlines(text.slice(0, at)), label: "a private key" };
+      // Enough to hold a key's start and what must follow it.
+      held = text.slice(-512);
+      line += newlines(text.slice(0, -512));
+    }
+    return null;
+  } catch {
+    return UNREAD;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+const newlines = (text: string) => text.split("\n").length - 1;
 
 /** A path as a diff's header writes it: git quotes odd ones, C-style, and ends one holding a space with a tab. */
 function diffPath(raw: string): string {
@@ -411,11 +439,13 @@ function sectionPaths(section: string): { old: string | null; now: string | null
  * side blanks (scanKeys, key-shaped text in comments of source files) are blanked, and their section loses its hunk
  * headers' function context, which git may take from a key's body: `files`, numbered in the side each diff line comes
  * from. Everything else may be a secret too, and is the outbound filter's (boundary.ts). `before` and `after` read each
- * side of a file by path. Last guard: a private key with a body left in a section refuses the change. */
+ * side of a file by path. `beforeOnly`: files left out for what only their removed side holds. Last guard: a private key with
+ * a body left in what a section shows refuses the change. */
 export function sealDiff(diff: string, allow: readonly SecretPin[], before: (path: string) => FileSide,
                          after: (path: string) => FileSide, standIns: boolean)
-  : { diff: string; files: Blanked[]; withheld: Withheld[] } {
+  : { diff: string; files: Blanked[]; withheld: Withheld[]; beforeOnly: Set<string> } {
   const files: Blanked[] = [], withheld: Withheld[] = [];
+  const beforeOnly = new Set<string>();
   const pins = (path: string) => allow.find((a) => a.path === path)?.matches ?? [];
   const kept = diff.split(/^(?=diff --git )/m).flatMap((section) => {
     const { old: oldPath, now: newPath } = sectionPaths(section);
@@ -428,7 +458,7 @@ export function sealDiff(diff: string, allow: readonly SecretPin[], before: (pat
       if (!got) return { blank };
       if ("label" in got) return { out: got, blank };
       const scan = scanKeys(p!, got.text, pins(p!));
-      const out = leftOutReason(got, scan, pins(p!), standIns && !isLockfile(p!));
+      const out = leftOutReason(p!, got, scan, pins(p!), standIns && !isLockfile(p!));
       if (out) return { out, blank };
       if (scan && "blank" in scan) {
         const lines = scan.text.split("\n");
@@ -440,6 +470,7 @@ export function sealDiff(diff: string, allow: readonly SecretPin[], before: (pat
     const out = newSide.out ?? oldSide.out;
     if (out) {
       withheld.push({ path, ...out });
+      if (!newSide.out) beforeOnly.add(path);
       return [];
     }
     const old = oldSide.blank, now = newSide.blank;
@@ -468,13 +499,28 @@ export function sealDiff(diff: string, allow: readonly SecretPin[], before: (pat
       if (blanked.size) files.push({ path, lines: [...blanked].sort((x, y) => x - y) });
     }
     const pinned = [...new Set([...pins(oldPath ?? ""), ...pins(newPath ?? "")])];
-    if (privateKeyBody(done, pinned) || (!path && hasKeyBody(done))) {
+    const shown = shownText(done);
+    if (privateKeyBody(shown, pinned, true) || (!path && hasKeyBody(shown))) {
       throw new ArnxError(path ? secretStop([{ path, label: "a private key" }])
         : "the change holds what looks like a key body (a private key) in a part arnx cannot place; arnx will not send it to a model");
     }
     return [done];
   });
-  return { diff: kept.join(""), files, withheld: withheld.sort((x, y) => x.path < y.path ? -1 : x.path > y.path ? 1 : 0) };
+  return { diff: kept.join(""), files, withheld: withheld.sort((x, y) => x.path < y.path ? -1 : x.path > y.path ? 1 : 0),
+    beforeOnly };
+}
+
+/** Git's own lines in a diff section: paths and names, not the file's text. */
+const GIT_LINE = /^(?:diff --git |index |old mode |new mode |new file mode |deleted file mode |similarity index |dissimilarity index |rename |copy |--- |\+\+\+ |Binary files |GIT binary patch)/;
+
+/** What a diff section shows of its file: its hunks' lines without their marks, and each hunk's function context, which is a
+ * line of the file. A section with no hunk (a binary or mode-only one) shows whatever is not git's own. */
+function shownText(section: string): string {
+  const lines = section.split("\n");
+  const first = lines.findIndex((l) => l.startsWith("@@ "));
+  if (first < 0) return lines.filter((l) => !GIT_LINE.test(l)).join("\n");
+  return lines.slice(first).filter((l) => !l.startsWith("\\"))
+    .map((l) => l.startsWith("@@ ") ? l.replace(/^@@ [^@]* @@ ?/, "") : l.slice(1)).join("\n");
 }
 
 /** The three files taking most of a diff, with their sizes ("package-lock.json 173 KB, README.md 25 KB, …"). */
@@ -585,7 +631,8 @@ export interface Scrubbed { withheld: Withheld[]; blanked: Blanked[]; standIns: 
 
 /** What a run says about `paths`, files left out of its snapshot for their size. */
 export const tooLargeText = (paths: readonly string[]) =>
-  `left out, too large to scan (over ${Math.round(changeLimits.maxScanBytes / 1_000_000)} MB): ${someNames(paths, 5)}; ` +
+  `too large to scan (over ${Math.round(changeLimits.maxScanBytes / 1_000_000)} MB), so not in the sandbox or the files a ` +
+  `model can open: ${someNames(paths, 5)}; ` +
   "if tests need one, list it in .arnxignore and sandbox_only";
 
 /** Where a snapshot's sandbox-only files are kept: beside it, so nothing that reads the snapshot sees them. */
@@ -983,6 +1030,14 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   const tooLarge: string[] = [];
   for (const f of kept) {
     const big = overScanLimit(f.p);
+    // A file no scan reads whole is still looked through for a key: tests may print any file the sandbox holds.
+    const key = big === "binary" || big === "too large" ? keyInStream(f.p) : null;
+    if (key) {
+      unlinkSync(f.p);
+      sandboxed.delete(f.rel);
+      removedFiles.push({ path: f.rel, ...key });
+      continue;
+    }
     // No model reads a binary file: read_file says only its size, grep skips it.
     if (big === "binary") continue;
     if (big === "too large") {
@@ -998,7 +1053,7 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
     const { text, binary } = read;
     const pins = pinsOf(f.rel);
     const scan = scanKeys(f.rel, text, pins);
-    const out = leftOutReason(read, scan, pins, fakes(f.rel));
+    const out = leftOutReason(f.rel, read, scan, pins, fakes(f.rel));
     if (out) {
       if (!binary) leaving(f.p, f.rel);
       unlinkSync(f.p);
@@ -1090,11 +1145,11 @@ function textOf(p: string): string | null {
 }
 
 /** How a snapshot treats a file over SCAN_LIMIT (null: it is not): text within the cap is scanned, text past it is left
- * out, and a binary file stays unread. The place for a streamed look at a file that is not scanned whole. */
+ * out, and a binary file is only looked through for a key (keyInStream). */
 function overScanLimit(p: string): "scan" | "binary" | "too large" | null {
   try {
     const { size } = statSync(p);
-    if (size <= SCAN_LIMIT) return null;
+    if (size <= Math.min(SCAN_LIMIT, changeLimits.maxScanBytes)) return null;
     const head = Buffer.alloc(8000);
     const fd = openSync(p, "r");
     try {

@@ -87,12 +87,20 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   A review's diff blanks comment lines the same way and names them. A changed file a snapshot leaves out, on either side
   of the change, has no part in the diff either, wherever in the file the key stands, so it is not reviewed and the rest
   is: the review names it with what it holds and the line, and tells the models its path and that label only. A test that
-  needs it could not run, and reads so: it is no finding. A change of only such files stops, naming `arnx allow-secret`,
-  which reads the working tree, so it cannot let in a key only the code before the change holds. A private key with a body
-  still in what would go out stops the review. When a file's key-shaped text
-  is test fixtures (a secret detector's own tests), `arnx allow-secret PATH` pins each such string in
-  `.arnx/review.yaml`, which is then proven again before the next review; a new key-shaped string in that file
-  withholds it again, and `arnx allow-secret --remove PATH` takes a file off the list (proven again too). Setup lists
+  needs it could not run, and reads so: it is no finding. A change of only such files stops, naming `arnx allow-secret`;
+  a key only the code before the change holds cannot be allowed, as that command reads the working tree, so the stop names
+  `--range`. A private key with a body still in what would go out stops the review.
+  A private key is a header in any armour (PEM, PGP, SSH2's four dashes) with a body after it, however wrapped and in
+  whatever quotes or comment marks: 40 base64 characters in both cases with 16 different ones, or any such run beside it.
+  Fewer, as in `...` or `<private key>`, is a placeholder and stays. With no header, it is base64 of 64 characters or
+  more that starts as a key's encoding must: a whole PEM, an OpenSSH body, private DER. A file over 1 MB that is binary, or
+  over 32 MB, is looked through for these and left out on a hit, whatever a pin says; with none, a binary file stays and a
+  larger text file keeps only its diff. A `.ppk` is known by its name. **These get past it:** a key with no
+  header whose body starts otherwise (a PGP body alone), a header broken up in the source (`"...PRIV" + "ATE KEY"`) over a
+  body that starts otherwise or is wrapped under 8 columns, base64 of something other than a whole PEM. When a file's key-shaped text
+  is test fixtures (a secret detector's own tests), `arnx allow-secret PATH` pins each such string, and a private key's body, in
+  `.arnx/review.yaml`, which is then proven again before the next review; a new key-shaped string or another key under the
+  same header in that file withholds it again, and `arnx allow-secret --remove PATH` takes a file off the list (proven again too). Setup lists
   allowed files under "Worth a look".
   When a setup run fails on a file left out this way, setup stops and names it: only you can let it in. When it
   fails on a file `.arnxignore` leaves out, setup copies that file into the sandbox (scrubbed the same way, never sent
@@ -122,7 +130,7 @@ Uncommitted work means tracked files only: staged and unstaged changes, and new 
 files are in neither the diff, the copy the reviewer reads nor the sandbox, and the review says how many it left out.
 `--untracked` sends them too and names each one (`untracked = true` under `[review]` in `.arnx/config.toml` does it
 always; `--no-untracked` overrides that); `arnx setup` reads the same way. With no commits yet every file is sent, and
-the review says so first. Paths in `.arnxignore`, secret files and files holding a private key are never sent, and other
+the review says so first. Paths in `.arnxignore`, secret files (`.pem`, `.key`, `.ppk` and the like) and files holding a private key are never sent, and other
 key-shaped text goes as a stand-in (see [What runs where](#what-runs-where)). review.json records `untracked_included` or
 `untracked_left_out`, and `not_sent` the files left out.
 
