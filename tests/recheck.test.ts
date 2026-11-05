@@ -101,7 +101,7 @@ test("check --review --json: the review, the result, and each confirmed finding'
   cli.out.length = 0;
   expect(await cli.run("check", "--review", RID, "--json", "--quiet")).toBe(1);
   const j = JSON.parse(cli.stdout);
-  expect(j).toEqual({ schema_version: 1, command: "check", review: RID, result: "fail", exit_code: 1, findings: [
+  expect(j).toEqual({ schema_version: 1, command: "check", review: RID, result: "fail", exit_code: 1, stand_ins_shown: false, findings: [
     { id: "F1", project: "app", test_id: `${GEN}::test_add`, status: "still-failing", runs: ["failed"],
       message: "assert -1 == 5\ntrace" },
     { id: "F2", project: "app", test_id: `${GEN}::test_add_neg`, status: "still-failing", runs: ["failed"],
@@ -150,5 +150,5 @@ test("a review with no confirmed findings has nothing to run (exit 0)", () => {
   const [text, code] = recheckSummary({ review: RID, findings: [] });
   expect([text, code]).toEqual([`Review ${RID} has no confirmed findings: nothing to run.`, 0]);
   expect(JSON.parse(recheckJson({ review: RID, findings: [] }))).toEqual({ schema_version: 1, command: "check", review: RID,
-    result: "nothing-confirmed", exit_code: 0, findings: [] });
+    result: "nothing-confirmed", exit_code: 0, findings: [], stand_ins_shown: false });
 });

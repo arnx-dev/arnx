@@ -6,6 +6,7 @@
 // tree, and so does each issue marked rewrite (the bug is real, its test wrong), from the owner's reason. A finding's
 // test is set aside when the owner's answer to the question it assumed has a test of its own, or when it is rewritten.
 // Every mark is appended to .arnx/precision.jsonl.
+import { Boundary, maskedCopy, STAND_INS_NOTE } from "./boundary";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative, sep } from "node:path";
 import { adapterFor, getAdapter } from "./adapters";
@@ -29,7 +30,7 @@ import { collect, DOME, dockerSession, readCopies, testRound, writeDirOf } from 
 import { acceptedTestIds, recordAccepted, testsByFile } from "./check";
 import { isoSeconds } from "./util";
 import { inPool } from "./challenge";
-import { sliceDiff, workingTreeFiles } from "./change";
+import { sliceDiff, treeValues, workingTreeFiles } from "./change";
 import { route } from "./route";
 
 /** Answer rounds at once (each a model round and three sandbox runs). */
@@ -587,6 +588,10 @@ export async function accept(repo: string, rdir: string, settings: Settings,
     .map((f) => ({ id: f.id, testId: f.testId, project: f.project, explanation: f.explanation }));
   const result = { review, marks, kept, answers, rewrites, setAside, dest, red, moved, sources,
     precision: precisionOf(log), fixOverrides: prompts.overridden.filter((k) => !isModelKey(k)) };
-  writeFileSync(join(rdir, "fix-prompt.md"), wrapMarkdown(fixPrompt(result, settings, prompts)));
+  // A coding agent reads this. The review is masked already; answers and reasons are the user's own, and any may quote a
+  // value of today's tree.
+  const fix = maskedCopy(new Boundary(treeValues(repo)), fixPrompt(result, settings, prompts));
+  const note = fix.shown || review.standInsShown ? `${STAND_INS_NOTE}\n\n` : "";
+  writeFileSync(join(rdir, "fix-prompt.md"), wrapMarkdown(note + fix.value));
   return result;
 }

@@ -357,17 +357,6 @@ test("a guess one file marks stays real where tests run, and gets one stand-in i
   expect(readFileSync(join(ctx, "logo.bin"))).toEqual(readFileSync(join(repo, "logo.bin")));
 });
 
-test("a guess a lockfile holds stays real in every file, in the build too", () => {
-  const repo = gitRepo(tmp());
-  writeFileSync(join(repo, "settings.py"), `API_TOKEN = "Qx7mK2pL9zR4wT8v"\n`);
-  writeFileSync(join(repo, "package-lock.json"), `{"x": "Qx7mK2pL9zR4wT8v"}\n`);
-  commit(repo, "auth");
-  const snap = join(tmp(), "snap");
-  takeSnapshot(repo, null, snap);
-  expect(buildContextOf(snap)).toBe(snap);
-  expect(readFileSync(join(snap, "settings.py"), "utf8")).toContain("Qx7mK2pL9zR4wT8v");
-});
-
 test("a sandbox copy gets the stand-ins the snapshot gave, for values nothing in it marks", () => {
   const repo = gitRepo(tmp());
   writeFileSync(join(repo, "settings.py"), `API_TOKEN = "${AWS_KEY}"\n`);

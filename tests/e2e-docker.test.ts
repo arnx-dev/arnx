@@ -1,12 +1,15 @@
 // Docker end to end: real sandbox and Postgres, scripted models. Run with ARNX_DOCKER_TESTS=1.
 import { describe, expect, test } from "bun:test";
 import { blankMarks } from "./helpers/review";
-import { appendFileSync, cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { accept } from "../src/accept";
-import { snapshot } from "../src/change";
-import { check } from "../src/check";
-import { isApproved, loadReviewFile, parseReviewConfig, reviewConfigPath } from "../src/config";
+import { snapshot, takeSnapshot } from "../src/change";
+import { check, checkJson, checkSummary } from "../src/check";
+import { isApproved, loadReviewFile, parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
+import type { AgentModel, Block, JsonModel } from "../src/llm";
+import { recheckJson, recheckReview, recheckSummary } from "../src/recheck";
+import { docker, ensureEnv } from "../src/sandbox";
 import { runTests } from "../src/outcomes";
 import { dockerSession } from "../src/testround";
 import { EVENTS_FILE } from "../src/events";
@@ -264,4 +267,116 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     const [ok2, detail2] = await approveConfig(repo, { by: "Dev", at: "2026-10-20" });
     expect([ok2, detail2]).toEqual([true, "4 passed"]);
   }, 900_000);
+
+  // --- a real guess in the code ------------------------------------------------------------------------------------
+  const GUESS = "zX9qP2vL7mK4tR8b";
+  const TOKEN = "cnryQ7vX2mK9pL4zR8tB1nW6yC3f";
+  const forms = (v: string) => [v, v.toUpperCase(), v.toLowerCase(), Buffer.from(v).toString("hex"),
+    Buffer.from(v).toString("base64"), Buffer.from(v).toString("base64").replace(/=+$/, ""),
+    Buffer.from(`app:${v}`).toString("base64")];
+  const expectNoForm = (what: string, text: string) => {
+    for (const v of [GUESS, TOKEN]) {
+      for (const form of forms(v)) if (text.includes(form)) throw new Error(`${what} holds a real value: ${form}`);
+    }
+  };
+  const CANARY_GEN = "tests/arnx_generated/test_canary.py";
+  const CANARY_TEST = `import base64
+from shop import settings
+
+def test_token():
+    assert settings.API_TOKEN == "x"
+def test_password():
+    assert settings.db_password == "x"
+def test_basic():
+    assert base64.b64encode(("app:" + settings.db_password).encode()).decode() == "x"
+def test_upper():
+    assert settings.db_password.upper() == "x"
+def test_hex():
+    assert settings.db_password.encode().hex() == "x"
+`;
+  const CANARY_NAMES = ["test_token", "test_password", "test_basic", "test_upper", "test_hex"];
+  const recorded = (steps: Block[][], last: string) => {
+    const bodies: string[] = [];
+    const model: AgentModel = { model: "claude-sonnet-5-5", create: async (a) => {
+      bodies.push(JSON.stringify(a));
+      const blocks = steps.shift() ?? [text(last)];
+      return { content: blocks, usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 }, raw: blocks,
+        stopReason: blocks.some((b) => b.type === "tool_use") ? "tool_use" : "end_turn" };
+    } };
+    return { bodies, model };
+  };
+
+  test("a real guess reaches no model and no report, nor its encoded forms, in a real test run", async () => {
+    const repo = initRepo(join(tmp(), "canary"));
+    mkdirSync(join(repo, "shop"));
+    mkdirSync(join(repo, "tests"));
+    writeFileSync(join(repo, "shop/__init__.py"), "");
+    writeFileSync(join(repo, "shop/settings.py"), `API_TOKEN = "${TOKEN}"\ndb_password = "${GUESS}"\n`);
+    writeFileSync(join(repo, "shop/price.py"), "def price(a):\n    return a\n");
+    writeFileSync(join(repo, ".gitignore"), "__pycache__\n.arnx/run\n");
+    mkdirSync(dirname(reviewConfigPath(repo)));
+    const yaml = "version: 1\nimage: python:3.12-slim\ninstall: [pip install pytest]\n" +
+      "test_command: python -m pytest -q {targets}\n";
+    writeFileSync(reviewConfigPath(repo), stamp(parseReviewConfig(yaml), "Dev", "2026-11-04"));
+    // These tests fail before the change too: without that check they stay confirmed, and check --review runs them.
+    const settings = { ...defaultSettings(), consentAt: "2026-11-04T00:00:00Z", beforeCheck: false };
+    commit(repo, "the code");
+    writeFileSync(join(repo, "shop/price.py"), "def price(a):\n    return a + 1\n");
+    commit(repo, "a change");
+    const report = JSON.stringify({ tests: [], questions: [],
+      suspected_defects: CANARY_NAMES.map((n) => ({ test: `${CANARY_GEN}::${n}`, explanation: `${n} is wrong.` })) });
+    const agent = recorded([
+      [tool("read_file", { path: "shop/settings.py" }), tool("grep", { pattern: "password|TOKEN", path: "." })],
+      [tool("write_file", { path: CANARY_GEN, content: CANARY_TEST }), tool("run_tests", {})]], report);
+    const judged: string[] = [];
+    const judge = { ref: "openai:x", completeJson: async (system: string, user: string) => {
+      judged.push(system, user);
+      return [{ verdict: "confirmed", reason: "It is wrong.", groups: [] }, 0.01] as const;
+    } } as unknown as JsonModel;
+    const { review, rdir } = await runReview(repo, { settings, agentModel: agent.model, challenger: judge });
+    expect(review.findings.length).toBe(CANARY_NAMES.length);
+    // The run was on the real values: the stand-in's own encodings are what the agent read.
+    const sent = agent.bodies.join("\n");
+    expect(sent).toContain("db_password");
+    expectNoForm("the agent's requests", sent);
+    expectNoForm("the judge's requests", judged.join("\n"));
+    for (const f of [EVENTS_FILE, "review.md", "review.json"]) expectNoForm(f, readFileSync(join(rdir, f), "utf8"));
+    for (const f of readdirSync(rdir, { recursive: true }) as string[]) {
+      if (f.endsWith("round.json")) expectNoForm(f, readFileSync(join(rdir, f), "utf8"));
+    }
+    const md = blankMarks(readFileSync(join(rdir, "review.md"), "utf8")).replaceAll("Mark: [ ] real", "Mark: [x] real");
+    writeFileSync(join(rdir, "review.md"), md);
+    await accept(repo, rdir, settings, { answerRunner: null });
+    expectNoForm("fix-prompt.md", readFileSync(join(rdir, "fix-prompt.md"), "utf8"));
+    const results = await check(repo, settings);
+    expect(results[0]!.failed.length).toBe(CANARY_NAMES.length);
+    expectNoForm("arnx check", checkJson(results, 1) + checkSummary(results)[0]);
+    const again = await recheckReview(repo, rdir, settings);
+    expect(again.findings.length).toBe(CANARY_NAMES.length);
+    expectNoForm("arnx check --review", recheckJson(again) + recheckSummary(again)[0]);
+  }, 600_000);
+
+  test("only the project's own manifest keeps a guess in a built image; the code an install can run does not", async () => {
+    const repo = initRepo(join(tmp(), "built"));
+    const manifest = `# ${Date.now()}\n[tool.shop]\napi_token = "${GUESS}"\n`;
+    mkdirSync(join(repo, "shop"));
+    mkdirSync(join(repo, "examples/demo"), { recursive: true });
+    writeFileSync(join(repo, "pyproject.toml"), manifest);
+    writeFileSync(join(repo, "shop/mfst.py"), `api_token = "${GUESS}"\n`);
+    writeFileSync(join(repo, "examples/demo/pyproject.toml"), `[x]\napi_token = "${GUESS}"\n`);
+    mkdirSync(dirname(reviewConfigPath(repo)));
+    const yaml = "version: 1\nimage: python:3.12-slim\ninstall: [\"true\"]\ntest_command: python -m pytest -q {targets}\n";
+    writeFileSync(reviewConfigPath(repo), stamp(parseReviewConfig(yaml), "Dev", "2026-11-04"));
+    commit(repo, "the code");
+    const snap = join(tmp(), "snap");
+    takeSnapshot(repo, null, snap, []);
+    const image = await ensureEnv(parseReviewConfig(yaml), snap, join(tmp(), "build.log"));
+    const inImage = (path: string) => docker(["run", "--rm", "--network", "none", image, "cat", path]).stdout;
+    expect(inImage("/src/pyproject.toml")).toBe(manifest);
+    expect(inImage("/src/shop/mfst.py")).toMatch(/^api_token = "[A-Za-z0-9]{16}"\n$/);
+    expect(inImage("/src/shop/mfst.py")).not.toContain(GUESS);
+    expect(inImage("/src/examples/demo/pyproject.toml")).not.toContain(GUESS);
+    // Where tests run it is the code as written.
+    expect(readFileSync(join(snap, "shop/mfst.py"), "utf8")).toContain(GUESS);
+  }, 600_000);
 });

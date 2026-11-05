@@ -56,6 +56,29 @@ function forms(v: string): string[] {
   }
 }
 
+/** A value's bytes in base64, starting `lead` bytes into a group and without the padding: only the characters the value
+ * alone decides, so it is found inside the base64 of a longer text (`Basic base64(user:value)`), for any text around it.
+ * `last`: with the character it shares with what follows, for a value that ends that text. */
+function base64Inside(v: string, lead: number, last = false): string {
+  const bytes = Buffer.byteLength(v);
+  const all = Buffer.concat([Buffer.alloc(lead), Buffer.from(v)]).toString("base64").replace(/=+$/, "");
+  return all.slice([0, 2, 3][lead]!, last || !((lead + bytes) % 3) ? all.length : all.length - 1);
+}
+const urlSafe = (b64: string) => b64.replaceAll("+", "-").replaceAll("/", "_");
+const plainBase64 = (v: string) => Buffer.from(v).toString("base64").replace(/=+$/, "");
+const hexOf = (v: string) => Buffer.from(v).toString("hex");
+/** What a program makes of a value's bytes. Applied to a stand-in, each gives what a model reads in its place, of the same
+ * length. A value in padded base64 is found by its text before the padding. */
+const ENCODINGS: ((v: string) => string)[] = [plainBase64, (v) => urlSafe(plainBase64(v)),
+  ...[0, 1, 2].flatMap((lead) => [(v: string) => base64Inside(v, lead), (v: string) => urlSafe(base64Inside(v, lead))]),
+  ...[1, 2].flatMap((lead) => [(v: string) => base64Inside(v, lead, true),
+    (v: string) => urlSafe(base64Inside(v, lead, true))]),
+  hexOf, (v) => hexOf(v).toUpperCase()];
+/** And what it makes of its letters. */
+const CASES: ((v: string) => string)[] = [(v) => v.toUpperCase(), (v) => v.toLowerCase()];
+/** The shortest encoded text taken for a value: shorter ones turn up by chance. */
+const ENCODED_MIN = 8;
+
 const alphanumeric = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
 /** Whether a piece may end at `at`: the text ends, or what follows is no letter or digit of a longer word. Text is cut in
  * too many ways to list its marks (a space, a quote, a bracket, a broken character), and a wrong guess costs an odd
@@ -102,6 +125,9 @@ function apply(text: string, edits: Edit[], withText: (e: Edit) => string): stri
 
 export class Boundary {
   private values = new Set<string>();
+  /** The values as written, and their JSON and URL forms: what a stand-in comes back to (`unmask`). `values` adds the
+   * encoded forms. */
+  private plain = new Set<string>();
   /** Longest first, so a value inside another never breaks it. */
   private longest: string[] = [];
   private made = new Map<string, string>();
@@ -111,6 +137,8 @@ export class Boundary {
   private formOf = new Map<string, string>();
   /** What `piecesAllowed` said, for each value or form a text has held a piece of. */
   private judged = new Map<string, boolean>();
+  /** An encoded form, and how it was made from the value `formOf` names. */
+  private encodingOf = new Map<string, (v: string) => string>();
 
   constructor(values: Iterable<string> = []) {
     this.add(values);
@@ -123,12 +151,31 @@ export class Boundary {
       if (!v) continue;
       for (const form of forms(v)) {
         this.values.add(form);
+        this.encodingOf.delete(form);
         if (form !== v) this.formOf.set(form, v);
       }
+      this.plain.add(v);
+      for (const form of forms(v)) this.plain.add(form);
+      this.addEncoded(v);
     }
     if (this.values.size === before) return;
-    this.longest = [...this.values].sort((a, b) => b.length - a.length);
+    this.longest = [...this.plain].sort((a, b) => b.length - a.length);
     this.index = null;
+  }
+
+  /** The forms a test can turn a real value into on its way to its output. An address's `pw@` is encoded as `pw` and keeps
+   * its case: alone it reads like a name, and `ACCESS_TOKEN` is a constant. */
+  private addEncoded(v: string): void {
+    const inAddress = v.endsWith("@");
+    const bare = inAddress ? v.slice(0, -1) : v;
+    const made = [...ENCODINGS, ...(inAddress ? [] : CASES)];
+    for (const encode of made) {
+      const form = encode(bare);
+      if (form.length < ENCODED_MIN || form === bare || this.values.has(form)) continue;
+      this.values.add(form);
+      this.formOf.set(form, v);
+      this.encodingOf.set(form, encode);
+    }
   }
 
   /** The values on both sides of a diff, a value only removed too. */
@@ -207,12 +254,27 @@ export class Boundary {
     return this.longest.map((v) => this.standIn(v));
   }
 
-  /** A value of signs alone keeps its shape, so `fake` leaves it as it is. */
+  /** A value of signs alone keeps its shape, so `fake` leaves it as it is. An encoded form's stand-in is its value's
+   * stand-in, encoded the same way: no further slow hash, and a model that decodes it finds the stand-in. */
   private standIn(v: string): string {
+    const encode = this.encodingOf.get(v);
+    if (encode) {
+      const of = this.standIn(this.formOf.get(v)!);
+      return encode(of.endsWith("@") ? of.slice(0, -1) : of);
+    }
     const s = fake(v, this.made);
     return s === v ? "x".repeat(v.length) : s;
   }
 }
+
+/** `value` masked, and whether that replaced anything. */
+export function maskedCopy<T>(b: Boundary, value: T): { value: T; shown: boolean } {
+  const masked = b.maskValue(value);
+  return { value: masked, shown: masked !== value && JSON.stringify(masked) !== JSON.stringify(value) };
+}
+
+/** Said beside text a developer or a coding agent reads, when it holds a stand-in. */
+export const STAND_INS_NOTE = "Values that look like secrets show as stand-ins: the test's file and line show the real code.";
 
 /** The values on both sides of a diff, each side read as the file's own text so a file's kind counts. */
 export function diffSuspects(diff: string, allow: readonly SecretPin[] = []): string[] {

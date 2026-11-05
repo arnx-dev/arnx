@@ -7,8 +7,9 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
-import { git, hasCommits, snapshot } from "./change";
-import { loadReviewFile, type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
+import { Boundary, maskedCopy, STAND_INS_NOTE } from "./boundary";
+import { git, hasCommits, takeSnapshot } from "./change";
+import { configSuspects, loadReviewFile, type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
 import { placed } from "./fixprompt";
 import { baseName, runTests, type TestResult } from "./outcomes";
@@ -23,7 +24,8 @@ export const CHECK_TIMEOUT = 900;
 /** `accepted`: the ids among passed and failed that are accepted tests (behind findings marked real; absent: all are).
  * `reason` and `log`, with noReport: why there is no report, and the runner's output (repository-relative).
  * `reviews`: a failed test → the review that accepted its file, when known. */
-export interface ProjectCheck { project: string; files: string[]; passed: string[]; failed: TestResult[];
+export interface ProjectCheck { /** Something in it was masked. */ standInsShown?: boolean; project: string; files: string[];
+  passed: string[]; failed: TestResult[];
   skipped: number; noReport: boolean; accepted?: string[]; reason?: string; log?: string | null;
   reviews?: Record<string, string>; workdir?: string }
 
@@ -190,7 +192,10 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       const snap = join(tmp, "repo");
       // The working tree as it is now, fixes included, untracked files too (accepted tests are untracked until
       // committed): no model sees what a check runs.
-      snapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw), untracked: true });
+      const { suspects } = takeSnapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw),
+        untracked: true });
+      // A coding agent reads what a check says, and the code it ran on holds real values.
+      const boundary = new Boundary([...suspects, ...configSuspects(repo)]);
       // The accepted tests and their support files, in place in this copy only.
       cpSync(join(repo, DOME), snap, { recursive: true });
       // Each review's files run apart (reviewGroup); the build log is kept where a failed build's error can point to
@@ -213,18 +218,19 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
           : `the runner wrote no report${run.exitCode === null ? "" : ` (exit ${run.exitCode})`}`) +
           (groups.length > 1 && g ? ` (the tests of review ${g.slice(1).replace("_", "-")})` : "");
         mkdirSync(dirname(join(repo, log)), { recursive: true });
-        writeFileSync(join(repo, log), missing.map(([, r]) => r.output).join("\n"));
+        writeFileSync(join(repo, log), boundary.mask(missing.map(([, r]) => r.output).join("\n")));
       }
       known ??= acceptedIds(repo);
       const ran = results.filter((t) => t.outcome !== "skipped");
       const failed = ran.filter((t) => t.outcome === "failed" || t.outcome === "error");
       const reviews = Object.fromEntries(failed.map((t) => [t.testId, reviewOf(known!, cfg.workdir, t.testId)])
         .filter(([, r]) => r));
-      out.push({ project: cfg.name, workdir: cfg.workdir, files, noReport: missing.length > 0,
+      const said = maskedCopy(boundary, { project: cfg.name, workdir: cfg.workdir, files, noReport: missing.length > 0,
         passed: ran.filter((t) => t.outcome === "passed").map((t) => t.testId), failed, reviews,
         skipped: results.filter((t) => t.outcome === "skipped").length,
         accepted: ran.filter((t) => isAccepted(known!, cfg.workdir, t.testId)).map((t) => t.testId),
-        ...(reason ? { reason, log } : { log: null }) });
+        ...(reason ? { reason, log } : { log: null }) } as ProjectCheck);
+      out.push(said.shown ? { ...said.value, standInsShown: true } : said.value);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -370,6 +376,14 @@ const count = (k: number, one: string, many = `${one}s`) => `${k} ${k === 1 ? on
  * tests changed since accept, is decided before anything runs: see changedAccepted). Accepted tests (behind findings
  * marked real) are told apart from the other tests the review wrote into the same files. */
 export function checkSummary(results: ProjectCheck[]): [string, number] {
+  const [text, code] = summaryOf(results);
+  if (!results.some((r) => r.standInsShown)) return [text, code];
+  const lines = text.split("\n");
+  lines.splice(lines.at(-1)!.startsWith("Next:") ? lines.length - 1 : lines.length, 0, STAND_INS_NOTE);
+  return [lines.join("\n"), code];
+}
+
+function summaryOf(results: ProjectCheck[]): [string, number] {
   if (!results.length) return ["No accepted tests yet: arnx accept keeps them after a review.", 3];
   const multi = results.length > 1;
   const lines: string[] = [];
@@ -761,5 +775,5 @@ export function checkJson(results: ProjectCheck[], code: number, changed: Change
           accepted: acc(t.testId) })),
         skipped: r.skipped };
     }),
-    changed, may_contradict: contradict }, null, 2);
+    changed, may_contradict: contradict, stand_ins_shown: results.some((r) => !!r.standInsShown) }, null, 2);
 }

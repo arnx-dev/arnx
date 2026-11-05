@@ -147,7 +147,7 @@ test("check --json and check --review --json carry command: check; their errors 
   const r = new Cli({ cwd: repo, checkSessions: sessions });
   expect(await r.run("check", "--review", "20261012-000000", "--json", "--quiet")).toBe(0);
   expect(JSON.parse(r.stdout)).toEqual({ schema_version: 1, command: "check", review: "20261012-000000",
-    result: "nothing-confirmed", exit_code: 0, findings: [] });
+    result: "nothing-confirmed", exit_code: 0, findings: [], stand_ins_shown: false });
   const e = new Cli({ cwd: repo, checkSessions: sessions });
   expect(await e.run("check", "--review", "nope", "--json")).toBe(3);
   expect(JSON.parse(e.stdout)).toEqual({ schema_version: 1, command: "check", result: "error", exit_code: 3,

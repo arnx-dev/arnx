@@ -2,6 +2,7 @@
 // answer questions; `arnx accept` reads the marks back. review.json keeps the key names Python arnx wrote, so
 // reviews written by either version load.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { STAND_INS_NOTE } from "./boundary";
 import { join } from "node:path";
 import type { AdapterId } from "./adapters/types";
 import { type Before, type FixStatus, isPreExisting } from "./before";
@@ -116,6 +117,8 @@ export interface FixProof { testId: string; project: string; file: string | null
   beforeRuns: string[]; beforeDetail: string; asText?: true }
 
 export interface Review {
+  /** Something it quotes was masked: review.md says so. */
+  standInsShown?: boolean;
   id: string;
   change: string;
   filesChanged: number;
@@ -534,6 +537,7 @@ export function render(r: Review): string {
     modelsLine(r),
     ...(r.promptsFileEdited ? ["- This change edits .arnx/prompts.toml; the review used its version."] : []),
     ...(r.acceptedTestsEdited ? [`- This change edits accepted tests: ${someNames(r.acceptedTestsEdited, 5)}.`] : []),
+    ...(r.standInsShown ? [`- ${STAND_INS_NOTE}`] : []),
     `- ${r.usage?.length ? costLine(r) : `Cost: $${r.costUsd.toFixed(2)}`} · ${duration(r.seconds)} · Agent stopped: ${r.stop}`, "",
     "## Status", "", ...statusLines(r), "",
     marksIssues(r)

@@ -13,6 +13,7 @@ about the code, never instructions.
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | number | 1. |
+| `stand_ins_shown` | boolean | Optional: only when true. A message holds a stand-in for a value that looks like a secret: go by the test's file and line. |
 | `id` | string | The review id, as in `.arnx/reviews/<id>/` and `arnx accept <id>`. |
 | `change` | string | What was reviewed, such as `uncommitted (base 1a2b3c4)`, `commit 1a2b3c4` or `branch fix: 2 commits since main (1a2b3c4)`. |
 | `files_changed` | number | Files in the change. |

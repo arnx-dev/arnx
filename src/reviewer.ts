@@ -12,6 +12,7 @@ import { shallowKind } from "./shallow";
 import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, withRole } from "./events";
 import { added, type Change, describe, describeBlanked, EMPTY_TREE, filesAt, removed, resolveChange, sliceDiff,
   someNames, treeSuspects, untrackedLine } from "./change";
+import { maskedCopy } from "./boundary";
 import { configSuspects, loadReviewFile, type ReviewConfig, reviewConfigPath, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
 import { huntParts } from "./hunt";
@@ -470,7 +471,8 @@ export async function runReview(repo: string, o: { settings: Settings;
       const t = await typecheckRound(repo, change.head, c.project, { changed: change.files,
         ...(s.beforeCheck ? { base: change.base === EMPTY_TREE ? null : change.base } : {}),
         outDir: join(rdir, "projects", c.project.name), sessionFactory: o.sessionFactory ?? dockerSession,
-        ...(o.progress ? { progress: o.progress } : {}), untracked: !!change.withUntracked });
+        ...(o.progress ? { progress: o.progress } : {}), untracked: !!change.withUntracked,
+        ...(boundary ? { boundary } : {}) });
       if (t) typecheck.push(t);
     }
     const keptRound = new Set<string>();
@@ -696,7 +698,11 @@ export async function runReview(repo: string, o: { settings: Settings;
       flaky: flaky.length, seconds: review.seconds });
     dockerSteps.log = null;
     dockerSteps.say = null;
-    save(review, rdir, change.diff);
+    // What a coding agent reads next holds no value a model may not: review.json, review.md, the summary.
+    const masked = boundary ? maskedCopy(boundary, review) : { value: review, shown: false };
+    const toSave: Review = masked.shown || done.some((d) => d.rnd.standInsShown)
+      ? { ...masked.value, standInsShown: true } : masked.value;
+    save(toSave, rdir, change.diff);
     logUsage(repo, "review", usage, o.now ?? new Date(), rid);
     const byOutcome: Record<string, number> = {};
     for (const x of suspects) byOutcome[x.outcome] = (byOutcome[x.outcome] ?? 0) + 1;
@@ -708,7 +714,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       tests_written: written, passed, flaky: flaky.length, errors: errors.length, missing_runs: missingRuns,
       cost_usd: review.costUsd, seconds: review.seconds, stop,
       usage: usage.map((u) => Object.fromEntries(Object.entries(u).map(([k, v]) => [snake(k), v]))) });
-    return { review, rdir };
+    return { review: toSave, rdir };
   };
   // Whatever stops the review is recorded, then thrown again unchanged.
   return withEvents(log, () => withCalls(calls, run).catch(async (e: unknown) => {

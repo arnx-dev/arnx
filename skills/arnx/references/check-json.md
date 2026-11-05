@@ -25,6 +25,7 @@ the path each test runs from; `files` are where they are kept.
 | `exit_code` | number | 0, 1, 2, 3 or 4, the same as the process exit code. |
 | `projects` | array | One entry per project with accepted tests: see [Each project](#each-project). Empty when nothing ran. |
 | `changed` | array | Accepted test files edited or deleted since `arnx accept` recorded them, or whose entry in `.arnx/accepted-tests.json` was changed or removed: see [Each changed file](#each-changed-file). Non-empty only with `tests-changed`. |
+| `stand_ins_shown` | boolean | A message holds a stand-in for a value that looks like a secret: go by the test's file and line. |
 | `may_contradict` | array | Pairs of an answer's test and an accepted test that may ask for opposite things: see [Each possible contradiction](#each-possible-contradiction). Empty when none. Never changes `result` or the exit code. |
 
 ## Each project
@@ -114,6 +115,7 @@ counts only when its test passes in every run (3 by default, `runs` in `.arnx/co
 | `schema_version` | number | 1. |
 | `command` | string | `check`. |
 | `review` | string | The review id. |
+| `stand_ins_shown` | boolean | A message holds a stand-in for a value that looks like a secret: go by the test's file and line. |
 | `result` | string | `pass`, `fail`, `no-report` or `nothing-confirmed` (see below). |
 | `exit_code` | number | 0, 1 or 2, the same as the process exit code. |
 | `findings` | array | One entry per confirmed finding: see [Each rechecked finding](#each-rechecked-finding). |

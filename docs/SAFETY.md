@@ -26,9 +26,17 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   never sent to a model. A file left out this way is named at setup and in each review. When every key-shaped
   string in a JavaScript, TypeScript, Python or Rust file is inside a comment that has its lines to itself (a doc
   example), the file is sent with those comment lines blanked instead (a private key's whole block too, when it lies
-  in the comment), and setup names the file and its lines. Everything else that may be a secret reaches a model only as
-  a stand-in, a fake of the same shape (its prefix such as `sk-`, `whsec_` or `AKIA` kept, then the same length and kinds
-  of characters, hex staying hex), in every request, whatever it holds: a file read, a search, a test's output.
+  in the comment), and setup names the file and its lines. Everything else that may be a secret reaches a model as a
+  stand-in, a fake of the same shape (its prefix such as `sk-`, `whsec_` or `AKIA` kept, then the same length and kinds
+  of characters, hex staying hex), in every request, whatever it holds: a file read, a search, a test's output. The same
+  goes for its JSON and URL forms, its upper and lower case, its hex and its base64, also inside the base64 of a longer
+  text (`Basic base64(user:value)`), and for what arnx writes or prints for you and your coding agent: `review.md`,
+  `review.json`, `round.json`, `fix-prompt.md`, and the output of `arnx prompt`, `arnx check` and `arnx check --review`.
+  These say so, and name the test's file and line, which hold the real code. **No filter is complete:** tests run on the
+  real guesses (below), and a test can turn a value into something no filter recognises, by reversing it, adding spaces,
+  hashing it or joining it with other text before encoding it in another way. A cut of a value under 12 characters
+  passes too, as does a value written with escapes in the source (`"ab\x55c"`), which nothing reads as that value.
+  Local files arnx writes for itself keep what they saw: `change.diff` and the setup and proof logs under `.arnx/run/`.
   What the tests run depends on how sure arnx is. Key-shaped text and a password in an address get the stand-in in the
   snapshot too, wherever they appear, so no file keeps them and every file gets the same fake; the tests run with the
   fake, and one that checks a signature made with the real value (a signed license key) fails. A guess stays as it is
@@ -43,11 +51,12 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   counts wherever it appears: those files are read for this and copied nowhere. A random-looking string (hex or base64)
   is a guess only where such a name marks it: unnamed, it is a hash, a commit id, an address or a signature that tests
   compare.
-  Building an image has network, so it gets a second copy of the snapshot in which each guess is a stand-in too. A guess a
-  manifest or a lockfile holds is the exception: it stays in every file of both copies, as a stand-in there can break an
-  install. An install that copies the project elsewhere (`cp -a . /opt/app`, `pip install .`) copies that second copy, so tests
-  that run there see stand-ins for guesses. Lockfiles and binary files are left alone. The real values never leave your machine,
-  beyond what a manifest or a lockfile holds. Setup names the files whose snapshot has stand-ins once. A private key with
+  Building an image has network, so it gets a second copy of the snapshot in which each guess is a stand-in too. The
+  project's own manifests (the files that key its image, by its adapter and folder) and lockfiles are the exception: they
+  keep their own values in both copies, as a stand-in there can break an install, so an install step can read those. No other
+  file keeps them. An install that copies the project elsewhere (`cp -a . /opt/app`, `pip install .`) copies that second copy, so tests
+  that run there see stand-ins for guesses. Binary files are left alone. The real values never leave your machine,
+  beyond what a manifest or a lockfile holds and what the limits above let through. Setup names the files whose snapshot has stand-ins once. A private key with
   a body cannot get a stand-in: its file is still left out (a header with no body anywhere in the file, such as a form's
   placeholder, is kept as it is).
   `[review] stand_ins = false` in `.arnx/config.toml` turns stand-ins off in both copies: files with key-shaped text in code

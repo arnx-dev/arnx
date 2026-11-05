@@ -10,7 +10,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSyn
 import { dirname, join, posix } from "node:path";
 import { adapterFor, getAdapter, LANGUAGES } from "./adapters";
 import type { CopyOnly } from "./baked";
-import { digest, type ReviewConfig } from "./config";
+import { digest, loadReviewFile, type ReviewConfig } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
 import { envValue, globRegex } from "./secrets";
 import { pyJson, randomHex, shQuote, sleep } from "./util";
@@ -209,6 +209,36 @@ export function isManifest(path: string): boolean {
   });
   const name = posix.basename(path);
   return manifestGlobs.some((g) => g.test(name));
+}
+
+/** Whether `rel` (repository path) is a file that keys `cfg`'s image: its adapter's manifests, where envKey reads them. */
+function keysImage(cfg: ReviewConfig, rel: string): boolean {
+  const root = posix.normalize(cfg.installRoot).replace(/^\.$/, "").replace(/\/$/, "");
+  if (root && !rel.startsWith(`${root}/`)) return false;
+  const inner = root ? rel.slice(root.length + 1) : rel;
+  const adapter = adapterFor(cfg);
+  const dirs = inner.split("/").slice(0, -1);
+  if (adapter.nestedManifests ? dirs.some((d) => d.startsWith(".") || d === "target" || d === "node_modules") : dirs.length) {
+    return false;
+  }
+  const name = posix.basename(inner);
+  return adapter.manifests.some((m) => globRegex(m).test(name));
+}
+
+/** Folders whose manifests are not the project's own, before any review.yaml says what the project is. */
+const NOT_THE_PROJECT = /(?:^|\/)(?:examples?|samples?|demos?|fixtures?|tests?|__tests__|testdata|docs?|vendor|third_party|node_modules)\//;
+
+/** Which files of `repo` an install of its projects reads for what to install: what keys their images. Before review.yaml
+ * exists, or reads, any language's manifests outside folders of examples, tests and the like. */
+export function manifestRule(repo: string): (rel: string) => boolean {
+  let projects: ReviewConfig[] = [];
+  try {
+    projects = loadReviewFile(repo, { requireApproved: false }).projects;
+  } catch {
+    // none yet, or one that does not read
+  }
+  if (projects.length) return (rel) => projects.some((cfg) => keysImage(cfg, rel));
+  return (rel) => isManifest(rel) && !NOT_THE_PROJECT.test(rel);
 }
 
 /** Where a snapshot's build context is kept when it has one of its own: beside the snapshot, so nothing that reads the

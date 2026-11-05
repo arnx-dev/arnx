@@ -13,14 +13,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve, sep } from "node:path";
+import { configSuspects, loadReviewFile, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
 import { excludePathspecs, firstUnpinned, hasKeyBody, isCertainRule, isCodePath, isSecretPath, privateKeyBody, scanKeys,
-  type SecretPin, standInsFor, suspects, usedAsName, wholeIn, WORD_RULE } from "./secrets";
-import { buildContextDir, isManifest, REPORT_DIR, type Runner } from "./sandbox";
+  type SecretPin, standInsFor, suspects, usedAsName, WORD_RULE } from "./secrets";
+import { buildContextDir, manifestRule, REPORT_DIR, type Runner } from "./sandbox";
 import { standInsSetting } from "./settings";
 import { splitLines } from "./util";
-import { ValueIndex } from "./valueindex";
 
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 export const MAX_DIFF_BYTES = 200_000;
@@ -446,7 +446,7 @@ export interface Scrubbed { withheld: Withheld[]; blanked: Blanked[]; standIns: 
    * copy into the sandbox (addToSandbox), never logged. */
   secrets: ReadonlySet<string>;
   /** The values real where tests run and stand-ins only in the build context (sandbox.ts buildContextOf): the guesses. A
-   * guess a manifest or a lockfile holds is not one of them: it stays real in every file of both. */
+   * project's manifest and a lockfile keep theirs in both trees. */
   guesses: ReadonlySet<string>;
   /** Every value that looks like a secret, in memory only: all of `secrets` and `guesses`, and those of files that get no
    * stand-ins, of secret files and of files left out, none of them changed. What leaves arnx is masked for each
@@ -513,7 +513,7 @@ export function takeSnapshot(repo: string, head: string | null, dest: string, al
     }
   }
   return scrub(dest, ignored, allow, { standIns: o.standIns ?? standInsSetting(repo), sandbox, build: !o.valuesOnly,
-    rootEnv: rootEnvValues(repo, allow) });
+    manifest: manifestRule(repo), rootEnv: rootEnvValues(repo, allow) });
 }
 
 /** The values of the `.env*` files at the top of `repo`, tracked or not, with their rules: they are read for this and
@@ -531,6 +531,21 @@ function rootEnvValues(repo: string, allow: readonly SecretPin[]): Map<string, s
     for (const [v, rule] of why) if (!out.has(v)) out.set(v, rule);
   }
   return out;
+}
+
+/** What a text from this repository's working tree may hold: every suspect of the tree, untracked files too, and of
+ * review.yaml. For what arnx writes or prints that a coding agent reads. */
+export function treeValues(repo: string): Set<string> {
+  let allow: readonly SecretPin[] = [];
+  let raw: string[] = [];
+  try {
+    const file = loadReviewFile(repo, { requireApproved: false });
+    allow = secretPinsOf(file.raw);
+    raw = sandboxOnlyOf(file.raw);
+  } catch {
+    // no review.yaml that reads: no pins
+  }
+  return new Set([...treeSuspects(repo, null, allow, { untracked: true, sandbox: raw }), ...configSuspects(repo)]);
 }
 
 /** The suspects of the code at `head` (the working tree when null), from a snapshot taken only for them. */
@@ -745,8 +760,8 @@ function linkTree(from: string, to: string, skip: ReadonlySet<string>, rel = "")
  * occurrence of a certain one (isCertainRule), in any file but a lockfile, gets its stand-in: a value is replaced wherever
  * it appears, so no file keeps it and the files agree. The guesses stay real here, since a wrong one must not change code
  * that runs, and a model reads them only through the filter (boundary.ts). A build has network, so with `build` the image
- * gets its own tree beside this one (buildContextOf), with a stand-in for each guess too; except a guess a manifest or a
- * lockfile holds, which stays in every file of both: a stand-in there can break an install. A file is left out only when
+ * gets its own tree beside this one (buildContextOf), with a stand-in for each guess too, in every file but a project's
+ * manifest and a lockfile: a stand-in there can break an install. A file is left out only when
  * no stand-in keeps a key out (a private key with its body), or, without `standIns`, when it holds key-shaped text in
  * code. Returns those files, the files blanked, given stand-ins and moved beside the tree, and the values (in memory only:
  * never logged or sent). */
@@ -756,6 +771,8 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
                  aside?: boolean;
                  /** Make the build context. */
                  build?: boolean;
+                 /** A file an install reads for what to install (sandbox.ts manifestRule). */
+                 manifest?: (rel: string) => boolean;
                  /** Values of files no snapshot holds, with their rules (rootEnvValues). */
                  rootEnv?: ReadonlyMap<string, string> }): Scrubbed {
   const realRoot = realpathSync(root);
@@ -906,17 +923,8 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
       }
     }
   }
-  // A certain value is certain everywhere. A guess a manifest or a lockfile holds stays in every file, or the install and
-  // the code would disagree; the manifest has it next to the network anyway.
+  // A certain value is certain everywhere.
   for (const v of values) guesses.delete(v);
-  if (guesses.size) {
-    const index = new ValueIndex([...guesses]);
-    for (const f of scanned) {
-      if (!isManifest(f.rel) && !isLockfile(f.rel)) continue;
-      const text = textOfScanned(f);
-      for (const v of wholeIn(text, index.present(text))) guesses.delete(v);
-    }
-  }
   // Then each value's stand-in, wherever it is: for the build each guess too, into a file of its own.
   const made = new Map<string, string>();
   const replace = values.size ? standInsFor(values, made) : null;
@@ -927,7 +935,8 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
     let text = scrubText(f.p, changeLimits.maxScanBytes)!.text;
     if (lines) text = (scanKeys(f.rel, text, pinsOf(f.rel)) as { text: string }).text;
     const r = replace && fakes(f.rel) ? replace(text, pinsOf(f.rel)) : { text, count: 0 };
-    const built = toBuild && fakes(f.rel) && !sandboxed.has(f.rel) && !notBuilt.has(f.rel)
+    // A manifest keeps its guesses, as a stand-in there can break an install; every other file gets them.
+    const built = toBuild && fakes(f.rel) && !o.manifest?.(f.rel) && !sandboxed.has(f.rel) && !notBuilt.has(f.rel)
       ? toBuild(text, pinsOf(f.rel)) : null;
     if (built && built.text !== r.text) {
       const at = join(context, f.rel);

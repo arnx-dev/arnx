@@ -14,6 +14,7 @@ import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type Be
   fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, newNames, notChecked, SKIP_REASONS, textBefore, textFix,
   vacuousBefore } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
+import { type Boundary, maskedCopy } from "./boundary";
 import { snapshot, takeSnapshot, tooLargeText, withSandboxFiles } from "./change";
 import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
@@ -31,6 +32,8 @@ export const TOOL_TIMEOUT = 300;
 export const RUN_TIMEOUT = 600;
 
 export interface Round {
+  /** Something in it was masked (boundary.ts). */
+  standInsShown?: boolean;
   agent: AgentResult;
   files: Record<string, string>;
   classified: Classified;
@@ -422,7 +425,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
     if (o.before && (failing.length || proofs.length)) {
       ({ before, fixProof } = await beforeStage(repo, cfg, { ...o.before, findings: failing, proofs, files,
         writeDir: o.writeDir, runs: o.runs, headSnap: snap, headKey, tmp, outDir: o.outDir,
-        sessionFactory: o.sessionFactory ?? dockerSession, say }));
+        sessionFactory: o.sessionFactory ?? dockerSession, say, ...(o.brain.boundary ? { boundary: o.brain.boundary } : {}) }));
     }
     if (checked) {
       typecheck = await typecheckDone(repo, cfg, checked, { ...o.typecheck!, headSnap: snap, headKey, tmp,
@@ -431,10 +434,11 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+  const b = o.brain.boundary;
   for (const [rel, source] of Object.entries(files)) {
     const dest = join(o.outDir, "tests", rel + COPY_SUFFIX);
     mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, source);
+    writeFileSync(dest, b ? b.mask(source) : source);
   }
   const hasTests = Object.keys(files).some((rel) => adapter.isTestFile(posix.basename(rel)));
   const classified = classify(results);
@@ -446,9 +450,12 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         message: testMessage(t.message) });
     }
   }
-  return { agent, files, classified, removed, sawResults: saw || !hasTests,
+  const round: Round = { agent, files, classified, removed, sawResults: saw || !hasTests,
     ...(dbLeft ? { dbUntested: dbLeft } : {}), ...(before ? { before } : {}), ...(fixProof ? { fixProof } : {}),
-    ...(typecheck ? { typecheck } : {}), ...(hunt ? { hunt } : {}) };
+    ...(typecheck ? { typecheck } : {}) };
+  // All a round says from here on is saved and read by people and coding agents, none of it through a model's filter.
+  const masked = b ? maskedCopy(b, round) : { value: round, shown: false };
+  return { ...masked.value, ...(masked.shown ? { standInsShown: true } : {}), ...(hunt ? { hunt } : {}) };
 }
 
 /** Clears what arnx wrote into a snapshot: the generated files and the runners' reports. A type check then sees the
@@ -465,8 +472,8 @@ function clearArnxFiles(snap: string, cfg: ReviewConfig, writeDir: string): void
  * change as a round's is. Null when the project has no type check. A failure here is the type check's, never the
  * review's. */
 export async function typecheckRound(repo: string, head: string | null, cfg: ReviewConfig, o: { changed: string[];
-  base?: string | null; outDir: string; sessionFactory?: SessionFactory; progress?: Say; untracked?: boolean })
-  : Promise<TypeCheck | null> {
+  base?: string | null; outDir: string; sessionFactory?: SessionFactory; progress?: Say; untracked?: boolean;
+  boundary?: Boundary }): Promise<TypeCheck | null> {
   if (!cfg.typecheck) return null;
   const say = (m: string) => o.progress?.(`${cfg.name}: ${m}`);
   const sessionFactory = o.sessionFactory ?? dockerSession;
@@ -474,7 +481,8 @@ export async function typecheckRound(repo: string, head: string | null, cfg: Rev
   const tmp = mkdtempSync(join(tmpdir(), "arnx-"));
   try {
     const snap = join(tmp, "repo");
-    snapshot(repo, head, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw), untracked: !!o.untracked });
+    o.boundary?.add(takeSnapshot(repo, head, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw),
+      untracked: !!o.untracked }).suspects);
     const headKey = envKey(cfg, snap);
     const run = await sessionFactory({ ...cfg, services: [] }, snap, join(o.outDir, "env-build.log"),
       async (session) => typecheckHere(session, snap, cfg, writeDirOf(cfg), say));
@@ -559,7 +567,7 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
 async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | null; diff?: string; deadline?: number;
   findings: TestResult[]; proofs: TestResult[]; files: Record<string, string>; writeDir: string; runs: number;
   headSnap: string; headKey: string; tmp: string;
-  outDir: string; sessionFactory: SessionFactory; say: (m: string) => void })
+  outDir: string; sessionFactory: SessionFactory; say: (m: string) => void; boundary?: Boundary })
   : Promise<{ before?: BeforeCheck; fixProof?: FixCheck }> {
   const started = performance.now();
   const ms = (from: number) => Math.round(performance.now() - from);
@@ -622,7 +630,9 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
     const snap = join(o.tmp, "before");
     let late = false, proofLate = false, envChanged = false;
     const proofRuns: BeforeRun[] = [];
-    const copyCode = () => snapshot(repo, o.base!, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw) });
+    // Its values may reach a model through a run's output, as the change's do.
+    const copyCode = () => o.boundary?.add(takeSnapshot(repo, o.base!, snap, secretPinsOf(cfg.raw),
+      { sandbox: sandboxOnlyOf(cfg.raw) }).suspects);
     // Set when the code is in place before the session, for an image made from it (below).
     let inImage = false;
     const inSession = async (session: Runner) => {

@@ -3,11 +3,15 @@
 // last test fails until it is named.
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { makeAnswerRunner } from "../src/accept";
 import { agreements, selfAgreement } from "../src/valueindex";
-import { Boundary, boundaryOf, diffSuspects, isMasked, maskedAgent, maskedJson, piecesAllowed } from "../src/boundary";
+import { accept } from "../src/accept";
+import { Boundary, boundaryOf, diffSuspects, isMasked, maskedAgent, maskedJson, piecesAllowed, STAND_INS_NOTE }
+  from "../src/boundary";
+import { check, checkJson, checkSummary } from "../src/check";
+import { recheckJson, recheckReview, recheckSummary } from "../src/recheck";
 import { CloudClient } from "../src/cloud";
 import { clipOutput as cutForBrain, CloudBrain } from "../src/cloudbrain";
 import { loadReviewFile, parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
@@ -209,6 +213,208 @@ test("a guess stays real in the run snapshot, and reaches no model through read_
   expect(sent).toContain(`api_token = \\\"${faked.mask(CANARY)}`);
   expect(sent).toContain(`db_password = \\\"${faked.mask(UNCHANGED)}`);
   expect(sent).toContain(`E   api_token = \\\"${faked.mask(CANARY)}`);
+});
+
+// --- what a test can make of a real value --------------------------------------------------------------------------
+
+const b64 = (t: string) => Buffer.from(t).toString("base64");
+const url64 = (t: string) => b64(t).replaceAll("+", "-").replaceAll("/", "_");
+/** A value whose base64 holds both the signs base64 and its URL form differ on. */
+const SIGNS_VALUE = "Zq~7x?K2>mP9vR4tY1wA";
+
+test("each encoded form of a value is masked, and each stand-in is the stand-in's own encoding", () => {
+  expect(b64(SIGNS_VALUE)).toMatch(/[+/]/);
+  expect(b64(SIGNS_VALUE)).toMatch(/=$/);
+  for (const value of [CANARY, SIGNS_VALUE]) {
+    const b = new Boundary([value]);
+    const fake = b.mask(value);
+    expect(fake).not.toBe(value);
+    for (const [name, encode] of Object.entries({
+      "base64": b64, "base64 unpadded": (t: string) => b64(t).replace(/=+$/, ""), "base64url": url64,
+      "base64url unpadded": (t: string) => url64(t).replace(/=+$/, ""),
+      "hex": (t: string) => Buffer.from(t).toString("hex"), "HEX": (t: string) => Buffer.from(t).toString("hex").toUpperCase(),
+      "upper": (t: string) => t.toUpperCase(), "lower": (t: string) => t.toLowerCase() })) {
+      const form = encode(value);
+      const out = b.mask(`x = "${form}";`);
+      expect([name, out.includes(form)]).toEqual([name, false]);
+      if (!name.includes("padded")) expect([name, out]).toEqual([name, `x = "${encode(fake)}";`]);
+    }
+  }
+});
+
+test("a value in the base64 of a longer text is masked, whatever stands around it", () => {
+  const b = new Boundary([CANARY]);
+  for (const text of [`app:${CANARY}`, `a:${CANARY}`, `someone@example.com:${CANARY}`, `${CANARY}:suffix`, `x${CANARY}yz`]) {
+    for (const encode of [b64, url64]) {
+      const whole = encode(text);
+      const out = b.mask(`Authorization: Basic ${whole}`);
+      expect([text, out.includes(whole)]).toEqual([text, false]);
+      // What is left is what stands around it, and at most the bits it shares with those characters.
+      const decoded = Buffer.from(out.slice("Authorization: Basic ".length), "base64").toString("latin1");
+      expect([text, decoded.includes(CANARY)]).toEqual([text, false]);
+      for (let i = 0; i + 4 <= CANARY.length; i++) {
+        expect([text, i, decoded.includes(CANARY.slice(i, i + 4))]).toEqual([text, i, false]);
+      }
+    }
+  }
+});
+
+test("a runner's cut of that base64 leaves no long tail of it", () => {
+  const b = new Boundary([CANARY]);
+  for (const user of ["app", "ab", "a"]) {
+    const whole = b64(`${user}:${CANARY}`);
+    const tail = whole.replace(/=+$/, "").slice(-12);
+    const out = b.mask(`assert 'Basic ${whole.slice(0, 6)}...${tail}${whole.slice(whole.replace(/=+$/, "").length)}' == 'x'`);
+    expect([user, out.includes(tail)]).toEqual([user, false]);
+  }
+});
+
+test("a word-like address password keeps its case: its other case is a name, and its encodings are not", () => {
+  const value = "access_token@";
+  const b = new Boundary([value]);
+  expect(b.mask("ACCESS_TOKEN = 1; access_token = 2")).toBe("ACCESS_TOKEN = 1; access_token = 2");
+  const encoded = b64("access_token").replace(/=+$/, "");
+  expect(b.mask(`x ${encoded} y`)).not.toContain(encoded);
+});
+
+test("short values have no encoded forms: short text turns up by chance", () => {
+  const b = new Boundary(["abc@"]);
+  expect(b.mask(`${b64("abc")} ABC`)).toBe(`${b64("abc")} ABC`);
+});
+
+test("only the value's plain forms come back from unmask: an encoded form's stand-in has no one place to go", () => {
+  const b = new Boundary([CANARY]);
+  expect(b.standIns().sort()).toEqual([b.mask(CANARY)].sort());
+  expect(b.unmask(b.mask(CANARY))).toBe(CANARY);
+});
+
+test("many values with their forms stay quick to add and to mask with", () => {
+  const values = Array.from({ length: 5000 }, (_, i) => `Zq7xK2mP9vR4tY${i}w`);
+  const t0 = performance.now();
+  const b = new Boundary(values);
+  const text = "lorem ipsum dolor sit amet ".repeat(40_000);
+  expect(b.mask(text)).toBe(text);
+  expect(performance.now() - t0).toBeLessThan(1500);
+});
+
+// --- what a coding agent reads next -----------------------------------------------------------------------------------
+
+/** A review whose failing test prints the real values, as the code holds them. */
+async function reviewedCanary() {
+  const repo = leakyRepo({ standIns: true });
+  const out = `E  token=${CANARY} ${b64(`app:${CANARY}`)} ${CANARY.toUpperCase()}\n1 failed\n`;
+  const run = (): [string | null, string, boolean] => [junitXml([[GEN, "test_add", "failed",
+    `assert "${CANARY}" == "${b64(`app:${UNCHANGED}`)}"`]]), out, false];
+  const settings: Settings = { ...SETTINGS, standIns: true };
+  writeSettings(repo, settings);
+  const r = await runReview(repo, { settings, agentModel: new RecordingAgent(TURNS()),
+    challenger: new RecordingJson("openai:x", VERDICT), sessionFactory: fakeFactory(run) });
+  return { repo, settings, run, ...r };
+}
+/** Fails on the value in any form a test here makes of it. */
+function expectNoForm(what: string, text: string): void {
+  const encoded = [CANARY, UNCHANGED].flatMap((v) => [v, v.toUpperCase(), b64(`app:${v}`)]);
+  for (const form of encoded) if (text.includes(form)) throw new Error(`${what} holds a real value: ${form}`);
+}
+
+test("review.json, review.md, round.json and the review returned hold no real value, and say so", async () => {
+  const { review, rdir } = await reviewedCanary();
+  expect(review.findings.length).toBeGreaterThan(0);
+  expectNoForm("the review returned", JSON.stringify(review));
+  for (const f of ["review.json", "review.md"]) expectNoForm(f, readFileSync(join(rdir, f), "utf8"));
+  const rounds = (readdirSync(rdir, { recursive: true }) as string[]).filter((f) => f.endsWith("round.json"));
+  expect(rounds.length).toBeGreaterThan(0);
+  for (const f of rounds) expectNoForm(f, readFileSync(join(rdir, f), "utf8"));
+  expect(readFileSync(join(rdir, "review.md"), "utf8").replace(/\s+/g, " ")).toContain(STAND_INS_NOTE);
+  expect(JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")).stand_ins_shown).toBe(true);
+});
+
+test("what a model's report quotes is masked in the saved review too", async () => {
+  const repo = leakyRepo({ standIns: true });
+  const report = JSON.stringify({ tests: [{ test: `${GEN}::test_add`, expects: "add sums" }], questions: [],
+    suspected_defects: [{ test: `${GEN}::test_add`, explanation: `It sends ${UNCHANGED}.` }] });
+  // The judge's reply goes straight into the review: no round's mask covers it.
+  const judge = new RecordingJson("openai:x", { ...VERDICT, reason: `It holds ${UNCHANGED}.` });
+  const { review, rdir } = await runReview(repo, { settings: { ...SETTINGS, standIns: true },
+    agentModel: new RecordingAgent(TURNS(), report), challenger: judge, sessionFactory: fakeFactory(leakyRun) });
+  expect(review.findings[0]!.explanation).toContain("It sends ");
+  expect(review.findings[0]!.reason).toContain("It holds ");
+  expectNoForm("the review returned", JSON.stringify(review));
+  for (const f of ["review.json", "review.md"]) expectNoForm(f, readFileSync(join(rdir, f), "utf8"));
+});
+
+test("the fix prompt holds no real value, whatever the review on disk quotes", async () => {
+  const { repo, rdir, settings } = await reviewedCanary();
+  const md = readFileSync(join(rdir, "review.md"), "utf8");
+  writeFileSync(join(rdir, "review.md"), md.replace(/Mark: \[[^\]]*\] real/g, "Mark: [x] real"));
+  const saved = JSON.parse(readFileSync(join(rdir, "review.json"), "utf8"));
+  saved.findings[0].explanation = `It sends ${UNCHANGED}.`;
+  writeFileSync(join(rdir, "review.json"), JSON.stringify(saved));
+  await accept(repo, rdir, settings, { answerRunner: null });
+  expect(readFileSync(join(rdir, "fix-prompt.md"), "utf8")).toContain("It sends");
+  const prompt = readFileSync(join(rdir, "fix-prompt.md"), "utf8");
+  expectNoForm("fix-prompt.md", prompt);
+  expect(prompt.replace(/\s+/g, " ")).toContain(STAND_INS_NOTE);
+});
+
+test("arnx check says no real value: its results, its JSON, its summary and its log", async () => {
+  const repo = leakyRepo({ standIns: true });
+  mkdirSync(join(repo, ".arnx/tests/tests/arnx/r1"), { recursive: true });
+  writeFileSync(join(repo, ".arnx/tests/tests/arnx/r1/test_kept.py"), "def test_kept():\n    assert False\n");
+  const failing = () => [junitXml([["tests/arnx/r1/test_kept.py", "test_kept", "failed",
+    `assert "${UNCHANGED}" == "${b64(`app:${UNCHANGED}`)}"`]]), `E  ${UNCHANGED}\n`, false] as [string, string, boolean];
+  const results = await check(repo, SETTINGS, { sessionFactory: fakeFactory(failing) });
+  expect(results[0]!.failed.length).toBe(1);
+  const [summary, code] = checkSummary(results);
+  expectNoForm("check", JSON.stringify(results));
+  expectNoForm("check --json", checkJson(results, code));
+  expect(JSON.parse(checkJson(results, code)).stand_ins_shown).toBe(true);
+  expect(summary).toContain(STAND_INS_NOTE);
+  // A run that gave no report: its output goes to a log a coding agent is pointed at.
+  const none = () => [null, `E  ${UNCHANGED}\n`, false] as [null, string, boolean];
+  const [gone] = await check(repo, SETTINGS, { sessionFactory: fakeFactory(none) });
+  expect(gone!.log).toBeTruthy();
+  expectNoForm("the check's log", readFileSync(join(repo, gone!.log!), "utf8"));
+});
+
+test("arnx check --review says no real value", async () => {
+  const { repo, rdir, settings, run } = await reviewedCanary();
+  const r = await recheckReview(repo, rdir, settings, { sessionFactory: fakeFactory(run) });
+  expect(r.findings.some((f) => f.message)).toBe(true);
+  expectNoForm("the recheck", JSON.stringify(r));
+  expectNoForm("check --review --json", recheckJson(r));
+  expect(recheckSummary(r)[0]).toContain(STAND_INS_NOTE);
+  expect(JSON.parse(recheckJson(r)).stand_ins_shown).toBe(true);
+});
+
+test("the before-snapshot's values reach the filter: a value only the code before the change holds", async () => {
+  const onlyBefore = "Mn6bV1cX8zL3kJ9h";
+  const repo = gitRepo(tmp());
+  mkdirSync(dirname(reviewConfigPath(repo)));
+  writeFileSync(reviewConfigPath(repo), stamp(parseReviewConfig(YAML), "Dev", "2026-11-04"));
+  const settings: Settings = { ...SETTINGS, standIns: true, beforeCheck: true };
+  writeSettings(repo, settings);
+  // A lockfile: no diff shows it, so only that snapshot can name the value.
+  writeFileSync(join(repo, "composer.lock"), `auth_token = "${onlyBefore}"\n`);
+  commit(repo, "old");
+  rmSync(join(repo, "composer.lock"));
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a - b\n");
+  commit(repo, "the change");
+  const run = (command: string): [string | null, string, boolean] => {
+    const quote = /before-\d/.test(command) ? ` ${onlyBefore}` : "";
+    return [junitXml([[GEN, "test_add", "failed", `assert 1 == 5${quote}`]]), `1 failed${quote}\n`, false];
+  };
+  const judge = new RecordingJson("openai:x", VERDICT);
+  const { review, rdir } = await runReview(repo, { settings, agentModel: new RecordingAgent(TURNS()), challenger: judge,
+    sessionFactory: fakeFactory(run) });
+  expect(review.findings[0]?.before).toBeTruthy();
+  expect(JSON.stringify(review)).not.toContain(onlyBefore);
+  expect(judge.bodies.join("\n")).not.toContain(onlyBefore);
+  for (const f of readdirSync(rdir, { recursive: true }) as string[]) {
+    if (f.endsWith(".json") && statSync(join(rdir, f)).isFile()) {
+      expect([f, readFileSync(join(rdir, f), "utf8").includes(onlyBefore)]).toEqual([f, false]);
+    }
+  }
 });
 
 // --- the review, on the user's own keys ---------------------------------------------------------------------------

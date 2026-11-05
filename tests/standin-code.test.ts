@@ -138,32 +138,76 @@ test("a key-shaped value and an address password are stand-ins in both", () => {
 
 test("a manifest keeps its value in both", () => {
   const manifest = `[tool.thing]\nauth_token = "${GUESS}"\n`;
-  const { snap, r, run, build } = snapped({ "pyproject.toml": manifest, "app.py": `print("${GUESS}")\n`,
-    "settings.py": `db_password = "${OTHER_GUESS}"\n` });
+  const { r, run, build } = snapped({ "pyproject.toml": manifest, "app.py": `print("${GUESS}")\n` });
   expect(run("pyproject.toml")).toBe(manifest);
   expect(build("pyproject.toml")).toBe(manifest);
-  // Every file agrees: the install reads the manifest and the code the same value. The filter still has it.
-  expect(build("app.py")).toContain(GUESS);
   expect(r.suspects.has(GUESS)).toBe(true);
-  expect(r.guesses.has(GUESS)).toBe(false);
-  // Other guesses are not affected.
-  expect(build("settings.py")).not.toContain(OTHER_GUESS);
-  expect(existsSync(buildContextOf(snap))).toBe(true);
+  // Only the manifest: a script an install runs reads the other files.
+  expect(run("app.py")).toContain(GUESS);
+  expect(build("app.py")).not.toContain(GUESS);
 });
 
-test("a lockfile keeps its value in both, and so does every file holding that value", () => {
+test("a lockfile keeps its value in both, and no other file does", () => {
   const lock = `auth_token = "${GUESS}"\n`;
   const { run, build } = snapped({ "composer.lock": lock, "settings.py": `db_password = "${GUESS}"\n`,
     "more.py": `db_password = "${OTHER_GUESS}"\n` });
   expect(run("composer.lock")).toBe(lock);
   expect(build("composer.lock")).toBe(lock);
-  expect(build("settings.py")).toContain(GUESS);
+  expect(build("settings.py")).not.toContain(GUESS);
   expect(build("more.py")).not.toContain(OTHER_GUESS);
 });
 
-test("a value inside a longer word in a manifest does not save it elsewhere", () => {
-  const { build } = snapped({ "requirements.txt": `pkg-${GUESS}x==1.0\n`, "settings.py": `db_password = "${GUESS}"\n` });
-  expect(build("settings.py")).not.toContain(GUESS);
+const PROJECT_YAML = (extra = "") => `version: 1\nimage: python:3.12-slim\n${extra}test_command: python -m pytest -q {targets}\n`;
+/** A snapshot with this review.yaml: the run's folder and the build's. */
+function withConfig(yaml: string, files: Record<string, string>) {
+  const repo = repoWith({ ...files, ".arnx/review.yaml": yaml });
+  const snap = join(tmp(), `snap-${repos}`);
+  takeSnapshot(repo, null, snap, []);
+  return (rel: string) => readFileSync(join(buildContextOf(snap), rel), "utf8");
+}
+
+test("only the project's own manifests keep their value: an example's or another folder's get the stand-in", () => {
+  const build = withConfig(PROJECT_YAML(), { "requirements.txt": `# auth_token = "${OTHER_GUESS}"\n`,
+    "pyproject.toml": `[x]\nauth_token = "${GUESS}"\n`, "examples/demo/pyproject.toml": `[x]\nauth_token = "${GUESS}"\n`,
+    "examples/demo/package.json": `{"auth_token": "${GUESS}"}\n`, "sub/pyproject.toml": `[x]\nauth_token = "${GUESS}"\n`,
+    "package.json": `{"auth_token": "${GUESS}"}\n` });
+  expect(build("pyproject.toml")).toContain(GUESS);
+  for (const other of ["examples/demo/pyproject.toml", "examples/demo/package.json", "sub/pyproject.toml",
+    // Another language's name, in a project this adapter installs.
+    "package.json"]) {
+    expect([other, build(other).includes(GUESS)]).toEqual([other, false]);
+  }
+});
+
+test("a project installed from a folder keeps that folder's manifests", () => {
+  const build = withConfig(PROJECT_YAML("workdir: app\n"), { "app/pyproject.toml": `[x]\nauth_token = "${GUESS}"\n`,
+    "pyproject.toml": `[x]\nauth_token = "${GUESS}"\n`, "lib/pyproject.toml": `[x]\nauth_token = "${GUESS}"\n`,
+    "app/a.py": `x = "${GUESS}"\n` });
+  expect(build("app/pyproject.toml")).toContain(GUESS);
+  expect(build("pyproject.toml")).not.toContain(GUESS);
+  expect(build("lib/pyproject.toml")).not.toContain(GUESS);
+  expect(build("app/a.py")).not.toContain(GUESS);
+});
+
+test("a language that installs nested manifests keeps them, build output and hidden folders aside", () => {
+  const yaml = "version: 1\nimage: rust:1\nlanguage: rust\ntest_command: cargo nextest run {targets}\n";
+  const cargo = `[package]\nauth_token = "${GUESS}"\n`;
+  const build = withConfig(yaml, { "Cargo.toml": cargo, "crates/a/Cargo.toml": cargo, "target/pkg/Cargo.toml": cargo,
+    ".hidden/Cargo.toml": cargo, "src/lib.rs": `const T: &str = "${GUESS}";\n` });
+  expect(build("Cargo.toml")).toBe(cargo);
+  expect(build("crates/a/Cargo.toml")).toBe(cargo);
+  for (const other of ["target/pkg/Cargo.toml", ".hidden/Cargo.toml", "src/lib.rs"]) {
+    expect([other, build(other).includes(GUESS)]).toEqual([other, false]);
+  }
+});
+
+test("before review.yaml, manifests outside folders of examples and tests keep their value", () => {
+  const { build } = snapped({ "pyproject.toml": `[x]\nauth_token = "${GUESS}"\n`, "app/package.json": `{"auth_token": "${GUESS}"}\n`,
+    "examples/a/package.json": `{"auth_token": "${GUESS}"}\n`, "tests/data/pyproject.toml": `[x]\nauth_token = "${GUESS}"\n` });
+  expect(build("pyproject.toml")).toContain(GUESS);
+  expect(build("app/package.json")).toContain(GUESS);
+  expect(build("examples/a/package.json")).not.toContain(GUESS);
+  expect(build("tests/data/pyproject.toml")).not.toContain(GUESS);
 });
 
 test("a certain value in a manifest is a stand-in in both, as before", () => {

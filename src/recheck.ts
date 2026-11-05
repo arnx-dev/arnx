@@ -6,8 +6,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
-import { snapshot } from "./change";
-import { loadReviewFile, sandboxOnlyOf, secretPinsOf } from "./config";
+import { Boundary, STAND_INS_NOTE } from "./boundary";
+import { takeSnapshot } from "./change";
+import { configSuspects, loadReviewFile, sandboxOnlyOf, secretPinsOf } from "./config";
 import { SetupRequired } from "./errors";
 import { asError, ownerFile, runTests, type TestResult } from "./outcomes";
 import type { Say } from "./progress";
@@ -24,7 +25,9 @@ export interface FindingRecheck { id: string; project: string; testId: string; s
   /** Its outcome in each run: passed, failed, error, skipped, absent (not in the report), missing (no report). */
   runs: string[]; message: string }
 
-export interface ReviewRecheck { review: string; findings: FindingRecheck[] }
+export interface ReviewRecheck { review: string; findings: FindingRecheck[];
+  /** A message was masked. */
+  standInsShown?: boolean }
 
 /** The generated tests a review kept for one project, by repository-relative path. */
 function generated(rdir: string, project: string, writable: RegExp): Record<string, string> {
@@ -51,6 +54,9 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
   const out: FindingRecheck[] = [];
   if (!todo.length) return { review: review.id, findings: out };
   const file = loadReviewFile(repo);
+  // A coding agent reads what a check says, and the code it ran on holds real values.
+  const boundary = new Boundary(configSuspects(repo));
+  let shown = false;
   for (const name of [...new Set(todo.map((f) => f.project))]) {
     const cfg = file.projects.find((p) => p.name === name) ?? (file.legacy ? file.projects[0] : undefined);
     if (!cfg) {
@@ -74,7 +80,8 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
         const snap = join(tmp, "repo");
         // The working tree as it is now, fixes included, untracked files too (accepted tests are untracked until
         // committed): no model sees what a check runs.
-        snapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw), untracked: true });
+        boundary.add(takeSnapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw),
+          untracked: true }).suspects);
         // The review's generated files go in as they ran, in place of anything in its tests directory.
         mkdirSync(join(snap, writeDir), { recursive: true });
         for (const rel of collect(snap, writeDir, adapter.writable)) rmSync(join(snap, rel), { force: true });
@@ -105,13 +112,15 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
       const failed = seen.find((r) => r.outcome === "failed" || r.outcome === "error");
       const status: RecheckStatus = failed ? "still-failing"
         : seen.length === settings.runs && seen.every((r) => r.outcome === "passed") ? "fixed" : "no-report";
-      out.push({ id: f.id, project: name, testId: f.testId, status, runs: seen.map((r) => r.outcome),
-        message: failed?.message ?? seen.find((r) => r.outcome !== "passed")?.message ?? "" });
+      const message = failed?.message ?? seen.find((r) => r.outcome !== "passed")?.message ?? "";
+      const said = boundary.mask(message);
+      shown ||= said !== message;
+      out.push({ id: f.id, project: name, testId: f.testId, status, runs: seen.map((r) => r.outcome), message: said });
     }
   }
   const order = new Map(review.findings.map((f, i) => [f.id, i]));
   out.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
-  return { review: review.id, findings: out };
+  return { review: review.id, findings: out, ...(shown ? { standInsShown: true } : {}) };
 }
 
 /** The exit code, as check's: 0 every confirmed test passes (or none to run), 1 some still fail, 2 some gave no
@@ -136,6 +145,7 @@ export function recheckSummary(r: ReviewRecheck): [string, number] {
       : `no report (${f.runs.join(", ") || "not run"})`;
     lines.push(`  ${mark} ${f.id} ${f.testId}: ${why}`);
   }
+  if (r.standInsShown) lines.push(STAND_INS_NOTE);
   lines.push(code === 0 ? "Every confirmed test passes now."
     : code === 1 ? "Fix the code (not the tests) and run `arnx check --review` again."
     : "Some tests did not report; see above.");
@@ -148,5 +158,5 @@ export function recheckJson(r: ReviewRecheck): string {
   return JSON.stringify({ schema_version: 1, command: "check", review: r.review,
     result: !r.findings.length ? "nothing-confirmed" : ["pass", "fail", "no-report"][code], exit_code: code,
     findings: r.findings.map((f) => ({ id: f.id, project: f.project, test_id: f.testId, status: f.status, runs: f.runs,
-      message: f.message })) }, null, 2);
+      message: f.message })), stand_ins_shown: !!r.standInsShown }, null, 2);
 }

@@ -594,13 +594,6 @@ export function standInsFor(values: Iterable<string>, made = new Map<string, str
   };
 }
 
-/** Which of `values` `text` holds whole: as standInsFor would replace them, without making a stand-in. */
-export function wholeIn(text: string, values: Iterable<string>): string[] {
-  const here = [...new Set(values)].filter((v) => v && text.includes(v)).sort((a, b) => b.length - a.length);
-  if (!here.length) return [];
-  return [...new Set(text.match(matcherOf(here)) ?? [])];
-}
-
 /** `text` with every whole occurrence of `values` given its stand-in (standInsFor). */
 export function fakeAll(text: string, values: Iterable<string>, pins: readonly string[] = [],
                         made = new Map<string, string>()): { text: string; count: number } {
