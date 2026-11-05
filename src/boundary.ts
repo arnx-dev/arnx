@@ -73,7 +73,8 @@ function base64Inside(v: string, lead: number, last = false): string {
 const urlSafe = (b64: string) => b64.replaceAll("+", "-").replaceAll("/", "_");
 const plainBase64 = (v: string) => Buffer.from(v).toString("base64").replace(/=+$/, "");
 const hexOf = (v: string) => Buffer.from(v).toString("hex");
-/** A hex dump's column: its bytes apart (hexdump, od). */
+/** A dump's hex column with its bytes apart: `od -tx1`, and `hexdump -C` up to its gap. Plain `hexdump` and `od -x` print
+ * swapped words, which no form here reads. */
 const hexApart = (v: string) => [...Buffer.from(v)].map((b) => b.toString(16).padStart(2, "0")).join(" ");
 /** And in pairs (xxd), the value starting at a pair's first byte or its second. */
 const hexPairs = (v: string, lead: number) => {

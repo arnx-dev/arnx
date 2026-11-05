@@ -38,10 +38,12 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   **No filter is complete.** arnx hides a value and its common encodings; a test or a command that prints a cut or
   transformed form can get past it, and tests run on the real guesses (below). A cut goes only where it keeps the value's start
   or end up to a word's edge, from 12 characters: `cut -c3-30`, a start cut running into a letter and `fold -w16` show the rest
-  raw. In a lower-case hex dump (`xxd`, `od -tx1`) a long value can show a middle line, `hexdump -C`'s gap can leave the middle
-  of one line, and the text column shows pieces. Nothing recognises a value reversed (`rev`), in rot13, base32, wrapped base64
-  (`base64 -w8`), an upper-case dump (`xxd -u`), `od -c`, `%XX` of every byte, `list()`, compressed or hashed, nor one written
-  with escapes in the source (`"ab\x55c"`).
+  raw. A lower-case hex dump (`xxd`, `od -tx1`) leaves a run of at most 4 bytes of a 16-byte value, and up to 20 of 32 on a longer
+  one, as its middle lines show. `hexdump -C`'s gap leaves more: 8 to 11 of 16 bytes unless the value starts at offset 0 or 8,
+  up to 28 of 32 on a longer one. A dump's text column shows pieces. Nothing recognises a value reversed (`rev`), in rot13,
+  base32, wrapped base64 (`base64 -w8`), a dump of swapped words (plain `hexdump`, `od -x`), an upper-case dump (`xxd -u`),
+  `xxd -i`, `od -c`, `%XX` of every byte, `list()`, compressed or hashed, nor one written with escapes in the source
+  (`"ab\x55c"`).
   Local files arnx writes for itself keep what they saw: `change.diff` and image build logs, neither of which `arnx init`'s
   `.arnx/.gitignore` lets git take. What a commit of `.arnx/` takes (`review.yaml`, `baseline.json`, accepted tests) holds
   stand-ins, apart from a value you wrote into `review.yaml` yourself.

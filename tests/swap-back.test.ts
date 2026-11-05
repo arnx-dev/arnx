@@ -302,6 +302,7 @@ function recordingDocker(): { calls: () => string[] } {
 printf '%s\\n' "$*" >> '${join(dir, "calls")}'
 case "$1" in
   image) echo '[]';;
+  network) [ "$2" = inspect ] && echo '[{"Subnet":"172.22.0.0/16"}]';;
   run|exec) for a; do last="$a"; done; printf '%s\\n' "$last";;
 esac
 exit 0
