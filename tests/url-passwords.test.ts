@@ -1,11 +1,13 @@
-// A password written into a connection address is a secret like a key: the snapshot gives it a stand-in, a diff showing
-// it stops the review, logs leave it out. Addresses that hold no real password stay as they are, or tests would stop
+// A password written into a connection address is a secret like a key: the snapshot gives it a stand-in, what a diff
+// shows of it reaches no model, logs leave it out. Addresses that hold no real password stay as they are, or tests would stop
 // working. Addresses here are built from parts.
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { Boundary } from "../src/boundary";
 import { resolveChange, takeSnapshot } from "../src/change";
 import { hasSecretContent, secretHits, secretPins, standIn, suspects } from "../src/secrets";
+import { defaultSettings, writeSettings } from "../src/settings";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { useTmp } from "./helpers/tmp";
 
@@ -112,12 +114,19 @@ test("the snapshot keeps the file, and none of the password", () => {
   expect(allText(snap)).not.toContain(PASSWORD);
 });
 
-test("a change that shows the password stops the review, naming the kind and never the value", () => {
+test("a change that shows the password reaches no model; with stand-ins off it leaves the change, naming the kind", () => {
   const repo = gitRepo(tmp());
   put(repo, "app.py", "X = 1\n");
   commit(repo, "app");
   put(repo, "app.py", `X = 1\nuri = "${REAL}"\n`);
   commit(repo, "address");
+  const c = resolveChange(repo, null, []);
+  const filter = new Boundary();
+  filter.addDiff(c.diff);
+  expect(filter.mask(c.diff)).toContain("+uri = ");
+  expect(filter.mask(c.diff)).not.toContain(PASSWORD);
+
+  writeSettings(repo, { ...defaultSettings(), standIns: false });
   let said = "";
   try {
     resolveChange(repo, null, []);

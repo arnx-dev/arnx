@@ -6,7 +6,7 @@ import { STAND_INS_NOTE } from "./boundary";
 import { join } from "node:path";
 import type { AdapterId } from "./adapters/types";
 import { type Before, type FixStatus, isPreExisting } from "./before";
-import { type Blanked, describeBlanked, someNames } from "./change";
+import { type Blanked, describeBlanked, someNames, type Withheld } from "./change";
 import { ArnxError } from "./errors";
 import { type ModelUse, parseJsonObject } from "./llm";
 import { type ProviderFailure, resumes } from "./outage";
@@ -149,6 +149,8 @@ export interface Review {
   lockfilesChanged?: string[];
   /** Changed source files whose diff lines held key-shaped text in comments: those lines were blanked. */
   blankedLines?: Blanked[];
+  /** Changed files left out as secret-looking: what they hold and where, never the text. */
+  leftOutFiles?: Withheld[];
   /** Untracked files the review sent because the owner opted in (--untracked); absent when none. */
   untrackedIncluded?: string[];
   /** How many untracked files the review left out (not sent, not in the sandbox); absent when none. */
@@ -676,7 +678,11 @@ export function render(r: Review): string {
     out.push(`- Comment lines blanked as secret-looking (not sent): ${describeBlanked(r.blankedLines)}`);
   }
   if (r.notSent.length) {
-    out.push(`- Files left out because they looked like secrets: ${ticks(r.notSent)}. If one is a test fixture, not a ` +
+    const named = r.notSent.map((p) => {
+      const w = r.leftOutFiles?.find((x) => x.path === p);
+      return `\`${p}\`${w ? ` (${w.label}, line ${w.line})` : ""}`;
+    }).join(", ");
+    out.push(`- Files left out because they looked like secrets: ${named}. If one is a test fixture, not a ` +
       "secret: `arnx allow-secret PATH`, then `arnx review` again");
   }
   const stats = r.projectStats ?? [];

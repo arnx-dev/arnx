@@ -7,7 +7,7 @@ import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "../src/error
 import { secretPins } from "../src/secrets";
 import { commit, gitRepo, initRepo, runGit } from "./helpers/gitutil";
 import { useTmp } from "./helpers/tmp";
-import { AWS_KEY, AWS_KEY_2, PRIVATE_KEY } from "./helpers/fakekeys";
+import { AWS_KEY, AWS_KEY_2, PRIVATE_KEY, PRIVATE_KEY_BLOCK } from "./helpers/fakekeys";
 
 const tmp = useTmp();
 
@@ -137,22 +137,27 @@ test("test_arnx_dir_is_not_a_change", () => {
   expect(resolveChange(repo).kind).toBe("commit");
 });
 
-test("test_secret_content_in_diff_refused", () => {
+test("test_secret_content_in_diff_refused: only a private key's body stops a change, the rest is the filter's", () => {
   const repo = gitRepo(tmp());
   writeFileSync(join(repo, "app.py"), `KEY = '${AWS_KEY_2}'\n`);
-  expect(() => resolveChange(repo)).toThrow(/secret/);
+  const c = resolveChange(repo);
+  expect([c.files, c.withheld]).toEqual([["app.py"], undefined]);
+  writeFileSync(join(repo, "app.py"), `KEY = """${PRIVATE_KEY_BLOCK}"""\n`);
+  expect(() => resolveChange(repo)).toThrow(/looks like a secret.*app\.py \(a private key\)/);
 });
 
 test("a change to an allowed file passes the secret check only with its pinned strings", () => {
   const repo = gitRepo(tmp());
-  writeFileSync(join(repo, "detect.py"), FIXTURE);
+  const held = `KEY = """${PRIVATE_KEY_BLOCK}"""\n`;
+  writeFileSync(join(repo, "detect.py"), held);
   runGit(repo, "add", "detect.py");
-  const allow = [{ path: "detect.py", matches: secretPins(FIXTURE) }];
-  expect(() => resolveChange(repo)).toThrow("detect.py (AKIA…)");
+  const allow = [{ path: "detect.py", matches: secretPins(held) }];
+  expect(() => resolveChange(repo)).toThrow("detect.py (a private key)");
   expect(() => resolveChange(repo)).toThrow("arnx allow-secret detect.py");
   expect(resolveChange(repo, null, allow).files).toEqual(["detect.py"]);
-  writeFileSync(join(repo, "app.py"), FIXTURE); // same string, another file
-  expect(() => resolveChange(repo, null, allow)).toThrow("app.py (AKIA…)");
+  writeFileSync(join(repo, "app.py"), held); // same string, another file
+  const c = resolveChange(repo, null, allow);
+  expect([c.files, c.withheld?.map((w) => w.path)]).toEqual([["detect.py"], ["app.py"]]);
 });
 
 test("test_empty_repo", () => {

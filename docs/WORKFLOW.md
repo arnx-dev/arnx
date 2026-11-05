@@ -116,7 +116,8 @@ one that takes in two or more other projects whole (a catch-all `services/`), wo
 twice, so it goes back to the setup agent as a hint too.
 
 What a review sends, and what it leaves out (untracked files, `.arnxignore`, secrets):
-[SAFETY.md](SAFETY.md#what-a-review-sends).
+[SAFETY.md](SAFETY.md#what-a-review-sends). A changed file holding a private key is left out and the rest reviewed; a
+change of only such files stops and names `arnx allow-secret`.
 
 ## Exit codes and JSON
 

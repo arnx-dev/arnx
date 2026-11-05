@@ -3,6 +3,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { Boundary } from "../src/boundary";
 import { describeBlanked, resolveChange, takeSnapshot } from "../src/change";
 import { render } from "../src/report";
 import type { SessionFactory } from "../src/sandbox";
@@ -178,7 +179,7 @@ test("a review's diff: a key in a comment on an added line is blanked and the re
   expect([hasSecretContent(done.diff), done.blanked]).toEqual([false, [{ path: "src/auth.ts", lines: [4] }]]);
 });
 
-test("a review's diff: a key in a comment on a context or removed line is blanked; one in code still refuses", () => {
+test("a review's diff: a key in a comment on a context or removed line is blanked; one in code is the filter's", () => {
   const repo = gitRepo(tmp());
   writeFileSync(join(repo, "client.py"), `# token = "${GH}"\nA = 1\n`);
   writeFileSync(join(repo, "lib.rs"), `/// Example: ${SK}\nfn f() {}\n`);
@@ -191,8 +192,12 @@ test("a review's diff: a key in a comment on a context or removed line is blanke
   expect(c.diff).toContain("@@\n-//\n fn f() {}\n");
   expect(c.blanked).toEqual([{ path: "client.py", lines: [1] }, { path: "lib.rs", lines: [1] }]);
   writeFileSync(join(repo, "client.py"), `# token = "${GH}"\nA = "${GH}"\n`);
-  expect(() => resolveChange(repo)).toThrow("the change contains text that looks like a secret (a key or token) in " +
-    "client.py (ghp_…)");
+  const coded = resolveChange(repo);
+  expect(coded.files).toEqual(["client.py", "lib.rs"]);
+  expect(coded.blanked).toEqual([{ path: "lib.rs", lines: [1] }]);
+  const filter = new Boundary();
+  filter.addDiff(coded.diff);
+  expect(filter.mask(coded.diff)).not.toContain(GH);
 });
 
 test("a review's diff never carries a key body in a hunk header's function context", () => {

@@ -15,9 +15,10 @@ import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type Be
   vacuousBefore } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
 import { type Boundary, maskedCopy, type Swap } from "./boundary";
-import { snapshot, takeSnapshot, tooLargeText, withSandboxFiles } from "./change";
+import { filesAt, snapshot, takeSnapshot, tooLargeText, withSandboxFiles } from "./change";
 import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
+import { missingLeftOut } from "./diagnose";
 import { clip, emit, testMessage } from "./events";
 import { type Classified, classify, describeRun, funcOf, ownerFile, runTests, type TestResult } from "./outcomes";
 import { DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
@@ -443,6 +444,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         if (o.typecheck && cfg.typecheck) checked = typecheckHere(session, snap, cfg, o.writeDir, say);
         return [a, f, r] as const;
       }, undefined, undefined, swap);
+    results = cannotRun(results, removed, removed.length ? filesAt(repo, head, !!o.untracked) : []);
     const classes = o.before ? classify(results) : null;
     const failing = classes?.findings ?? [];
     // Chosen by test id, so the same tests are checked whatever order the runner reported them in.
@@ -483,6 +485,17 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   // All a round says from here on is saved and read by people and coding agents, none of it through a model's filter.
   const masked = b ? maskedCopy(b, round) : { value: round, shown: false };
   return { ...masked.value, ...(masked.shown ? { standInsShown: true } : {}), ...(hunt ? { hunt } : {}) };
+}
+
+/** A test failing because its code needs a file the snapshot left out says nothing about the project: it could not run,
+ * however the runner reports it (an import inside a test is a plain failure). */
+function cannotRun(runs: (TestResult[] | null)[], leftOut: string[], all: string[]): (TestResult[] | null)[] {
+  if (!leftOut.length) return runs;
+  return runs.map((run) => run && run.map((t) => {
+    if (t.outcome !== "failed" && t.outcome !== "error") return t;
+    const [needed] = missingLeftOut([t.message], leftOut, all);
+    return needed ? { ...t, outcome: "error", message: `needs ${needed}, left out as secret-looking: ${t.message}` } : t;
+  }));
 }
 
 /** Clears what arnx wrote into a snapshot: the generated files and the runners' reports. A type check then sees the

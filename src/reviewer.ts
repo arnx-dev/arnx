@@ -10,7 +10,7 @@ import type { Billed, Brain, Totals } from "./brain";
 import { inPool, oneVerdict } from "./challenge";
 import { shallowKind } from "./shallow";
 import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, withRole } from "./events";
-import { added, type Change, describe, describeBlanked, EMPTY_TREE, filesAt, removed, resolveChange, sliceDiff,
+import { added, type Change, describe, describeBlanked, describeWithheld, EMPTY_TREE, filesAt, removed, resolveChange, sliceDiff,
   someNames, treeSuspects, untrackedLine } from "./change";
 import { maskedCopy } from "./boundary";
 import { configSuspects, loadReviewFile, type ReviewConfig, reviewConfigPath, sandboxOnlyOf, secretPinsOf } from "./config";
@@ -26,7 +26,7 @@ import { changeEditsAccepted } from "./check";
 import { baseName, funcOf, ownerFile } from "./outcomes";
 import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, resumes, withCalls } from "./outage";
 import { CONTEXT_LIMIT, contextPack } from "./context";
-import { elsewhereNote, type Suspect } from "./prompts";
+import { elsewhereNote, leftOutNote, type Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
 import { type AgentReport, type Checked, type Finding, type FixProof, parseReports, type ProjectStat, type Review,
   save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause, sameTest } from "./report";
@@ -237,6 +237,10 @@ export async function runReview(repo: string, o: { settings: Settings;
     o.progress?.(`left out ${change.leftOut.length} accepted test file(s) not committed yet`);
   }
   if (change.blanked) o.progress?.(`comment lines blanked as secret-looking: ${describeBlanked(change.blanked)}`);
+  if (change.withheld) {
+    o.progress?.(`left out as secret-looking: ${describeWithheld(change.withheld)}; if one is a test fixture, allow it ` +
+      "with `arnx allow-secret PATH`");
+  }
   // The local brain reads .arnx/prompts.toml from the working tree: a change that edits it is reviewed with its own.
   const promptsEdited = !o.brain && changeEditsPrompts(repo, change);
   if (promptsEdited) o.progress?.(PROMPTS_EDITED);
@@ -292,7 +296,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     const questionProjects: string[] = [];
     const sources: Record<string, string> = {};
     const writeDirs: Record<string, string> = {};
-    const flaky: string[] = [], errors: string[] = [], notSent = new Set<string>();
+    const flaky: string[] = [], errors: string[] = [], notSent = new Set(change.withheld?.map((w) => w.path));
     const projectStats: ProjectStat[] = [];
     const checked: Checked[] = [];
     const untested: Untested[] = [];
@@ -389,10 +393,11 @@ export async function runReview(repo: string, o: { settings: Settings;
       // taken for missing from the change.
       const seen = new Set([...owned, ...used]);
       const elsewhere = file.legacy || diff === change.diff ? [] : change.files.filter((f) => !seen.has(f));
-      const others = elsewhereNote(elsewhere);
+      const others = [elsewhereNote(elsewhere), leftOutNote(change.withheld ?? [])].filter(Boolean).join(" ");
       diffs[cfg.name] = others ? `${diff}\n\n${others}\n` : diff;
       const outDir = file.legacy ? rdir : join(rdir, "projects", cfg.name);
-      const scope = file.legacy ? { owned: change.files, used: [] } : { owned, used, elsewhere };
+      const leftOut = change.withheld ? { leftOut: change.withheld } : {};
+      const scope = file.legacy ? { owned: change.files, used: [], ...leftOut } : { owned, used, elsewhere, ...leftOut };
       const projectBudget = s.reviewBudgetUsd * AGENT_SHARE / n;
       const opts = { brain, budgetUsd: projectBudget, writeDir, runs: s.runs, outDir,
         sessionFactory: o.sessionFactory ?? dockerSession, progress: o.progress, coverage: scope.owned,
@@ -675,6 +680,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       ...(change.ignored ? { ignoredChanged: change.ignored } : {}),
       ...(change.lockfiles ? { lockfilesChanged: change.lockfiles } : {}),
       ...(change.blanked ? { blankedLines: change.blanked } : {}),
+      ...(change.withheld ? { leftOutFiles: change.withheld } : {}),
       ...(change.untrackedIncluded ? { untrackedIncluded: change.untrackedIncluded } : {}),
       ...(change.untrackedLeftOut ? { untrackedLeftOut: change.untrackedLeftOut.length } : {}),
       costUsd: Math.round(usage.reduce((a, u) => a + u.costUsd, 0) * 10_000) / 10_000, usage,

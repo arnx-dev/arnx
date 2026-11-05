@@ -27,7 +27,7 @@ import { type Account, byokHint, CloudClient, credentialsPath, deleteCredentials
   type Fetch, tokenFor, usd } from "./cloud";
 import { dockerSession, suffixReviewCopies } from "./testround";
 import type { SessionFactory } from "./sandbox";
-import { describe, describeBlanked, git, repoRoot, resolveChange } from "./change";
+import { describe, describeBlanked, describeWithheld, git, repoRoot, resolveChange } from "./change";
 import { NOT_SET_UP } from "./draft";
 import { route } from "./route";
 import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, readSecretPins, type ReviewFile,
@@ -56,7 +56,7 @@ import { type ModelRef, providerLines, providerName, refString, setupRef, setupS
   from "./settings";
 import { providerHost, resolveProvider } from "./providers";
 import { isSecretPath, secretHits, secretPins } from "./secrets";
-import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, type ProjectProof,
+import { approveFile, coverageMap, describeCoverage, type NeededFile, type ProjectProof,
   NOTHING_TO_TEST, proofBefore, type ProofBefore, rerecordBaseline, runSetup, type SetupResult, type SetupRun, stillRed,
   WEB_UI_STOP } from "./setup";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, notTestedRecord, PROVEN_BASELINE,

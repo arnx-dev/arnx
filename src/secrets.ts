@@ -9,9 +9,13 @@ export const SECRET_FILE_GLOBS: readonly string[] = [
   ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "*.jks", "id_rsa*", "id_ecdsa*",
   "id_ed25519*", ".netrc", ".npmrc", ".pypirc", "credentials*.json", "service-account*.json", "*.session",
   "*.session-journal"];
+/** What a text holding any key-shaped string must hold, as a pattern (QUICK, and an address's `://`). */
+export const MAY_HOLD_KEY = "-----BEGIN|AKIA|sk-|gh[pousr]_|xox[abpr]-|://";
+/** A private key's header, as a pattern. */
+export const KEY_HEADER = "-----BEGIN [A-Z ]*PRIVATE KEY-----";
 // A key starts a token: no letter or digit right before it, so `task-…` or `desk-…` is not an `sk-` key.
 const CONTENT = new RegExp(
-  "-----BEGIN [A-Z ]*PRIVATE KEY-----|(?<![A-Za-z0-9])(?:AKIA[0-9A-Z]{16}|sk-ant-[A-Za-z0-9_-]{20,}" +
+  `${KEY_HEADER}|` + "(?<![A-Za-z0-9])(?:AKIA[0-9A-Z]{16}|sk-ant-[A-Za-z0-9_-]{20,}" +
   "|sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}" +
   "|gh[pousr]_[A-Za-z0-9]{36,}|xox[abpr]-[A-Za-z0-9-]{10,})");
 const ENV_NAME = /KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE/i;
@@ -75,6 +79,8 @@ export function hasSecretContent(text: string): boolean {
 export interface SecretPin { path: string; matches: string[] }
 
 const pinOf = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 16);
+/** Whether `pins` allows this key-shaped string. */
+export const isPinned = (s: string, pins: readonly string[]) => pins.includes(pinOf(s));
 
 /** The pins of every key-shaped string in `text`, unique and sorted. */
 export function secretPins(text: string): string[] {

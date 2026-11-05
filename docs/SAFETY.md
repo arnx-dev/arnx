@@ -44,8 +44,8 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   base32, wrapped base64 (`base64 -w8`), a dump of swapped words (plain `hexdump`, `od -x`), an upper-case dump (`xxd -u`),
   `xxd -i`, `od -c`, `%XX` of every byte, `list()`, compressed or hashed, nor one written with escapes in the source
   (`"ab\x55c"`).
-  Local files arnx writes for itself keep what they saw: `change.diff` and image build logs, neither of which `arnx init`'s
-  `.arnx/.gitignore` lets git take. What a commit of `.arnx/` takes (`review.yaml`, `baseline.json`, accepted tests) holds
+  Local files arnx writes for itself keep what they saw: `change.diff` (minus the files left out) and image build logs,
+  neither of which `arnx init`'s `.arnx/.gitignore` lets git take. What a commit of `.arnx/` takes (`review.yaml`, `baseline.json`, accepted tests) holds
   stand-ins, apart from a value you wrote into `review.yaml` yourself.
   What the tests run depends on how sure arnx is. Key-shaped text and a password in an address get the stand-in in the
   snapshot too, wherever they appear, so no file keeps them and every file gets the same fake; the tests run with the
@@ -84,8 +84,12 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   `docker run -e` and `sh -c` arguments, which `ps` on this machine shows.
   `[review] stand_ins = false` in `.arnx/config.toml` turns stand-ins off in both copies: files with key-shaped text in code
   are left out, and requests still hold stand-ins for the other values.
-  A review's diff blanks comment lines the same
-  way and names them; a key in code in the diff still stops the review. When its key-shaped text
+  A review's diff blanks comment lines the same way and names them. A changed file a snapshot leaves out, on either side
+  of the change, has no part in the diff either, wherever in the file the key stands, so it is not reviewed and the rest
+  is: the review names it with what it holds and the line, and tells the models its path and that label only. A test that
+  needs it could not run, and reads so: it is no finding. A change of only such files stops, naming `arnx allow-secret`,
+  which reads the working tree, so it cannot let in a key only the code before the change holds. A private key with a body
+  still in what would go out stops the review. When a file's key-shaped text
   is test fixtures (a secret detector's own tests), `arnx allow-secret PATH` pins each such string in
   `.arnx/review.yaml`, which is then proven again before the next review; a new key-shaped string in that file
   withholds it again, and `arnx allow-secret --remove PATH` takes a file off the list (proven again too). Setup lists
@@ -118,8 +122,9 @@ Uncommitted work means tracked files only: staged and unstaged changes, and new 
 files are in neither the diff, the copy the reviewer reads nor the sandbox, and the review says how many it left out.
 `--untracked` sends them too and names each one (`untracked = true` under `[review]` in `.arnx/config.toml` does it
 always; `--no-untracked` overrides that); `arnx setup` reads the same way. With no commits yet every file is sent, and
-the review says so first. Paths in `.arnxignore`, secret files and files with key-shaped text are never sent (see [What
-runs where](#what-runs-where)). review.json records `untracked_included` or `untracked_left_out`.
+the review says so first. Paths in `.arnxignore`, secret files and files holding a private key are never sent, and other
+key-shaped text goes as a stand-in (see [What runs where](#what-runs-where)). review.json records `untracked_included` or
+`untracked_left_out`, and `not_sent` the files left out.
 
 With arnx cloud, the same content goes to arnx cloud instead of your providers, and arnx cloud passes it to its model
 providers ([CLOUD.md](CLOUD.md)).

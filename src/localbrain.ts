@@ -13,7 +13,7 @@ import { clip, emit, hypId } from "./events";
 import { explain } from "./explain";
 import { partHunts, parseSuspects, rankSuspects, sameSuspect, secondHunt } from "./hunt";
 import { type AgentModel, FallbackJson, type JsonModel, type ModelUse, newUse, parseJsonObject } from "./llm";
-import { DEFAULT_PROMPTS, isModelKey, PROMPT_VERSION, type Prompts, type Suspect } from "./prompts";
+import { DEFAULT_PROMPTS, isModelKey, PROMPT_VERSION, type Prompts, scopeTold, type Suspect } from "./prompts";
 import { mergeQuestions } from "./questions";
 import { type Finding, parseReports, questionTexts } from "./report";
 import type { Prices } from "./settings";
@@ -144,7 +144,7 @@ export class LocalBrain implements Brain {
     // The steps list only the calls that reach the CLI: a write or a run while the hunt is open is refused here.
     const reaching = (calls: ToolCall[]) => (hunting ? calls.filter((c) => !CLOSED_TOOLS.has(c.name)) : calls);
     const opts = this.loop(t, x, this.p.reviewSystem(cfg, x.envTests),
-      hunt?.user ?? this.p.reviewTask(cfg, x.diff, x.maxQuestions, x.scoped ? x.scope : undefined), decide, reaching);
+      hunt?.user ?? this.p.reviewTask(cfg, x.diff, x.maxQuestions, scopeTold(x.scoped, x.scope)), decide, reaching);
     const agent = await runAgent(this.m.agentModel, ws, opts);
     // A report that reached the budget is asked nothing more, but it is still the round's final (a hunt reply is not).
     const end = opts.unasked();
@@ -316,7 +316,7 @@ export class LocalBrain implements Brain {
         "asking the reviewer to test them or say why they cannot run here");
       return prompts.untestedSuspectsTask(left);
     };
-    return { user: prompts.huntTask(cfg, diff, h.context, x.scoped ? scope : undefined), afterHunt, afterTests, state };
+    return { user: prompts.huntTask(cfg, diff, h.context, scopeTold(x.scoped, scope)), afterHunt, afterTests, state };
   }
 
   /** The second hunter, arrived after the tests started: its cost counts; its suspects are kept in hunt.json, not

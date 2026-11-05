@@ -10,6 +10,7 @@ import { parse as parseToml } from "smol-toml";
 import DEFAULT_TOML from "./prompts.toml" with { type: "text" };
 import { adapterFor } from "./adapters";
 import type { Words } from "./adapters/types";
+import type { Withheld } from "./change";
 import type { ReviewConfig } from "./config";
 
 // The reviewer sees its project's whole part of the change: arnx refuses changes over MAX_DIFF_BYTES instead of
@@ -123,7 +124,9 @@ export interface Suspect { id: string; file: string; line: number; claim: string
 
 /** What a project's round covers: the changed files it owns and the ones it only uses; `elsewhere`, the change's
  * other files, which its diff leaves out. */
-export interface Scope { owned: string[]; used: string[]; elsewhere?: string[] }
+export interface Scope { owned: string[]; used: string[]; elsewhere?: string[];
+  /** Files of the change left out for what they hold. */
+  leftOut?: readonly Withheld[] }
 
 /** The most files of the change's other parts a prompt names. */
 const ELSEWHERE_MAX = 40;
@@ -137,13 +140,28 @@ export function elsewhereNote(files: readonly string[]): string {
     "diff above: never conclude that something is missing from the change because the diff does not show it.";
 }
 
+/** The change's files left out as secret-looking, named with what they hold so a round never takes them for absent. */
+export function leftOutNote(files: readonly Withheld[]): string {
+  if (!files.length) return "";
+  const named = files.slice(0, ELSEWHERE_MAX).map((x) => `\`${x.path}\` (${x.label})`).join(", ");
+  return "This change also edits files left out of the diff, the code you can read and the sandbox, because they look " +
+    `like secrets, so never conclude that they are missing: ${named}` +
+    `${files.length > ELSEWHERE_MAX ? `, and ${files.length - ELSEWHERE_MAX} more` : ""}.`;
+}
+
+/** The scope a round's task names: a repository of one project says only what is left out. */
+export const scopeTold = (scoped: boolean, scope: Scope): Scope | undefined =>
+  scoped ? scope : scope.leftOut?.length ? { owned: [], used: [], leftOut: scope.leftOut } : undefined;
+
 function scopeText(cfg: ReviewConfig, scope: Scope | undefined): string {
   if (!scope) return "";
+  const left = leftOutNote(scope.leftOut ?? []);
+  if (left && !scope.owned.length && !scope.used.length) return `\n${left}\n`;
   const list = (xs: string[]) => xs.length ? xs.map((x) => `\`${x}\``).join(", ") : "none";
   const others = elsewhereNote(scope.elsewhere ?? []);
   return `\nThis review covers the project \`${cfg.name}\` (root \`${cfg.workdir}\`). Files of this change it owns: ` +
     `${list(scope.owned)}. Files it only uses: ${list(scope.used)}. Test the behaviour this project gets from the ` +
-    `change.${others ? ` ${others}` : ""}\n`;
+    `change.${others ? ` ${others}` : ""}${left ? ` ${left}` : ""}\n`;
 }
 
 /** The prompts built from one set of templates: arnx's defaults, or with a repository's overrides (`overridden`). */

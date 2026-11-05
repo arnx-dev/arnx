@@ -14,7 +14,7 @@ import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { AdapterId, TestResult } from "./adapters/types";
-import { addToSandbox, type Blanked, describeBlanked, filesAt, hasCommits, snapshotDigest, someNames,
+import { addToSandbox, type Blanked, describeBlanked, describeWithheld, filesAt, hasCommits, snapshotDigest, someNames,
   takeSnapshot, tooLargeText, type Withheld, workingTreeFiles } from "./change";
 import { configSuspects,
   loadReviewFile, parseReviewFile, plainReviewYaml, projectDigest, readSecretPins, restDigest, runDigest, type ReviewConfig,
@@ -570,10 +570,6 @@ export function neededText(files: NeededFile[]): string {
     "not in the sandbox)" : "", ignored.length ? `${ignored.join(", ")}, which .arnxignore leaves out` : ""]
     .filter(Boolean).join(", and ");
 }
-
-/** Withheld files for a person or an agent: path, what looks like a key, and its line. */
-export const describeWithheld = (w: Withheld[]) => w.map((x) => `${x.path} (${x.label}, line ${x.line})`).join(", ");
-
 
 /** Up to `max` names, then "…". */
 const few = (xs: string[], max = 3) => xs.slice(0, max).join(", ") + (xs.length > max ? ", …" : "");
