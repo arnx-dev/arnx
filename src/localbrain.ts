@@ -16,7 +16,7 @@ import { type AgentModel, FallbackJson, type JsonModel, type ModelUse, newUse, p
 import { DEFAULT_PROMPTS, isModelKey, PROMPT_VERSION, type Prompts, scopeTold, type Suspect } from "./prompts";
 import { mergeQuestions } from "./questions";
 import { standInsText } from "./standins";
-import { type Finding, parseReports, questionTexts } from "./report";
+import { type Finding, parseReport, parseReports, questionTexts } from "./report";
 import type { Prices } from "./settings";
 
 /** How long the tests wait for the second hunter after the reviewer's own hunt has replied. */
@@ -226,6 +226,8 @@ export class LocalBrain implements Brain {
     let last = 0, unasked: { text: string; turn: number } | null = null;
     return { system, user, budgetUsd: x.budgetUsd, prices: this.m.prices, transcript: transcriptOf(x),
       unasked: () => unasked,
+      // A follow-up cut short leaves a finished round only when the reply before it is a report, not the hunt's.
+      isReport: (reply: string) => parseReport(reply).tests.length > 0,
       onFinal: (reply: string, turn: number) => { unasked = { text: reply, turn }; },
       followUp: async (reply: string) => {
         unasked = null;

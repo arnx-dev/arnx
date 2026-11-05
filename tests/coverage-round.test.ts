@@ -8,7 +8,9 @@ import { parseReviewConfig, parseReviewFile, reviewConfigPath, stamp } from "../
 import { snapshot } from "../src/change";
 import { PRICES } from "../src/llm";
 import { coverageTask, PROMPT_VERSION, reviewSystem } from "../src/prompts";
-import { parseReports } from "../src/report";
+import { parseReport, parseReports } from "../src/report";
+import { ModelError } from "../src/errors";
+import type { Reply } from "../src/llm";
 import { envTests, runReview } from "../src/reviewer";
 import { defaultSettings } from "../src/settings";
 import { FakeJson, fakeFactory, ScriptedAgent, text } from "./helpers/fakes";
@@ -122,4 +124,22 @@ test("a follow-up's report repeats the first: entries count once, not_tested com
   expect(r.questions).toEqual(["Q1?", "Q2?"]);
   expect(r.not_tested).toEqual([{ file: "main.py", reason: "wiring" }]);
   expect(parseReports([second, "not json"]).tests).toHaveLength(2); // a broken last reply loses nothing
+});
+
+test("a failure before the first report is not a follow-up cut short", async () => {
+  class FailsSecond extends ScriptedAgent {
+    override async create(a: Parameters<ScriptedAgent["create"]>[0]): Promise<Reply> {
+      if (this.calls.length === 1) throw new ModelError("HTTP 529: overloaded");
+      return super.create(a);
+    }
+  }
+  const run = (first: string) => runAgent(new FailsSecond([[text(first)]]), new Workspace(tmp()), { system: "s",
+    user: "u", budgetUsd: 100, prices: PRICES, followUp: () => "write the tests",
+    isReport: (t) => parseReport(t).tests.length > 0 });
+  const hunt = await run("S1: suspect");
+  expect(hunt.stop.startsWith("api_error")).toBe(true);
+  expect(hunt.cut).toContain("529");
+  const report = await run('{"tests": [{"test": "a::b"}]}');
+  expect([report.stop, report.finalText]).toEqual(["end_turn", '{"tests": [{"test": "a::b"}]}']);
+  expect(report.cut).toContain("529");
 });

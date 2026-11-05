@@ -241,7 +241,10 @@ export function toolErrorText(e: unknown): string {
 export interface AgentResult { finalText: string; costUsd: number; turns: number; stop: string; usage: Usage;
   calls: number; unknownCalls?: number;
   /** Final replies before a follow-up message continued the conversation, oldest first. */
-  earlierTexts?: string[] }
+  earlierTexts?: string[];
+  /** Why the loop was cut short after a reply had ended a turn (a follow-up the budget, turns, time or an API error
+   * stopped), set even when the round is put down as finished on its earlier report. */
+  cut?: string }
 export type ToolFn = (args: Record<string, unknown>) => string | Promise<string>;
 
 const schema = (props: Record<string, unknown>, required: string[]) =>
@@ -535,7 +538,10 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
   /** Called when the model ends its turn: a message continues the conversation (within budget), null ends it. */
   followUp?: (finalText: string) => string | null | Promise<string | null>;
   /** Each reply that ends a turn, before followUp is asked (it is not asked once the budget is spent). */
-  onFinal?: (finalText: string, turn: number) => void }): Promise<AgentResult> {
+  onFinal?: (finalText: string, turn: number) => void;
+  /** Whether a reply is the round's report (default: any reply). A cut follow-up restores the reply before it only
+   * when that is a report; a hunt reply is not. */
+  isReport?: (text: string) => boolean }): Promise<AgentResult> {
   const tools = ws.tools();
   const messages: Message[] = [{ role: "user", content: o.user }];
   let cost = 0, stop = "max_turns", final = "", turn = 0, usage = NO_USAGE, calls = 0, unknown = 0;
@@ -661,11 +667,16 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
     messages.push({ role: "user", content: results });
   }
   // A follow-up is extra work after a finished round: when it is cut short (budget, turns, an API error), the round
-  // still ended normally, with the reply it ended on.
+  // still ended normally, with the report it ended on. A reply that is no report (the hunt's) is not a finished round.
+  let cut: string | undefined;
   if (stop !== "end_turn" && stop !== "stopped" && earlier.length) {
-    final = earlier.pop()!;
-    stop = "end_turn";
+    cut = stop;
+    if ((o.isReport ?? (() => true))(earlier.at(-1)!)) {
+      final = earlier.pop()!;
+      stop = "end_turn";
+    }
   }
   return { finalText: final, costUsd: round4(cost), turns: Math.min(turn, o.maxTurns ?? 60), stop, usage, calls,
-    ...(unknown ? { unknownCalls: unknown } : {}), ...(earlier.length ? { earlierTexts: earlier } : {}) };
+    ...(unknown ? { unknownCalls: unknown } : {}), ...(earlier.length ? { earlierTexts: earlier } : {}),
+    ...(cut !== undefined ? { cut } : {}) };
 }

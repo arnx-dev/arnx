@@ -87,6 +87,8 @@ export interface ProjectStat {
   sawResults: boolean;
   /** Why this project's reviewer stopped ("end_turn", "budget", "api_error: ..."); absent in older reviews. */
   stop?: string;
+  /** The round ended with no report: no tests, no reasons, no questions (set only then). */
+  noReport?: boolean;
 }
 
 /** Findings that share one cause, explained in plain language by the second model (report only: verdicts, marks and
@@ -234,7 +236,7 @@ export const notChecked = (r: Review) => active(r).filter((f) => f.verdict !== "
 const neverTested = (r: Review) => r.testsWritten === 0 ? (r.suspects ?? []).filter((s) => s.outcome === "not tested")
   : [];
 export const incomplete = (r: Review) => r.stop !== "end_turn" || r.missingRuns > 0 || neverTested(r).length > 0 ||
-  !!r.couldNotRun?.length;
+  !!r.couldNotRun?.length || (r.projectStats ?? []).some((p) => p.noReport);
 export const exitCode = (r: Review) => (confirmed(r).length || notChecked(r).length ? 1 : incomplete(r) ? 2 : 0);
 
 export interface Marks {
@@ -1138,6 +1140,9 @@ export function parseReport(finalText: string): AgentReport {
   if (Array.isArray(data.suspects_not_tested)) out.suspects_not_tested = list("suspects_not_tested");
   return out;
 }
+
+/** Whether any of these replies is a report: a JSON object with a `tests` list (an empty one still says so). */
+export const hasReport = (texts: string[]): boolean => texts.some((t) => Array.isArray(parseJsonObject(t)?.tests));
 
 /** The text of each question in these replies, once each (a question is a string, or an object with a question). */
 export function questionTexts(texts: string[]): string[] {

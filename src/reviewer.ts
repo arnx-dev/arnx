@@ -28,7 +28,7 @@ import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, 
 import { CONTEXT_LIMIT, contextPack } from "./context";
 import { elsewhereNote, leftOutNote, type Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
-import { type AgentReport, type Checked, type Finding, type FixProof, parseReports, type ProjectStat, type Review,
+import { type AgentReport, type Checked, type Finding, type FixProof, hasReport, parseReports, type ProjectStat, type Review,
   save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause, sameTest } from "./report";
 import { dockerSteps, type SessionFactory } from "./sandbox";
 import type { TypeCheck } from "./typecheck";
@@ -556,7 +556,9 @@ export async function runReview(repo: string, o: { settings: Settings;
       const tests = c.findings.length + c.flaky.length + c.errors.length + c.passed.length;
       projectStats.push({ name: cfg.name, tests, passed: c.passed.length, missingRuns: c.missingRuns,
         testFiles: Object.keys(rnd.files).filter((p) => adapterFor(cfg).isTestFile(posix.basename(p))).length,
-        sawResults: rnd.sawResults, stop: rnd.agent.stop });
+        sawResults: rnd.sawResults, stop: rnd.agent.stop,
+        // A round that never gave a report (an empty one still counts) is not a finished one.
+        ...(hasReport([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]) ? {} : { noReport: true }) });
       agentCost += rnd.agent.costUsd;
       Object.assign(agentUse, addUsage(agentUse, rnd.agent.usage));
       agentUse.calls += rnd.agent.calls;

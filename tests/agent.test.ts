@@ -249,3 +249,15 @@ test("run_tests accepts targets sent as a JSON string or a single path", async (
   await ws.call("run_tests", { targets: "tests/gen/test_b.py" });
   expect(seen).toEqual([["tests/gen/test_a.py"], ["tests/gen/test_b.py"]]);
 });
+
+test("a budget cut after the hunt reply is not a finished round", async () => {
+  const model = new ScriptedAgent([[text("suspects only")]]);
+  const r = await runAgent(model, new Workspace(tmp()), { system: "s", user: "u", budgetUsd: 100, prices: PRICES,
+    maxTurns: 1, followUp: () => "now write the tests", isReport: (t) => t.includes('"tests"') });
+  expect(r.stop).toBe("max_turns");
+  expect(r.cut).toBe("max_turns");
+  const done = new ScriptedAgent([[text('{"tests": [1]}')]]);
+  const ok = await runAgent(done, new Workspace(tmp()), { system: "s", user: "u", budgetUsd: 100, prices: PRICES,
+    maxTurns: 1, followUp: () => "more", isReport: (t) => t.includes('"tests"') });
+  expect([ok.stop, ok.cut]).toEqual(["end_turn", "max_turns"]);
+});

@@ -243,3 +243,11 @@ test("a completed review closes its brain with the agent's stop", async () => {
   expect(stops).toEqual([{ stop: "end_turn", projectsReviewed: 1 }]);
   expect(closers.size).toBe(0);
 });
+
+test("no report at all is incomplete", async () => {
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: new ScriptedAgent([[text("looked around, nothing to say")], [text("still nothing")]]),
+    challenger: new FakeJson([]), sessionFactory: fakeFactory(runs) });
+  expect(review.stop).toBe("end_turn");
+  expect(review.projectStats[0]!.noReport).toBe(true);
+  expect(exitCode(review)).toBe(2);
+});
