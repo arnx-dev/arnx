@@ -9,6 +9,9 @@ import { exitCodeAfter, finalExitCode, onInterrupt, startInterrupt } from "../sr
 import { type ProviderTable } from "../src/providers";
 import { defaultSettings, parseModelRef } from "../src/settings";
 import { PROVIDER_CONCURRENCY } from "../src/provider";
+import { Boundary } from "../src/boundary";
+
+const noValues = new Boundary();
 
 const SCHEMA = { type: "object", properties: { verdict: { type: "string" } }, required: ["verdict"],
   additionalProperties: false };
@@ -166,13 +169,13 @@ const COMPAT_ENV = { COMPAT_KEY: "c", COMPAT_ENV_KEY: "e", COMPAT_URL: "https://
 
 test("test_factories", () => {
   const s = { ...defaultSettings(), challenger: parseModelRef("openai:gpt-6.1-sol"), providers: TABLES };
-  expect(() => makeAgentModel(s, { OPENAI_API_KEY: "o" })).toThrow(/ANTHROPIC_API_KEY/);
-  expect(makeAgentModel(s, { ANTHROPIC_API_KEY: "a" }).model).toBe("claude-sonnet-5-5");
-  expect(makeJsonModel(s.challenger, s, { OPENAI_API_KEY: "o" }).ref).toBe("openai:gpt-6.1-sol");
+  expect(() => makeAgentModel(s, { OPENAI_API_KEY: "o" }, noValues)).toThrow(/ANTHROPIC_API_KEY/);
+  expect(makeAgentModel(s, { ANTHROPIC_API_KEY: "a" }, noValues).model).toBe("claude-sonnet-5-5");
+  expect(makeJsonModel(s.challenger, s, { OPENAI_API_KEY: "o" }, noValues).ref).toBe("openai:gpt-6.1-sol");
   // A model arnx has no price for runs, its cost unknown; the command says so once.
   const unpriced = parseModelRef("compat:unpriced", TABLES);
-  expect(makeJsonModel(unpriced, s, COMPAT_ENV).ref).toBe("compat:unpriced");
-  expect(makeAgentModel({ ...s, reviewer: unpriced }, COMPAT_ENV).model).toBe("unpriced");
+  expect(makeJsonModel(unpriced, s, COMPAT_ENV, noValues).ref).toBe("compat:unpriced");
+  expect(makeAgentModel({ ...s, reviewer: unpriced }, COMPAT_ENV, noValues).model).toBe("unpriced");
   expect(unpricedModels(s, [s.reviewer, unpriced, null, unpriced])).toEqual([{ ref: "compat:unpriced", name: "unpriced" }]);
   expect(unpricedModels({ ...s, prices: PRICED }, [parseModelRef("compat:some-model", TABLES)])).toEqual([]);
   // Priced by the name [prices] uses: with the OpenAI tier when one applies.
@@ -455,10 +458,10 @@ test("responses agent: a cut-off reply is max_tokens, and without storage reason
 test("the reviewer may be any provider, priced or not", () => {
   const as = (ref: string) => ({ ...defaultSettings(), providers: TABLES, prices: PRICED,
     reviewer: parseModelRef(ref, TABLES) });
-  expect(makeAgentModel(as("openai:gpt-5.5-2026-04-23"), { OPENAI_API_KEY: "o" })).toBeInstanceOf(ResponsesAgent);
-  expect(makeAgentModel(as("compat:some-model"), COMPAT_ENV).model).toBe("some-model");
-  expect(() => makeAgentModel(as("openai:gpt-5.5-2026-04-23"), {})).toThrow(/OPENAI_API_KEY/);
-  expect(makeAgentModel(as("compatenv:unpriced"), COMPAT_ENV).model).toBe("unpriced");
+  expect(makeAgentModel(as("openai:gpt-5.5-2026-04-23"), { OPENAI_API_KEY: "o" }, noValues)).toBeInstanceOf(ResponsesAgent);
+  expect(makeAgentModel(as("compat:some-model"), COMPAT_ENV, noValues).model).toBe("some-model");
+  expect(() => makeAgentModel(as("openai:gpt-5.5-2026-04-23"), {}, noValues)).toThrow(/OPENAI_API_KEY/);
+  expect(makeAgentModel(as("compatenv:unpriced"), COMPAT_ENV, noValues).model).toBe("unpriced");
 });
 
 // Provider backoff headers: the wait is never shorter than the local backoff (DELAYS[0] = 2s for the first retry).
@@ -968,8 +971,8 @@ async function bodiesSent(fn: () => Promise<unknown>): Promise<Record<string, un
 test("openai_transport: OpenAI clients run in background by default and stream when it is \"stream\"", async () => {
   const s = { ...defaultSettings(), challenger: GPT, reviewer: GPT };
   const env = { OPENAI_API_KEY: "o" };
-  const json = (t: typeof s) => bodiesSent(() => makeJsonModel(GPT, t, env).completeJson("s", "u", SCHEMA));
-  const turn = (t: typeof s) => bodiesSent(() => makeAgentModel(t, env).create({ system: "s", tools: [],
+  const json = (t: typeof s) => bodiesSent(() => makeJsonModel(GPT, t, env, noValues).completeJson("s", "u", SCHEMA));
+  const turn = (t: typeof s) => bodiesSent(() => makeAgentModel(t, env, noValues).create({ system: "s", tools: [],
     messages: [{ role: "user", content: "u" }], maxTokens: 10 }));
   for (const sent of [await json(s), await turn(s)]) {
     expect([sent.length, sent[0]!.background, sent[0]!.stream]).toEqual([1, true, undefined]);
@@ -982,10 +985,10 @@ test("openai_transport: OpenAI clients run in background by default and stream w
 
 test("generic Responses tables keep streaming; store = false is sent", async () => {
   const s = { ...defaultSettings(), providers: TABLES, prices: PRICED };
-  const fixed = await bodiesSent(() => makeJsonModel(parseModelRef("compat:some-model", TABLES), s, COMPAT_ENV)
+  const fixed = await bodiesSent(() => makeJsonModel(parseModelRef("compat:some-model", TABLES), s, COMPAT_ENV, noValues)
     .completeJson("s", "u", SCHEMA).catch(() => null));
   expect([fixed[0]!.stream, fixed[0]!.background, fixed[0]!.store]).toEqual([true, undefined, false]);
-  const fromEnv = await bodiesSent(() => makeJsonModel(parseModelRef("compatenv:some-model", TABLES), s, COMPAT_ENV)
+  const fromEnv = await bodiesSent(() => makeJsonModel(parseModelRef("compatenv:some-model", TABLES), s, COMPAT_ENV, noValues)
     .completeJson("s", "u", SCHEMA).catch(() => null));
   expect([fromEnv[0]!.stream, fromEnv[0]!.background]).toEqual([true, undefined]);
 });
@@ -994,15 +997,15 @@ test("second_hunter_effort is sent as is to the second hunter; unset, the table'
   const hunter = parseModelRef("compat:some-model", TABLES);
   const s = { ...defaultSettings(), providers: TABLES, prices: PRICED, secondHunter: hunter };
   const env = COMPAT_ENV;
-  const effort = async (t: typeof s) => (await bodiesSent(() => makeSecondHunter(t, env)!.completeJson("s", "u",
+  const effort = async (t: typeof s) => (await bodiesSent(() => makeSecondHunter(t, env, noValues)!.completeJson("s", "u",
     SCHEMA)))[0]!.reasoning;
   expect(await effort({ ...s, secondHunterEffort: "none" })).toEqual({ effort: "none" });
   expect(await effort(s)).toEqual({ effort: "high" });
   // only the second hunter: the challenger keeps the shared effort
-  const challenger = await bodiesSent(() => makeJsonModel(hunter, { ...s, secondHunterEffort: "none" }, env)
+  const challenger = await bodiesSent(() => makeJsonModel(hunter, { ...s, secondHunterEffort: "none" }, env, noValues)
     .completeJson("s", "u", SCHEMA));
   expect(challenger[0]!.reasoning).toEqual({ effort: "high" });
-  expect(makeSecondHunter(defaultSettings(), env)).toBeUndefined();
+  expect(makeSecondHunter(defaultSettings(), env, noValues)).toBeUndefined();
 });
 
 test("background: a 404 poll soon after the create is tried again; past the grace it fails the call", async () => {
@@ -1232,13 +1235,13 @@ test("makeChallenger: timeoutAttempts 1 on the first model only, and only with a
     challenger: parseModelRef("compat:some-model", TABLES), challengerFallback: parseModelRef("openai:gpt-6.1-sol") };
   const limit = (m: unknown) => (m as { timeoutAttempts: number }).timeoutAttempts;
   const attempt = (m: unknown) => (m as { attemptLimit: number }).attemptLimit;
-  const withFallback = makeChallenger(s, env) as FallbackJson;
+  const withFallback = makeChallenger(s, env, noValues) as FallbackJson;
   expect(withFallback).toBeInstanceOf(FallbackJson);
   const [first, second] = [(withFallback as unknown as { first: unknown }).first,
     (withFallback as unknown as { second: unknown }).second];
   expect([limit(first), attempt(first)]).toEqual([1, 60]);
   expect([limit(second), attempt(second)]).toEqual([Infinity, 60]);
-  const alone = makeChallenger({ ...s, challengerFallback: undefined }, env);
+  const alone = makeChallenger({ ...s, challengerFallback: undefined }, env, noValues);
   expect(alone).not.toBeInstanceOf(FallbackJson);
   expect([limit(alone), attempt(alone)]).toEqual([Infinity, 60]);
 });

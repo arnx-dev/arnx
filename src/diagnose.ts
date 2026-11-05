@@ -11,6 +11,7 @@ import { join, posix } from "node:path";
 import type { TestResult } from "./adapters/types";
 import type { ReviewConfig } from "./config";
 import { envValue } from "./secrets";
+import { clip } from "./events";
 
 export type HintKind = "missing-package" | "import-path" | "missing-library" | "missing-program" |
   "missing-variable" | "env-value" | "unresolved-host" | "connection-refused" | "does-not-load" | "order-dependent" |
@@ -33,7 +34,7 @@ const MARKS = /^(?:\s|E(?=\s)|>)+/;
 function lineOf(text: string, index: number): string {
   const start = text.lastIndexOf("\n", index) + 1;
   const end = text.indexOf("\n", index);
-  return text.slice(start, end === -1 ? undefined : end).replace(MARKS, "").trim().slice(0, 200);
+  return clip(text.slice(start, end === -1 ? undefined : end).replace(MARKS, "").trim(), 200);
 }
 
 /** Whether a failing result stands for a whole test file that did not load, so none of its tests ran: pytest's
@@ -51,7 +52,7 @@ export function errorLine(message: string): string {
   if (/^collection failure\b/.test(lines[0] ?? "")) {
     const rest = lines.slice(1);
     const line = rest.filter((l) => /^E\s/.test(l)).at(-1) ?? rest.find((l) => l.trim());
-    if (line) return line.replace(MARKS, "").trim().slice(0, 200);
+    if (line) return clip(line.replace(MARKS, "").trim(), 200);
   }
   return firstLine(message);
 }
@@ -162,7 +163,7 @@ export const npxText = (pkg: string) => `\`${pkg}\` is not installed where test_
 
 /** The first line of a failure message that says something, as evidence for a hint no signature produced. */
 export function firstLine(message: string): string {
-  return message.split("\n").map((l) => l.replace(MARKS, "").trim()).find(Boolean)?.slice(0, 200) ?? "";
+  return clip(message.split("\n").map((l) => l.replace(MARKS, "").trim()).find(Boolean) ?? "", 200);
 }
 
 /** Most failing files whose first error the setup agent is shown. */

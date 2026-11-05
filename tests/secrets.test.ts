@@ -62,3 +62,14 @@ test("a file's key-shaped strings are pinned by short hashes; it is kept only wh
   expect(firstUnpinned(`${PRIVATE_KEY}\n`, [])).toEqual({ line: 1, label: "a private key" });
   expect(firstUnpinned("def key_for(user): return user.id", [])).toBeNull();
 });
+
+test("a port before an @ is not a password", () => {
+  for (const url of ["http://localhost:3000@evil.com/x", "https://example.com:8080@evil.com", "http://:8080@proxy.test"]) {
+    expect(hasSecretContent(url)).toBe(false);
+  }
+  for (const url of [["postgres://user:", "12345", "@db.corp.net/x"], ["mysql://admin:", "1234", "@prod.db.com"]].map((p) => p.join(""))) {
+    expect(hasSecretContent(url)).toBe(true);
+  }
+  // On a host of one's own a plain word with digits keeps today's behaviour: no stand-in.
+  expect(hasSecretContent(["postgres://app:", "12345", "@localhost/x"].join(""))).toBe(false);
+});

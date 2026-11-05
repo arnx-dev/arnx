@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { challengeUser } from "../src/prompts";
-import { challenge, CONCURRENCY, inPool, oneVerdict, sameTest } from "../src/challenge";
+import { challenge, CONCURRENCY, inPool, oneVerdict } from "../src/challenge";
+import { sameTest } from "../src/report";
 import { ModelError } from "../src/errors";
 import { billedError, FallbackJson } from "../src/llm";
 import { FakeJson } from "./helpers/fakes";

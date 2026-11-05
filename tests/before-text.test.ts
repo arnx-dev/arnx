@@ -21,7 +21,7 @@ test("one kind of outcome: a full sentence; the passing tests say 'either' after
   expect(fixText(fixNews, false)).toBe("the 5 passing tests cannot run there (what they test is new), so they show no fix");
   expect(beforeText(of<Before["status"]>(["regression"]))).toBe("the failing test passes there: the change broke it");
   expect(fixText(of<Fix["status"]>(["fixed"], ["fixed"]), false))
-    .toBe("the 2 passing tests fail there and pass now: the change fixes them");
+    .toBe("the 2 passing tests fail there and pass now");
   expect(fixText(of<Fix["status"]>(["unchanged"]), false)).toBe("the passing test passes there too");
 });
 
@@ -31,7 +31,7 @@ test("several outcomes: one line per kind of test, joined with '; ', singular an
     .toBe("2 failing tests pass there: the change broke them; 1 fails the same way there: not caused by the change; " +
       "1 cannot run there (what it tests is new); 1 fails differently there; 1 unclear (flaky)");
   expect(fixText(of<Fix["status"]>(["fixed"], ["unchanged"], ["unchanged"], ["new-code"], ["unknown"]), false))
-    .toBe("1 passing test fails there and passes now: the change fixes it; 1 cannot run there (what it tests is new), " +
+    .toBe("1 passing test fails there and passes now; 1 cannot run there (what it tests is new), " +
       "so it shows no fix; 2 pass there too; 1 unclear");
 });
 

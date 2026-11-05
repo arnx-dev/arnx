@@ -7,12 +7,12 @@ import { join, posix } from "node:path";
 import { adapterFor } from "./adapters";
 import { isPreExisting } from "./before";
 import type { Billed, Brain, Totals } from "./brain";
-import { inPool, oneVerdict, sameTest } from "./challenge";
+import { inPool, oneVerdict } from "./challenge";
 import { shallowKind } from "./shallow";
 import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, withRole } from "./events";
 import { added, type Change, describe, describeBlanked, EMPTY_TREE, filesAt, removed, resolveChange, sliceDiff,
-  someNames, untrackedLine } from "./change";
-import { loadReviewFile, type ReviewConfig, reviewConfigPath, secretPinsOf } from "./config";
+  someNames, treeSuspects, untrackedLine } from "./change";
+import { configSuspects, loadReviewFile, type ReviewConfig, reviewConfigPath, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
 import { huntParts } from "./hunt";
 import { projectIndex } from "./indexer";
@@ -28,7 +28,7 @@ import { CONTEXT_LIMIT, contextPack } from "./context";
 import { elsewhereNote, type Suspect } from "./prompts";
 import { changedSources, databaseEnv, untestedFiles } from "./untested";
 import { type AgentReport, type Checked, type Finding, type FixProof, parseReports, type ProjectStat, type Review,
-  save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause } from "./report";
+  save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause, sameTest } from "./report";
 import { dockerSteps, type SessionFactory } from "./sandbox";
 import type { TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
@@ -307,6 +307,19 @@ export async function runReview(repo: string, o: { settings: Settings;
     const secondHunter = o.secondHunter ?? (o.challenger && vendor(o.challenger.ref) !== vendor(refString(s.reviewer)) &&
       !(o.challenger instanceof FallbackJson) ? o.challenger : null);
     const brain: Brain = o.brain ?? local();
+    // Nothing has left yet: the filter knows the diff before the first request, and the tree before each round's. A
+    // resumed review may have no round left to tell it, and it still judges.
+    const boundary = brain.boundary;
+    if (boundary) {
+      log.filter = boundary;
+      const pins = secretPinsOf(file.raw);
+      boundary.addDiff(change.diff, pins);
+      boundary.add(configSuspects(repo));
+      if (resumed) {
+        boundary.add(treeSuspects(repo, change.head, pins, { untracked: !!change.withUntracked,
+          sandbox: sandboxOnlyOf(file.raw) }));
+      }
+    }
     let finished = false;
     const interrupted = async () => { await finish?.("interrupted"); };
     finish = async (end, totals) => {
@@ -551,10 +564,10 @@ export async function runReview(repo: string, o: { settings: Settings;
     const left = () => Math.max(0, s.reviewBudgetUsd - agentCost - (huntSecond?.costUsd ?? 0) -
       extraUses.reduce((n, u) => n + u.costUsd, 0));
     // Every second-model attempt and call goes to second-opinion.jsonl, so a slow or failed call can be traced.
-    const log = join(rdir, "second-opinion.jsonl");
+    const opinions = join(rdir, "second-opinion.jsonl");
     const trace: Trace = (line) => {
       mkdirSync(rdir, { recursive: true });
-      appendFileSync(log, JSON.stringify({ at: new Date().toISOString(), ...line }) + "\n");
+      appendFileSync(opinions, JSON.stringify({ at: new Date().toISOString(), ...line }) + "\n");
     };
     // Verdicts given before an interruption are kept, with their cost.
     const verdictsFile = join(rdir, "verdicts.json");

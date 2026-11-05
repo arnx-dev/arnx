@@ -5,6 +5,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CloudClient, writeCredentials } from "../src/cloud";
+import { Boundary } from "../src/boundary";
 import { CloudBrain } from "../src/cloudbrain";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { runReview } from "../src/reviewer";
@@ -29,7 +30,7 @@ const cloudOf = (rounds: StepScript[]) => {
   clouds.push(c);
   return c;
 };
-const brainFor = (c: FakeCloud) => new CloudBrain({ client: new CloudClient(c.url, { token: TOKEN, delays: [0] }),
+const brainFor = (c: FakeCloud) => new CloudBrain({ boundary: new Boundary(), client: new CloudClient(c.url, { token: TOKEN, delays: [0] }),
   tier: "medium" });
 /** Everything the CLI sent arnx cloud, as one string. */
 const sent = (c: FakeCloud) => JSON.stringify(c.seen.map((x) => x.body));

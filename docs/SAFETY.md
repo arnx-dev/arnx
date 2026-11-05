@@ -5,7 +5,9 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
 ## What runs where
 
 - Tests run only in Docker: no network (only the services in `.arnx/review.yaml`), no environment variables except
-  the ones in it, CPU, memory and process limits, on a throwaway copy of your repository.
+  the ones in it, CPU, memory and process limits, on a throwaway copy of your repository. A network for services has no
+  way out and no address on this machine, on Docker 28 or later. On an older Docker a test with services declared can reach
+  what listens on this machine, a database too; arnx says so when it happens.
 - Each test environment is a Docker image (`arnx-env:<hash>`), built again when the install steps or the dependency
   files change; Rust images can take several GB. With `context = "precise"` (`.arnx/config.toml`), each one also
   gets a code indexer layer (`arnx-env:<hash>-scip1`, about 0.7 GB for Python and TypeScript; the indexer runs with
@@ -23,7 +25,8 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   Files you committed are left for the `git rm` it prints, so the removal shows in a commit. Accepted tests are your
   tests by then: kept unless `--tests`. Your arnx cloud login and the arnx program itself are not touched.
 - Your model keys stay in the arnx process. Files that usually hold secrets, and text that looks like a key, are
-  never sent to a model. A file left out this way is named at setup and in each review. When every key-shaped
+  not sent to a model, except the forms listed below. A file left out this way is named at setup and in each review.
+  When every key-shaped
   string in a JavaScript, TypeScript, Python or Rust file is inside a comment that has its lines to itself (a doc
   example), the file is sent with those comment lines blanked instead (a private key's whole block too, when it lies
   in the comment), and setup names the file and its lines. Everything else that may be a secret gets a stand-in, a
@@ -53,6 +56,18 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   the file under `sandbox_only` in `.arnx/review.yaml` and under "Worth a look". This holds for every line of
   `.arnxignore`, arnx's defaults and yours alike: `init` writes data files it finds there by name, so the file does
   not tell them apart. A test's output still goes to the model, and may quote such a file.
+- Everything sent to a model, arnx cloud, the second-opinion model or telemetry goes through one filter, in every
+  string of the request: a value arnx took for a secret is replaced by its stand-in there too, and so is a piece of
+  one at the edge of a word, unless the value is proven a name or words. What is still imperfect: a secret arnx does
+  not pick as a secret is not masked; a cut piece of a word-like value can still leave; a dotted username with a
+  1-5 digit address password (`user.name:12345@host`) reads as a host and is not masked; a file over 32 MB is not
+  scanned and is left out.
+- A private key is found by its header: OpenSSL and OpenSSH blocks, PGP's `PRIVATE KEY BLOCK`, SSH2's four dashes,
+  and a label with digits or hyphens (`ED25519`, `RSA-PSS`). A `.ppk` file is a secret file by its name. A key header
+  in code in a diff stops the review. A key with no header is not found as a key. A key whose lines are under 40
+  characters is not found as a body, so beside a header it reads as a placeholder and the file is kept. What can still
+  reach a model: a key a test prints (the output of the tests goes to the model), a key whose lines are under 40
+  characters, a key as a JWK, a key as hex, and any other form without a header.
 - A variable whose name looks like a secret (KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL, …) is refused in
   `.arnx/review.yaml` unless listed under `allow_env_names` or set to `arnx:generated` (64 hex digits arnx makes) or
   `arnx:generated:base64` (32 bytes, URL-safe base64): throwaway values, the same in every run.
@@ -77,6 +92,10 @@ files are in neither the diff, the copy the reviewer reads nor the sandbox, and 
 always; `--no-untracked` overrides that); `arnx setup` reads the same way. With no commits yet every file is sent, and
 the review says so first. Paths in `.arnxignore`, secret files and files with key-shaped text are never sent (see [What
 runs where](#what-runs-where)). review.json records `untracked_included` or `untracked_left_out`.
+
+The diff is git's plain text form. arnx turns off textconv drivers, external diff tools and the diff form of a
+submodule (`diff.submodule`) for every diff it reads. A driver that decrypts a file cannot put its text in the diff.
+A submodule shows as a pointer only.
 
 With arnx cloud, the same content goes to arnx cloud instead of your providers, and arnx cloud passes it to its model
 providers ([CLOUD.md](CLOUD.md)).

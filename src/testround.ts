@@ -11,9 +11,10 @@ import { adapterFor } from "./adapters";
 import { bakedError, bakedIn, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
   from "./baked";
 import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
-  fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, notChecked, SKIP_REASONS, textBefore, textFix } from "./before";
+  fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, newNames, notChecked, SKIP_REASONS, textBefore, textFix,
+  vacuousBefore } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
-import { snapshot, withSandboxFiles } from "./change";
+import { snapshot, takeSnapshot, tooLargeText, withSandboxFiles } from "./change";
 import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
 import { clip, emit, testMessage } from "./events";
@@ -288,8 +289,12 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   const dbNames = databaseEnv(cfg.env, cfg.services);
   try {
     const snap = join(tmp, "repo");
-    removed = snapshot(repo, head, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw),
-      untracked: !!o.untracked }).map((w) => w.path);
+    const taken = takeSnapshot(repo, head, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw),
+      untracked: !!o.untracked });
+    removed = taken.withheld.map((w) => w.path);
+    // Before the brain hears anything from this snapshot.
+    o.brain.boundary?.add(taken.suspects);
+    if (taken.tooLarge.length) say(tooLargeText(taken.tooLarge));
     // Clear earlier generated files only: for some languages the tests directory also holds the project's own tests.
     mkdirSync(join(snap, o.writeDir), { recursive: true });
     for (const rel of collect(snap, o.writeDir, adapter.writable)) rmSync(join(snap, rel), { force: true });
@@ -707,10 +712,16 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
     const asText = (t: TestResult, file: string | null) => file !== null &&
       shallowKind(o.files[file], funcOf(t), (p) => source(file, p)) === "source-text";
     // Nor does a test that fakes what only the change uses prove a fix.
-    const added = namesAdded(o.diff ?? "", (name) => adapterFor(cfg).isTestFile(name));
+    const isTest = (name: string) => adapterFor(cfg).isTestFile(name);
+    const added = namesAdded(o.diff ?? "", isTest);
+    // And failing the same way there says nothing when the test uses what the change adds.
+    const brought = newNames(o.diff ?? "", isTest, (path) => {
+      const at = join(snap, path);
+      return existsSync(at) ? readFileSync(at, "utf8") : null;
+    });
     return result(() => done(Object.fromEntries(o.findings.map((t) => {
       const file = ownerFile(t.fileAttr, own), b = judgeBefore(t, file, runs, envChanged);
-      return [t.testId, asText(t, file) ? textBefore(b) : b];
+      return [t.testId, asText(t, file) ? textBefore(b) : file === null ? b : vacuousBefore(b, o.files[file] ?? "", funcOf(t), brought)];
     }))),
     () => proofLate ? proved({}, "time") : proved(Object.fromEntries(o.proofs.map((t) => {
       const file = ownerFile(t.fileAttr, own);

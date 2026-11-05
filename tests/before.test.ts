@@ -202,7 +202,7 @@ test("a regression is marked; a pre-existing failure is reported apart, not chal
   expect(md).not.toContain("nothing to compare");
   const text = summary(review, "review.md");
   expect(text).toContain("regression: add subtracts.");
-  expect(text).toContain("Already failing before the change: F2");
+  expect(text).toContain("Already failing before the change:\n  · F2  ");
 });
 
 test("only pre-existing findings: nothing is challenged and the exit code is 0", async () => {
@@ -402,4 +402,20 @@ test("an image made from the code before the change has that code's dependencies
   const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent(), sessionFactory: bakedSessions([]),
     challenger: new FakeJson([{ verdict: "confirmed", reason: "add subtracts." }]) });
   expect(review.findings[0]!.before!.status).toBe("regression");
+});
+
+test("a finding that fails the same way but uses what the change adds is judged, not set aside as old", async () => {
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return helper(a) - b\n\ndef old():\n    return 0\n");
+  const uses = new ScriptedAgent([
+    [tool("write_file", { path: GEN, content: "import app\n\ndef test_add():\n    assert app.helper(2) == 5\n\ndef test_old():\n    assert app.old() == 1\n" })],
+    [text(REPORT)]]);
+  const same = junitXml([[GEN, "test_add", "failed", "assert 0 == 5"], [GEN, "test_old", "failed", "assert 0 == 1"]]);
+  const sessionsSame: SessionFactory = async (_cfg, snap, _log, body) => body(new FakeSession(snap, () => [same, "", false]));
+  const judge = new FakeJson([{ verdict: "disputed", reason: "no" }]);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: uses, challenger: judge, sessionFactory: sessionsSame });
+  const [add, old] = [review.findings.find((f) => f.func === "test_add")!, review.findings.find((f) => f.func === "test_old")!];
+  expect(add.before!.status).toBe("unknown");
+  expect(add.before!.detail).toContain("the test uses `helper`, which the change adds");
+  expect(add.verdict).toBe("disputed");
+  expect(old.before!.status).toBe("pre-existing");
 });

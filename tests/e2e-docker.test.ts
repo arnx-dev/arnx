@@ -2,11 +2,13 @@
 import { describe, expect, test } from "bun:test";
 import { blankMarks } from "./helpers/review";
 import { appendFileSync, cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer, type AddressInfo } from "node:net";
 import { basename, dirname, join } from "node:path";
 import { accept } from "../src/accept";
 import { snapshot } from "../src/change";
 import { check } from "../src/check";
-import { isApproved, loadReviewFile, parseReviewConfig, reviewConfigPath } from "../src/config";
+import { isApproved, loadReviewFile, parseReviewConfig, parseReviewFile, reviewConfigPath } from "../src/config";
+import { docker, dockerSteps, networkNotice, Session } from "../src/sandbox";
 import { runTests } from "../src/outcomes";
 import { dockerSession } from "../src/testround";
 import { EVENTS_FILE } from "../src/events";
@@ -202,7 +204,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
       ["test_mul", "unchanged"], ["test_neg", "new-code"]]);
     expect(exitCode(review)).toBe(0);
     const md = readFileSync(join(rdir, "review.md"), "utf8");
-    expect(md).toContain("## The change fixes");
+    expect(md).toContain("## Fails before the change, passes with it");
     expect(md).toContain("- `tests/arnx_generated/test_calc.py::test_add`: add sums");
     console.log(`fix proof: ${review.timings!.fixProofSecs} s of a ${review.seconds} s review`);
   }, 900_000);
@@ -264,4 +266,51 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     const [ok2, detail2] = await approveConfig(repo, { by: "Dev", at: "2026-10-20" });
     expect([ok2, detail2]).toEqual([true, "4 passed"]);
   }, 900_000);
+
+  // --- a service network ------------------------------------------------------------------------------------------------
+  test("a test on a service network reaches its services, and no listener on this machine through the network's gateway", async () => {
+    const server = createServer((c) => c.end("listening\n"));
+    await new Promise<void>((done) => server.listen(0, "0.0.0.0", done));
+    const port = (server.address() as AddressInfo).port;
+    const cfg = parseReviewFile(`version: 1\nimage: python:3.12-slim\ntest_command: python -m pytest -q {targets}\n` +
+      "services:\n  cache:\n    image: redis:7-alpine\n    ready: redis-cli ping\n").projects[0]!;
+    const reach = (host: string, p = port) => `python -c "import socket; s = socket.create_connection(('${host}', ${p}), 3); ` +
+      `print('reached')" 2>&1 | tail -1`;
+    const dockerOut = (...args: string[]) => docker(args).stdout.trim();
+    // The check bites: on a network with the old options the same listener answers from the gateway.
+    const open = `arnx-open-${process.pid}`;
+    docker(["network", "create", "--internal", open]);
+    try {
+      const gateway = dockerOut("network", "inspect", open, "-f", "{{(index .IPAM.Config 0).Gateway}}");
+      const control = docker(["run", "--rm", "--network", open, "python:3.12-slim", "sh", "-c", reach(gateway)]).stdout;
+      expect(control).toContain("reached");
+    } finally {
+      docker(["network", "rm", open]);
+    }
+    // A protected network is not reported as an open one.
+    const noticed: string[] = [];
+    const before = { say: dockerSteps.say, said: networkNotice.said };
+    dockerSteps.say = (m) => void noticed.push(m);
+    networkNotice.said = false;
+    const session = await new Session("python:3.12-slim", cfg, tmp()).start().finally(() => {
+      dockerSteps.say = before.say;
+    });
+    try {
+      expect(noticed).toEqual([]);
+      expect(networkNotice.said).toBe(false);
+      networkNotice.said = before.said;
+      const made = JSON.parse(dockerOut("network", "inspect", session.network, "-f", "{{json .IPAM.Config}}"));
+      expect(made[0].Gateway ?? "").toBe("");
+      // What would be its gateway, and the default bridge's, which a test could guess.
+      const first = String(made[0].Subnet).replace(/\.0\/\d+$/, ".1");
+      const bridge = dockerOut("network", "inspect", "bridge", "-f", "{{(index .IPAM.Config 0).Gateway}}");
+      for (const host of [first, bridge]) {
+        expect(session.run(reach(host), 30).output).not.toContain("reached");
+      }
+      expect(session.run(reach("cache", 6379), 30).output).toContain("reached");
+    } finally {
+      session.close();
+      server.close();
+    }
+  }, 300_000);
 });

@@ -10,6 +10,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join } from "node:path";
 import { adapterFor } from "./adapters";
 import { type AgentResult, type ToolCall, toolErrorText } from "./agent";
+import type { Boundary } from "./boundary";
 import type { AnswerInput, Billed, Brain, Facts, Judged, JudgeOptions, ReviewInput, ReviewOpened, ReviewStart,
   RoundHunt, RoundInputs, RoundKind, RoundResult, RoundTools, SetupInput, Totals } from "./brain";
 import { type CallOptions, CloudClient, CloudError, usd } from "./cloud";
@@ -95,6 +96,8 @@ const EMPTY_DETECTION: Detection = { candidates: [], workspaces: [], ci: [], com
 export interface CloudBrainOptions {
   client: CloudClient;
   tier: Tier;
+  /** Masks every string this brain sends. */
+  boundary: Boundary;
   /** Lines for the user outside a round (the review opening, the bill at finish). */
   progress?: Say;
 }
@@ -133,6 +136,15 @@ export class CloudBrain implements Brain {
     this.tier = o.tier;
   }
 
+  get boundary(): Boundary {
+    return this.o.boundary;
+  }
+
+  /** The one way out: a call with every string in it masked, its fields as they were. */
+  private post<T>(path: string, body: unknown, c?: CallOptions): Promise<T> {
+    return this.o.client.call<T>("POST", this.boundary.mask(path), this.boundary.maskValue(body), c);
+  }
+
   /** The tier and harness this brain answered with ("arnx:medium/h-2026-10-19.1"); never a model name. */
   get label(): string {
     return `arnx:${this.tier}${this.harness ? `/${this.harness}` : ""}`;
@@ -160,7 +172,7 @@ export class CloudBrain implements Brain {
   /** Opens the review (its budget hold); `resume_of` names the review a `--resume` continues. Returns the id arnx
    * cloud gave it (the CLI keeps it in state.json as cloud_review_id). */
   async start(x: ReviewStart): Promise<ReviewOpened> {
-    const r = await this.o.client.call<WireReview>("POST", "/v1/reviews", { cli_version: VERSION, effort: this.tier,
+    const r = await this.post<WireReview>("/v1/reviews", { cli_version: VERSION, effort: this.tier,
       mode: { models: true, tests: false }, change: { files_changed: x.files.filter((p) => !isSecretPath(p)),
         added: x.added, removed: x.removed, diff_sha256: x.diffSha256, projects: x.projects },
       budget_cap_micro_usd: micro(x.budgetUsd), resume_of: x.resumeOf ?? null },
@@ -218,7 +230,7 @@ export class CloudBrain implements Brain {
     say(h ? "arnx cloud is looking for defects" : "arnx cloud is writing tests");
     // A start that timed out or failed on the way (a network failure, 503) is sent once more with the same
     // Idempotency-Key: arnx cloud answers it from the round it already started instead of starting another.
-    const first = this.o.client.call<WireStep>("POST", path, { diff, context_pack: h?.context ?? "",
+    const first = this.post<WireStep>(path, { diff, context_pack: h?.context ?? "",
       changed_definitions: h?.changedDefinitions ?? (root ? changedDefinitions(root, diff, scope.owned) : ""),
       scope: { owns: cfg.owns, uses: cfg.uses, changed_owned: scope.owned, changed_used: scope.used,
         scoped: x.scoped },
@@ -290,7 +302,7 @@ export class CloudBrain implements Brain {
     const say = this.sayer(cfg.name, x.progress);
     const stream: CallOptions = { stream: true, onProgress: (p) => say(p.message) };
     say("arnx cloud is writing tests");
-    const started = this.o.client.call<WireAnswerStarted>("POST", "/v1/answers", {
+    const started = this.post<WireAnswerStarted>("/v1/answers", {
       cli_version: VERSION, effort: this.tier, project: cfg.name, question: x.question, answer: x.answer, diff: x.diff,
       scope: { owns: cfg.owns, uses: cfg.uses }, facts: projectFacts(cfg, [], databaseEnv(cfg.env, cfg.services)),
       budget_cap_micro_usd: micro(x.budgetUsd) }, { ...stream, idempotencyKey: randomUUID() });
@@ -308,7 +320,7 @@ export class CloudBrain implements Brain {
     const stream: CallOptions = { stream: true, onProgress: (p) => say(p.message) };
     const d = x.detection ?? EMPTY_DETECTION;
     const withheld = x.withheldFiles ?? [];
-    const started = await this.o.client.call<WireSetupStarted>("POST", "/v1/setup", {
+    const started = await this.post<WireSetupStarted>("/v1/setup", {
       cli_version: VERSION, effort: this.tier, detection: { candidates: d.candidates.map((c) => ({ root: c.root,
         language: c.language, manifest: c.manifest, runner: c.runner, package_manager: c.packageManager,
         evidence: c.evidence })), workspaces: d.workspaces, ci: d.ci, compose: d.compose, services: d.services,
@@ -423,11 +435,11 @@ export class CloudBrain implements Brain {
   private async step(path: string, body: Record<string, unknown>, c: CallOptions, say: (m: string) => void)
     : Promise<WireStep> {
     try {
-      return await this.o.client.call<WireStep>("POST", path, body, c);
+      return await this.post<WireStep>(path, body, c);
     } catch (e) {
       if (!(e instanceof CloudError) || e.body?.code !== "turn_conflict") throw e;
       say(`arnx cloud expected turn ${e.body.expected_turn ?? "?"}, not ${String(body.turn)}; sending it again`);
-      return this.o.client.call<WireStep>("POST", path, body, c);
+      return this.post<WireStep>(path, body, c);
     }
   }
 
@@ -476,7 +488,7 @@ export class CloudBrain implements Brain {
     };
     const started = performance.now();
     o.progress?.(`arnx cloud is judging ${findings.length} finding${findings.length === 1 ? "" : "s"}`);
-    const r = await this.o.client.call<WireJudge>("POST", `/v1/reviews/${id}/judge`, body,
+    const r = await this.post<WireJudge>(`/v1/reviews/${id}/judge`, body,
       { stream: true, onProgress: (p) => o.progress?.(p.message) });
     this.named(r);
     const uses = new Map<string, ModelUse>();
@@ -534,7 +546,7 @@ export class CloudBrain implements Brain {
     this.closed = true;
     const id = this.review.id;
     try {
-      const r = await this.o.client.call<WireFinish>("POST", `/v1/reviews/${id}/finish`, { stop: finishStop(totals.stop),
+      const r = await this.post<WireFinish>(`/v1/reviews/${id}/finish`, { stop: finishStop(totals.stop),
         projects_reviewed: totals.projectsReviewed, tests_written: totals.testsWritten, passed: totals.passed,
         findings: totals.findings, flaky: totals.flaky, seconds: Math.max(0, totals.seconds) });
       this.named(r);

@@ -5,7 +5,7 @@ import { clip, emit, hypId, withRole } from "./events";
 import { type JsonModel, type ModelUse, newUse, tally, type Trace } from "./llm";
 import type { Say } from "./progress";
 import { CHALLENGE_SCHEMA, DEFAULT_PROMPTS, type Prompts } from "./prompts";
-import type { Finding } from "./report";
+import { type Finding, sameTest } from "./report";
 import { pyRepr } from "./util";
 
 /** Why the findings after a timed-out call were not sent; the reviewer then skips the explain call too. */
@@ -23,9 +23,6 @@ export async function inPool<T>(items: T[], limit: number, work: (item: T) => Pr
   };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, lane));
 }
-
-/** One test: its project and name, its cases' parameters left out (`test_x[a]`, `test_x[b]`). */
-export const sameTest = (f: Finding) => `${f.project}::${f.testId.replace(/\[.*\]$/, "")}`;
 
 /** One test gets one verdict: when its cases disagree, all are disputed, for the developer to decide. */
 export function oneVerdict(findings: Finding[]): void {

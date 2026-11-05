@@ -4,6 +4,7 @@
 // No model is called. The stage itself is `beforeStage` in testround.ts; this module only compares outcomes.
 import { posix } from "node:path";
 import { asError, ownerFile, type TestResult } from "./outcomes";
+import { testText } from "./shallow";
 import { splitLines } from "./util";
 
 /** regression: passes before the change. pre-existing: fails the same way before it. new-code: what it tests does not
@@ -36,7 +37,7 @@ const MISSING = new RegExp([
   "ModuleNotFoundError", "ImportError", "cannot import name", "has no attribute", "NameError", "is not defined",
   "is not a function", "is not a constructor", "does not provide an export named", "Cannot find module",
   "Failed to (?:load|resolve) (?:url|import)", "cannot find (?:function|value|struct|type|macro|trait|module)",
-  "unresolved import", "no (?:function|method|associated item|field) named", "error\\[E0(?:412|425|432|433|599|609)\\]",
+  "unresolved import", "no (?:function|method|associated item|field) named", "object has no field", "error\\[E0(?:412|425|432|433|599|609)\\]",
   "ENOENT: no such file or directory, \\w+ '/src/", "No such file or directory: '/src/",
 ].join("|"));
 
@@ -200,7 +201,7 @@ export function judgeFix(t: TestResult, file: string | null, runs: BeforeRun[], 
         "changes the dependencies the image is built from, so that code ran with the change's", runs: outcomes });
     }
     return withMessage({ status: "fixed", detail: `fails on the code before the change (${plural(n, "run")}) and ` +
-      `passes after: the change fixes this (${quoted(failure)})`, runs: outcomes });
+      `passes after (${quoted(failure)})`, runs: outcomes });
   }
   if (all("skipped")) return { status: "unknown", detail: "skipped on the code before the change", runs: outcomes };
   if (all("absent")) return { status: "unknown", detail: "did not run on the code before the change", runs: outcomes };
@@ -254,6 +255,31 @@ export function fakedName(source: string, names: ReadonlySet<string>): string | 
   return null;
 }
 
+const LANGUAGE = new Set(["async", "await", "class", "const", "elif", "else", "except", "export", "false", "from", "function",
+  "import", "null", "raise", "return", "self", "this", "true", "type", "undefined", "void", "while", "with", "yield"]);
+
+/** The names a change brings in: on its added source lines (namesAdded), and in no old version of the files it changes.
+ * `old`: a file's text before the change, null when it is new. */
+export function newNames(diff: string, isTest: (name: string) => boolean, old: (path: string) => string | null): Set<string> {
+  const before = new Set<string>();
+  for (const section of diff.split(/^(?=diff --git )/m)) {
+    const path = /^\+\+\+ b\/(.*)$/m.exec(section)?.[1];
+    const text = path ? old(path) : null;
+    if (text) for (const w of text.match(/[A-Za-z_$][\w$]*/g) ?? []) before.add(w);
+  }
+  return new Set([...namesAdded(diff, isTest)].filter((n) => n.length >= 4 && !LANGUAGE.has(n) && !before.has(n)));
+}
+
+/** A failure that is the same before the change says nothing when the test uses what the change adds: the code before
+ * it cannot pass, whatever it does. Such a finding is judged like any other. */
+export function vacuousBefore(b: Before, source: string, func: string, names: ReadonlySet<string>): Before {
+  if (b.status !== "pre-existing") return b;
+  const scope = testText(source, func);
+  const name = (scope.match(/[A-Za-z_$][\w$]*/g) ?? []).find((w) => names.has(w));
+  return !name ? b : { ...b, status: "unknown", detail: "fails the same way on the code before the change, but the test " +
+    `uses \`${name}\`, which the change adds, so that says nothing about the code before it` };
+}
+
 /** A failure of the test's own check, not a crash in the code it runs. */
 const OWN_CHECK = /^(?:Error:\s*)?expect\(|^(?:E\s+)?assert\b|AssertionError/;
 
@@ -282,7 +308,7 @@ const BEFORE_WORDS: Record<BeforeStatus, [string, string]> = {
   unknown: ["unclear", "unclear"],
 };
 const FIX_WORDS: Record<FixStatus, [string, string]> = {
-  fixed: ["fail there and pass now: the change fixes them", "fails there and passes now: the change fixes it"],
+  fixed: ["fail there and pass now", "fails there and passes now"],
   "new-code": ["cannot run there (what they test is new), so they show no fix",
     "cannot run there (what it tests is new), so it shows no fix"],
   unchanged: ["pass there too", "passes there too"],

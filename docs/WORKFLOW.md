@@ -145,7 +145,7 @@ for uncommitted work), in the same sandbox image, with no model call. A finding 
 there; one that fails the same way there is listed under "Already failing before this change": it was not caused by
 the change, is not sent to the second opinion and does not set the exit code (mark it real to keep it as a test
 anyway). Tests that passed in every run also run there (up to 20 per project): one that fails there in every run
-shows the change fixes what it checks, and review.md says so under "The change fixes". `before_check = false` under
+shows the change fixes or adds what it checks, and review.md lists it under "Fails before the change, passes with it". `before_check = false` under
 `[review]` in `.arnx/config.toml` turns both off; `fix_proof_max = 0` turns off only the second.
 
 What each outcome means: **regression** (passes before, fails after: the change broke what the test checks, if the

@@ -8,6 +8,9 @@ import { join } from "node:path";
 import { type JsonModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter } from "../src/llm";
 import { defaultSettings, type Env, parseModelRef, type Settings } from "../src/settings";
 import { GOLDEN } from "./helpers/golden";
+import { Boundary } from "../src/boundary";
+
+const noValues = new Boundary();
 
 const FILE = join(GOLDEN, "requests.json");
 const SCHEMA = { type: "object", properties: { verdict: { type: "string" } }, required: ["verdict"],
@@ -90,7 +93,7 @@ const base = (): Settings => ({ ...defaultSettings(), providers: TABLES,
   prices: { "some-model": [1, 2, 0.1, 0], "other-model": [0.12, 0.40, 0.024, 0.0] } });
 const MODELS: Record<string, string> = { anthropic: "anthropic:claude-sonnet-5-5", openai: "openai:gpt-6.1-sol",
   river: "river:zai-org/GLM-5.3-Flash", compat: "compat:other-model", compatenv: "compatenv:some-model" };
-const agentTurn = (s: Settings) => makeAgentModel(s, ENV).create({ system: "sys", tools: [TOOL],
+const agentTurn = (s: Settings) => makeAgentModel(s, ENV, noValues).create({ system: "sys", tools: [TOOL],
   messages: [{ role: "user", content: "go" }], maxTokens: 900 });
 
 /** Every case: a name and the call that sends its requests. */
@@ -102,17 +105,17 @@ function cases(): [string, () => Promise<unknown>, boolean?][] {
       const s = { ...base(), effort };
       out.push([`${p}/${effort}/reviewer`, () => agentTurn({ ...s, reviewer: ref })]);
       out.push([`${p}/${effort}/answer_model`, () => agentTurn({ ...s, answerModel: ref, reviewer: ref })]);
-      out.push([`${p}/${effort}/hunter`, () => makeJsonModel(ref, s, ENV).completeJson("sys", "user", SCHEMA)]);
+      out.push([`${p}/${effort}/hunter`, () => makeJsonModel(ref, s, ENV, noValues).completeJson("sys", "user", SCHEMA)]);
       out.push([`${p}/${effort}/challenger`, () => makeChallenger({ ...s, challenger: ref,
-        challengerFallback: parseModelRef(MODELS.anthropic!) }, ENV).completeJson("sys", "user", SCHEMA)]);
+        challengerFallback: parseModelRef(MODELS.anthropic!) }, ENV, noValues).completeJson("sys", "user", SCHEMA)]);
       // What the fallback is sent when it is asked (the first model having failed).
       out.push([`${p}/${effort}/challenger_fallback`, () => (makeChallenger({ ...s,
-        challenger: parseModelRef(p === "compatenv" ? MODELS.compat! : MODELS.compatenv!, TABLES), challengerFallback: ref }, ENV) as unknown as
+        challenger: parseModelRef(p === "compatenv" ? MODELS.compat! : MODELS.compatenv!, TABLES), challengerFallback: ref }, ENV, noValues) as unknown as
         { second: JsonModel }).second.completeJson("sys", "user", SCHEMA)]);
-      out.push([`${p}/${effort}/second_hunter`, () => makeSecondHunter({ ...s, secondHunter: ref }, ENV)!
+      out.push([`${p}/${effort}/second_hunter`, () => makeSecondHunter({ ...s, secondHunter: ref }, ENV, noValues)!
         .completeJson("sys", "user", SCHEMA)]);
       out.push([`${p}/${effort}/second_hunter_effort`, () => makeSecondHunter({ ...s, secondHunter: ref,
-        secondHunterEffort: "none" }, ENV)!.completeJson("sys", "user", SCHEMA)]);
+        secondHunterEffort: "none" }, ENV, noValues)!.completeJson("sys", "user", SCHEMA)]);
     }
   }
   const gpt = parseModelRef(MODELS.openai!);
@@ -120,9 +123,9 @@ function cases(): [string, () => Promise<unknown>, boolean?][] {
     ["fast-stream", { openaiTier: "fast", openaiTransport: "stream" as const }]] as const) {
     const s = { ...base(), ...extra };
     out.push([`openai/${name}/reviewer`, () => agentTurn({ ...s, reviewer: gpt })]);
-    out.push([`openai/${name}/hunter`, () => makeJsonModel(gpt, s, ENV).completeJson("sys", "user", SCHEMA)]);
+    out.push([`openai/${name}/hunter`, () => makeJsonModel(gpt, s, ENV, noValues).completeJson("sys", "user", SCHEMA)]);
   }
-  out.push(["openai/background-poll/hunter", () => makeJsonModel(gpt, base(), ENV).completeJson("sys", "user", SCHEMA),
+  out.push(["openai/background-poll/hunter", () => makeJsonModel(gpt, base(), ENV, noValues).completeJson("sys", "user", SCHEMA),
     true]);
   return out;
 }

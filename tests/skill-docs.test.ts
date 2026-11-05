@@ -116,7 +116,7 @@ test("every field a review writes is named in review-json.md", () => {
 
 test("review-json.md names each finding status review.json can write", () => {
   const doc = readFileSync(join(REFS, "review-json.md"), "utf8");
-  for (const s of ["confirmed", "disputed", "waiting-on-answer", "pre-existing"]) expect(doc).toContain(`\`${s}\``);
+  for (const s of ["confirmed", "not-checked", "disputed", "waiting-on-answer", "pre-existing"]) expect(doc).toContain(`\`${s}\``);
 });
 
 test("review-json.md names each type-check status and comparison review.json can write", () => {

@@ -87,7 +87,7 @@ Then, in both cases:
     arnx prompt                         # the fix prompt for your coding agent
     arnx check                          # runs the accepted tests; green means they pass now
 
-The first review asks before sending code, and proves each project it sets up with a quick look (the test listing,
+With arnx cloud, the first review asks before sending code (with your own keys nothing is asked). It proves each project it sets up with a quick look (the test listing,
 arnx's one-line test, a few small test files); a later change in another project sets that one up then.
 `arnx setup` instead sets up the whole repository and runs every suite in Docker.
 

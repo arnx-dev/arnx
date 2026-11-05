@@ -48,7 +48,7 @@ function withoutCheck(j: Json): Json {
   return { ...rest, findings: (rest.findings as Json[]).map(({ before: _before, ...f }) => f) };
 }
 
-const SECTION = /## The change fixes\n[\s\S]*?(?=## Findings)/;
+const SECTION = /## Fails before the change, passes with it\n[\s\S]*?(?=## Findings)/;
 
 function compare(name: string, on: Written, off: Written, fixed: string[]): void {
   expect((on.json.fix_proof as Json[]).filter((x) => x.before_status === "fixed").map((x) => x.test_id))

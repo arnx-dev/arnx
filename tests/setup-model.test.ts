@@ -11,6 +11,9 @@ import { FakeSession } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
+import { Boundary } from "../src/boundary";
+
+const noValues = new Boundary();
 
 const tmp = useTmp();
 const HAIKU = "anthropic:claude-haiku-5-5";
@@ -111,7 +114,7 @@ async function sent(fn: () => Promise<unknown>): Promise<{ url: string; body: Re
 test("setup's agent sends the setup model and its effort; without them, the reviewer's", async () => {
   const s = defaultSettings();
   const env = { ANTHROPIC_API_KEY: "a" };
-  const turn = (t: typeof s) => sent(() => makeAgentModel(setupSettings(t), env).create({ system: "s", tools: [],
+  const turn = (t: typeof s) => sent(() => makeAgentModel(setupSettings(t), env, noValues).create({ system: "s", tools: [],
     messages: [{ role: "user", content: "u" }], maxTokens: 10 }));
   const [own] = await turn({ ...s, setup: parseModelRef(HAIKU), setupEffort: "low" });
   expect([own!.body.model, own!.body.output_config]).toEqual(["claude-haiku-5-5", { effort: "low" }]);

@@ -35,6 +35,12 @@ const WITH_OPEN = /\bwith\b[^\n]*\bas\s+([A-Za-z_]\w*)\s*:/;
 
 /** Where the test is: from its name to the next test, or the end of the file. JS names come as "describe > it": the
  * name is looked for after its describe blocks', so two tests of the same name in different suites are told apart. */
+/** The text of the test `func` in `source`; the whole file when it cannot be told apart. */
+export function testText(source: string, func: string): string {
+  const span = testSpan(source, func);
+  return span ? source.slice(span.at, span.end) : source;
+}
+
 function testSpan(source: string, func: string): { at: number; end: number } | null {
   const path = func.split(" > ");
   const name = path.at(-1)!.split("::").at(-1)!.replace(/\[.*\]$/, "");
