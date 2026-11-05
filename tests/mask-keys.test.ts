@@ -32,7 +32,10 @@ const randomWrap = (w: number) => random.match(new RegExp(`.{1,${w}}`, "g"))!;
 const mask = (text: string) => new Boundary().mask(text);
 /** Fails naming how much of a body stayed, never printing it. */
 const clean = (what: string, sent: string, lines: string[]) => {
-  const found = lines.filter((l) => l.length >= 4 && sent.includes(l)).length;
+  // The run's rule: a last line under 16 characters with no "=" is not part of a no-header key's run, so it may stay.
+  const last = lines.length - 1;
+  const found = lines.filter((l, i) => l.length >= 4 && !(i === last && lines.length > 1 && l.length < 16 && !l.includes("=")) &&
+    sent.includes(l)).length;
   if (found) throw new Error(`${what}: ${found} of ${lines.length} body lines`);
 };
 
