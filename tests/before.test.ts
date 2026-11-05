@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CopyDiffers } from "../src/baked";
-import { type Before, type BeforeRun, judgeBefore, namesAdded, newNames, sharedFailure, sharedInGroups, usesNew, vacuousBefore } from "../src/before";
+import { type Before, type BeforeRun, judgeBefore, judgeFix, missingName, namesAdded, newNames, sharedFailure, sharedInGroups, usesNew, vacuousBefore, vacuousPass } from "../src/before";
 import { testBody } from "../src/shallow";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { EVENTS_FILE, type TraceEvent } from "../src/events";
@@ -571,5 +571,86 @@ describe("fix round 2: reading the diff against the files", () => {
     expect([...namesAdded(diff, notTest)]).toContain("brand_new");
     const block = diffFor(["@@ -3,2 +3,3 @@", "     */", "+  run_new(1);"], "lib/a.js", "lib/a.js");
     expect([...namesAdded(block, notTest)]).toContain("run_new");
+  });
+});
+
+describe("a pass and a failure say only what the runs show", () => {
+  const passed: Before = { status: "regression", detail: "passes on the code before the change (3 runs), fails with it",
+    runs: ["passed", "passed", "passed"] };
+  const o = (source: string, names: string[], baseOutput: string[] = []) =>
+    ({ source, func: "test_a", names: new Set(names), baseOutput });
+
+  test("a pass that uses a name the change adds is no regression", () => {
+    const b = vacuousPass(passed, o("def test_a():\n    assert cell_ran_at_or_after(1)\n", ["cell_ran_at_or_after"]));
+    expect(b.status).toBe("unknown");
+    expect(b.vacuous).toBe("new-name");
+    expect(b.detail).toContain("`cell_ran_at_or_after`");
+    expect(b.detail).toContain("no proof of a regression");
+  });
+
+  test("a pass whose helper thread died is no regression", () => {
+    const out = ["PytestUnhandledThreadExceptionWarning: Exception in thread", "AttributeError: module 'app' has no attribute 'add'"];
+    const b = vacuousPass(passed, o("def test_a():\n    assert add(1, 2) == 3\n", ["other_name"], out));
+    expect(b.status).toBe("unknown");
+    expect(b.vacuous).toBe("background-error");
+    // a warning with nothing missing in it, or missing code with no background error, proves nothing either way
+    expect(vacuousPass(passed, o("def test_a():\n    assert 1\n", [], ["PytestUnraisableExceptionWarning: x"]))).toBe(passed);
+    expect(vacuousPass(passed, o("def test_a():\n    assert 1\n", [], ["NameError: name 'x' is not defined"]))).toBe(passed);
+  });
+
+  test("a pass that uses only old names stays a regression", () => {
+    expect(vacuousPass(passed, o("def test_a():\n    assert add(1, 2) == 3  # cell_ran_at_or_after\n", ["cell_ran_at_or_after"]))).toBe(passed);
+    // only a regression is set aside
+    const same: Before = { status: "pre-existing", detail: "d", runs: [] };
+    expect(vacuousPass(same, o("def test_a():\n    cell_ran_at_or_after()\n", ["cell_ran_at_or_after"]))).toBe(same);
+  });
+
+  test("a clipped import failure is new code", () => {
+    const clipped = "TypeError: __vite_ssr_import_2__.assertNever is not a function";
+    for (const m of ["…__vite_ssr_import_2__.assertNeve…", clipped, "x.__vi_import_0__.helper(…)"]) {
+      expect(judgeBefore(failing, GEN, three(run(t("test_add", "failed", m)))).status).toBe("new-code");
+    }
+  });
+
+  test("an unknown keyword on the code before is new code", () => {
+    const m = "TypeError: connect() got an unexpected keyword argument 'timeout'";
+    expect(judgeBefore(failing, GEN, three(run(t("test_add", "failed", m)))).status).toBe("new-code");
+  });
+
+  const loadFail = (m: string): TestResult => ({ testId: GEN, fileAttr: GEN, name: GEN, outcome: "failed", message: m });
+  const source = "def test_add():\n    assert add(2, 3) == 5\n\ndef test_uses():\n    assert Gadget() == 1\n";
+  const body = (func: string) => ({ source, func });
+
+  test("a file that cannot load for a name this test does not use settles nothing", () => {
+    const err = loadFail("ImportError: cannot import name 'Gadget' from 'app'");
+    const b = judgeBefore(failing, GEN, three(run(err)), false, body("test_add"));
+    expect(b.status).toBe("unknown");
+    expect(b.detail).toBe("its file cannot load there because `Gadget` is missing, which this test does not use");
+    // the same for a passing test's fix proof
+    const f = judgeFix(t("test_add", "passed"), GEN, three(run(err)), false, body("test_add"));
+    expect(f.status).toBe("unknown");
+    expect(f.detail).toContain("`Gadget` is missing");
+  });
+
+  test("a load failure for a name the test uses is new code", () => {
+    const err = loadFail("ImportError: cannot import name 'Gadget' from 'app'");
+    expect(judgeBefore(failing, GEN, three(run(err)), false, body("test_uses")).status).toBe("new-code");
+    // a module that is missing altogether: the file's imports from it are the tests' to use
+    const mod = loadFail("ModuleNotFoundError: No module named 'app.gadgets'");
+    expect(judgeBefore(failing, GEN, three(run(mod)), false, body("test_add")).status).toBe("new-code");
+    expect(judgeFix(t("test_uses", "passed"), GEN, three(run(err)), false, body("test_uses")).status).toBe("new-code");
+    // without the test's source, nothing is known about it: the old reading stands
+    expect(judgeBefore(failing, GEN, three(run(err))).status).toBe("new-code");
+  });
+
+  test("missingName reads the name out of the usual messages", () => {
+    expect(missingName("ImportError: cannot import name 'Gadget' from 'app'")).toBe("Gadget");
+    expect(missingName("AttributeError: module 'app' has no attribute 'add'")).toBe("add");
+    expect(missingName("NameError: name 'frob' is not defined")).toBe("frob");
+    expect(missingName("ReferenceError: frob is not defined")).toBe("frob");
+    // a whole module missing names no single thing: what the file imports from it, its tests use
+    expect(missingName("ModuleNotFoundError: No module named 'app.thing'")).toBeNull();
+    expect(missingName("Cannot find module './thing' from 'a.test.ts'")).toBeNull();
+    expect(missingName("assert 1 == 2")).toBeNull();
   });
 });

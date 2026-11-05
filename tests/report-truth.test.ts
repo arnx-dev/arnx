@@ -69,7 +69,7 @@ test("failing the same way says nothing when the test uses what the change adds"
   const same: Before = { status: "pre-existing", detail: "fails the same way", runs: ["failed"], message: "x" };
   const b = vacuousBefore(same, "def test_a():\n    assert toast.called\n", "test_a", new Set(["toast"]));
   expect(b.status).toBe("unknown");
-  expect(b.detail).toBe("fails the same way on the code before the change, but the test uses `toast`, which the change " +
+  expect(b.detail).toBe("fails with the same message on the code before the change, but the test uses `toast`, which the change " +
     "adds, so that says nothing about the code before it");
   expect(vacuousBefore(same, "def test_a():\n    assert pay(1)\n", "test_a", new Set(["toast"]))).toBe(same);
   // Another test in the file using it does not count.
@@ -127,4 +127,16 @@ test("an optional question names each issue that covers a finding assuming it, a
     groups: [g("a", ["F1", "F2"]), g("b", ["F3", "F4"])] as never });
   expect(render(r)).toContain("Optional: Issue 1's mark covers F2; Issue 2's mark covers F4, which assumed an answer.");
   expect(summary(r, "review.md")).toContain("in review.md (a proven issue's mark covers the findings that assumed it)");
+});
+
+test("an unproven pass has no regression prefix", () => {
+  const old = { ...f("F1", "test_a", "confirmed", "real"), before: { status: "unknown", vacuous: "new-name",
+    detail: "passes on the code before the change (3 runs), but the test uses `toast`, which the change adds: no proof of a regression",
+    runs: ["passed", "passed", "passed"] } };
+  const r = sampleReview({ findings: [old as never], questions: [], questionProjects: [],
+    groups: [{ title: "a", findings: ["F1"], input: "", actual: "", expected: "", consequence: "" }] as never });
+  const text = summary(r, "review.md");
+  expect(text).not.toContain("regression");
+  expect(text).not.toContain("caused by the change");
+  expect(render(r)).not.toContain("regression ·");
 });

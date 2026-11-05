@@ -146,19 +146,19 @@ error) counts as confirmed for the exit code, so a review never passes silently 
 
 Each test that failed in every run then runs again, as many times, on the code before the change (its base; HEAD
 for uncommitted work), in the same sandbox image, with no model call. A finding is marked a regression when it passes
-there; one that fails the same way there is listed under "Already failing before this change": it was not caused by
-the change, is not sent to the second opinion and does not set the exit code (mark it real to keep it as a test
-anyway). Tests that passed in every run also run there (up to 20 per project): one that fails there in every run
+there; one that fails with the same message there is listed under "Already failing before this change": it is not
+sent to the second opinion and does not set the exit code (mark it real to keep it as a test anyway). Neither
+outcome says why: a same message can have another cause there, and a pass can be a pass of different code. Tests that passed in every run also run there (up to 20 per project): one that fails there in every run
 shows the change fixes or adds what it checks, and review.md lists it under "Fails before the change, passes with it". `before_check = false` under
 `[review]` in `.arnx/config.toml` turns both off; `fix_proof_max = 0` turns off only the second.
 
-What each outcome means: **regression** (passes before, fails after: the change broke what the test checks, if the
-test is right); **pre-existing** (fails the same way before: not caused by the change); **new-code** (what it tests
+What each outcome means: **regression** (passes before, fails after, and nothing shows the pass was empty);
+**pre-existing** (fails with the same message before); **new-code** (what it tests
 does not exist before, so there is nothing to compare); **changed** (fails before too, differently: kept as a
 finding); **unknown** (not checked, or nothing settled: flaky, an error, no base, or the change altered the image's
 dependencies so a same failure would prove nothing). A same failure also settles nothing when the test uses a name
 the change adds (read from the code of its source files, not their comments or strings, and not from tests or data
-files), or when tests that pass with the change fail there with the same message. Only regression is evidence about the change itself. A test
+files), or when tests that pass with the change fail there with the same message. A pass settles nothing when the test uses a name the change adds, or when a background thread died there on missing code (`vacuous`: `new-name` or `background-error`); a file that cannot load for a name its test does not use settles nothing either. Only regression is evidence about the change itself. A test
 that reads one of the project's source files as text and matches it is never a regression or a fix: it shows the
 text changed, not the behaviour, so its outcome there is unknown and review.md says why.
 

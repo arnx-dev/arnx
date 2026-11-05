@@ -12,7 +12,7 @@ import { absentFromSnapshot, bakedError, bakedIn, imageFiles, bakedKey, type Bak
   from "./baked";
 import { asFallbackBefore, asFallbackFix, BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
   fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, newNames, notChecked, sharedInGroups, SKIP_REASONS, textBefore, textFix,
-  vacuousBefore } from "./before";
+  vacuousBefore, vacuousPass } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
 import { type Boundary, maskedCopy, type Swap } from "./boundary";
 import { holdsIn, staleLine, staleRewrites, standInsLine, writeStandIns } from "./standins";
@@ -845,15 +845,20 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
     }, readSide);
     const passing = new Set(o.passed);
     return result(() => done(Object.fromEntries(o.findings.map((t) => {
-      const file = ownerFile(t.fileAttr, own), b = judgeBefore(t, file, runs, envChanged);
+      const file = ownerFile(t.fileAttr, own);
+      const b = judgeBefore(t, file, runs, envChanged, file === null ? undefined : { source: o.files[file] ?? "", func: funcOf(t) });
       // Tests that pass with the change and fail there with the same message: that message says nothing about this one.
-      const judged = asText(t, file) ? textBefore(b) : file === null ? b : sharedInGroups(
-        vacuousBefore(b, o.files[file] ?? "", funcOf(t), brought, file), t.message, [runs, proofRuns], passing);
+      // A pass there that used a name the change adds, or ran beside a dead background thread, proves no regression.
+      const judged = asText(t, file) ? textBefore(b) : file === null ? b : sharedInGroups(vacuousBefore(
+        vacuousPass(b, { source: o.files[file] ?? "", func: funcOf(t), names: brought, path: file,
+          baseOutput: runs.map((r) => r.output) }), o.files[file] ?? "", funcOf(t), brought, file),
+      t.message, [runs, proofRuns], passing);
       return [t.testId, o.fallback ? asFallbackBefore(judged) : judged];
     }))),
     () => proofLate ? proved({}, "time") : proved(Object.fromEntries(o.proofs.map((t) => {
       const file = ownerFile(t.fileAttr, own);
-      const f = judgeFix(t, file, file !== null && owners.includes(file) ? runs : proofRuns, envChanged);
+      const f = judgeFix(t, file, file !== null && owners.includes(file) ? runs : proofRuns, envChanged,
+        file === null ? undefined : { source: o.files[file] ?? "", func: funcOf(t) });
       const faked = file === null ? null : fakedName(o.files[file] ?? "", added);
       const judged = asText(t, file) ? textFix(f) : faked ? fakedFix(f, faked) : f;
       return [t.testId, o.fallback ? asFallbackFix(judged) : judged];

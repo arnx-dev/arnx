@@ -224,7 +224,7 @@ A summary of the review, as the terminal shows it. The whole review is `review_j
 | `status` | string | `complete`, `incomplete` (see `problems`), or `partly-covered` (changed source files no test refers to: `not_tested`). |
 | `issues` | number | Entries in `findings`: the summary's numbered rows. |
 | `findings` | array | One entry per issue the change may have caused, as the summary groups and orders them (most severe first): `{ ids, state, confirmed, regression, projects, title, severity }`. `ids`: the findings (`F1`) with this cause; `state`: their verdicts in words (`confirmed`, `disputed`, `not challenged`, `depends on Q1`, or counts such as `1 confirmed, 1 disputed`); `confirmed`: one of them is confirmed (exit 1); `regression`: one passed before the change; `title`: the problem in a few words; `severity`: `high`, `medium`, `low` or `null` (the grouping model's estimate). |
-| `pre_existing` | array of strings | Findings that fail the same way before the change: not caused by it, never the exit code. |
+| `pre_existing` | array of strings | Findings that fail with the same message before the change; never the exit code. |
 | `questions` | array | `{ id, question, project, optional }`: `Q1` first. Only the user answers them. `optional`: no issue waits on it (a test another finding proves already settles the issue); an answer still lets `arnx accept` write a test. |
 | `tests_written` | number | Tests the reviewer wrote. |
 | `cost_usd` | number | What the review cost. |

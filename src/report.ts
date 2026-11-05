@@ -710,7 +710,7 @@ export function render(r: Review): string {
   }
   if (already.length) {
     out.push("## Already failing before this change", "",
-      "These tests fail the same way on the code before this change, so the change did not cause them. They were " +
+      "These tests fail with the same message on the code before this change. They were " +
       "not sent to the second opinion and do not set the exit code; mark one real to keep it as a test of a bug " +
       "that was already there.", "");
     for (const f of already) out.push(...findingLines(r, f));
@@ -736,7 +736,7 @@ export function render(r: Review): string {
         : x.outcome === "disputed" ? `its test failed, but the second model disputed it: ${fs}`
         : x.outcome === "unchecked" ? `its test failed; the second model did not judge it: ${fs}`
         : x.outcome === "pending answer" ? `its test failed; whether that is a defect depends on a question: ${fs}`
-        : x.outcome === "pre-existing" ? `its test failed, but it fails the same way before the change: ${fs}`
+        : x.outcome === "pre-existing" ? `its test failed, but it fails with the same message before the change: ${fs}`
         : x.outcome === "not reproduced" ? `not reproduced: its test passed (\`${x.tests[0]}\`), which does not ` +
           "rule it out"
         : x.outcome === "inconclusive" ? `inconclusive, flaky or errored: \`${x.tests[0]}\``
@@ -1137,7 +1137,7 @@ function issuesLine(r: Review, rows: SummaryRow[]): string {
   const before = [...new Set(confirmed(r).map((f) => f.before?.status))];
   const settled = before.length !== 1 ? ""
     : before[0] === "new-code" ? `${sure === 1 ? "" : sure === 2 ? "both " : "all "}in new code`
-    : before[0] === "regression" ? "caused by the change"
+    : before[0] === "regression" ? "their tests pass before the change"
     : before[0] === "pre-existing" ? "already failing before the change" : "";
   return `${counted} (${plural(findings, "finding")})${settled ? `; ${settled}` : ""}.`;
 }

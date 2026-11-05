@@ -5,6 +5,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { textBefore, textFix } from "../src/before";
+import { shallowKind } from "../src/shallow";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { load, summary } from "../src/report";
 import { runReview } from "../src/reviewer";
@@ -91,4 +92,29 @@ test("only a regression or a fix is set aside: other outcomes stand as they are"
   expect(textFix({ status: "fixed", detail: "d", runs, message: "m" })).toEqual({ status: "unknown",
     detail: "fails on the code before the change (3 runs), but it reads the code as text: no proof of a fix", runs,
     message: "m", asText: true });
+});
+
+test("a text check with an or is a text check", () => {
+  const py = "def test_a():\n    t = open('app.py').read()\n    assert 'x' in t or 'Required' in t\n";
+  expect(shallowKind(py, "test_a")).toBe("source-text");
+  const both = "def test_b():\n    t = open('app.py').read()\n    assert 'x' in t and 'y' in t\n";
+  expect(shallowKind(both, "test_b")).toBe("source-text");
+  // an or between values that are not the text stays a behaviour check
+  const run = "def test_c():\n    t = run()\n    assert 'x' in t or 'y' in t\n";
+  expect(shallowKind(run, "test_c")).toBeNull();
+});
+
+test("text read through a path variable is a text check", () => {
+  const js = "test('t', () => {\n  const file = join(__dirname, '../app.ts');\n  const src = readFileSync(file, 'utf8');\n" +
+    "  const head = src.slice(0, 200);\n  expect(head).toContain('Required');\n});\n";
+  expect(shallowKind(js, "t")).toBe("source-text");
+  const py = "def test_p():\n    path = 'src/app.py'\n    text = Path(path).read_text()\n    assert 'x' in text\n";
+  expect(shallowKind(py, "test_p")).toBe("source-text");
+  // a path variable naming a fixture, or the project's own check that it is not a source file, stays behaviour
+  const fix = "def test_f():\n    path = 'tests/fixtures/sample.py'\n    text = open(path).read()\n    assert 'x' in text\n";
+  expect(shallowKind(fix, "test_f")).toBeNull();
+  expect(shallowKind(py, "test_p", () => false)).toBeNull();
+  // a path variable that is read and then run is not text
+  const ran = "def test_r():\n    path = 'app.py'\n    text = open(path).read()\n    exec(text)\n    assert 'x' in text\n";
+  expect(shallowKind(ran, "test_r")).toBeNull();
 });

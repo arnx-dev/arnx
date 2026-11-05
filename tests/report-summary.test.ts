@@ -40,7 +40,7 @@ test("rows not confirmed are counted apart and their findings carry their state"
   groups: [{ findings: ["F1", "F2"], title: DISCOUNT, input: "", actual: "", expected: "", consequence: "" },
     { findings: ["F3", "F4"], title: BULK, input: "", actual: "", expected: "", consequence: "" }] }), "m");
   expect(s.split("\n").slice(1, 5)).toEqual([
-    "1 issue confirmed, 1 waiting on a question, 1 disputed (5 findings); caused by the change.",
+    "1 issue confirmed, 1 waiting on a question, 1 disputed (5 findings); their tests pass before the change.",
     `  ✗ 1  regression: ${DISCOUNT}  F1, F2`,
     `  ? 2  ${BULK.padEnd(DISCOUNT.length + 12)}  F3 disputed; F4 depends on Q1`,
     `  · 3  ${"assert 0".padEnd(DISCOUNT.length + 12)}  F5 disputed`,

@@ -113,6 +113,16 @@ function readPath(line: string): string | null {
   return posix.join(...parts);
 }
 
+/** The code file a line names in its quoted parts, joined (`join(dir, "..", "app.ts")` is "../app.ts"); null if none. */
+function codePathIn(line: string): string | null {
+  const parts: string[] = [];
+  for (const m of line.matchAll(/['"`]([^'"`\n]*)['"`]/g)) {
+    parts.push(m[1]!);
+    if (CODE_NAME.test(m[1]!)) return posix.join(...parts);
+  }
+  return null;
+}
+
 /** Whether an expression or line reads one of the project's source files: a code file outside a fixtures folder
  * (`isSource`, when given, says whether the path names one of the project's files), or Python's `inspect.getsource`. */
 function readsCode(text: string, isSource?: (path: string) => boolean): boolean {
@@ -183,8 +193,11 @@ function checked(line: string): string[] {
   }
   if (/^\s*assert\b|\bassert(?:True|False)\s*\(/.test(line)) {
     const plain = line.replace(/\bnot\s+in\b/g, "in").replace(/\s+#.*$/, "");
-    const m = /\bin\s+/.exec(plain);
-    if (m) out.push(callArgs(`(${plain.slice(m.index + m[0].length)})`, 0).args[0]!);
+    // Each side of an `or` / `and` is its own check: `"a" in t or "b" in t` looks at `t` twice, not at `t or "b" in t`.
+    for (const part of plain.split(/\s+(?:or|and)\s+/)) {
+      const m = /\bin\s+/.exec(part);
+      if (m) out.push(callArgs(`(${part.slice(m.index + m[0].length)})`, 0).args[0]!);
+    }
   }
   return out;
 }
@@ -202,21 +215,29 @@ export function shallowKind(source: string | undefined, func: string, isSource?:
   const depth = indent(before.at(-1)!);
   const scope = [...before.slice(0, -1).filter((l) => indent(l) <= depth), ...lines];
   // Names given the text: assigned from a read, or from `f.read()` of a `with open(...) as f`.
-  const names: string[] = [], handles: string[] = [];
+  const names: string[] = [], handles: string[] = [], paths: string[] = [];
   const readOf = (h: string) => new RegExp(String.raw`^${esc(h)}\s*\.\s*read\s*\(\s*\)$`);
+  // A read of a path held in a name (`const file = join(dir, "app.ts"); readFileSync(file)`) reads code too.
+  const reads = (l: string) => readsCode(l, isSource) ||
+    (paths.some((n) => word(n).test(l)) && (READ_CALL.test(l) || READ_AFTER.test(l)));
+  // A name given part of a text name (`src.slice(0, 80)`, `src.split("\n")`) is text too.
+  const derived = (rhs: string) => names.some((n) => new RegExp(String.raw`^${esc(n)}(?![\w$])(?:\s*\.\s*\w+\s*\([^()]*\))+$`).test(rhs));
   for (const l of scope) {
     const w = WITH_OPEN.exec(l);
-    if (w && readsCode(l, isSource)) handles.push(w[1]!);
+    if (w && reads(l)) handles.push(w[1]!);
     const m = ASSIGNS.exec(l);
-    if (m && (readsCode(l, isSource) || handles.some((h) => readOf(h).test(l.slice(l.indexOf("=") + 1).trim())))) {
-      names.push(m[1]!);
+    const rhs = m ? l.slice(l.indexOf("=") + 1).trim().replace(/;$/, "") : "";
+    if (m && (reads(l) || handles.some((h) => readOf(h).test(rhs)) || derived(rhs))) names.push(m[1]!);
+    else if (m && !READ_CALL.test(l) && !FIXTURE_DIR.test(l)) {
+      const p = codePathIn(l);
+      if (p !== null && (isSource ? isSource(p) : true)) paths.push(m[1]!);
     }
   }
   const run = scope.filter((l) => RUNS.test(l));
   const text = names.filter((n) => !run.some((l) => word(n).test(l)));
   const isText = (s: string) => {
     const t = s.trim();
-    if (readsCode(t, isSource)) return !RUNS.test(t);
+    if (reads(t)) return !RUNS.test(t);
     return handles.some((h) => readOf(h).test(t)) ||
       text.some((n) => new RegExp(String.raw`^${esc(n)}(?![\w$])(?:\s*\.\s*\w+\s*\([^()]*\))*$`).test(t));
   };

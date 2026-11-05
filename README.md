@@ -37,7 +37,7 @@ From the review's report:
 
 ### F2 · regression · confirmed by the second opinion
 - Failure: `expect(received).toBe(expected)`
-- Before the change (regression): passes on the code before the change (3 runs): the change broke it
+- Before the change (regression): passes on the code before the change (3 runs), fails with it
 - Second opinion: planRemove takes accepted-tests.json keys verbatim and applyRemove rmSync's join(repo, p), …
 ```
 
@@ -103,7 +103,7 @@ dollars (our own reviews: $0.17 to $3.19) and stops writing tests at your cap, `
 - **Reproduced failure:** a test arnx wrote failed in every run (3 by default). That shows an assertion fails, not
   that the code is wrong: the test can encode a wrong expectation.
 - **Regression evidence:** the same test passes on the code before the change. Other outcomes are reported as they
-  are: already failing before (not caused by the change), new code (nothing to compare), changed, or not checked.
+  are: failing with the same message before, new code (nothing to compare), changed, or not checked.
 - **Second opinion:** another model reads the test, the failure and the diff, and confirms or disputes it. That is a
   model's judgement. A finding it could not judge (budget, API error) counts as confirmed for the exit code, so a
   review never passes because the check did not run.

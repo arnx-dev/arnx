@@ -162,8 +162,8 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     expect(review.findings.map((f) => f.verdict)).toEqual(["confirmed", null, "confirmed"]);
     expect(exitCode(review)).toBe(1);
     expect(said.some((m) => m.endsWith("running 3 failing tests on the code before the change"))).toBe(true);
-    expect(said.some((m) => /before the change: 1 failing test passes there: the change broke it; 1 fails the same way /
-      .test(m) && /there: not caused by the change; 1 cannot run there \(what it tests is new\) \([\d.]+ s\)$/.test(m)))
+    expect(said.some((m) => /before the change: 1 failing test passes there, fails with the change; 1 fails with the same message /
+      .test(m) && /there; 1 cannot run there \(what it tests is new\) \([\d.]+ s\)$/.test(m)))
       .toBe(true);
     const done = readFileSync(join(rdir, EVENTS_FILE), "utf8").split("\n").filter(Boolean)
       .map((l) => JSON.parse(l) as { type: string; data: Record<string, number> }).find((e) => e.type === "before.done")!;
