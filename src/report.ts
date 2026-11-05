@@ -469,7 +469,7 @@ function statusLines(r: Review): string[] {
   }
   for (const u of (r.untested ?? []).filter((x) => x.files.length)) {
     const why = (f: string) => u.reasons?.[f] ? ` (reviewer: ${u.reasons[f]})` : "";
-    out.push(`Not tested by arnx${multi(r) ? ` in \`${u.project}\`` : ""}: ` +
+    out.push(`No test seen reaching${multi(r) ? ` in \`${u.project}\`` : ""}: ` +
       `${u.files.map((f) => `\`${f}\`${why(f)}`).join(", ")}.`);
   }
   for (const n of notes) out.push(`Note: ${n}.`);
@@ -1078,7 +1078,7 @@ export function summary(r: Review, reviewMd: string): string {
   }
   for (const u of (r.untested ?? []).filter((x) => x.files.length)) {
     const shown = u.files.slice(0, 8).join(", ") + (u.files.length > 8 ? `, … (${u.files.length - 8} more)` : "");
-    out.push(`  Not tested${multi(r) ? ` (${u.project})` : ""}: ${shown}`);
+    out.push(`  No test seen reaching${multi(r) ? ` (${u.project})` : ""}: ${shown}`);
   }
   if (r.uncovered.length) out.push(`  Not tested: ${r.uncovered.map((u) => u.path).join(", ")}`);
   for (const t of r.typecheck ?? []) out.push(`  Type check${multi(r) ? ` (${t.project})` : ""}: ${describeTypecheck(t)}`);

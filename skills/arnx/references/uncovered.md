@@ -9,8 +9,8 @@ arnx reviews only code inside a project backed by an existing test suite (a proj
   to cover these paths``.
 - Or it reviews the rest and lists what it left out in review.json:
   - `uncovered`: `{path, reason}`, changed files no project covers (the summary says `Not tested: ...`);
-  - `untested`: per project, changed source files no arnx test refers to (the summary says `Not tested: ...`;
-    review.md says `Not tested by arnx: ...` and "partly covered").
+  - `untested`: per project, changed source files no arnx test refers to (the summary says `No test seen reaching: ...`;
+    review.md says `No test seen reaching: ...` and "partly covered").
 
 ## What to do
 

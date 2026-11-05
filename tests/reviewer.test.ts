@@ -271,3 +271,45 @@ test("tests that ran, then a reply in prose: not incomplete", async () => {
   expect(review.projectStats[0]!.noReport).toBeUndefined();
   expect(exitCode(review)).toBe(0);
 });
+
+const GEN2 = "tests/arnx_generated/test_load.py";
+const reportFor = (...tests: string[]) => JSON.stringify({ tests: tests.map((t) => ({ test: t, expects: "x" })),
+  suspected_defects: [], questions: [] });
+
+test("a file a failing stack trace goes through is not listed", async () => {
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a + b\n");
+  runGit(repo, "add", "other.py");
+  runGit(repo, "commit", "-q", "-m", "other");
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a - b\n");
+  // Neither source is named in code: the test reads text only.
+  const body = "def test_add():\n    # covers app and other\n    assert open('x').read() == 'app other'\n";
+  const go = async (message: string) => {
+    const model = new ScriptedAgent([[tool("write_file", { path: GEN, content: body })],
+      [text(reportFor(`${GEN}::test_add`))]]);
+    const sess = fakeFactory(() => [junitXml([[GEN, "test_add", "failed", message]]), "", false]);
+    return (await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([{ verdict: "confirmed",
+      reason: "r" }]), sessionFactory: sess })).review;
+  };
+  const without = await go("assert failed");
+  expect(without.untested![0]!.files.sort()).toEqual(["app.py", "other.py"]);
+  expect(without.untested![0]!.reasons).toEqual({ "app.py": "a test reads it as text; nothing runs it",
+    "other.py": "a test reads it as text; nothing runs it" });
+  const through = await go("app.py:2: in add\n    return a - b\n/src/vendor/x.py:1 [private key]:3");
+  expect(through.untested![0]!.files).toEqual(["other.py"]);
+});
+
+test("a file named only by a test that could not load is not reached", async () => {
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a + b\n");
+  runGit(repo, "add", "other.py");
+  runGit(repo, "commit", "-q", "-m", "other");
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a - b\n");
+  const model = new ScriptedAgent([[
+    tool("write_file", { path: GEN2, content: "from app import add\nfrom other import sub\n\ndef test_load():\n    add(1, 2)\n    sub(1, 2)\n" }),
+    tool("write_file", { path: GEN, content: "def test_add():\n    assert 1 == 1\n" })],
+    [text(reportFor(`${GEN}::test_add`))]]);
+  const sess = fakeFactory(() => [junitXml([[GEN2, "test_load", "error", "ImportError: boom"], [GEN, "test_add", "passed", ""]]),
+    "", false]);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
+    sessionFactory: sess });
+  expect(review.untested![0]!.files.sort()).toEqual(["app.py", "other.py"]);
+});

@@ -27,7 +27,7 @@ import { baseName, funcOf, ownerFile } from "./outcomes";
 import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, resumes, withCalls } from "./outage";
 import { CONTEXT_LIMIT, contextPack } from "./context";
 import { elsewhereNote, leftOutNote, PROMPT_VERSION, type Suspect } from "./prompts";
-import { changedSources, databaseEnv, untestedFiles } from "./untested";
+import { changedSources, databaseEnv, framed, framesIn, loadedTests, notReached, untestedFiles } from "./untested";
 import { type AgentReport, type Checked, type Finding, type FixProof, hasReport, parseReports, type ProjectStat, type Review,
   save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause } from "./report";
 import { dockerSteps, type SessionFactory } from "./sandbox";
@@ -637,8 +637,22 @@ export async function runReview(repo: string, o: { settings: Settings;
       const ownedNow = file.legacy ? change.files : owned;
       const of = changedSources(ownedNow, adapterFor(cfg)).length;
       if (of) {
-        const files = [...new Set([...untestedFiles(ownedNow, rnd.files, adapterFor(cfg)), ...rnd.dbUntested ?? []])];
+        const adapter = adapterFor(cfg);
+        // What a test is shown to reach: its stack frames, and the names its code uses. A file whose tests did not load,
+        // or did not finish, shows nothing.
+        const frames = [...rnd.classified.findings, ...rnd.classified.flaky].filter((t) => !t.needs && !t.fakedKey)
+          .flatMap((t) => framesIn(t.message));
+        const loaded = loadedTests(rnd.files, rnd.classified, [...rnd.hungFiles ?? [], ...rnd.notRunFiles ?? []]);
+        const byText = new Set(untestedFiles(ownedNow, rnd.files, adapter));
+        const missed = notReached(ownedNow, { tests: loaded, frames }, adapter);
         const reasons: Record<string, string> = {};
+        for (const f of missed) if (!byText.has(f)) reasons[f] = "a test reads it as text; nothing runs it";
+        // A file the reviewer named stays listed, unless a failing test's frame goes through it.
+        const sources = changedSources(ownedNow, adapter);
+        const named = (report.not_tested ?? []).flatMap((n) => !isObject(n) ? [] :
+          sources.filter((x) => x === text(n.file) || x.endsWith(`/${text(n.file)}`)));
+        const shown = new Set(framed(sources, frames));
+        const files = [...new Set([...missed, ...named.filter((f) => !shown.has(f)), ...rnd.dbUntested ?? []])];
         for (const f of rnd.dbUntested ?? []) reasons[f] = "it holds SQL, and no test that connects to the database refers to it (arnx checks names, not what ran)";
         for (const n of report.not_tested ?? []) {
           if (!isObject(n)) continue;

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { python } from "../src/adapters/python";
 import { sliceDiff } from "../src/change";
-import { changedSources, dbUntested, moduleName, untestedFiles } from "../src/untested";
+import { changedSources, codeOf, dbUntested, framesIn, moduleName, notReached, untestedFiles } from "../src/untested";
 
 test("a test refers to a file by its module name; index and __init__ files by their directory", () => {
   expect(moduleName("services/billing/snapshot.py")).toBe("snapshot");
@@ -41,7 +41,6 @@ test("an index file counts as referred to when a test imports a relative path th
   expect(untestedFiles(owned, { "parser/app.test.ts": 'import { app } from "./";' }, typescript)).toEqual([]);
   expect(untestedFiles(owned, { "parser/__tests__/app.test.ts": "require('../index')" }, typescript)).toEqual([]);
   // The directory's name still counts; a mention of `index` elsewhere, or a path that resolves elsewhere, does not.
-  expect(untestedFiles(owned, at("// covers parser"), typescript)).toEqual([]);
   for (const body of ["const { app } = require('../index');", "import x from '../../other/index.js';",
     "expect(list.indexOf(1)).toBe(0); // index", "const index = require('./index');", "fetch('../../index.html')"]) {
     expect(untestedFiles(owned, at(body), typescript)).toEqual(owned);
@@ -73,4 +72,40 @@ test("an index file holding SQL counts for the database check when a connecting 
   // The import must be in a test that connects: another test importing it does not count.
   expect(dbUntested(owned, read, { "parser/__tests__/a.test.ts": connects,
     "parser/__tests__/b.test.ts": "require('../index')" }, typescript, ["DB"])).toEqual(owned);
+});
+
+test("a file named only in a read path or comment is not reached", async () => {
+  const { typescript } = await import("../src/adapters/typescript");
+  const owned = ["parser/index.ts", "src/lexer.ts"];
+  const at = (body: string) => ({ "parser/__tests__/arnx/app.test.ts": body });
+  const none = { frames: [] as string[] };
+  for (const body of ["// covers parser and lexer", "const t = readFileSync('src/lexer.ts', 'utf8');",
+    "/* lexer */ expect(1).toBe(1);", "it('parser and lexer', () => {});"]) {
+    expect(notReached(owned, { tests: at(body), ...none }, typescript)).toEqual(owned);
+  }
+  // A load by path or module name, and a name used as code, still reach.
+  expect(notReached(owned, { tests: at("import { lex } from '../../src/lexer';\nlex();\nparser.run();"), ...none }, typescript))
+    .toEqual([]);
+  expect(notReached(["pkg/mod.py"], { tests: { "t/test_a.py": "# mod\nx = 'mod'\nimport_module('pkg.mod')\n" }, ...none },
+    python)).toEqual([]);
+  expect(notReached(["pkg/mod.py"], { tests: { "t/test_a.py": "# mod\nx = open('mod.py').read()\n" }, ...none }, python))
+    .toEqual(["pkg/mod.py"]);
+  // The old match still counts those names, for the mid-round follow-up.
+  expect(untestedFiles(owned, at("// covers parser and lexer"), typescript)).toEqual([]);
+  expect(codeOf("a = 1  # mock('x')\nmock('./y')\n", "t.py")).toMatch(/^a = 1\s*\nmock\('\.\/y'\)\n$/);
+});
+
+test("a changed *_test.py is not a source file", () => {
+  expect(changedSources(["a/billing.py", "a/billing_test.py", "tests/helper.py", "a/tests/util.py", "a/x.test.ts"], python))
+    .toEqual(["a/billing.py"]);
+});
+
+test("a stack frame, from a message, names a file", () => {
+  expect(framesIn("FAIL  src/a.test.ts > x\n at Object.<anonymous> (/src/lib/a.ts:12:5)\n ❯ src/b.ts:3:1")
+    .sort()).toEqual(["/src/lib/a.ts", "src/b.ts"].sort());
+  expect(framesIn("at run (file:///src/lib/jest.js:4:2)\n    at node_modules/x/index.js:9:1")).toEqual(["/src/lib/jest.js"]);
+  expect(framesIn("pkg/mod.py:41: in run\n/src/pkg/other.py:7: AssertionError")).toEqual(["pkg/mod.py", "/src/pkg/other.py"]);
+  expect(framesIn("no frame here, took 3:20 and [private key]:1")).toEqual([]);
+  expect(notReached(["pkg/mod.py", "pkg/other.py", "pkg/z.py"], { tests: {}, frames: ["pkg/mod.py", "/src/pkg/other.py"] },
+    python)).toEqual(["pkg/z.py"]);
 });

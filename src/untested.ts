@@ -4,6 +4,10 @@
 // coverage: a file listed here was certainly not targeted.
 import { posix } from "node:path";
 import type { Adapter } from "./adapters/types";
+import type { Classified } from "./outcomes";
+import { ownerFile } from "./outcomes";
+import { codeText } from "./codetext";
+import { isTestPath } from "./detect";
 
 /** Source files: the ones setup must place in a project, and the ones a review must cover. */
 export const SOURCE = /\.(py|[cm]?[jt]sx?|rs|cs|go|java|kt|rb|php|swift|c|h|cpp|hpp)$/;
@@ -54,8 +58,85 @@ function referredTo(path: string, tests: Record<string, string>): boolean {
 
 /** Changed source files owned by the project, without its own tests and test helpers. */
 export function changedSources(owned: string[], adapter: Adapter): string[] {
-  return owned.filter((p) => SOURCE.test(p) && !adapter.isTestFile(posix.basename(p)) &&
-    !adapter.isSupportFile(posix.basename(p)));
+  return owned.filter((p) => SOURCE.test(p) && !isTestPath(p) && !TEST_DIR.test(p) &&
+    !adapter.isTestFile(posix.basename(p)) && !adapter.isSupportFile(posix.basename(p)));
+}
+
+const TEST_DIR = /(^|\/)tests?\//;
+/** A line that loads something by a path or module name held in a string. */
+const LOADS = /\b(?:from|import|require|mock|importActual|import_module|__import__)\b|#\[path/;
+const EMPTY_LITERAL = /(['"`])\1/g;
+
+/** `body` as code: comments and string literals blanked, except the strings of a line that loads something (`from`,
+ * `import`, `require`, `mock`, `importActual`, `import_module`, `__import__`, `#[path`), which a test names a file by.
+ * A name in a comment or in text a test reads is not a reference. `path` gives the language. */
+export function codeOf(body: string, path: string): string {
+  const strings: string[] = [];
+  const code = codeText(body, path, (t) => strings.push(t));
+  const lines = code.split("\n");
+  const total = lines.reduce((n, l) => n + (l.match(EMPTY_LITERAL)?.length ?? 0), 0);
+  if (total !== strings.length) {
+    // Quotes did not pair up with the strings read (an odd literal form): keep the loading lines whole.
+    const original = body.split("\n");
+    return lines.map((l, i) => LOADS.test(l) ? original[i] ?? l : l).join("\n");
+  }
+  let at = 0;
+  return lines.map((l) => {
+    const n = l.match(EMPTY_LITERAL)?.length ?? 0;
+    const mine = strings.slice(at, at + n);
+    at += n;
+    if (!LOADS.test(l)) return l;
+    let k = 0;
+    return l.replace(EMPTY_LITERAL, (q) => `${q[0]}${mine[k++] ?? ""}${q[0]}`);
+  }).join("\n");
+}
+
+/** Files named as `path.ext:line` in a message (a stack frame in a test runner's output). Directories under
+ * `node_modules` or `site-packages` are other people's code and are left out. */
+export function framesIn(message: string): string[] {
+  const out = new Set<string>();
+  for (const m of message.matchAll(/((?:[\w@.+~-]*\/)*[\w@.+-]+\.[A-Za-z]{1,5}):\d+/g)) {
+    const f = m[1]!.replace(/^(?:file:)?\/{2,}/, "/");
+    if (!/(^|\/)(node_modules|site-packages)\//.test(f)) out.add(f);
+  }
+  return [...out];
+}
+
+/** Whether a frame names `path`: the same path, or one that ends where the other does (the frame is from inside a
+ * container, or the path is from the repository root). */
+const frameIs = (frame: string, path: string) => {
+  const f = posix.normalize(frame).replace(/^(\.\/)+/, "");
+  return f === path || path.endsWith("/" + f.replace(/^\//, "")) || f.endsWith("/" + path);
+};
+
+/** The sources a stack frame goes through. */
+export function framed(sources: string[], frames: string[]): string[] {
+  return sources.filter((p) => frames.some((f) => frameIs(f, p)));
+}
+
+/** Changed source files with no sign a test reached them: no test of `tests` (those that loaded) names them in code
+ * (not in a comment or a string it only reads), no stack frame of a failing test goes through them, and none of `ran`
+ * (files a run reported) is them. */
+export function notReached(owned: string[], ev: { tests: Record<string, string>; frames: string[]; ran?: string[] },
+                           adapter: Adapter): string[] {
+  const tests = Object.fromEntries(Object.entries(ev.tests).map(([k, v]) => [k, codeOf(v, k)]));
+  const text = Object.values(tests).join("\n");
+  const sources = changedSources(owned, adapter);
+  const hit = new Set([...framed(sources, ev.frames), ...(ev.ran ?? []).filter((r) => sources.includes(r))]);
+  return sources.filter((p) => !hit.has(p) && (posix.basename(p) === "lib.rs" ? !text.trim() : !referredTo(p, tests)));
+}
+
+/** The generated files whose tests loaded: a test file with a passed, failed or flaky test (one that only has errors,
+ * or is in `not`, did not load), and the support files beside them when any test file did. */
+export function loadedTests(files: Record<string, string>, c: Classified, not: string[] = []): Record<string, string> {
+  const paths = Object.keys(files);
+  const of = (xs: { fileAttr: string }[]) => new Set(xs.map((t) => ownerFile(t.fileAttr, paths)).filter((x) => x !== null));
+  const loaded = of([...c.passed, ...c.findings, ...c.flaky]);
+  const named = of([...c.errors]);
+  for (const f of not) loaded.delete(f);
+  const isTest = (f: string) => loaded.has(f) || named.has(f) || not.includes(f);
+  const keep = (f: string) => loaded.has(f) || (loaded.size > 0 && !isTest(f));
+  return Object.fromEntries(Object.entries(files).filter(([f]) => keep(f)));
 }
 
 /** Changed source files that no generated test names. A Rust crate root (lib.rs) is reached by every integration

@@ -178,11 +178,11 @@ test("each project sees only its part of the change, and files no test names are
     expect(load(rdir)).toEqual(review);
     const md = render(review);
     expect(md).toContain("Partly covered: no arnx test refers to 1 of the 2 changed source files below");
-    expect(md).toContain("Not tested by arnx in `pay`: `services/pay/pay.py` (reviewer: needs a live payment gateway).");
+    expect(md).toContain("No test seen reaching in `pay`: `services/pay/pay.py` (reviewer: needs a live payment gateway).");
     expect(md).not.toContain("Complete:");
     const short = summary(review, "review.md");
     expect(short).toContain("Partly covered: no test refers to 1 of 2 changed source files");
-    expect(short).toContain("  Not tested (pay): services/pay/pay.py");
+    expect(short).toContain("  No test seen reaching (pay): services/pay/pay.py");
   });
 
 test("projects are tested two at a time, and the report keeps review order", async () => {
