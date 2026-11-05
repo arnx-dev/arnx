@@ -53,7 +53,7 @@ export const OUTAGE_DELAYS = [2, 8, 30, 60, 60, 60];
  * review that still finds it down ends with the resume advice. */
 export const OUTAGE_WAIT_MAX_SECONDS = 600;
 /** Per provider: the seconds of wall clock spent waiting out an outage (overlapping waits of parallel calls count once)
- * and when the latest wait ends (ms on the clock). A call that gets an answer clears it. */
+ * and when the latest wait ends (ms on the clock). A call that succeeds clears it. */
 const outageWaited = new Map<string, { seconds: number; until: number }>();
 /** For tests: forget the outage waits of every provider. */
 export function resetOutageWaits(): void { outageWaited.clear(); }
