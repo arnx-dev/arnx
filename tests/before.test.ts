@@ -474,7 +474,7 @@ describe("names, not words", () => {
       fail("test_r", "AssertionError: other")));
     const b = sharedFailure(same, "AssertionError: assert False", base, new Set(["t.py::test_p", "t.py::test_q", "t.py::test_r"]));
     expect(b.status).toBe("unknown");
-    expect(b.detail).toBe("fails the same way there, but so do 2 tests that pass with the change");
+    expect(b.detail).toBe("fails with the same message there, but so do 2 tests that pass with the change");
     // Another message, or no passing test failing there: the verdict stands.
     expect(sharedFailure(same, "AssertionError: assert False", base, new Set(["t.py::test_r"]))).toBe(same);
     expect(sharedFailure(same, "AssertionError: assert False", base, new Set())).toBe(same);
@@ -515,7 +515,7 @@ describe("fix round: whole files, shared messages", () => {
     const proofRuns = [run(fail("test_p", m))]; // cut after one run
     const b = sharedInGroups(same, m, [own, proofRuns], new Set(["t.py::test_p"]));
     expect(b.status).toBe("unknown");
-    expect(b.detail).toBe("fails the same way there, but so does 1 test that passes with the change");
+    expect(b.detail).toBe("fails with the same message there, but so does 1 test that passes with the change");
     expect(sharedInGroups(same, m, [own, []], new Set(["t.py::test_p"]))).toBe(same);
     expect(sharedInGroups(same, m, [own, proofRuns], new Set(["t.py::test_z"]))).toBe(same);
   });
@@ -536,7 +536,7 @@ describe("fix round: whole files, shared messages", () => {
         challenger: new FakeJson([{ verdict: "confirmed", reason: "x" }]), sessionFactory: factory });
       const old = review.findings.find((f) => f.func === "test_old")!;
       expect(old.before!.status).toBe("unknown");
-      expect(old.before!.detail).toBe("fails the same way there, but so does 1 test that passes with the change");
+      expect(old.before!.detail).toBe("fails with the same message there, but so does 1 test that passes with the change");
     });
   }
 });
@@ -589,13 +589,24 @@ describe("a pass and a failure say only what the runs show", () => {
   });
 
   test("a pass whose helper thread died is no regression", () => {
-    const out = ["PytestUnhandledThreadExceptionWarning: Exception in thread", "AttributeError: module 'app' has no attribute 'add'"];
+    const out = ["tests/x.py::test_a\n  PytestUnhandledThreadExceptionWarning: Exception in thread\n" +
+      "  AttributeError: module 'app' has no attribute 'add'\n"];
     const b = vacuousPass(passed, o("def test_a():\n    assert add(1, 2) == 3\n", ["other_name"], out));
     expect(b.status).toBe("unknown");
     expect(b.vacuous).toBe("background-error");
     // a warning with nothing missing in it, or missing code with no background error, proves nothing either way
     expect(vacuousPass(passed, o("def test_a():\n    assert 1\n", [], ["PytestUnraisableExceptionWarning: x"]))).toBe(passed);
     expect(vacuousPass(passed, o("def test_a():\n    assert 1\n", [], ["NameError: name 'x' is not defined"]))).toBe(passed);
+  });
+
+  test("a background error of another thread, and a sibling's missing name, leave a regression", () => {
+    const out = ["== warnings summary ==\ntests/x.py::test_other\n  threadexception.py: PytestUnhandledThreadExceptionWarning: Exception in thread\n\n" +
+      "== short test summary ==\nFAILED tests/x.py::test_new - ImportError: cannot import name 'fresh' from 'app'\n"];
+    expect(vacuousPass(passed, o("def test_a():\n    assert add(1, 2) == 3\n", [], out))).toBe(passed);
+    // the same lines in another test's block, or in one run the test's block is not in
+    const mine = ["tests/x.py::test_a\n  PytestUnhandledThreadExceptionWarning: died\n  NameError: name 'fresh' is not defined\n"];
+    expect(vacuousPass(passed, o("def test_a():\n    assert 1\n", [], mine)).vacuous).toBe("background-error");
+    expect(vacuousPass(passed, { ...o("def test_ab():\n    assert 1\n", [], mine), func: "test_ab" })).toBe(passed);
   });
 
   test("a pass that uses only old names stays a regression", () => {

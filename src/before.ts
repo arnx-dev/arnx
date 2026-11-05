@@ -377,7 +377,7 @@ const BACKGROUND = /PytestUnhandledThreadExceptionWarning|PytestUnraisableExcept
 
 /** A pass on the code before the change proves a regression only if the code it ran was whole. It is not when the test
  * uses a name the change adds (`new-name`: what it checks cannot have been there), or when a background thread or task
- * died there on missing code and the test passed anyway (`background-error`: base console lines, `baseOutput`). Such a
+ * died there on missing code, in a block of the console that names this test, and the test passed anyway (`background-error`: `baseOutput` is one console per run). Such a
  * pass is `unknown`. `path`: the test file (its language). Only a regression is changed. */
 export function vacuousPass(b: Before, o: { source: string; func: string; names: ReadonlySet<string>;
   baseOutput: string[]; path?: string }): Before {
@@ -388,16 +388,20 @@ export function vacuousPass(b: Before, o: { source: string; func: string; names:
     return { ...b, status: "unknown", vacuous: "new-name", detail: `${lead}the test uses \`${name}\`, which the ` +
       "change adds: no proof of a regression" };
   }
-  const lines = o.baseOutput.flatMap((out) => splitLines(out));
-  const at = lines.findIndex((l) => BACKGROUND.test(l));
-  if (at >= 0 && lines.slice(at).some((l) => MISSING.test(l))) {
+  // The background error belongs to this test: one block of one run's console (set off by blank lines and rulers)
+  // names the test, holds the background-error line, and holds the sign of missing code.
+  const own = o.func.split(" > ").at(-1)!.split("::").at(-1)!.replace(/\[.*\]$/, "");
+  const named = own ? new RegExp(`(?<![\\w$])${own.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`) : null;
+  const ours = named !== null && o.baseOutput.some((out) => out.split(/\n\s*\n|\n[=_-]{5,}[^\n]*\n/).some((block) =>
+    BACKGROUND.test(block) && named.test(block) && MISSING.test(block)));
+  if (ours) {
     return { ...b, status: "unknown", vacuous: "background-error", detail: `${lead}a background error there names ` +
       "code that is missing: no proof of a regression" };
   }
   return b;
 }
 
-/** A same failure says nothing when tests that pass with the change fail the same way there: the message is shared
+/** A same failure says nothing when tests that pass with the change fail with the same message there: the message is shared
  * (an `assert False`), not specific to this test. Counted: tests of `passedOnChange` that failed with `signatureOf`'s
  * first line in every run of `baseRuns`, and in no run otherwise. Limit: only tests that ran on the code before the
  * change can count, those in the findings' files and the fix proof's (up to its cap); a passing test in another file, past
@@ -415,7 +419,7 @@ export function sharedFailure(b: Before, signatureOf: string, baseRuns: BeforeRu
     }
   }
   const n = [...seen.values()].filter((k) => k >= each).length;
-  return n ? { ...b, status: "unknown", detail: `fails the same way there, but so ${n === 1 ? "does 1 test that passes" :
+  return n ? { ...b, status: "unknown", detail: `fails with the same message there, but so ${n === 1 ? "does 1 test that passes" :
     `do ${n} tests that pass`} with the change` } : b;
 }
 
