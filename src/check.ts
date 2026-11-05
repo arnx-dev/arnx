@@ -17,7 +17,7 @@ import { load, type Review } from "./report";
 import type { Say } from "./progress";
 import { sayingDocker, type SessionFactory } from "./sandbox";
 import type { Env, Settings } from "./settings";
-import { DOME, dockerSession, keptTestFiles, legacyKeptFiles, runPath } from "./testround";
+import { collect, DOME, dockerSession, keptTestFiles, legacyKeptFiles, runPath, swapFiles, swapIn } from "./testround";
 
 export const CHECK_TIMEOUT = 900;
 
@@ -192,20 +192,25 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       const snap = join(tmp, "repo");
       // The working tree as it is now, fixes included, untracked files too (accepted tests are untracked until
       // committed): no model sees what a check runs.
-      const { suspects } = takeSnapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw),
+      const taken = takeSnapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw),
         untracked: true });
       // A coding agent reads what a check says, and the code it ran on holds real values.
-      const boundary = new Boundary([...suspects, ...configSuspects(repo)]);
-      // The accepted tests and their support files, in place in this copy only.
+      const boundary = new Boundary(configSuspects(repo));
+      boundary.addScrubbed(taken);
+      // The accepted tests and their support files, in place in this copy only, which alone gets the real values.
       cpSync(join(repo, DOME), snap, { recursive: true });
+      const placed = new Set(collect(join(repo, DOME), "", /./));
+      const swap = swapIn(boundary, snap, (rel) => placed.has(rel));
       // Each review's files run apart (reviewGroup); the build log is kept where a failed build's error can point to
       // it (the snapshot is removed below).
       const groups = [...new Set(files.map(reviewGroup))];
       const target = (f: string) => posix.relative(cfg.workdir, runPath(f)) || runPath(f);
       const runs = await sayingDocker(o.progress, () => (o.sessionFactory ?? dockerSession)(cfg, snap,
-        join(repo, ".arnx", "run", `check-${cfg.name}-build.log`), async (session) =>
-          groups.map((g, i) => [g, ...runTests(session, snap, cfg, files.filter((f) => reviewGroup(f) === g).map(target),
-            groups.length > 1 ? `check-${i + 1}.xml` : "check.xml", CHECK_TIMEOUT)] as const)));
+        join(repo, ".arnx", "run", `check-${cfg.name}-build.log`), async (session) => {
+          if (!session.copies) swapFiles(snap, [...placed], swap);
+          return groups.map((g, i) => [g, ...runTests(session, snap, cfg, files.filter((f) => reviewGroup(f) === g).map(target),
+            groups.length > 1 ? `check-${i + 1}.xml` : "check.xml", CHECK_TIMEOUT)] as const);
+        }, undefined, undefined, swap));
       const results = runs.flatMap(([, , r]) => r ?? []);
       const missing = runs.filter(([, , r]) => r === null);
       const log = checkLog(cfg.name);

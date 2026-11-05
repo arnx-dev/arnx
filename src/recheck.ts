@@ -15,7 +15,7 @@ import type { Say } from "./progress";
 import { confirmed, notChecked, type Finding, load, type Review } from "./report";
 import type { SessionFactory } from "./sandbox";
 import type { Settings } from "./settings";
-import { collect, dockerSession, readCopies, RUN_TIMEOUT } from "./testround";
+import { collect, dockerSession, readCopies, RUN_TIMEOUT, swapFiles, swapIn } from "./testround";
 
 /** fixed: passed in every run. still-failing: failed (or errored) in a run; one is enough. no-report: a run gave no
  * report, or the test did not appear in it, and it never failed. */
@@ -80,8 +80,8 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
         const snap = join(tmp, "repo");
         // The working tree as it is now, fixes included, untracked files too (accepted tests are untracked until
         // committed): no model sees what a check runs.
-        boundary.add(takeSnapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw),
-          untracked: true }).suspects);
+        boundary.addScrubbed(takeSnapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw),
+          untracked: true }));
         // The review's generated files go in as they ran, in place of anything in its tests directory.
         mkdirSync(join(snap, writeDir), { recursive: true });
         for (const rel of collect(snap, writeDir, adapter.writable)) rmSync(join(snap, rel), { force: true });
@@ -89,7 +89,10 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
           mkdirSync(dirname(join(snap, rel)), { recursive: true });
           writeFileSync(join(snap, rel), source);
         }
+        const ours = Object.keys(files);
+        const swap = swapIn(boundary, snap, (rel) => ours.includes(rel));
         await (o.sessionFactory ?? dockerSession)(cfg, snap, join(tmp, "build.log"), async (session) => {
+          if (!session.copies) swapFiles(snap, ours, swap);
           for (let i = 1; i <= settings.runs; i++) {
             // Only tests not yet decided: none of their runs failed, none went without a report.
             const open = runnable.filter((f) => runs.get(f.id)!.every((r) => r.outcome === "passed"));
@@ -98,11 +101,12 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
               .map((p) => posix.relative(cfg.workdir, p) || p);
             o.progress?.(`${name}: run ${i}/${settings.runs}, ${targets.length} file${targets.length === 1 ? "" : "s"}`);
             const [, parsed] = runTests(session, snap, cfg, targets, `recheck-${i}.xml`, RUN_TIMEOUT);
-            const results = parsed?.map(asError) ?? null;
+            // The saved finding's id holds a stand-in where the run's holds the value (a parametrized test).
+            const results = parsed?.map(asError).map((t) => ({ ...t, testId: boundary.mask(t.testId) })) ?? null;
             for (const f of open) runs.get(f.id)!.push(outcomeIn(results, f));
           }
           return null;
-        });
+        }, undefined, undefined, swap);
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }

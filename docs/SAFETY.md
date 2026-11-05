@@ -36,7 +36,8 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   real guesses (below), and a test can turn a value into something no filter recognises, by reversing it, adding spaces,
   hashing it or joining it with other text before encoding it in another way. A cut of a value under 12 characters
   passes too, as does a value written with escapes in the source (`"ab\x55c"`), which nothing reads as that value.
-  Local files arnx writes for itself keep what they saw: `change.diff` and the setup and proof logs under `.arnx/run/`.
+  Local files arnx writes for itself keep what they saw: `change.diff`, image build logs, and a project's own test ids in
+  `.arnx/baseline.json`.
   What the tests run depends on how sure arnx is. Key-shaped text and a password in an address get the stand-in in the
   snapshot too, wherever they appear, so no file keeps them and every file gets the same fake; the tests run with the
   fake, and one that checks a signature made with the real value (a signed license key) fails. A guess stays as it is
@@ -59,6 +60,16 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   beyond what a manifest or a lockfile holds and what the limits above let through. Setup names the files whose snapshot has stand-ins once. A private key with
   a body cannot get a stand-in: its file is still left out (a header with no body anywhere in the file, such as a form's
   placeholder, is kept as it is).
+  A model works among stand-ins, so what it writes holds them. When its text meets real files, arnx swaps each guess's
+  stand-in back, in memory and at the last moment: a test as it goes into the throwaway copy, an accepted test too (the file
+  under `.arnx/` keeps the stand-in); a search pattern and a path; a command of setup's `exec`; and the env and commands of
+  `review.yaml` when they run, inside the run's network. `review.yaml` itself keeps the stand-in, and `install` is never
+  swapped, since a build has network. Whatever a run prints then goes out through the filter again. A key-shaped value's
+  stand-in stays, as it is what the code holds. A project whose tests run on an install's copy stays among stand-ins, as that
+  copy does: nothing is swapped for its runs, so a test there that reads `/src` and compares with a stand-in fails.
+  Only a plain stand-in comes back. One a model encoded, re-cased or cut itself stays as written, and a test holding it fails
+  on the real value; a test that encodes a plain stand-in when it runs is fine. A stand-in a real file holds by chance stays
+  as written everywhere, since there it means itself.
   `[review] stand_ins = false` in `.arnx/config.toml` turns stand-ins off in both copies: files with key-shaped text in code
   are left out, and requests still hold stand-ins for the other values.
   A review's diff blanks comment lines the same

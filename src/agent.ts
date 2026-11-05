@@ -8,6 +8,7 @@ import { basename, dirname, join, posix, relative, resolve, sep } from "node:pat
 import { Worker } from "node:worker_threads";
 import { python } from "./adapters/python";
 import type { Adapter } from "./adapters/types";
+import type { Swap } from "./boundary";
 import { ModelError, NoCredits } from "./errors";
 import { clip, emitModelCall, emitTurn } from "./events";
 import { recordCall } from "./outage";
@@ -288,15 +289,22 @@ export class Workspace {
   private extra: Record<string, [Tool, ToolFn]>;
   private adapter: Adapter;
   private runner: string;
+  private reads?: Swap;
+  private writes?: Swap;
 
+  /** `reads`: what a path or a search means in these files, which hold real values. `writes`: what a test's text means
+   * where it runs; absent when runs read a copy of the code that holds the stand-ins (baked.ts). */
   constructor(root: string, opts: { writeDir?: string | null; runTests?: (targets: string[]) => string | Promise<string>;
-                                    extra?: Record<string, [Tool, ToolFn]>; adapter?: Adapter; runner?: string } = {}) {
+                                    extra?: Record<string, [Tool, ToolFn]>; adapter?: Adapter; runner?: string;
+                                    reads?: Swap; writes?: Swap } = {}) {
     this.root = realpathSync(root);
     this.writeDir = opts.writeDir ? opts.writeDir.replace(/^\/+|\/+$/g, "") : null;
     this.runTestsFn = opts.runTests;
     this.extra = opts.extra ?? {};
     this.adapter = opts.adapter ?? python;
     this.runner = opts.runner ?? this.adapter.defaultRunner;
+    this.reads = opts.reads;
+    this.writes = opts.writes;
   }
 
   tools(): Tool[] {
@@ -329,8 +337,9 @@ export class Workspace {
     }
   }
 
-  private resolvePath(path: string): string {
-    const rel = path.trim().replace(/^\/+/, "") || ".";
+  /** `asWritten`: a new file's name, which is never swapped. */
+  private resolvePath(path: string, asWritten = false): string {
+    const rel = (this.reads && !asWritten ? this.reads.text(path) : path).trim().replace(/^\/+/, "") || ".";
     const full = resolveLoose(join(this.root, rel));
     if (full !== this.root && !full.startsWith(this.root + sep)) throw new ToolError(`path outside the repository: ${path}`);
     if (relative(this.root, full).split(sep).includes(".git") || isSecretPath(basename(full))) {
@@ -384,7 +393,7 @@ export class Workspace {
     }
     // Refused before any worker starts: under Bun a terminated worker keeps its core busy until arnx exits.
     if (backtracks(pattern)) throw tooSlow();
-    const matcher = new Matcher(pattern);
+    const matcher = new Matcher(this.reads ? this.reads.pattern(pattern) : pattern);
     try {
       return await this.grepFiles(matcher, path);
     } finally {
@@ -464,14 +473,16 @@ export class Workspace {
   }
 
   private writeFile(path: string, content: string): string {
-    const full = this.resolvePath(path);
+    // The name goes under .arnx with the saved test, and a run's command names it.
+    if (this.reads && this.reads.text(path) !== path) throw new ToolError("name the file without that value");
+    const full = this.resolvePath(path, true);
     if (!this.inWriteDir(full) || !this.adapter.writable.test(basename(full))) {
       throw new ToolError(`writes are allowed only for ${this.adapter.words(this.runner).writableFiles} under ` +
         `${this.writeDir}/`);
     }
     if (content.length > WRITE_LIMIT) throw new ToolError("file too large");
     mkdirSync(dirname(full), { recursive: true });
-    writeFileSync(full, content);
+    writeFileSync(full, this.writes ? this.writes.text(content) : content);
     return `wrote ${this.rel(full)} (${content.length} bytes)`;
   }
 

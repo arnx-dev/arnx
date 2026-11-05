@@ -10,6 +10,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSyn
 import { dirname, join, posix } from "node:path";
 import { adapterFor, getAdapter, LANGUAGES } from "./adapters";
 import type { CopyOnly } from "./baked";
+import type { Swap } from "./boundary";
 import { digest, loadReviewFile, type ReviewConfig } from "./config";
 import { ArnxError, SetupRequired } from "./errors";
 import { envValue, globRegex } from "./secrets";
@@ -117,9 +118,11 @@ export interface Runner {
 /** Runs `body` with a ready session for the config's environment and tears it down afterwards. `envFrom`: the
  * snapshot whose manifests pick the image, when it is not `snap` (the before/after check runs the code before the
  * change in the change's image); `key`: that image's key, taken before runs could change those manifests (cargo
- * writes a missing Cargo.lock). */
+ * writes a missing Cargo.lock); `swap`: what the file's env and commands mean where they run (Session), unless runs read a
+ * baked copy of the code. */
 export type SessionFactory = <T>(cfg: ReviewConfig, snap: string, buildLog: string,
-                                 body: (runner: Runner) => Promise<T>, envFrom?: string, key?: string) => Promise<T>;
+                                 body: (runner: Runner) => Promise<T>, envFrom?: string, key?: string, swap?: Swap)
+  => Promise<T>;
 
 export function docker(args: string[], { timeout = 120, stdin }: { timeout?: number; stdin?: string } = {}) {
   const r = spawnSync(sandboxOptions.docker, args, { encoding: "utf8", timeout: timeout * 1000, input: stdin,
@@ -476,9 +479,20 @@ export class Session implements Runner {
   /** When the last run in the shared container started (host clock, ms); 0 before its first. */
   private lastRun = 0;
 
+  /** `swap`: what a model's text means where this session runs. review.yaml and the commands keep their stand-ins, and so
+   * do the logs; only what Docker gets, with this session's network, holds real values. An image's build has network and
+   * never gets them. */
   constructor(readonly image: string, readonly cfg: ReviewConfig, readonly snapshot: string,
-              readonly limits: Limits = DEFAULT_LIMITS) {
+              readonly limits: Limits = DEFAULT_LIMITS, private readonly swap?: Swap) {
     this.network = cfg.services.length ? `arnx-${this.id}` : "none";
+  }
+
+  private real(text: string): string {
+    return this.swap ? this.swap.text(text) : text;
+  }
+
+  private realEnv(env: Record<string, string>): Record<string, string> {
+    return Object.fromEntries(Object.entries(env).map(([k, v]) => [k, this.real(v)]));
   }
 
   async start(): Promise<this> {
@@ -493,7 +507,8 @@ export class Session implements Runner {
           const name = `arnx-${this.id}-${svc.name}`;
           const args = ["run", "-d", "--rm", "--name", name, "--network", this.network, "--network-alias", svc.name,
             "--cpus", "1", "--memory", "1g"];
-          for (const k of Object.keys(svc.env).sort()) args.push("-e", `${k}=${envValue(svc.env[k]!)}`);
+          const env = this.realEnv(svc.env);
+          for (const k of Object.keys(env).sort()) args.push("-e", `${k}=${envValue(env[k]!)}`);
           r = docker([...args, svc.image], { timeout: stepTimeout(900) });
           if (r.status !== 0) throw new ArnxError(`service ${svc.name} did not start: ${r.stderr.trim().slice(0, 300)}`);
           this.started.push(name);
@@ -512,7 +527,7 @@ export class Session implements Runner {
   private async waitReady(container: string, service: string, ready: string): Promise<void> {
     const deadline = performance.now() + READY_TIMEOUT * 1000;
     while (performance.now() < deadline) {
-      if (docker(["exec", container, "sh", "-c", ready], { timeout: 30 }).status === 0) return;
+      if (docker(["exec", container, "sh", "-c", this.real(ready)], { timeout: 30 }).status === 0) return;
       await sleep(1000);
     }
     throw new ArnxError(`service ${service} was not ready after ${READY_TIMEOUT}s (ready: ${ready})`);
@@ -546,7 +561,7 @@ export class Session implements Runner {
     // A closed session (an interrupt) starts no container that nothing would remove.
     if (!emptied || this.closed || !this.mayShare()) {
       const name = `arnx-${this.id}-${step}-${randomHex(3)}`;
-      return this.spawnRun(this.argv(name, command), command, timeout, step, () => docker(["kill", name]));
+      return this.spawnRun(this.argv(name, this.real(command)), command, timeout, step, () => docker(["kill", name]));
     }
     let r = this.keptRun(command, timeout, emptied, step);
     // A container that went away (Docker restarted, removed by hand) is started again once; its build starts over.
@@ -578,7 +593,7 @@ export class Session implements Runner {
   private argv(name: string, command: string): string[] {
     const user = `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`;
     return runArgv({ image: this.image, name, network: this.network, snapshot: this.snapshot,
-      workdir: this.cfg.workdir, env: this.cfg.env, command, limits: this.limits, user,
+      workdir: this.cfg.workdir, env: this.realEnv(this.cfg.env), command, limits: this.limits, user,
       runEnv: adapterFor(this.cfg).runEnv });
   }
 
@@ -617,7 +632,7 @@ export class Session implements Runner {
       : changed.join(" ").length > TOUCH_LIMIT
         ? `find /src -path /src/${REPORT_DIR} -prune -o -type f -exec touch -c {} + 2>/dev/null; `
         : `touch -c -- ${changed.join(" ")}; `;
-    const wrapped = `rm -rf ${empty} 2>/dev/null; ${touch}sh -c ${shQuote(command)}; s=$?; kill -9 -1 2>/dev/null; ` +
+    const wrapped = `rm -rf ${empty} 2>/dev/null; ${touch}sh -c ${shQuote(this.real(command))}; s=$?; kill -9 -1 2>/dev/null; ` +
       "exit $s";
     this.lastRun = Date.now();
     return this.spawnRun([sandboxOptions.docker, "exec", box, "sh", "-c", wrapped], command, timeout, step, () => {
@@ -669,10 +684,10 @@ export class Session implements Runner {
 export interface ExecRunner { exec(command: string, timeout: number): RunResult; close(): void }
 /** A started ExecRunner on `image` with `cfg`'s services and environment, `src` mounted at /src; null when the image
  * is not there: exec builds no image. */
-export type ExecFactory = (image: string, cfg: ReviewConfig, src: string) => Promise<ExecRunner | null>;
+export type ExecFactory = (image: string, cfg: ReviewConfig, src: string, swap?: Swap) => Promise<ExecRunner | null>;
 
-export const dockerExec: ExecFactory = async (image, cfg, src) => {
+export const dockerExec: ExecFactory = async (image, cfg, src, swap) => {
   requireDocker();
   if (docker(["image", "inspect", image]).status !== 0) return null;
-  return new Session(image, cfg, src).start();
+  return new Session(image, cfg, src, DEFAULT_LIMITS, swap).start();
 };

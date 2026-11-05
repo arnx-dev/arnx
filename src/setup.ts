@@ -9,12 +9,12 @@ import { isMap as isYamlMap, isScalar, parseDocument, visit } from "yaml";
 import { type AgentResult, StopRound, Workspace } from "./agent";
 import { type Baseline, BASELINE_FILE, type BaselineTest, baselineDigest, describeBaselineChanges, entryOf, keysOf,
   readBaseline, testKey, writeBaseline } from "./baseline";
-import { Boundary, boundaryOf } from "./boundary";
+import { Boundary, boundaryOf, type Swap } from "./boundary";
 import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
 import { getAdapter, LANGUAGES } from "./adapters";
 import type { AdapterId, TestResult } from "./adapters/types";
-import { addToSandbox, type Blanked, describeBlanked, filesAt, hasCommits, snapshot, snapshotDigest, someNames,
+import { addToSandbox, type Blanked, describeBlanked, filesAt, hasCommits, snapshotDigest, someNames,
   takeSnapshot, tooLargeText, type Withheld, workingTreeFiles } from "./change";
 import { configSuspects,
   loadReviewFile, parseReviewFile, plainReviewYaml, projectDigest, readSecretPins, restDigest, runDigest, type ReviewConfig,
@@ -52,7 +52,7 @@ import { agentUse, logUsage } from "./usage";
 import { randomHex } from "./util";
 import { VERSION } from "./version";
 import { acceptedPins, type AcceptedPins } from "./check";
-import { collect, DOME, dockerSession, isKeptPath, ownTestsInWriteDir, ownTestsProblem, probeRun, writeDirOf }
+import { collect, DOME, dockerSession, isKeptPath, ownTestsInWriteDir, ownTestsProblem, probeRun, swapIn, writeDirOf }
   from "./testround";
 import { type TestsDirChoice, testsDirFor } from "./testsdir";
 
@@ -249,26 +249,29 @@ const APART_MAX = 20;
 export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string,
                                { sessionFactory = dockerSession, targets = [], failureModel, key, acceptedTestsDir,
                                  accepted, outputLog, leftOut, baseline = [], rerun = false, passedBefore = false,
-                                 precheck = false, quick = false }: {
+                                 precheck = false, quick = false, boundary, swap }: {
                                  sessionFactory?: SessionFactory; targets?: string[]; failureModel?: FailureModel;
                                  key?: string; acceptedTestsDir?: string; accepted?: AcceptedPins;
                                  outputLog?: string; leftOut?: LeftOut; baseline?: BaselineTest[] | "record";
-                                 rerun?: boolean; passedBefore?: boolean; precheck?: boolean; quick?: boolean } = {})
+                                 rerun?: boolean; passedBefore?: boolean; precheck?: boolean; quick?: boolean;
+                                 boundary?: Boundary; swap?: Swap } = {})
   : Promise<[boolean, string, string, string[], string[], string, SuiteCounts]> {
   const none = noCounts();
   // A review clears and collects every writable file in tests_dir: the project's own tests may not live there.
   const own = ownTestsIn(cfg, snap, acceptedTestsDir);
   if (own.length) return [false, ownTestsProblem(cfg, own), "", [], [], "", none];
   if (outputLog) rmSync(outputLog, { force: true });
-  /** The end of `output`, the whole of it kept in outputLog. */
-  const tailOf = (output: string): string => {
+  /** The end of `output`, the whole of it kept in outputLog. A run can print the real values it holds. */
+  const tailOf = (raw: string): string => {
+    const output = boundary ? boundary.mask(raw) : raw;
     if (outputLog) {
       mkdirSync(dirname(outputLog), { recursive: true });
       writeFileSync(outputLog, output);
     }
     return output.slice(-OUTPUT_TAIL);
   };
-  return sessionFactory(cfg, snap, buildLog, async (session) => {
+  const said = (t: string) => boundary ? boundary.mask(t) : t;
+  const [ok, summary, tail, skips, failing, hints, counts] = await sessionFactory(cfg, snap, buildLog, async (session) => {
     type Out = [boolean, string, string, string[], string[], string, SuiteCounts];
     // A project with no tests of its own has nothing to list: its run below is quick.
     let sample: { files: string[]; run: RunResult; results: TestResult[] } | null = null;
@@ -390,7 +393,8 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
         "that folder out (jest roots, vitest include, testMatch) or does not collect tests named the usual way (an " +
         "option in test_command). Either set tests_dir to a new folder the runner includes, or fix test_command",
         tailOf(tail), skips, failing, "", counts] as Out;
-  }, undefined, key);
+  }, undefined, key, swap);
+  return [ok, said(summary), tail, skips.map(said), failing, said(hints), counts];
 }
 
 /** runSuite's answer for a project with no tests of its own: its environment proven by arnx's one-line test (and the
@@ -1109,11 +1113,15 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     }
     say(line);
   };
+  // The projects whose runs read a baked copy: exec's commands stay among its stand-ins too.
+  const baked = new Set<string>();
   const factory: SessionFactory = <T>(cfg: ReviewConfig, snap: string, log: string, body: (r: Runner) => Promise<T>,
-    ...rest: [string?, string?]) => (o.sessionFactory ?? dockerSession)(cfg, snap, log, (session) => {
+    ...rest: [string?, string?, Swap?]) => (o.sessionFactory ?? dockerSession)(cfg, snap, log, (session) => {
       const a = announce;
       announce = null;
       if (a) say(`${a.name}: running its suite (try ${a.n})`);
+      if (session.copies) baked.add(cfg.name);
+      else baked.delete(cfg.name);
       return body(session);
     }, ...rest);
   try {
@@ -1127,8 +1135,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const { withheld, blanked, standIns, secrets: replaced, suspects: found, tooLarge } = takeSnapshot(repo, null, snap, pins,
       { untracked, sandbox: [...sandbox] });
     if (tooLarge.length) say(tooLargeText(tooLarge));
-    boundary.add(found);
+    boundary.addScrubbed({ suspects: found, secrets: replaced });
     boundary.add(configSuspects(repo));
+    // What the agent's file, commands and paths mean here. review.yaml keeps its stand-ins: only a run reads them as values.
+    const swap = swapIn(boundary, snap);
     // The code every run of this setup sees, before any run writes into the snapshot (SetupRun).
     const code = snapshotDigest(snap);
     // Image keys come from the manifests as they were before any run wrote into the snapshot.
@@ -1342,12 +1352,12 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           say(`${name}: same environment as the last try; rerunning the ${subset.length} file(s) that failed`);
           [ok, summary, tail, skips, failing, hints, counts] = await runSuite(cfg, snap, log, { sessionFactory: factory,
             targets: subset, failureModel: o.failureModel, key: keyOf(cfg), acceptedTestsDir: accepted,
-            accepted: trusted, leftOut, baseline: "record" });
+            accepted: trusted, leftOut, baseline: "record", boundary, swap });
           if (ok) {
             say(`${name}: they run now; running the whole suite to prove the project`);
             [ok, summary, tail, skips, failing, hints, counts] = await runSuite(cfg, snap, log, { sessionFactory: factory,
             failureModel: o.failureModel, key: keyOf(cfg), acceptedTestsDir: accepted,
-            accepted: trusted, leftOut, baseline: "record" });
+            accepted: trusted, leftOut, baseline: "record", boundary, swap });
           } else {
             onlySubset = true;
             summary = `rerun of the ${subset.length} file(s) that failed last time: ${summary}`;
@@ -1356,7 +1366,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           const look = state.looked.get(name) !== env;
           [ok, summary, tail, skips, failing, hints, counts] = await runSuite(cfg, snap, log, { sessionFactory: factory,
             failureModel: o.failureModel, key: keyOf(cfg), acceptedTestsDir: accepted,
-            accepted: trusted, leftOut, baseline: "record", precheck: look, quick: !!o.quick });
+            accepted: trusted, leftOut, baseline: "record", precheck: look, quick: !!o.quick, boundary, swap });
           state.looked.set(name, env);
         }
         if (ok) state.lastFailing.delete(name);
@@ -1371,7 +1381,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         // Files .arnxignore leaves out go into the sandbox (scrubbed as the snapshot is), and the project runs again.
         if (e instanceof LeftOutNeeded && e.files.every((p) => !secret.has(p))) {
           const r = addToSandbox(repo, snap, e.files, pins, { known: replaced });
-          boundary.add(r.suspects);
+          boundary.addScrubbed(r);
           r.sandboxed.forEach((p) => sandbox.add(p));
           r.withheld.forEach((w) => secret.add(w.path));
           leftOut.paths = leftOut.paths.filter((p) => !sandbox.has(p));
@@ -1680,8 +1690,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       return said;
     };
     const shell = exec = new SetupExec({ snap, dir: join(tmp, "exec"), outDir: o.outDir,
-      factory: o.execFactory ?? dockerExec, tried: state.lastTry, say });
-    const ws = new Workspace(snap, { extra: { try_project: [TRY_PROJECT, noted(tryProject)],
+      factory: o.execFactory ?? dockerExec, tried: state.lastTry, say, boundary,
+      swapOf: (project) => baked.has(project) ? undefined : swap });
+    const ws = new Workspace(snap, { reads: swap, extra: { try_project: [TRY_PROJECT, noted(tryProject)],
       propose: [PROPOSE, noted(propose, false)], exec: [EXEC, noted((i) => shell.call(i))] } });
     const detection = detectReadable(repo, untracked);
     const brain: Brain = o.brain ?? new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings),
@@ -1877,7 +1888,11 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
   try {
     const snap = join(tmp, "repo");
     const untracked = o.untracked ?? settings?.untracked ?? false;
-    snapshot(repo, null, snap, secretPinsOf(f.raw), { sandbox: sandboxOnlyOf(f.raw), untracked });
+    const taken = takeSnapshot(repo, null, snap, secretPinsOf(f.raw), { sandbox: sandboxOnlyOf(f.raw), untracked });
+    // The file may hold a guess's stand-in, which runs read as the value; the logs keep neither.
+    const boundary = new Boundary(configSuspects(repo));
+    boundary.addScrubbed(taken);
+    const swap = swapIn(boundary, snap);
     // The code now, against the code setup's runs saw: only taken right after setup.
     const code = o.afterSetup?.length ? withSandbox(snapshotDigest(snap), sandboxOnlyOf(f.raw)) : null;
     copyManifests(snap, join(tmp, "manifests"));
@@ -1906,7 +1921,7 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
       const [ok, summary, , skips, , , counts] = stands ?? await runSuite(cfg, snap, log, {
         sessionFactory: o.sessionFactory, key: envKey(cfg, join(tmp, "manifests")), acceptedTestsDir: accepted,
         accepted: trusted, outputLog: join(repo, output), baseline: mine, rerun: true, passedBefore: !!prior,
-        ...(quick.has(cfg.name) ? { precheck: true, quick: true } : {}) });
+        ...(quick.has(cfg.name) ? { precheck: true, quick: true } : {}), boundary, swap });
       const moved = [counts.left.length ? `${counts.left.length} left the baseline (they pass now)` : "",
         counts.flaky.length ? `${plural(counts.flaky.length, "test")} failed, then passed when run again (flaky): ` +
           few(counts.flaky) : ""].filter(Boolean).map((x) => ` · ${x}`).join("");
@@ -1922,7 +1937,7 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
       next.set(cfg.name, [...mine.filter((b) => !left.has(b.id)), ...joined]);
     }
     const failed = suites.filter((s) => !s.ok);
-    if (failed.length) return [false, failed.map((s) => failedSuite(s, f.legacy, repo)).join("\n\n"), suites];
+    if (failed.length) return [false, boundary.mask(failed.map((s) => failedSuite(s, f.legacy, repo)).join("\n\n")), suites];
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -1974,8 +1989,10 @@ export async function rerecordBaseline(repo: string, o: { by: string; at: string
   const tmp = tempDir("arnx-baseline-");
   try {
     const snap = join(tmp, "repo");
-    snapshot(repo, null, snap, secretPinsOf(f.raw), { sandbox: sandboxOnlyOf(f.raw),
-      untracked: o.untracked ?? settings?.untracked ?? false });
+    const boundary = new Boundary(configSuspects(repo));
+    boundary.addScrubbed(takeSnapshot(repo, null, snap, secretPinsOf(f.raw), { sandbox: sandboxOnlyOf(f.raw),
+      untracked: o.untracked ?? settings?.untracked ?? false }));
+    const swap = swapIn(boundary, snap);
     copyManifests(snap, join(tmp, "manifests"));
     for (const cfg of f.projects) {
       const log = join(repo, ".arnx", "run", f.legacy ? "baseline-build.log" : `baseline-build-${cfg.name}.log`);
@@ -1983,7 +2000,7 @@ export async function rerecordBaseline(repo: string, o: { by: string; at: string
       const all = { ...cfg, knownFailing: [] };
       let [ok, summary, , , , , counts] = await runSuite(all, snap, log, { sessionFactory: o.sessionFactory,
         key: envKey(cfg, join(tmp, "manifests")), acceptedTestsDir: accepted, accepted: trusted,
-        outputLog: join(repo, output), baseline: "record" });
+        outputLog: join(repo, output), baseline: "record", boundary, swap });
       // Most of the suite failing is the environment, not today's code: nothing is recorded from it.
       const most = ok && counts.failed.length > counts.passed;
       if (most) {

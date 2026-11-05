@@ -12,11 +12,12 @@ import { recheckJson, recheckReview, recheckSummary } from "../src/recheck";
 import { docker, ensureEnv } from "../src/sandbox";
 import { runTests } from "../src/outcomes";
 import { dockerSession } from "../src/testround";
+import { fake } from "../src/secrets";
 import { EVENTS_FILE } from "../src/events";
 import { exitCode } from "../src/report";
 import { runReview } from "../src/reviewer";
 import { defaultSettings } from "../src/settings";
-import { approveConfig } from "../src/setup";
+import { approveConfig, runSetup } from "../src/setup";
 import { FakeJson, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
 import { useTmp } from "./helpers/tmp";
@@ -354,6 +355,124 @@ def test_hex():
     const again = await recheckReview(repo, rdir, settings);
     expect(again.findings.length).toBe(CANARY_NAMES.length);
     expectNoForm("arnx check --review", recheckJson(again) + recheckSummary(again)[0]);
+  }, 600_000);
+
+  // --- a model's stand-in, in a real test run ---------------------------------------------------------------------------
+  const SHOWN = fake(GUESS, new Map());
+  const SHOWN_B64 = Buffer.from(SHOWN).toString("base64");
+  const VALUE_GEN = "tests/arnx_generated/test_value.py";
+  const VALUE_TEST = `import base64
+from shop import settings
+
+def test_value():
+    assert settings.db_password == "${SHOWN}"
+def test_encoded_at_run():
+    assert base64.b64encode(settings.db_password.encode()) == base64.b64encode(b"${SHOWN}")
+def test_on_the_mounted_code():
+    assert '"${SHOWN}"' in open("/src/shop/settings.py").read()
+def test_encoded_as_written():
+    assert base64.b64encode(settings.db_password.encode()).decode() == "${SHOWN_B64}"
+`;
+  const VALUE_NAMES = ["test_value", "test_encoded_at_run", "test_on_the_mounted_code", "test_encoded_as_written"];
+  const valueRepo = (name: string, yaml: string) => {
+    const repo = initRepo(join(tmp(), name));
+    mkdirSync(join(repo, "shop"));
+    mkdirSync(join(repo, "tests"));
+    writeFileSync(join(repo, "shop/__init__.py"), "");
+    writeFileSync(join(repo, "shop/settings.py"), `db_password = "${GUESS}"\n`);
+    writeFileSync(join(repo, "shop/price.py"), "def price(a):\n    return a\n");
+    writeFileSync(join(repo, "shop/names.py"), "NAME = 'shop'\n");
+    writeFileSync(join(repo, ".gitignore"), "__pycache__\n.arnx/run\n");
+    mkdirSync(dirname(reviewConfigPath(repo)));
+    writeFileSync(reviewConfigPath(repo), stamp(parseReviewConfig(yaml), "Dev", "2026-11-04"));
+    commit(repo, "the code");
+    writeFileSync(join(repo, "shop/price.py"), "def price(a):\n    return a + 1\n");
+    commit(repo, "a change");
+    return repo;
+  };
+  /** Each test's class in the review's event log. */
+  const classes = (rdir: string) => {
+    const out: Record<string, string[]> = {};
+    for (const line of readFileSync(join(rdir, EVENTS_FILE), "utf8").split("\n").filter(Boolean)) {
+      const e = JSON.parse(line);
+      if (e.type === "test.classified") (out[e.data.class] ??= []).push(e.data.func);
+    }
+    return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, v.sort()]));
+  };
+  const expectNoReal = (what: string, text: string) => {
+    for (const form of forms(GUESS)) if (text.includes(form)) throw new Error(`${what} holds a real value: ${form}`);
+  };
+  const allIn = (dir: string) => (readdirSync(dir, { recursive: true, withFileTypes: true }) as import("node:fs").Dirent[])
+    .filter((e) => e.isFile()).map((e) => [join(e.parentPath, e.name), readFileSync(join(e.parentPath, e.name), "utf8")] as const);
+
+  test("a model's test holding a stand-in passes against the real value in the code, and nothing real is kept", async () => {
+    const repo = valueRepo("plain", "version: 1\nimage: python:3.12-slim\ninstall: [pip install pytest]\n" +
+      "test_command: python -m pytest -q {targets}\n");
+    const settings = { ...defaultSettings(), consentAt: "2026-11-04T00:00:00Z", beforeCheck: false };
+    const report = JSON.stringify({ tests: [], questions: [], suspected_defects: [
+      { test: `${VALUE_GEN}::test_encoded_as_written`, explanation: "It does not match." }] });
+    const agent = recorded([[tool("grep", { pattern: SHOWN, path: "shop" })],
+      [tool("write_file", { path: VALUE_GEN, content: VALUE_TEST }), tool("run_tests", {})]], report);
+    const judge = { ref: "openai:x", completeJson: async () => [{ verdict: "confirmed", reason: "No.", groups: [] }, 0.01] } as
+      unknown as JsonModel;
+    const { review, rdir } = await runReview(repo, { settings, agentModel: agent.model, challenger: judge });
+    // A stand-in as written comes back; one a model encoded itself does not, and that test fails on the real value.
+    expect(classes(rdir)).toEqual({ finding: ["test_encoded_as_written"],
+      passed: ["test_encoded_at_run", "test_on_the_mounted_code", "test_value"] });
+    expect(review.findings.map((f) => f.testId.split("::")[1])).toEqual(["test_encoded_as_written"]);
+    const sent = agent.bodies.join("\n");
+    // The grep found the value, and its line came back with the stand-in.
+    expect(sent).toContain(`shop/settings.py:1: db_password = \\"${SHOWN}`);
+    expectNoReal("the agent's requests", sent);
+    const md = blankMarks(readFileSync(join(rdir, "review.md"), "utf8")).replaceAll("Mark: [ ] real", "Mark: [x] real");
+    writeFileSync(join(rdir, "review.md"), md);
+    await accept(repo, rdir, settings, { answerRunner: null });
+    // Accepted, run again: the kept file keeps the stand-in and the run holds the value.
+    const results = await check(repo, settings);
+    expect(results[0]!.passed.map((t) => t.split("::")[1]).sort()).toEqual(
+      ["test_encoded_at_run", "test_on_the_mounted_code", "test_value"]);
+    expect(results[0]!.failed.map((t) => t.testId.split("::")[1])).toEqual(["test_encoded_as_written"]);
+    const kept = allIn(join(repo, ".arnx"));
+    expect(kept.some(([p, t]) => p.includes("/.arnx/tests/") && t.includes(SHOWN))).toBe(true);
+    for (const [p, t] of kept) expectNoReal(p, t);
+    expect((await recheckReview(repo, rdir, settings)).findings.map((f) => f.status)).toEqual(["still-failing"]);
+    for (const [p, t] of allIn(join(repo, ".arnx"))) expectNoReal(p, t);
+  }, 600_000);
+
+  test("on a baked copy the same test passes against the copy's stand-in, and one reading the mounted code does not", async () => {
+    const repo = valueRepo("baked", "version: 1\nimage: python:3.12-slim\n" +
+      "install: [pip install pytest, cp -r . /opt/app]\ntest_command: pytest -q {targets}\nenv: {PYTHONPATH: /opt/app}\n");
+    const settings = { ...defaultSettings(), consentAt: "2026-11-04T00:00:00Z", beforeCheck: false };
+    const report = JSON.stringify({ tests: [], questions: [], suspected_defects: [] });
+    const agent = recorded([[tool("write_file", { path: VALUE_GEN, content: VALUE_TEST }), tool("run_tests", {})]], report);
+    const judge = { ref: "openai:x", completeJson: async () => [{ verdict: "confirmed", reason: "No.", groups: [] }, 0.01] } as
+      unknown as JsonModel;
+    const { rdir } = await runReview(repo, { settings, agentModel: agent.model, challenger: judge });
+    expect(classes(rdir)).toEqual({ finding: ["test_on_the_mounted_code"],
+      passed: ["test_encoded_as_written", "test_encoded_at_run", "test_value"] });
+    expectNoReal("the agent's requests", agent.bodies.join("\n"));
+    for (const [p, t] of allIn(join(repo, ".arnx"))) expectNoReal(p, t);
+  }, 600_000);
+
+  test("exec runs a stand-in as the value in the container, with no network, and its output comes back masked", async () => {
+    const repo = valueRepo("exec", "version: 1\nimage: python:3.12-slim\ninstall: [pip install pytest]\n" +
+      "test_command: python -m pytest -q {targets}\n");
+    const yaml = "version: 1\nprojects:\n  app:\n    root: .\n    image: python:3.12-slim\n" +
+      "    install: [pip install pytest]\n    test_command: python -m pytest -q {targets}\n    tests_dir: tests/arnx_generated\n";
+    writeFileSync(join(repo, "tests/test_a.py"), "def test_a():\n    pass\n");
+    commit(repo, "a test");
+    const out = join(tmp(), "setup");
+    const agent = recorded([[tool("try_project", { yaml, project: "app" })],
+      [tool("exec", { project: "app", command: `echo said ${SHOWN}; grep -c ${SHOWN} shop/settings.py; printf %s ${SHOWN} | base64; ` +
+        "python -c 'import socket; socket.create_connection((\"1.1.1.1\", 53), 3)' 2>&1 | tail -1" })]], "done");
+    await runSetup(repo, { ...defaultSettings(), consentAt: "2026-11-04T00:00:00Z" }, agent.model, { outDir: out });
+    const sent = agent.bodies.join("\n");
+    expect(sent).toContain(`said ${SHOWN}\\n1\\n`);
+    expect(sent).toMatch(/unreachable|OSError|timed out|No route/i);
+    expectNoReal("setup's requests", sent);
+    const logged = allIn(out);
+    expect(logged.some(([p]) => p.endsWith("exec-1.log"))).toBe(true);
+    for (const [p, t] of logged) expectNoReal(p, t);
   }, 600_000);
 
   test("only the project's own manifest keeps a guess in a built image; the code an install can run does not", async () => {

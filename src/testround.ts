@@ -14,13 +14,13 @@ import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type Be
   fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, newNames, notChecked, SKIP_REASONS, textBefore, textFix,
   vacuousBefore } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
-import { type Boundary, maskedCopy } from "./boundary";
+import { type Boundary, maskedCopy, type Swap } from "./boundary";
 import { snapshot, takeSnapshot, tooLargeText, withSandboxFiles } from "./change";
 import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
 import { clip, emit, testMessage } from "./events";
 import { type Classified, classify, describeRun, funcOf, ownerFile, runTests, type TestResult } from "./outcomes";
-import { dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
+import { DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
   type SessionFactory } from "./sandbox";
 import type { Say } from "./progress";
 import { describeTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
@@ -50,7 +50,23 @@ export interface Round {
   typecheck?: TypeCheck;
 }
 
-export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, envFrom, key) => {
+/** What a model's text means in the snapshot `snap`, `ours` (and the runners' reports) not being real text. */
+export const swapIn = (b: Boundary, snap: string, ours: (rel: string) => boolean = () => false): Swap =>
+  b.swapFor(snap, (rel) => rel === REPORT_DIR || ours(rel));
+
+/** The files `rels` of a snapshot, as they mean there: tests kept with their stand-ins, now in place to run. */
+export function swapFiles(snap: string, rels: readonly string[], swap: Swap): void {
+  for (const rel of rels) {
+    const was = readFileSync(join(snap, rel), "utf8");
+    const now = swap.text(was);
+    if (now !== was) writeFileSync(join(snap, rel), now);
+  }
+}
+
+// `swap` reaches the session only when runs read the mounted code: a baked copy comes from the build context, so it holds
+// each guess's stand-in, and a test, an env or a command holding that stand-in agrees with it as it is. `Runner.copies` tells
+// whoever places a test. A test there that reads /src and compares with a stand-in fails: /src holds the value.
+export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, envFrom, key, swap) => {
   requireDocker();
   let image = await ensureEnv(cfg, envFrom ?? snap, buildLog, key);
   // An image holding an older copy of the code (baked.ts) is built again for the code in the snapshot, once per version
@@ -79,7 +95,7 @@ export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, e
       } };
     };
   }
-  const session = await new Session(image, cfg, snap).start();
+  const session = await new Session(image, cfg, snap, DEFAULT_LIMITS, copies.length ? undefined : swap).start();
   // Files the tests need that no model may read are in the snapshot only while a test runs.
   const placed = withSandboxFiles(session, snap);
   const runner = guard ? guard(placed) : placed;
@@ -288,6 +304,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   let saw = false, dbLeft: string[] | undefined, before: BeforeCheck | undefined, headKey = "";
   let hunt: RoundHunt | undefined;
   let fixProof: FixCheck | undefined;
+  let baked = false;
   let checked: TypeCheckRun | undefined, typecheck: TypeCheck | undefined;
   const dbNames = databaseEnv(cfg.env, cfg.services);
   try {
@@ -296,7 +313,10 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
       untracked: !!o.untracked });
     removed = taken.withheld.map((w) => w.path);
     // Before the brain hears anything from this snapshot.
-    o.brain.boundary?.add(taken.suspects);
+    const filter = o.brain.boundary;
+    filter?.addScrubbed(taken);
+    // What the tests directory holds from here on is a model's or arnx's.
+    const swap = filter && swapIn(filter, snap, (rel) => rel === o.writeDir || rel.startsWith(`${o.writeDir}/`));
     if (taken.tooLarge.length) say(tooLargeText(taken.tooLarge));
     // Clear earlier generated files only: for some languages the tests directory also holds the project's own tests.
     mkdirSync(join(snap, o.writeDir), { recursive: true });
@@ -321,8 +341,9 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const probe = probeRun(session, snap, cfg, o.writeDir, "probe.xml", RUN_TIMEOUT);
         if (!probe.seen) {
           const log = join(o.outDir, "probe.log");
-          writeFileSync(log, probe.result.output);
-          throw probeFailure(cfg, probe.result, log, session.copies?.(probe.result.output));
+          const said = { ...probe.result, output: filter ? filter.mask(probe.result.output) : probe.result.output };
+          writeFileSync(log, said.output);
+          throw probeFailure(cfg, said, log, session.copies?.(probe.result.output));
         }
         let counter = 0;
         // Runs name the generated test files, never the tests directory: for some languages (Rust) that directory
@@ -340,7 +361,10 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
           if (results?.some((t) => ownerFile(t.fileAttr, own) !== null)) saw = true;
           return describeRun(result, results, own);
         };
-        const ws = new Workspace(snap, { writeDir: o.writeDir, runTests: run, adapter, runner: cfg.runner });
+        // A copy holding the stand-ins is what tests run on, while the tools read the files here.
+        baked = !!session.copies;
+        const ws = new Workspace(snap, { writeDir: o.writeDir, runTests: run, adapter, runner: cfg.runner, reads: swap,
+          ...(baked ? {} : { writes: swap }) });
         // The facts the brain decides its follow-ups on: what the generated tests name, computed here.
         const coverage = o.coverage ?? [];
         const tools: RoundTools = { tools: () => ws.tools(), call: (name, args) => ws.call(name, args),
@@ -416,7 +440,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         }
         if (o.typecheck && cfg.typecheck) checked = typecheckHere(session, snap, cfg, o.writeDir, say);
         return [a, f, r] as const;
-      });
+      }, undefined, undefined, swap);
     const classes = o.before ? classify(results) : null;
     const failing = classes?.findings ?? [];
     // Chosen by test id, so the same tests are checked whatever order the runner reported them in.
@@ -425,11 +449,12 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
     if (o.before && (failing.length || proofs.length)) {
       ({ before, fixProof } = await beforeStage(repo, cfg, { ...o.before, findings: failing, proofs, files,
         writeDir: o.writeDir, runs: o.runs, headSnap: snap, headKey, tmp, outDir: o.outDir,
-        sessionFactory: o.sessionFactory ?? dockerSession, say, ...(o.brain.boundary ? { boundary: o.brain.boundary } : {}) }));
+        sessionFactory: o.sessionFactory ?? dockerSession, say, ...(baked ? {} : { swap }),
+        ...(o.brain.boundary ? { boundary: o.brain.boundary } : {}) }));
     }
     if (checked) {
       typecheck = await typecheckDone(repo, cfg, checked, { ...o.typecheck!, headSnap: snap, headKey, tmp,
-        outDir: o.outDir, sessionFactory: o.sessionFactory ?? dockerSession, say });
+        outDir: o.outDir, sessionFactory: o.sessionFactory ?? dockerSession, say, ...(baked ? {} : { swap }) });
     }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -481,13 +506,17 @@ export async function typecheckRound(repo: string, head: string | null, cfg: Rev
   const tmp = mkdtempSync(join(tmpdir(), "arnx-"));
   try {
     const snap = join(tmp, "repo");
-    o.boundary?.add(takeSnapshot(repo, head, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw),
-      untracked: !!o.untracked }).suspects);
+    o.boundary?.addScrubbed(takeSnapshot(repo, head, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw),
+      untracked: !!o.untracked }));
+    const swap = o.boundary && swapIn(o.boundary, snap);
     const headKey = envKey(cfg, snap);
-    const run = await sessionFactory({ ...cfg, services: [] }, snap, join(o.outDir, "env-build.log"),
-      async (session) => typecheckHere(session, snap, cfg, writeDirOf(cfg), say));
+    let baked = false;
+    const run = await sessionFactory({ ...cfg, services: [] }, snap, join(o.outDir, "env-build.log"), async (session) => {
+      baked = !!session.copies;
+      return typecheckHere(session, snap, cfg, writeDirOf(cfg), say);
+    }, undefined, undefined, swap);
     return await typecheckDone(repo, cfg, run, { changed: o.changed, ...(o.base !== undefined ? { base: o.base } : {}),
-      headSnap: snap, headKey, tmp, outDir: o.outDir, sessionFactory, say });
+      headSnap: snap, headKey, tmp, outDir: o.outDir, sessionFactory, say, ...(baked ? {} : { swap }) });
   } catch (e) {
     const run: TypeCheckRun = { status: "failed", errors: [], output: e instanceof Error ? e.message : String(e),
       exitCode: null, timedOut: false, seconds: 0 };
@@ -522,7 +551,7 @@ function typecheckHere(session: Runner, snap: string, cfg: ReviewConfig, writeDi
  * what keys the image, its dependencies differ there and errors are not compared. */
 async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun, o: { changed: string[];
   base?: string | null; headSnap: string; headKey: string; tmp: string; outDir: string; sessionFactory: SessionFactory;
-  say: (m: string) => void }): Promise<TypeCheck> {
+  say: (m: string) => void; swap?: Swap }): Promise<TypeCheck> {
   let secs = run.seconds;
   let before: { status: TypeCheckBefore; errors?: TscError[] } | undefined, error: string | undefined;
   if (run.status === "errors" && o.base !== undefined) {
@@ -536,7 +565,7 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
         else {
           o.say("type check on the code before the change");
           const there = await o.sessionFactory({ ...cfg, services: [] }, snap, join(o.outDir, "typecheck-env-build.log"),
-            async (session) => runTypecheck(session, cfg), o.headSnap, o.headKey);
+            async (session) => runTypecheck(session, cfg), o.headSnap, o.headKey, o.swap);
           secs += there.seconds;
           emit("typecheck.run", { project: cfg.name, on: "before", status: there.status, errors: there.errors.length,
             exit_code: there.exitCode, timed_out: there.timedOut, duration_ms: Math.round(there.seconds * 1000) });
@@ -567,7 +596,7 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
 async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | null; diff?: string; deadline?: number;
   findings: TestResult[]; proofs: TestResult[]; files: Record<string, string>; writeDir: string; runs: number;
   headSnap: string; headKey: string; tmp: string;
-  outDir: string; sessionFactory: SessionFactory; say: (m: string) => void; boundary?: Boundary })
+  outDir: string; sessionFactory: SessionFactory; say: (m: string) => void; boundary?: Boundary; swap?: Swap })
   : Promise<{ before?: BeforeCheck; fixProof?: FixCheck }> {
   const started = performance.now();
   const ms = (from: number) => Math.round(performance.now() - from);
@@ -631,8 +660,8 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
     let late = false, proofLate = false, envChanged = false;
     const proofRuns: BeforeRun[] = [];
     // Its values may reach a model through a run's output, as the change's do.
-    const copyCode = () => o.boundary?.add(takeSnapshot(repo, o.base!, snap, secretPinsOf(cfg.raw),
-      { sandbox: sandboxOnlyOf(cfg.raw) }).suspects);
+    const copyCode = () => o.boundary?.addScrubbed(takeSnapshot(repo, o.base!, snap, secretPinsOf(cfg.raw),
+      { sandbox: sandboxOnlyOf(cfg.raw) }));
     // Set when the code is in place before the session, for an image made from it (below).
     let inImage = false;
     const inSession = async (session: Runner) => {
@@ -704,7 +733,7 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
     const buildLog = join(o.outDir, "before-env-build.log");
     let runs: BeforeRun[];
     try {
-      runs = await o.sessionFactory(cfg, snap, buildLog, inSession, o.headSnap, o.headKey);
+      runs = await o.sessionFactory(cfg, snap, buildLog, inSession, o.headSnap, o.headKey, o.swap);
     } catch (e) {
       if (!(e instanceof CopyDiffers)) throw e;
       // The tests run the image's copy of the code, which is the change's: the code before it needs an image of its own,
@@ -714,7 +743,7 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
       proofRuns.length = 0;
       rmSync(snap, { recursive: true, force: true });
       copyCode();
-      runs = await o.sessionFactory(cfg, snap, buildLog, inSession, o.headSnap, o.headKey);
+      runs = await o.sessionFactory(cfg, snap, buildLog, inSession, o.headSnap, o.headKey, o.swap);
     }
     if (late) return skip("time");
     // A test that reads one of the project's source files as text and matches it proves no regression and no fix.

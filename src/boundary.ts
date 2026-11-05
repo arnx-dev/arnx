@@ -3,8 +3,14 @@
 // does a piece of one at the edge of a word, as a cut leaves it, unless the value is proven word-like. A
 // wrong guess costs an odd string in a prompt: nothing on disk changes. One Boundary serves a run: it starts empty and
 // is told each value before the text holding it can leave (a run's snapshots, both sides of its diff).
+//
+// The other way, a model's text meets real files: its tests, its tool inputs and what it proposes hold the stand-ins it
+// read. `swapFor` gives them back as they mean there, at the last moment and in memory only, for what runs or reads the
+// real files; nothing swapped back is kept, logged or sent.
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentModel, JsonModel } from "./llm";
-import { fake, hasSecretContent, nameShaped, type SecretPin, suspects } from "./secrets";
+import { fake, hasSecretContent, isCertainRule, nameShaped, type SecretPin, suspects } from "./secrets";
 import { ValueIndex } from "./valueindex";
 
 /** The shortest piece of a value taken for that value: shorter ones are too often a piece of something else. */
@@ -123,10 +129,49 @@ function apply(text: string, edits: Edit[], withText: (e: Edit) => string): stri
   return parts.join("");
 }
 
+/** What a model's text means where real files are (Boundary.swapFor). */
+export interface Swap {
+  /** Text used as it is: a test, a path, a command. */
+  text(t: string): string;
+  /** A regular expression: a stand-in written bare or escaped, back as its value escaped. */
+  pattern(p: string): string;
+}
+
+/** A stand-in is made letter for letter (secrets.ts fake), so this is the same for it and its value, and a text's windows
+ * of a value's shape are the only places its stand-in can be: no other value's slow hash need be taken. */
+const shapeOf = (s: string) => s.replace(/[0-9]/g, "0").replace(/[A-Z]/g, "A").replace(/[a-z]/g, "a");
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
+/** Files past this are not read for a stand-in: a snapshot keeps no text this large. */
+const HELD_MOST = 32_000_000;
+
+/** Whether a file under `root`, by its name or its bytes, holds `text`; `notReal` (paths relative to it) are not looked at. */
+function heldUnder(root: string, text: string, notReal: (rel: string) => boolean): boolean {
+  const bytes = Buffer.from(text);
+  const look = (rel: string): boolean => {
+    for (const name of readdirSync(join(root, rel))) {
+      const r = rel ? `${rel}/${name}` : name;
+      if (notReal(r)) continue;
+      if (name.includes(text)) return true;
+      try {
+        const st = lstatSync(join(root, r));
+        if (st.isDirectory() ? look(r) : st.isFile() && st.size <= HELD_MOST && readFileSync(join(root, r)).includes(bytes)) {
+          return true;
+        }
+      } catch {
+        // a run took it away
+      }
+    }
+    return false;
+  };
+  return look("");
+}
+
 export class Boundary {
   private values = new Set<string>();
   /** The values as written, and their JSON and URL forms: what a stand-in comes back to (`unmask`). `values` adds the
-   * encoded forms. */
+   * encoded forms, which never do: a run encodes the plain form it holds, and text holding an encoded stand-in stays. */
   private plain = new Set<string>();
   /** Longest first, so a value inside another never breaks it. */
   private longest: string[] = [];
@@ -139,6 +184,10 @@ export class Boundary {
   private judged = new Map<string, boolean>();
   /** An encoded form, and how it was made from the value `formOf` names. */
   private encodingOf = new Map<string, (v: string) => string>();
+  /** The values and forms that have stand-ins where tests run: a test's stand-in of one is what the code holds. */
+  private faked = new Set<string>();
+  /** The plain forms by shape, and an index of the shapes: made when first asked, and again after values are added. */
+  private shapes: { of: Map<string, string[]>; index: ValueIndex } | null = null;
 
   constructor(values: Iterable<string> = []) {
     this.add(values);
@@ -161,6 +210,18 @@ export class Boundary {
     if (this.values.size === before) return;
     this.longest = [...this.plain].sort((a, b) => b.length - a.length);
     this.index = null;
+    this.shapes = null;
+  }
+
+  /** A snapshot's values: `secrets` got stand-ins in it, and the rest are real there. */
+  addScrubbed(taken: { suspects: Iterable<string>; secrets: Iterable<string> }): void {
+    this.add(taken.suspects);
+    this.add(taken.secrets);
+    this.keepFaked(taken.secrets);
+  }
+
+  private keepFaked(values: Iterable<string>): void {
+    for (const v of values) for (const form of forms(v)) this.faked.add(form);
   }
 
   /** The forms a test can turn a real value into on its way to its output. An address's `pw@` is encoded as `pw` and keeps
@@ -180,7 +241,9 @@ export class Boundary {
 
   /** The values on both sides of a diff, a value only removed too. */
   addDiff(diff: string, allow: readonly SecretPin[] = []): void {
-    this.add(diffSuspects(diff, allow));
+    const why = new Map<string, string>();
+    this.add(diffSuspects(diff, allow, why));
+    this.keepFaked([...why].filter(([, rule]) => isCertainRule(rule)).map(([v]) => v));
   }
 
   /** `text` without any of the values, each replaced wherever it stands, inside a longer word too, and without the piece
@@ -239,14 +302,84 @@ export class Boundary {
     return Object.fromEntries(Object.entries(v).map(([k, x]) => [this.mask(k), this.walk(x)]));
   }
 
-  /** `text` with each stand-in back as its value. */
-  unmask(text: string): string {
-    let out = text;
-    for (const v of this.longest) {
-      const s = fake(v, this.made);
-      if (s !== v) out = out.replaceAll(s, v);
+  /** Where `text` holds the stand-in of a value real where tests run, longest first at each place. A value's slow hash is
+   * taken only when the text has a window of its shape, so text with none costs a slide over it; a run of values of one shape
+   * (all digits, one length) costs one hash each, once, if the text has such a window. `held`: a stand-in that means
+   * itself, as real text holds it. */
+  private standInsIn(text: string, held?: (standIn: string) => boolean): { at: number; length: number; value: string }[] {
+    if (!this.plain.size) return [];
+    if (!this.shapes) {
+      const of = new Map<string, string[]>();
+      for (const v of this.plain) {
+        const shape = shapeOf(v);
+        const same = of.get(shape);
+        if (same) same.push(v);
+        else of.set(shape, [v]);
+      }
+      this.shapes = { of, index: new ValueIndex(of.keys()) };
     }
-    return out;
+    const { of, index } = this.shapes;
+    const found: { at: number; length: number; value: string }[] = [];
+    index.eachStart(shapeOf(text), (shape, at, n) => {
+      if (n !== shape.length) return;
+      const same = of.get(shape)!;
+      // What a model read was hashed when it was masked: those first, and one match is enough.
+      for (const hashed of [true, false]) {
+        for (const v of same) {
+          if (this.made.has(v) !== hashed || this.faked.has(v)) continue;
+          const s = fake(v, this.made);
+          if (s === v || !text.startsWith(s, at)) continue;
+          if (!held?.(s)) found.push({ at, length: n, value: v });
+          return;
+        }
+      }
+    });
+    found.sort((a, b) => a.at - b.at || b.length - a.length);
+    let from = 0;
+    return found.filter((e) => e.at >= from && (from = e.at + e.length, true));
+  }
+
+  /** `text` with each stand-in of a value real where tests run back as its value. */
+  unmask(text: string, held?: (standIn: string) => boolean): string {
+    const parts: string[] = [];
+    let from = 0;
+    for (const e of this.standInsIn(text, held)) {
+      parts.push(text.slice(from, e.at), e.value);
+      from = e.at + e.length;
+    }
+    return from ? parts.join("") + text.slice(from) : text;
+  }
+
+  /** The regular expression `pattern` with each stand-in, bare or escaped, back as its value, which it then matches as
+   * plain text. A stand-in holds the signs its value does. */
+  private unmaskPattern(pattern: string, held?: (standIn: string) => boolean): string {
+    const bare: string[] = [];
+    const places: number[] = [];
+    for (let i = 0; i < pattern.length; i++) {
+      places.push(i);
+      if (pattern[i] === "\\" && i + 1 < pattern.length && !/[0-9A-Za-z\s]/.test(pattern[i + 1]!)) i++;
+      bare.push(pattern[i]!);
+    }
+    const parts: string[] = [];
+    let from = 0;
+    for (const e of this.standInsIn(bare.join(""), held)) {
+      parts.push(pattern.slice(from, places[e.at]!), escapeRegExp(e.value));
+      from = places[e.at + e.length] ?? pattern.length;
+    }
+    return from ? parts.join("") + pattern.slice(from) : pattern;
+  }
+
+  /** How a model's text reads where the files under `root` are real. A stand-in those files hold stays as written: there it
+   * means itself, and a wrong swap would change what the text says. `notReal` (paths relative to `root`): files that do
+   * not count, as a model's own tests. Looked at when a stand-in is first met, so a run with none reads nothing. */
+  swapFor(root: string, notReal: (rel: string) => boolean = () => false): Swap {
+    const known = new Map<string, boolean>();
+    const held = (s: string) => {
+      let yes = known.get(s);
+      if (yes === undefined) known.set(s, yes = heldUnder(root, s, notReal));
+      return yes;
+    };
+    return { text: (t) => this.unmask(t, held), pattern: (p) => this.unmaskPattern(p, held) };
   }
 
   /** The stand-ins of every value. */
@@ -277,10 +410,10 @@ export function maskedCopy<T>(b: Boundary, value: T): { value: T; shown: boolean
 export const STAND_INS_NOTE = "Values that look like secrets show as stand-ins: the test's file and line show the real code.";
 
 /** The values on both sides of a diff, each side read as the file's own text so a file's kind counts. */
-export function diffSuspects(diff: string, allow: readonly SecretPin[] = []): string[] {
+export function diffSuspects(diff: string, allow: readonly SecretPin[] = [], why?: Map<string, string>): string[] {
   const out = new Set<string>();
   const scan = (path: string, text: string) => {
-    for (const v of suspects(path, text, allow.find((a) => a.path === path)?.matches ?? [])) out.add(v);
+    for (const v of suspects(path, text, allow.find((a) => a.path === path)?.matches ?? [], why)) out.add(v);
   };
   for (const section of diff.split(/^(?=diff --git )/m)) {
     const path = /^\+\+\+ b\/(.*)$/m.exec(section)?.[1] ?? /^--- a\/(.*)$/m.exec(section)?.[1] ?? "";

@@ -1662,3 +1662,61 @@ test("a capitals key behind a short kind prefix is judged as its body is, whatev
     expect(differ).toBe(0);
   }
 });
+
+// --- a model's stand-in meets real files (S3) ------------------------------------------------------------------------
+
+/** A test the fake sandbox runs as a test would: it passes when the value it names is what settings.py holds, and its
+ * failure quotes what the code holds. */
+const VALUE_TEST = (held: string) => `from settings import api_token\n\ndef test_add():\n    assert api_token == "${held}"\n`;
+const valueRun = (snap: () => string, ran: string[]) => (command: string): [string | null, string, boolean] => {
+  void command;
+  const test = readFileSync(join(snap(), GEN), "utf8");
+  const code = readFileSync(join(snap(), "settings.py"), "utf8");
+  const named = /== "([^"]*)"/.exec(test)![1]!;
+  ran.push(test);
+  return code.includes(`"${named}"`) ? [junitXml([[GEN, "test_add", "passed", ""]]), "1 passed\n", false]
+    : [junitXml([[GEN, "test_add", "failed", `assert ${code.trim()} == "${named}"`]]), `E   ${code}\n1 failed\n`, false];
+};
+const valueRound = (held: string) => (): Block[][] => [[tool("read_file", { path: "settings.py" })],
+  [tool("write_file", { path: GEN, content: VALUE_TEST(held) }), tool("run_tests", {})]];
+
+test("a test holding a stand-in passes against the real value in the snapshot", async () => {
+  const repo = leakyRepo({ standIns: true });
+  const agent = new RecordingAgent(valueRound(FAKED)(), JSON.stringify({
+    tests: [{ test: `${GEN}::test_add`, expects: "the token" }], suspected_defects: [], questions: [] }));
+  const made: FakeSession[] = [];
+  const ran: string[] = [];
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent,
+    challenger: new RecordingJson("openai:x", VERDICT), sessionFactory: fakeFactory(valueRun(() => made[0]!.snap, ran), made) });
+  // The run was on the real value, and the test said it.
+  expect(ran.length).toBeGreaterThan(0);
+  expect(ran.every((t) => t.includes(CANARY) && !t.includes(FAKED))).toBe(true);
+  expect(review.findings).toEqual([]);
+  expect(review.projectStats?.[0]?.passed ?? 1).toBeGreaterThan(0);
+});
+
+test("the saved test file keeps the stand-in", async () => {
+  const repo = leakyRepo({ standIns: true });
+  const agent = new RecordingAgent(valueRound(FAKED)(), JSON.stringify({
+    tests: [{ test: `${GEN}::test_add`, expects: "the token" }], suspected_defects: [], questions: [] }));
+  const made: FakeSession[] = [];
+  const { rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent,
+    challenger: new RecordingJson("openai:x", VERDICT), sessionFactory: fakeFactory(valueRun(() => made[0]!.snap, []), made) });
+  const saved = (readdirSync(rdir, { recursive: true }) as string[]).filter((f) => f.endsWith(".arnx-copy"));
+  expect(saved.length).toBe(1);
+  const text = readFileSync(join(rdir, saved[0]!), "utf8");
+  expect(text).toContain(FAKED);
+  expect(text).not.toContain(CANARY);
+});
+
+test("a failure message quoting the real value is masked before a model sees it", async () => {
+  const repo = leakyRepo({ standIns: true });
+  // The test names something else, so it fails, and the failure quotes the code.
+  const agent = new RecordingAgent(valueRound("not the value")());
+  const made: FakeSession[] = [];
+  await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson("openai:x", VERDICT),
+    sessionFactory: fakeFactory(valueRun(() => made[0]!.snap, []), made) });
+  const sent = agent.bodies.join("\n");
+  expectClean("the failure", sent);
+  expect(sent).toContain(`E   api_token = \\"${FAKED}`);
+});
