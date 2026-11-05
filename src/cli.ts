@@ -27,7 +27,7 @@ import { type Account, byokHint, CloudClient, credentialsPath, deleteCredentials
   type Fetch, tokenFor, usd } from "./cloud";
 import { dockerSession, suffixReviewCopies } from "./testround";
 import type { SessionFactory } from "./sandbox";
-import { describe, describeBlanked, describeWithheld, git, repoRoot, resolveChange } from "./change";
+import { branchBase, describe, describeBlanked, describeWithheld, git, hasCommits, repoRoot, resolveChange } from "./change";
 import { NOT_SET_UP } from "./draft";
 import { route } from "./route";
 import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, readSecretPins, type ReviewFile,
@@ -1288,7 +1288,11 @@ class Commands {
       if (!hits.length) throw new ArnxError(`${rel} holds nothing that looks like a key; nothing to allow`);
       const shown = hits.slice(0, 5).map((h) => `${h.label} line ${h.line}`).join(", ") + (hits.length > 5 ? ", …" : "");
       this.d.out(`! ${rel}: ${hits.length} key-like string${hits.length === 1 ? "" : "s"} (${shown})`);
-      return { path: rel, matches: secretPins(text), hits };
+      // Each side of a change must be allowed: the file as it stands, as committed, where its branch left, and as allowed before.
+      const earlier = hasCommits(repo) ? ["HEAD", branchBase(repo)?.base].flatMap((rev) => rev
+        ? [git(repo, ["show", `${rev}:${rel}`], [0, 128])] : []) : [];
+      const before = (existsSync(reviewConfigPath(repo)) ? readSecretPins(repo) : []).find((x) => x.path === rel)?.matches ?? [];
+      return { path: rel, matches: [...new Set([...secretPins(text), ...earlier.flatMap(secretPins), ...before])].sort(), hits };
     });
     const path = reviewConfigPath(repo);
     const seed = !existsSync(path) || isSeedFile(repo);
@@ -1298,7 +1302,9 @@ class Commands {
     // Allowing is not sending: the file goes out with the next command that calls a model or runs the sandbox.
     this.d.out(`✓ Allowed in ${REVIEW_FILE}: from now on, model calls and the sandbox may include ` +
       `${pins.length === 1 ? "this file" : "these files"}.`);
-    this.d.out("  A new key-like string in it withholds the file again.");
+    this.d.out(pins.some((p) => p.hits.some((h) => h.label === "a private key"))
+      ? "  A private key reaches models as `[private key]`; any edit withholds the file again."
+      : "  A new key-like string in it withholds the file again.");
     this.d.out(`Next: ${seed ? "arnx setup" : "arnx review"}`);
     // Never the matched text, nor its pins: where each key-like string is, and what kind it looks like.
     this.emit("ok", 0, { files: pins.map((p) => ({ path: p.path, matches: p.hits.length,

@@ -16,8 +16,8 @@ import { dirname, join, posix, resolve, sep } from "node:path";
 import { configSuspects, loadReviewFile, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
-import { excludePathspecs, hasKeyBody, isCertainRule, isCodePath, isSecretPath, KEY_ANYWHERE, type KeyScan,
-  MAY_HOLD_KEY, mayShowPrivateKey, privateKeyBody, scanKeys, type SecretPin, standInsFor, suspects, usedAsName, WORD_RULE } from "./secrets";
+import { excludePathspecs, filePin, holdsPrivateKey, isCertainRule, isCodePath, isSecretPath, KEY_SHOWN, keyLines, keyPieces,
+  type KeyScan, MAY_HOLD_KEY, mayShowPrivateKey, privateKeyIn, scanKeys, type SecretPin, standInsFor, suspects, usedAsName, WORD_RULE } from "./secrets";
 import { buildContextDir, manifestRule, REPORT_DIR, type Runner } from "./sandbox";
 import { standInsSetting } from "./settings";
 import { DIFF_SECTION, splitLines } from "./util";
@@ -305,15 +305,17 @@ function secretStop(files: readonly { path: string; label: string }[], beforeOnl
 function leftOutReason(rel: string, read: { text: string; binary: boolean }, scan: KeyScan | null, pins: readonly string[],
                        fakes: boolean): { line: number; label: string } | null {
   const nul = read.binary || read.text.includes("\0");
-  const held = nul ? scanKeys(rel, read.text.replaceAll("\0", ""), pins) : scan;
+  const plain = nul ? read.text.replaceAll("\0", "") : read.text;
+  // A pin is of the file as it stands.
+  const held = nul ? scanKeys(rel, plain, pins.includes(filePin(read.text)) ? [...pins, filePin(plain)] : pins) : scan;
   if (!held) return null;
   if (nul) return "withhold" in held ? held.withhold : { line: held.blank[0]!, label: "key-shaped text" };
-  // A file that gets no stand-ins (a lockfile, or stand-ins off) is left out, as is a private key's body.
-  return "withhold" in held && (!fakes || privateKeyBody(read.text, pins)) ? held.withhold : null;
+  // A file that gets no stand-ins (a lockfile, or stand-ins off) is left out, as is a private key.
+  return "withhold" in held && (!fakes || holdsPrivateKey(read.text, pins)) ? held.withhold : null;
 }
 
-/** One side of a changed file, for sealDiff: its content; where a file no scan reads whole holds a key; or null, with
- * nothing to read (not on this side, not a file) or no key found. */
+/** One side of a changed file, for sealDiff: its content; why it counts as holding a key (a file no scan reads whole, or one
+ * that cannot be read); or null, with nothing to read (not a file, or no key found). */
 export type FileSide = { text: string; binary: boolean } | { line: number; label: string } | null;
 
 /** The working tree's side, what a snapshot of it copies. A link is its target's path: nothing here follows it. */
@@ -322,19 +324,22 @@ function fileSide(repo: string, path: string): FileSide {
   try {
     if (!lstatSync(p).isFile()) return null;
   } catch {
-    return null;
+    return UNREADABLE;
   }
   const big = overScanLimit(p);
   return big === "binary" || big === "too large" ? keyInStream(p) : scrubText(p, changeLimits.maxScanBytes);
 }
 
-/** A commit's side, read no further than the largest file a scan takes. */
+/** A commit's side, read no further than the largest file a scan takes; past that, onto disk and a piece at a time. A read
+ * that fails on a path the diff names counts as a hit. */
 function blobSide(repo: string, rev: string, path: string): FileSide {
-  const r = spawnSync("git", ["-C", repo, "show", `${rev}:${path}`], { maxBuffer: changeLimits.maxScanBytes });
-  if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ENOBUFS") return keyInBigFile(repo, rev, path);
-  if (r.error) throw new SetupRequired(`git could not run: ${r.error.message}`);
-  if (r.status !== 0) return null;
+  const r = spawnSync("git", ["-C", repo, "show", `${rev}:${path}`], { maxBuffer: changeLimits.maxScanBytes, env: searchEnv() });
   const bytes = r.stdout as unknown as Buffer;
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ENOBUFS" || bytes?.length > changeLimits.maxScanBytes) {
+    return keyInBlob(repo, rev, path);
+  }
+  if (r.error) throw new SetupRequired(`git could not run: ${r.error.message}`);
+  if (r.status !== 0) return UNREADABLE;
   return { text: bytes.toString("utf8"), binary: bytes.subarray(0, 8000).includes(0) };
 }
 
@@ -363,32 +368,42 @@ function blobSides(repo: string, diff: string) {
   };
 }
 
-/** What a file too large or too binary for a whole scan says when it cannot be searched. */
+/** What a file on disk no scan reads whole says when it cannot be read. */
 const UNREAD = { line: 1, label: "too large to scan" };
+/** What a side says when a path the diff names cannot be read. */
+const UNREADABLE = { line: 1, label: "could not be read" };
 
-/** Where a commit's file over every scan's limit holds a private key, searched by git, which keeps none of it here. A pin
- * cannot vouch for what no scan reads. A search that fails counts as a hit. */
-function keyInBigFile(repo: string, rev: string, path: string): { line: number; label: string } | null {
-  const r = spawnSync("git", [...SEARCH(repo), "-n", "-o", "-e", KEY_ANYWHERE, rev, "--", path],
-    { encoding: "utf8", maxBuffer: MAX_BUFFER, env: searchEnv() });
-  if (r.error || (r.status !== 0 && r.status !== 1)) return UNREAD;
-  const hit = /:(\d+):[^:\n]*$/m.exec(r.stdout);
-  return hit ? { line: Number(hit[1]), label: "a private key" } : null;
+/** A private key in a commit's file over every scan's limit: the file goes to disk for keyInStream. A read that fails counts
+ * as a hit. */
+function keyInBlob(repo: string, rev: string, path: string): { line: number; label: string } | null {
+  const dir = mkdtempSync(join(tmpdir(), "arnx-"));
+  try {
+    const p = join(dir, "blob");
+    const fd = openSync(p, "w", 0o600);
+    let r;
+    try {
+      r = spawnSync("git", ["-C", repo, "show", `${rev}:${path}`], { stdio: ["ignore", fd, "ignore"], env: searchEnv() });
+    } finally {
+      closeSync(fd);
+    }
+    return r.error || r.status !== 0 ? UNREAD : keyInStream(p);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** Where a file on disk over a whole scan's limit holds a private key, read a piece at a time, without its NULs (UTF-16). A
  * pin cannot vouch for what no scan reads. A file that cannot be read counts as a hit. */
-function keyInStream(p: string): { line: number; label: string } | null {
+export function keyInStream(p: string): { line: number; label: string } | null {
   const piece = Buffer.alloc(1 << 20);
-  const key = new RegExp(KEY_ANYWHERE);
   let fd: number | null = null;
   try {
     fd = openSync(p, "r");
     let held = "", line = 1;
     for (let n = readSync(fd, piece, 0, piece.length, null); n > 0; n = readSync(fd, piece, 0, piece.length, null)) {
       const text = held + piece.toString("latin1", 0, n).replaceAll("\0", "");
-      const at = key.exec(text)?.index;
-      if (at !== undefined) return { line: line + newlines(text.slice(0, at)), label: "a private key" };
+      const at = privateKeyIn(text);
+      if (at >= 0) return { line: line + newlines(text.slice(0, at)), label: "a private key" };
       // Enough to hold a key's start and what must follow it.
       held = text.slice(-512);
       line += newlines(text.slice(0, -512));
@@ -415,32 +430,38 @@ function diffPath(raw: string): string {
 
 /** The paths a diff section reads from and writes to, null where it has no such side. No line of a hunk counts; a section
  * with no name lines (a mode change, a binary file) has them in its first line. */
-function sectionPaths(section: string): { old: string | null; now: string | null } {
-  let old: string | null | undefined, now: string | null | undefined;
+function sectionPaths(section: string): { old: string | null; now: string | null; link?: true } {
+  let old: string | null | undefined, now: string | null | undefined, added = false, gone = false, link = false;
   const lines = section.split("\n", 12);
   for (const line of lines) {
     if (line.startsWith("@@ ")) break;
+    if (line.startsWith("new file mode ")) added = true;
+    if (line.startsWith("deleted file mode ")) gone = true;
+    // A submodule's commit: nothing here to read.
+    if (/^(?:index \S+ |(?:new file|deleted file|old|new) mode )160000$/.test(line)) link = true;
     const moved = /^(?:rename|copy) (from|to) (.*)$/.exec(line);
     if (moved?.[1] === "from") old = diffPath(moved[2]!);
     else if (moved) now = diffPath(moved[2]!);
     else if (line.startsWith("--- ")) old = line === "--- /dev/null" ? null : diffPath(line.slice(4)).replace(/^a\//, "");
     else if (line.startsWith("+++ ")) now = line === "+++ /dev/null" ? null : diffPath(line.slice(4)).replace(/^b\//, "");
   }
+  if (link) return { old: null, now: null, link: true };
   if (old !== undefined || now !== undefined) return { old: old ?? null, now: now ?? null };
-  const head = /^diff --git (.*)$/m.exec(section)?.[1] ?? "";
+  const head = lines[0]!.startsWith("diff --git ") ? lines[0]!.slice(11) : "";
   const quoted = /^("(?:[^"\\]|\\.)*") "/.exec(head)?.[1];
   const path = quoted ? diffPath(quoted).replace(/^a\//, "") : head.slice(2, (head.length - 1) / 2);
   return head === (quoted ? `${quoted} ${quoted.replace('"a/', '"b/')}` : `a/${path} b/${path}`)
-    ? { old: path, now: path } : { old: null, now: null };
+    ? { old: added ? null : path, now: gone ? null : path } : { old: null, now: null };
 }
 
 /** `diff` as it may leave arnx. A section goes whole when a snapshot of either side would leave its file out (a private key
- * with a body, wherever it stands in the file; without `standIns`, any key-shaped text in code): `withheld`. Lines each
+ * wherever it stands in the file; without `standIns`, any key-shaped text in code), or when a side cannot be read: `withheld`.
+ * In a pinned file, the lines of a private key read `[private key]`, with no header in the hunk to go by. Lines each
  * side blanks (scanKeys, key-shaped text in comments of source files) are blanked, and their section loses its hunk
  * headers' function context, which git may take from a key's body: `files`, numbered in the side each diff line comes
  * from. Everything else may be a secret too, and is the outbound filter's (boundary.ts). `before` and `after` read each
- * side of a file by path. `beforeOnly`: files left out for what only their removed side holds. Last guard: a private key with
- * a body left in what a section shows refuses the change. */
+ * side of a file by path. `beforeOnly`: files left out for what only their removed side holds. Last guard: private-key text
+ * left in what a section shows, or a section with no path, refuses the change. */
 export function sealDiff(diff: string, allow: readonly SecretPin[], before: (path: string) => FileSide,
                          after: (path: string) => FileSide, standIns: boolean)
   : { diff: string; files: Blanked[]; withheld: Withheld[]; beforeOnly: Set<string> } {
@@ -448,24 +469,31 @@ export function sealDiff(diff: string, allow: readonly SecretPin[], before: (pat
   const beforeOnly = new Set<string>();
   const pins = (path: string) => allow.find((a) => a.path === path)?.matches ?? [];
   const kept = diff.split(DIFF_SECTION).flatMap((section) => {
-    const { old: oldPath, now: newPath } = sectionPaths(section);
+    const { old: oldPath, now: newPath, link } = sectionPaths(section);
     const path = newPath ?? oldPath ?? "";
-    /** Why this side leaves the file out; otherwise its blanked lines by number. */
+    /** Why this side leaves the file out; otherwise its lines to replace by number, and which of them are a pinned key's. */
     const side = (p: string | null, read: (p: string) => FileSide)
-      : { out?: { line: number; label: string }; blank: Map<number, string> } => {
-      const blank = new Map<number, string>();
+      : { out?: { line: number; label: string }; blank: Map<number, string>; keys: Set<number> } => {
+      const blank = new Map<number, string>(), keys = new Set<number>();
+      // A name that is not text cannot be asked for by name.
+      if (p?.includes("\uFFFD")) return { out: UNREADABLE, blank, keys };
       const got = p === null ? null : read(p);
-      if (!got) return { blank };
-      if ("label" in got) return { out: got, blank };
+      if (!got) return { blank, keys };
+      if ("label" in got) return { out: got, blank, keys };
       const scan = scanKeys(p!, got.text, pins(p!));
       const out = leftOutReason(p!, got, scan, pins(p!), standIns && !isLockfile(p!));
-      if (out) return { out, blank };
+      if (out) return { out, blank, keys };
       if (scan && "blank" in scan) {
         const lines = scan.text.split("\n");
         for (const n of scan.blank) blank.set(n, lines[n - 1]!);
       }
-      return { blank };
+      for (const n of keyLines(got.text.replaceAll("\0", ""))) {
+        blank.set(n, KEY_SHOWN);
+        keys.add(n);
+      }
+      return { blank, keys };
     };
+    if (!path && !link) throw new ArnxError("the change holds a part arnx cannot place; arnx will not send it to a model");
     const oldSide = side(oldPath, before), newSide = side(newPath, after);
     const out = newSide.out ?? oldSide.out;
     if (out) {
@@ -493,17 +521,12 @@ export function sealDiff(diff: string, allow: readonly SecretPin[], before: (pat
         if (mark !== "+") a++;
         if (mark !== "-") b++;
         if (to === undefined) return line;
-        blanked.add(n);
+        if (!(mark === "-" ? oldSide : newSide).keys.has(n)) blanked.add(n);
         return mark + to;
       }).join("\n");
       if (blanked.size) files.push({ path, lines: [...blanked].sort((x, y) => x - y) });
     }
-    const pinned = [...new Set([...pins(oldPath ?? ""), ...pins(newPath ?? "")])];
-    const shown = shownText(done);
-    if (privateKeyBody(shown, pinned, true) || (!path && hasKeyBody(shown))) {
-      throw new ArnxError(path ? secretStop([{ path, label: "a private key" }])
-        : "the change holds what looks like a key body (a private key) in a part arnx cannot place; arnx will not send it to a model");
-    }
+    if (holdsPrivateKey(shownText(done), [])) throw new ArnxError(secretStop([{ path: path || "the change", label: "a private key" }]));
     return [done];
   });
   return { diff: kept.join(""), files, withheld: withheld.sort((x, y) => x.path < y.path ? -1 : x.path > y.path ? 1 : 0),
@@ -937,7 +960,7 @@ function linkTree(from: string, to: string, skip: ReadonlySet<string>, rel = "")
  * that runs, and a model reads them only through the filter (boundary.ts). A build has network, so with `build` the image
  * gets its own tree beside this one (buildContextOf), with a stand-in for each guess too, in every file but a project's
  * manifest and a lockfile: a stand-in there can break an install. A file is left out only when
- * no stand-in keeps a key out (a private key with its body), or, without `standIns`, when it holds key-shaped text in
+ * no stand-in keeps a key out (a private key), or, without `standIns`, when it holds key-shaped text in
  * code. Returns those files, the files blanked, given stand-ins and moved beside the tree, and the values (in memory only:
  * never logged or sent). */
 function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly SecretPin[],
@@ -1062,6 +1085,8 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
       continue;
     }
     if (binary) continue;
+    // A pinned file keeps its key, for its tests: the filter is told each piece, as a search can show one with no header.
+    for (const v of keyPieces(text)) seen.add(v);
     const blank = scan && "blank" in scan ? scan : null;
     if (blank) blanks.set(f.rel, blank.blank);
     const why = new Map<string, string>();

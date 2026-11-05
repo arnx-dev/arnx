@@ -187,9 +187,8 @@ test("test_snapshot_worktree_scrubs", () => {
   expect(existsSync(join(dest, ".env")) || existsSync(join(dest, ".git")) || existsSync(join(dest, "link")))
     .toBe(false);
   expect(removedFiles).toEqual([{ path: "conf.py", line: 1, label: "a private key" }]);
-  // With stand-ins (the default), a private key header with no body anywhere is a placeholder: kept as it is.
-  expect(snapshot(repo, null, join(tmp(), "kept"), [], { untracked: true })).toEqual([]);
-  expect(readFileSync(join(tmp(), "kept", "conf.py"), "utf8")).toBe(`K = '${PRIVATE_KEY}'\n`);
+  // With stand-ins (the default) too: a private key header leaves its file out, body or not.
+  expect(snapshot(repo, null, join(tmp(), "kept"), [], { untracked: true })).toEqual(removedFiles);
 });
 
 const FIXTURE = `AWS = '${AWS_KEY}'\n`;

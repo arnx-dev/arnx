@@ -36,8 +36,8 @@ We answer as soon as we can, agree with you on a fix and a date to disclose, and
   Model keys are never passed to either.
 - The secrets filter is a heuristic, not a complete detector of confidential data; `.arnxignore` is yours to extend.
 - `arnx allow-secret PATH` deliberately lets the key-shaped strings of a test fixture through (pinned in
-  `.arnx/review.yaml`, which is then proven again before the next review). Use it only for fake keys, never real
-  credentials.
+  `.arnx/review.yaml`, which is then proven again before the next review); a private key in it goes as `[private key]`. Use
+  it only for fake keys, never real credentials.
 - Accepted tests run outside the sandbox once you commit them, in your own test runner: read them first.
 
 See [docs/SAFETY.md](docs/SAFETY.md#what-runs-where) for the full set of boundaries.

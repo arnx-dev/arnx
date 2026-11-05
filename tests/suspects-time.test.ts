@@ -2,7 +2,7 @@
 // can stop one that runs away. And reading a name backwards from its `=` finds what a pattern from the name's side found.
 import { expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { assignedPairs, privateKeyBody, scanKeys, suspects } from "../src/secrets";
+import { assignedPairs, holdsPrivateKey, scanKeys, suspects } from "../src/secrets";
 
 const repeat = (unit: string, size: number) => unit.repeat(Math.ceil(size / unit.length));
 const SIZE = 1_100_000;
@@ -36,7 +36,7 @@ for (const [name, text] of Object.entries(SHAPES)) {
     const t0 = performance.now();
     suspects("a.py", text, []);
     scanKeys("a.py", text, []);
-    privateKeyBody(text, []);
+    holdsPrivateKey(text, []);
     expect(performance.now() - t0).toBeLessThan(5000);
   }, 60_000);
 }

@@ -157,16 +157,17 @@ test("a change of only such files stops with the way out", () => {
   expect(nextStep(repo)).not.toContain(BODY);
 });
 
-test("a pinned file is sent as before", () => {
+test("a pinned file is sent, with `[private key]` for its key", () => {
   const repo = gitRepo(tmp());
   writeFileSync(join(repo, "keys.ts"), IN_CODE);
   const allow = [{ path: "keys.ts", matches: secretPins(IN_CODE) }];
   runGit(repo, "add", "keys.ts");
   const c = resolveChange(repo, null, allow);
-  expect([c.files, c.withheld, c.diff.includes(BODY)]).toEqual([["keys.ts"], undefined, true]);
-  // A new key in it withholds it again.
-  const other = PRIVATE_KEY.replace("RSA", "EC");
-  writeFileSync(join(repo, "keys.ts"), `${IN_CODE}const B = \`${other}\n${BODY}\`;\n`);
+  expect([c.files, c.withheld, c.diff.includes(BODY)]).toEqual([["keys.ts"], undefined, false]);
+  expect(c.diff).toContain("+[private key]");
+  expect(c.diff).toContain("+export const a = 1;");
+  // Any edit withholds it again.
+  writeFileSync(join(repo, "keys.ts"), `${IN_CODE}// an edit\n`);
   expect(() => resolveChange(repo, null, allow)).toThrow("keys.ts (a private key)");
   // Another file with the same strings is not pinned.
   writeFileSync(join(repo, "keys.ts"), IN_CODE);
@@ -292,32 +293,33 @@ test("a key far from the hunk leaves the section out: no part of a withheld file
   expect(c.diff).not.toContain("x();");
 });
 
-test("a private key header with no body on either side stays, as in a snapshot", () => {
+test("a private key header with no body on either side leaves the file out, as in a snapshot", () => {
   const repo = gitRepo(tmp());
   const form = `const HINT = "${PRIVATE_KEY}";\n`;
   writeFileSync(join(repo, "form.ts"), form);
   commit(repo, "a form's hint");
   writeFileSync(join(repo, "form.ts"), `${form}export const a = 1;\n`);
+  editApp(repo);
   const c = resolveChange(repo);
-  expect([c.files, c.withheld]).toEqual([["form.ts"], undefined]);
-  expect(c.diff).toContain("export const a = 1");
-  expect(takeSnapshot(repo, null, join(tmp(), "s"), [], { standIns: true }).withheld).toEqual([]);
-  // A body on either side is enough.
-  writeFileSync(join(repo, "form.ts"), `${form}${BODY}\n`);
-  expect(() => resolveChange(repo)).toThrow("form.ts (a private key)");
+  expect([c.files, c.withheld?.map((w) => w.path)]).toEqual([["app.py"], ["form.ts"]]);
+  expect(takeSnapshot(repo, null, join(tmp(), "s"), [], { standIns: true }).withheld.map((w) => w.path)).toEqual(["form.ts"]);
 });
 
-test("the last guard: a body left in a section refuses the change", () => {
-  const section = (path: string) => `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n` +
-    `@@ -0,0 +1,2 @@\n+${PRIVATE_KEY}\n+${BODY}\n`;
+test("the last guard: private-key text left in a section, or a section with no path, refuses the change", () => {
+  const section = (path: string, ...lines: string[]) => `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n` +
+    `@@ -0,0 +1,2 @@\n${lines.map((l) => `+${l}`).join("\n")}\n`;
   const none = () => null;
   // Neither side could be read, so nothing says what the file holds.
-  expect(() => sealDiff(section("k.ts"), [], none, none, true)).toThrow("k.ts (a private key)");
-  expect(() => sealDiff(section("k.ts"), [], none, none, true)).toThrow("arnx allow-secret k.ts");
-  const pinned = [{ path: "k.ts", matches: secretPins(section("k.ts")) }];
-  expect(sealDiff(section("k.ts"), pinned, none, none, true).withheld).toEqual([]);
-  // With no path to read, a body alone is enough.
-  expect(() => sealDiff(`diff --git something odd\n+${BODY}\n`, [], none, none, true)).toThrow("(a private key)");
+  expect(() => sealDiff(section("k.ts", PRIVATE_KEY, BODY), [], none, none, true)).toThrow("k.ts (a private key)");
+  expect(() => sealDiff(section("k.ts", PRIVATE_KEY, BODY), [], none, none, true)).toThrow("arnx allow-secret k.ts");
+  expect(sealDiff(section("k.ts", "x = 1"), [], none, none, true).withheld).toEqual([]);
+  // A pin cannot vouch for a file it did not read.
+  const pinned = [{ path: "k.ts", matches: secretPins(section("k.ts", PRIVATE_KEY, BODY)) }];
+  expect(() => sealDiff(section("k.ts", PRIVATE_KEY, BODY), pinned, none, none, true)).toThrow("k.ts (a private key)");
+  expect(() => sealDiff(`diff --git something odd\n+x = 1\n`, [], none, none, true)).toThrow("cannot place");
+  // A read that fails says so, and the section goes.
+  const failed = () => ({ line: 1, label: "could not be read" });
+  expect(sealDiff(section("k.ts", "x = 1"), [], none, failed, true).withheld).toEqual([{ path: "k.ts", line: 1, label: "could not be read" }]);
 });
 
 test("a path git quotes or ends with a tab is read all the same, under any prefix setting", () => {

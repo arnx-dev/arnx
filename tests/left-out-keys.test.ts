@@ -10,7 +10,7 @@ import { changeLimits, resolveChange, takeSnapshot } from "../src/change";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { leftOutNote } from "../src/prompts";
 import { runReview } from "../src/reviewer";
-import { hasKeyBody, hasSecretContent, privateKeyBody, secretHits, secretPins } from "../src/secrets";
+import { hasSecretContent, holdsPrivateKey, secretHits, secretPins } from "../src/secrets";
 import { defaultSettings, type Settings, writeSettings } from "../src/settings";
 import { fakeFactory, type FakeSession, tool } from "./helpers/fakes";
 import { commit, gitRepo, runGit } from "./helpers/gitutil";
@@ -68,8 +68,8 @@ const big = (s: string, n: number) => `${"// padding line\n".repeat(Math.ceil(n 
 const nul = (s: string, n = 10) => Buffer.concat([Buffer.alloc(n), Buffer.from(s)]);
 const asB64 = (s: string) => Buffer.from(s).toString("base64");
 
-/** `out`: the file leaves the change. `blank`: its comment lines are blanked. `absent`: it never was in the change. */
-type Want = "out" | "blank" | "absent";
+/** `out`: the file leaves the change. `absent`: it never was in the change. */
+type Want = "out" | "absent";
 interface Row { name: string; key: string; path: string; want?: Want; content?: string | Buffer | null;
   setup?: (repo: string) => void; worktree?: boolean; untracked?: boolean; settings?: Partial<Settings> }
 const wrap32 = rewrap(pk8, 32);
@@ -93,7 +93,7 @@ const ROWS: Row[] = [
   { name: "wrapped at 32 with CRLF", key: wrap32, path: "k.txt", content: wrap32.replace(/\n/g, "\r\n") },
   { name: "CRLF", key: pk8, path: "k.txt", content: pk8.replace(/\n/g, "\r\n") },
   { name: "Ed25519 wrapped at 32", key: rewrap(edp8, 32), path: "k.txt" },
-  { name: "SEC1 wrapped at 32, a # comment", key: rewrap(sec1, 32), path: "k.py", want: "blank",
+  { name: "SEC1 wrapped at 32, a # comment", key: rewrap(sec1, 32), path: "k.py",
     content: `${marked(rewrap(sec1, 32), "# ")}x = 1\n` },
   { name: "JSON service account", key: pk8, path: "svc.json",
     content: `${JSON.stringify({ type: "service_account", private_key: pk8 }, null, 1)}\n` },
@@ -106,10 +106,10 @@ const ROWS: Row[] = [
   { name: "YAML folded", key: pk8, path: "c.yaml", content: `key: >-\n${marked(pk8, "  ")}` },
   { name: "YAML block wrapped at 32", key: wrap32, path: "c.yaml", content: `key: |\n${marked(wrap32, "  ")}` },
   { name: "YAML escaped", key: pk8, path: "c.yaml", content: `key: "${esc(pk8)}"\n` },
-  { name: "a # comment", key: pk8, path: "k.py", want: "blank", content: `${marked(pk8, "# ")}x = 1\n` },
-  { name: "a // comment", key: pk8, path: "k.ts", want: "blank", content: `${marked(pk8, "// ")}export const x = 1;\n` },
-  { name: "a /* */ comment", key: pk8, path: "k.ts", want: "blank", content: `/*\n${marked(pk8, " * ")} */\nexport const x = 1;\n` },
-  { name: "a // comment wrapped at 32", key: wrap32, path: "k.ts", want: "blank", content: `${marked(wrap32, "// ")}export const x = 1;\n` },
+  { name: "a # comment", key: pk8, path: "k.py", content: `${marked(pk8, "# ")}x = 1\n` },
+  { name: "a // comment", key: pk8, path: "k.ts", content: `${marked(pk8, "// ")}export const x = 1;\n` },
+  { name: "a /* */ comment", key: pk8, path: "k.ts", content: `/*\n${marked(pk8, " * ")} */\nexport const x = 1;\n` },
+  { name: "a // comment wrapped at 32", key: wrap32, path: "k.ts", content: `${marked(wrap32, "// ")}export const x = 1;\n` },
   { name: "a Markdown quote", key: pk8, path: "d.md", content: marked(pk8, "> ") },
   { name: "a Markdown fence", key: pk8, path: "d.md", content: `\`\`\`\n${pk8}\`\`\`\n` },
   { name: "base64 of a whole PEM, a Kubernetes secret", key: asB64(pk8), path: "s.yaml", content: `data:\n  tls.key: ${asB64(pk8)}\n` },
@@ -191,7 +191,7 @@ for (const row of ROWS) {
     const c = resolveChange(repo, null, [], { untracked });
     leaked("change.diff", c.diff, probes);
     const want = row.want ?? "out";
-    const state = c.withheld?.some((w) => w.path === row.path) ? "out" : c.diff.includes(row.path) ? "blank" : "absent";
+    const state = c.withheld?.some((w) => w.path === row.path) ? "out" : c.diff.includes(row.path) ? "kept" : "absent";
     expect(state).toBe(want);
 
     const snap = join(tmp(), "snap");
@@ -238,30 +238,27 @@ const PLACEHOLDERS: [string, string][] = [
   ["code that looks for it", `const a = pem.startsWith("${HDR}");\nconst b = pem.endsWith("${END}");\n`],
 ];
 for (const [name, text] of PLACEHOLDERS) {
-  test(`a placeholder stays, in the diff and the snapshot: ${name}`, () => {
-    expect(privateKeyBody(text, [])).toBe(false);
+  test(`a placeholder header leaves its file out until it is allowed: ${name}`, () => {
+    expect(holdsPrivateKey(text, [])).toBe(true);
     const repo = gitRepo(tmp());
     const long = "docs/Guides/AuthenticationAndSecurity/Certificates/README.md";
     put(repo, long, text);
+    editApp(repo);
     commit(repo, "a doc");
     const c = resolveChange(repo);
-    expect([c.files, c.withheld]).toEqual([[long], undefined]);
-    expect(takeSnapshot(repo, "HEAD", join(tmp(), "s"), [], { standIns: true }).withheld).toEqual([]);
+    expect([c.files, c.withheld?.map((w) => [w.path, w.label])]).toEqual([["app.py"], [[long, "a private key"]]]);
+    expect(takeSnapshot(repo, "HEAD", join(tmp(), "s"), [], { standIns: true }).withheld.map((w) => w.path)).toEqual([long]);
+    const allowed = resolveChange(repo, null, [{ path: long, matches: secretPins(text) }]);
+    expect([allowed.files, allowed.withheld]).toEqual([["app.py", long], undefined]);
   });
 }
-
-test("a URL-encoded key is read as a key: its header, then its body decoded", () => {
-  const wrapped = rewrap(pgp, 32);
-  expect(privateKeyBody(encodeURIComponent(wrapped), [])).toBe(true);
-  expect(privateKeyBody(encodeURIComponent(`${HDR}\n...\n${END}\n`), [])).toBe(false);
-});
 
 test("what is not a private key stays: a certificate, a public key, their base64, an unrelated long value", () => {
   const spki = pem(rsa.publicKey).export({ type: "spki", format: "pem" });
   const rows = [spki, asB64(spki), bodyOf(spki).join(""), `MIIDdzCCAl+gAwIBAgI${randomBytes(90).toString("base64")}`,
     asB64(`-----BEGIN CERTIFICATE-----\n${randomBytes(300).toString("base64")}\n-----END CERTIFICATE-----\n`),
     randomBytes(60).toString("base64")];
-  for (const text of rows) expect(privateKeyBody(text, [])).toBe(false);
+  for (const text of rows) expect(holdsPrivateKey(text, [])).toBe(false);
 });
 
 test("every kind of key is known by how its encoding starts, whole or wrapped", () => {
@@ -275,81 +272,19 @@ test("every kind of key is known by how its encoding starts, whole or wrapped", 
     ...(opensshPlain ? [opensshPlain] : []),
   ];
   const known = (bare: string) => {
-    expect(privateKeyBody(bare, [])).toBe(true);
+    expect(holdsPrivateKey(bare, [])).toBe(true);
     expect(secretHits(bare)[0]?.label).toBe("a private key");
     expect(hasSecretContent(bare)).toBe(true);
-    if (bare.length > 100) expect(privateKeyBody(bare.match(/.{1,32}/g)!.join("\n"), [])).toBe(true);
+    if (bare.length > 100) expect(holdsPrivateKey(bare.match(/.{1,32}/g)!.join("\n"), [])).toBe(true);
   };
   for (const key of kinds) {
     known(bodyOf(key).join(""));
-    expect(privateKeyBody(asB64(key), [])).toBe(true);
+    expect(holdsPrivateKey(asB64(key), [])).toBe(true);
   }
   // How those this runtime cannot make start: Ed448, secp256k1 SEC1, DSA PKCS8, a P-256 PKCS8 that is encrypted.
   for (const start of ["MEcCAQAwBQYDK2Vx", "MHQCAQEEI", "MIIBWwIBADCCATQGByqGSM44", "MIHsMFcGCSqGSIb3DQEF"]) {
     known(`${start}${randomBytes(90).toString("base64")}`);
   }
-});
-
-// --- pins ------------------------------------------------------------------------------------------------------------
-
-test("a pin is for one key: its header alone lets no other body through", () => {
-  const repo = configured();
-  put(repo, "fix.txt", pk8);
-  commit(repo, "a fixture");
-  const allow = [{ path: "fix.txt", matches: secretPins(pk8) }];
-  // The same key: sent, though the hunk shows only part of its body.
-  put(repo, "fix.txt", `${pk8}# edit\n`);
-  commit(repo, "edit");
-  const same = resolveChange(repo, null, allow);
-  expect([same.files, same.withheld]).toEqual([["fix.txt"], undefined]);
-  // An edit beside the header: the hunk shows it with a few lines of the body.
-  put(repo, "fix.txt", `# top\n${pk8}# edit\n`);
-  const near = resolveChange(repo, null, allow);
-  expect(near.diff).toContain(KEY);
-  expect([near.files, near.withheld]).toEqual([["fix.txt"], undefined]);
-  commit(repo, "edit by the header");
-  // Another key under the same header: out, in the diff and the snapshot.
-  put(repo, "fix.txt", other);
-  editApp(repo);
-  commit(repo, "swap");
-  const swapped = resolveChange(repo, null, allow);
-  expect(swapped.withheld?.map((w) => [w.path, w.label])).toEqual([["fix.txt", "a private key"]]);
-  leaked("the diff", swapped.diff, probesOf(other));
-  expect(takeSnapshot(repo, "HEAD", join(tmp(), "s"), allow, { standIns: true }).withheld.map((w) => w.path)).toEqual(["fix.txt"]);
-  // A new long value beside a pinned key withholds it too.
-  expect(privateKeyBody(`${pk8}x = "${randomBytes(40).toString("base64")}"\n`, secretPins(pk8))).toBe(true);
-  expect(privateKeyBody(pk8, secretPins(pk8))).toBe(false);
-  expect(privateKeyBody(other, secretPins(pk8))).toBe(true);
-});
-
-test("a pure rename counts both its paths: a pin on each lets it through, a pin on the new one alone does not", () => {
-  const repo = gitRepo(tmp());
-  put(repo, "old.txt", `${pk8}extra\nline\n`);
-  commit(repo, "a fixture");
-  runGit(repo, "mv", "old.txt", "new.txt");
-  editApp(repo);
-  commit(repo, "moved");
-  expect(resolveChange(repo).diff).not.toContain("new.txt");
-  const pins = secretPins(`${pk8}extra\nline\n`);
-  const both = resolveChange(repo, null, [{ path: "old.txt", matches: pins }, { path: "new.txt", matches: pins }]);
-  expect([both.files, both.withheld]).toEqual([["app.py", "new.txt"], undefined]);
-  const one = resolveChange(repo, null, [{ path: "new.txt", matches: pins }]);
-  expect([one.files, one.withheld?.map((w) => w.path)]).toEqual([["app.py"], ["new.txt"]]);
-});
-
-test("a pin holds for a key with no header, and a key allowed is one `arnx allow-secret` can name", () => {
-  const blob = `export const blob = "${asB64(pk8)}";\n`;
-  expect(secretHits(blob)).toEqual([{ line: 1, label: "a private key" }]);
-  const pins = secretPins(blob);
-  expect(pins.length).toBeGreaterThan(0);
-  expect(privateKeyBody(blob, pins)).toBe(false);
-  expect(privateKeyBody(`export const blob = "${asB64(other)}";\n`, pins)).toBe(true);
-  const repo = gitRepo(tmp());
-  put(repo, "s.ts", blob);
-  commit(repo, "a pinned blob");
-  const c = resolveChange(repo, null, [{ path: "s.ts", matches: pins }]);
-  expect([c.files, c.withheld]).toEqual([["s.ts"], undefined]);
-  expect(() => resolveChange(repo)).toThrow("s.ts (a private key)");
 });
 
 // --- what a change shows, across its sections -------------------------------------------------------------------------
@@ -364,7 +299,7 @@ test("a header removed from one file and the body added to another leave nothing
   editApp(repo);
   commit(repo, "the body elsewhere");
   const c = resolveChange(repo);
-  expect(c.withheld?.map((w) => w.path)).toEqual(["y.txt"]);
+  expect(c.withheld?.map((w) => w.path)).toEqual(["x.txt", "y.txt"]);
   leaked("the diff", c.diff, probesOf(pk8));
   const same = gitRepo(join(tmp(), "same"));
   put(same, "x.txt", `old\n${HDR}\nend\n`);
@@ -467,11 +402,11 @@ test("a file over every limit: a key leaves it out, pinned or not, and so does a
 
 // --- a search that fails counts as a hit -------------------------------------------------------------------------------
 
-/** Runs `body` with a `git` whose `grep` fails: the search of a commit's files, by the arguments it gets. */
-function withBrokenGrep(body: () => void): void {
+/** Runs `body` with a `git` that fails where `when` (a line of shell) says. */
+function withBroken(when: string, body: () => void): void {
   const bin = mkdtempSync(join(tmpdir(), "arnx-git-"));
   const real = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
-  writeFileSync(join(bin, "git"), `#!/bin/sh\nfor a in "$@"; do [ "$a" = grep ] && exit 2; done\nexec ${real} "$@"\n`);
+  writeFileSync(join(bin, "git"), `#!/bin/sh\n${when}\nexec ${real} "$@"\n`);
   chmodSync(join(bin, "git"), 0o755);
   const path = process.env.PATH;
   process.env.PATH = `${bin}:${path}`;
@@ -488,20 +423,20 @@ test("a failed search of a commit's files reads every file: the key is still fou
   put(repo, "keys.ts", `const P = \`${pk8}\`;\n`);
   editApp(repo);
   commit(repo, "a key");
-  withBrokenGrep(() => {
+  withBroken('for a in "$@"; do [ "$a" = grep ] && exit 2; done', () => {
     const c = resolveChange(repo);
     expect(c.withheld?.map((w) => w.path)).toEqual(["keys.ts"]);
     expect(c.files).toEqual(["app.py"]);
   });
 });
 
-test("a failed search of a file too large to read leaves it out", () => {
+test("a failed read of a file too large to hold leaves it out", () => {
   const repo = gitRepo(tmp());
   put(repo, "big.txt", `one\n${"text ".repeat(2000)}\n`);
   editApp(repo);
   commit(repo, "large");
   changeLimits.maxScanBytes = 1000;
-  withBrokenGrep(() => {
+  withBroken('for a in "$@"; do [ "$a" = grep ] && exit 2; done\n[ -f /dev/stdout ] && [ "$3" = show ] && exit 2', () => {
     const c = resolveChange(repo);
     expect(c.withheld).toEqual([{ path: "big.txt", line: 1, label: "too large to scan" }]);
     expect(c.files).toEqual(["app.py"]);
@@ -547,19 +482,6 @@ test("the note does not say a file left out is unreadable when a clean copy is t
   const sent = agent.bodies.join("\n");
   expect(sent).toContain("clean head version");
   leaked("a model's messages", sent, probesOf(pk8));
-});
-
-test("a text with more headers than are worth reading counts as holding a body, and stays quick", () => {
-  const many = `${HDR}\n`.repeat(1001);
-  const started = performance.now();
-  expect(privateKeyBody(many, [])).toBe(true);
-  expect(privateKeyBody(`${HDR}\n`.repeat(1000), [])).toBe(false);
-  expect(performance.now() - started).toBeLessThan(5000);
-});
-
-test("hasKeyBody still reads a long run anywhere, as every older path expects", () => {
-  expect(hasKeyBody(bodyOf(pk8)[0]!)).toBe(true);
-  expect(hasKeyBody("abc")).toBe(false);
 });
 
 afterEach(() => {

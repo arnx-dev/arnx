@@ -83,14 +83,10 @@ test("an allowed (pinned) key stays as it is; only the others get stand-ins", ()
   expect(r.text).not.toContain(SK);
 });
 
-test("a private key with a body gets no stand-in; a header with no body anywhere is a placeholder, kept", () => {
+test("a private key gets no stand-in, with a body or without", () => {
   expect(standIn(`K = """${PRIVATE_KEY_BLOCK}"""\n`, [])).toBeNull();
-  // A body elsewhere in the file may be the key's.
   expect(standIn(`H = "${PRIVATE_KEY}"\nB = "${AWS_SECRET}"\n`, [])).toBeNull();
-  const hint = `placeholder = "${PRIVATE_KEY}\\n...\\n"\nT = '${AWS_KEY}'\n`;
-  const r = standIn(hint, [])!;
-  expect(r.text).toContain(PRIVATE_KEY);
-  expect(r.text).not.toContain(AWS_KEY);
+  expect(standIn(`placeholder = "${PRIVATE_KEY}\\n...\\n"\nT = '${AWS_KEY}'\n`, [])).toBeNull();
 });
 
 test("a snapshot keeps a file with stand-ins and says so; the real key reaches neither the snapshot nor its sandbox " +
