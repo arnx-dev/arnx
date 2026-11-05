@@ -1,6 +1,7 @@
 // A changed file holding a private key leaves the change, and the rest is reviewed. What each party sees: no model gets a
 // section, a read, a search hit or a sandbox file of it; only its path and a label go anywhere.
 import { afterEach, expect, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync }
   from "node:fs";
 import { dirname, join } from "node:path";
@@ -408,6 +409,34 @@ test("a diff shows what git holds, whatever a text conversion, a submodule setti
   const c = resolveChange(repo);
   expect(c.diff).not.toContain(body);
   expect(c.diff).toContain("Subproject commit");
+});
+
+test("every armour a private key comes in is one: PGP, SSH2's four dashes, a digit in the label, a .ppk", () => {
+  const random = randomBytes(600).toString("base64").match(/.{1,64}/g)!.join("\n");
+  const block = (begin: string, end: string) => `${begin}\n\n${random}\n${end}\n`;
+  const key = "PRIVATE " + "KEY";
+  const armours = [block(`-----BEGIN PGP ${key} BLOCK-----`, `-----END PGP ${key} BLOCK-----`),
+    block(`---- BEGIN SSH2 ENCRYPTED ${key} ----`, `---- END SSH2 ENCRYPTED ${key} ----`),
+    block(`-----BEGIN ED25519 ${key}-----`, `-----END ED25519 ${key}-----`)];
+  armours.forEach((armour, i) => {
+    const repo = gitRepo(join(tmp(), `armour-${i}`));
+    writeFileSync(join(repo, "k.txt"), armour);
+    editApp(repo);
+    commit(repo, "a key");
+    const c = resolveChange(repo);
+    expect(c.withheld?.map((w) => [w.path, w.label])).toEqual([["k.txt", "a private key"]]);
+    expect(c.diff).not.toContain(random.slice(0, 64));
+    const snap = join(tmp(), `armour-${i}-snap`);
+    takeSnapshot(repo, "HEAD", snap, [], { standIns: true });
+    expect(existsSync(join(snap, "k.txt"))).toBe(false);
+  });
+  const repo = gitRepo(join(tmp(), "ppk"));
+  writeFileSync(join(repo, "k.ppk"), `PuTTY-User-Key-File-3: ssh-ed25519\nPrivate-Lines: 1\n${random.slice(0, 44)}\n`);
+  editApp(repo);
+  commit(repo, "a key");
+  expect(resolveChange(repo).diff).not.toContain("PuTTY");
+  takeSnapshot(repo, "HEAD", join(tmp(), "ppk-snap"), [], { standIns: true });
+  expect(existsSync(join(tmp(), "ppk-snap", "k.ppk"))).toBe(false);
 });
 
 test("bytes that are not text beside a key do not hide it from the search", () => {

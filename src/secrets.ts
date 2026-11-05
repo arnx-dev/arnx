@@ -7,12 +7,13 @@ import { ValueIndex } from "./valueindex";
 
 export const SECRET_FILE_GLOBS: readonly string[] = [
   ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "*.jks", "id_rsa*", "id_ecdsa*",
-  "id_ed25519*", ".netrc", ".npmrc", ".pypirc", "credentials*.json", "service-account*.json", "*.session",
+  "id_ed25519*", "*.ppk", ".netrc", ".npmrc", ".pypirc", "credentials*.json", "service-account*.json", "*.session",
   "*.session-journal"];
 /** What a text holding any key-shaped string must hold, as a pattern (QUICK, and an address's `://`). */
-export const MAY_HOLD_KEY = "-----BEGIN|AKIA|sk-|gh[pousr]_|xox[abpr]-|://";
-/** A private key's header, as a pattern. */
-export const KEY_HEADER = "-----BEGIN [A-Z ]*PRIVATE KEY-----";
+export const MAY_HOLD_KEY = "-{4,5} ?BEGIN|AKIA|sk-|gh[pousr]_|xox[abpr]-|://";
+/** A private key's header in any armour (PEM, PGP's block, SSH2's four dashes), as a pattern. */
+export const KEY_HEADER = "-{4,5} ?BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)? ?-{4,5}";
+const isHeader = (s: string) => s.startsWith("----");
 // A key starts a token: no letter or digit right before it, so `task-…` or `desk-…` is not an `sk-` key.
 const CONTENT = new RegExp(
   `${KEY_HEADER}|` + "(?<![A-Za-z0-9])(?:AKIA[0-9A-Z]{16}|sk-ant-[A-Za-z0-9_-]{20,}" +
@@ -20,7 +21,7 @@ const CONTENT = new RegExp(
   "|gh[pousr]_[A-Za-z0-9]{36,}|xox[abpr]-[A-Za-z0-9-]{10,})");
 const ENV_NAME = /KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE/i;
 /** What every CONTENT match holds: a fast test first, since CONTENT's look-behind is slow on a large tree. */
-const QUICK = /-----BEGIN|AKIA|sk-|gh[pousr]_|xox[abpr]-/;
+const QUICK = /-{4,5} ?BEGIN|AKIA|sk-|gh[pousr]_|xox[abpr]-/;
 /** A password written into an address, `scheme://user:password@host`: the groups are the password and the host. A
  * template (`{password}`, `${X}`, `<password>`) holds characters a password here may not, and an example's `u:p` is
  * too short for one. */
@@ -89,7 +90,7 @@ export function secretPins(text: string): string[] {
 
 /** Names a match without repeating it: its well-known prefix. */
 function label(match: string): string {
-  if (match.startsWith("-----")) return "a private key";
+  if (isHeader(match)) return "a private key";
   const prefix = /^(sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|AKIA|gh[pousr]_|xox[abpr]-)/.exec(match)?.[0];
   return prefix ? `${prefix}…` : "a password in an address";
 }
@@ -120,7 +121,7 @@ function lastAtOrBefore<T>(sorted: readonly T[], key: (item: T) => number, x: nu
 export type KeyScan = { withhold: { line: number; label: string } } | { blank: number[]; text: string };
 
 /** A private key's END line. */
-const KEY_END = /-----END [A-Z ]*PRIVATE KEY-----/;
+const KEY_END = /-{4,5} ?END [A-Z0-9 ]*PRIVATE KEY( BLOCK)? ?-{4,5}/;
 /** Something like a key body anywhere: a run of 40 or more base64 characters in both cases. */
 export const hasKeyBody = (text: string) => [...text.matchAll(/[A-Za-z0-9+/=]{40,}/g)]
   .some(([run]) => /[a-z]/.test(run) && /[A-Z]/.test(run));
@@ -165,7 +166,7 @@ export function scanKeys(path: string, text: string, pins: readonly string[]): K
     const at = lineAt(m.index);
     if (!covered(at)) return { withhold: { line: at + 1, label: label(m[0]) } };
     blank.add(at);
-    if (!m[0].startsWith("-----") || KEY_END.test(lines[at]!)) continue;
+    if (!isHeader(m[0]) || KEY_END.test(lines[at]!)) continue;
     // A private key header is blanked with its block only when the block up to its END line lies in the comment.
     // With no END line, it is a placeholder (a doc example) only while the file holds no END and no key body.
     const withhold = { withhold: { line: at + 1, label: label(m[0]) } };
@@ -514,7 +515,7 @@ export function suspects(path: string, text: string, pins: readonly string[], wh
     return !!s && at < s.end;
   };
   for (const m of contentMatches(text)) {
-    if (m[0].startsWith("-----") || allowed(m[0])) continue;
+    if (isHeader(m[0]) || allowed(m[0])) continue;
     const password = m[0].endsWith("@") ? m[0].slice(0, -1) : null;
     if (password === null) {
       add(m[0], "key-shaped");
@@ -609,7 +610,7 @@ export function fakeAll(text: string, values: Iterable<string>, pins: readonly s
 /** A private key whose body may be in `text` (beside its header): no stand-in can keep it out. */
 export function privateKeyBody(text: string, pins: readonly string[]): boolean {
   const all = contentMatches(text);
-  const header = (m: Hit) => m[0].startsWith("-----");
+  const header = (m: Hit) => isHeader(m[0]);
   if (!all.some((m) => header(m) && !pins.includes(pinOf(m[0])))) return false;
   // Key-shaped strings aside, any run like a key body may be the private key's.
   const parts: string[] = [];

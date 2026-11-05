@@ -267,7 +267,7 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
   };
   const standIns = standInsSetting(repo);
   // What is left out does not count, but reading every file of a huge change only to refuse it would take minutes.
-  if (standIns && !diff.includes("PRIVATE KEY-----")) notTooLarge(diff);
+  if (standIns && !diff.includes("PRIVATE KEY")) notTooLarge(diff);
   const pinsOf = (path: string) => allow.find((a) => a.path === path)?.matches ?? [];
   const atRev = blobSides(repo, diff, pinsOf);
   const sealed = sealDiff(diff, allow, (path) => base === EMPTY_TREE ? null : atRev(base, path),
