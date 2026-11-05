@@ -93,6 +93,9 @@ export interface ProjectStat {
   stop?: string;
   /** The round ended with no report: no tests, no reasons, no questions (set only then). */
   noReport?: boolean;
+  /** This commit's own environment could not be had: `failed` (nothing was tested) or `fallback` (tested on the image
+   * built for another commit; its findings do not fail the run). `log` is a file under the review's folder. */
+  env?: { state: "failed" | "fallback"; kind: "build" | "probe"; log: string };
 }
 
 /** Findings that share one cause, explained in plain language by the second model (report only: verdicts, marks and
@@ -240,8 +243,11 @@ export const notChecked = (r: Review) => active(r).filter((f) => f.verdict !== "
 const neverTested = (r: Review) => r.testsWritten === 0 ? (r.suspects ?? []).filter((s) => s.outcome === "not tested")
   : [];
 export const incomplete = (r: Review) => r.stop !== "end_turn" || r.missingRuns > 0 || neverTested(r).length > 0 ||
-  !!r.couldNotRun?.length || (r.projectStats ?? []).some((p) => p.noReport || !!p.hungFiles?.length || !!p.notRunFiles?.length);
-export const exitCode = (r: Review) => (confirmed(r).length || notChecked(r).length ? 1 : incomplete(r) ? 2 : 0);
+  !!r.couldNotRun?.length || (r.projectStats ?? []).some((p) => p.noReport || !!p.env || !!p.hungFiles?.length || !!p.notRunFiles?.length);
+/** Findings from a project tested on another commit's image are shown, labelled, and do not fail the run. */
+const counts = (r: Review) => (f: Finding) => !(r.projectStats ?? []).some((p) => p.name === f.project && p.env);
+export const exitCode = (r: Review) => (confirmed(r).filter(counts(r)).length || notChecked(r).filter(counts(r)).length ? 1
+  : incomplete(r) ? 2 : 0);
 
 export interface Marks {
   findings: Record<string, string | null>;
@@ -349,6 +355,13 @@ function statusOf(r: Review): { problems: string[]; notes: string[] } {
   const problems: string[] = [], notes: string[] = [];
   const stats = r.projectStats ?? [];
   for (const p of stats) {
+    if (p.env) {
+      const log = `.arnx/reviews/${r.id}/${p.env.log}`;
+      problems.push(p.env.state === "failed"
+        ? `\`${p.name}\` not tested: this commit's ${p.env.kind === "build" ? "install does not build" : "environment runs no test"}; that is the commit, not your setup. Review a later commit, or \`arnx setup --project ${p.name}\` from this one`
+        : `\`${p.name}\`: this commit's own ${p.env.kind === "build" ? "install does not build" : "environment runs no test"} (see ${log}). Tested on the image built for another commit: its dependencies may differ`);
+      if (p.env.state === "failed") continue;
+    }
     // reviews written before per-project stops: a project with no tests is put down to the review's stop
     const stop = p.stop ?? (p.tests ? "end_turn" : r.stop);
     if (stop !== "end_turn") {
@@ -799,7 +812,7 @@ export function sameCause(sus: SuspectOutcome[], groups: Group[], findings: Find
   }
 }
 
-const troubled = (p: ProjectStat) => p.missingRuns > 0 || !!p.hungFiles?.length || !!p.notRunFiles?.length || !p.sawResults || !!p.noReport;
+const troubled = (p: ProjectStat) => !!p.env || p.missingRuns > 0 || !!p.hungFiles?.length || !!p.notRunFiles?.length || !p.sawResults || !!p.noReport;
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /** Why a round has no report: a provider outage cut it, or the reviewer gave none. */
@@ -807,11 +820,13 @@ const noReportWhy = (p: ProjectStat, r: Review) => p.stop?.startsWith("api_error
   ? "a model call failed before the reviewer gave its report" : "the reviewer gave no report";
 
 function projectLine(p: ProjectStat, r: Review): string {
+  if (p.env?.state === "failed") return `not tested: this commit's environment could not be had (log: .arnx/reviews/${r.id}/${p.env.log})`;
   if (p.noReport) return noReportWhy(p, r);
   const ran = p.tests ? `${plural(p.tests, "test")}, ${p.passed} passing in every run`
     : `${plural(p.testFiles, "test file")}, no run reported its tests`;
   const missing = p.missingRuns ? ` (${plural(p.missingRuns, "run")} without a report)` : "";
-  return ran + missing + (p.sawResults ? "" : "; the reviewer never saw them run");
+  return ran + missing + (p.sawResults ? "" : "; the reviewer never saw them run") +
+    (p.env ? "; run on the image built for another commit" : "");
 }
 
 /** `reasons`: a rewrite mark without its Rewrite line is an error (accept needs the reason; triage does not). */

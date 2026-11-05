@@ -7,12 +7,12 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync }
   from "node:fs";
-import { dirname, join, posix } from "node:path";
+import { basename, dirname, join, posix } from "node:path";
 import { adapterFor, getAdapter, LANGUAGES } from "./adapters";
 import type { CopyOnly } from "./baked";
 import type { Swap } from "./boundary";
 import { digest, loadReviewFile, type ReviewConfig } from "./config";
-import { ArnxError, SetupRequired } from "./errors";
+import { ArnxError, EnvFailed, SetupRequired } from "./errors";
 import { envValue, globRegex } from "./secrets";
 import { pyJson, randomHex, shQuote, sleep } from "./util";
 
@@ -391,11 +391,12 @@ export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: st
   }
   if (r.status !== 0) {
     if (NETWORK_TROUBLE.test(r.stdout + r.stderr)) {
-      throw new ArnxError("building the test environment failed because it could not reach the package index or " +
+      throw new EnvFailed("building the test environment failed because it could not reach the package index or " +
         "registry (timeouts or a broken connection, twice): a network problem, not the install steps. Keep the " +
-        `configuration as it is and try again when the connection is stable; see ${logPath}`);
+        `configuration as it is and try again when the connection is stable; see ${logPath}`, "build",
+      basename(logPath), true);
     }
-    throw new ArnxError(`building the test environment failed; see ${logPath}`);
+    throw new EnvFailed(`building the test environment failed; see ${logPath}`, "build", basename(logPath));
   }
   if (adapterFor(cfg).keepBuild && context !== snapshot) newerThanBuild(snapshot, context);
   return tag;

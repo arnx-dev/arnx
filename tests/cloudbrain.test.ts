@@ -214,11 +214,11 @@ test("a review that fails is closed with stop failed", async () => {
 test("a review whose environment runs no test never starts the round: nothing billed", async () => {
   const c = cloud = fakeCloud({ rounds: { "*": ROUND.map((s) => ({ ...s })) }, billed });
   const broken = (): [string | null, string, boolean] => [null, "error: failed to build `dep`", false];
-  await expect(runReview(repo, { settings: SETTINGS, brain: brainFor(c), hunt: true,
-    sessionFactory: fakeFactory(broken, [], { probe: "ignore" }) }))
-    .rejects.toThrow(/the test environment runs no test at this commit/);
+  const { review } = await runReview(repo, { settings: SETTINGS, brain: brainFor(c), hunt: true,
+    sessionFactory: fakeFactory(broken, [], { probe: "ignore" }) });
+  expect(review.projectStats[0]).toMatchObject({ stop: "env_failed: probe" });
   expect(c.seen.some((x) => x.path.endsWith("/agent"))).toBe(false);
-  expect(c.seen.find((x) => x.path.endsWith("/finish"))!.body).toMatchObject({ stop: "failed", projects_reviewed: 0 });
+  expect(c.seen.find((x) => x.path.endsWith("/finish"))!.body).toMatchObject({ stop: "completed", tests_written: 0 });
 });
 
 test("a tool call the CLI does not run is answered as an error result", async () => {

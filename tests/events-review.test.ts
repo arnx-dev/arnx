@@ -187,16 +187,17 @@ test("a review whose environment runs no test makes no model call and costs $0",
   const { spend } = await import("../src/spend");
   const before = spend.total;
   const broken = (): [string | null, string, boolean] => [null, "error: failed to build `dep`", false];
-  await expect(runReview(repo, { settings: SETTINGS, agentModel: agent, challenger, hunter, ranker,
-    secondHunter: second, hunt: true, sessionFactory: fakeFactory(broken, [], { probe: "ignore" }), now: NOW }))
-    .rejects.toThrow(/the test environment runs no test at this commit/);
+  // the project is reported not tested; the review is written
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger, hunter, ranker,
+    secondHunter: second, hunt: true, sessionFactory: fakeFactory(broken, [], { probe: "ignore" }), now: NOW });
+  expect(review.projectStats[0]).toMatchObject({ stop: "env_failed: probe", env: { state: "failed", kind: "probe" } });
   expect([agent.calls, challenger.calls, hunter.calls, ranker.calls, second.calls].map((c) => c.length))
     .toEqual([0, 0, 0, 0, 0]);
   expect(spend.total).toBe(before);
   const [rid] = readdirSync(join(repo, ".arnx/reviews"));
   const es = events(join(repo, ".arnx/reviews", rid!));
   expect(ofType(es, "model.call")).toEqual([]);
-  expect(es.at(-1)!.type).toBe("review.failed");
+  expect(es.at(-1)!.type).toBe("review.completed");
 });
 
 describe("a resumed review", () => {

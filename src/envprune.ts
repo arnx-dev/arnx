@@ -6,13 +6,14 @@
 // image's tag (sandbox.ts dockerfile), never a prune of the whole cache. An arnx before 0.1.3 built them without that
 // step, and nothing Docker prints ties such an image to its records (they list no layer digest, and every build of a
 // project's image names its steps alike), so their cache is left and prune says so.
-import { loadReviewFile } from "./config";
+import { digest, loadReviewFile, type ReviewConfig } from "./config";
 import { LAYER_VERSION } from "./indexer";
-import { docker, envKey, repoId } from "./sandbox";
+import { docker, envKey, envOwner, repoId } from "./sandbox";
 
 export { repoId };
 
-export interface EnvImage { tag: string; size: string; repo: string | null; project: string; created: string }
+export interface EnvImage { tag: string; size: string; repo: string | null; project: string; created: string;
+  config?: string }
 /** `cache`: the build cache records removed (with dryRun, to remove) with the images made from the code;
  * `cacheNotFound`: how many of those images an older arnx built without the marked step, so their records stay. */
 export interface Pruned {
@@ -42,7 +43,7 @@ function envImages(): { labelled: EnvImage[]; unlabelled: number } {
     }
     if (!labels["arnx.created"]) unlabelled++;
     else labelled.push({ tag, size, repo: labels["arnx.repo"] ?? null, project: labels["arnx.project"] ?? "",
-      created: labels["arnx.created"] });
+      created: labels["arnx.created"], ...(labels["arnx.config"] ? { config: labels["arnx.config"] } : {}) });
   }
   return { labelled, unlabelled };
 }
@@ -183,4 +184,15 @@ export function totalSize(images: { size: string }[]): string {
     return sum + (m ? Number(m[1]) * (unit[m[2]!] ?? 0) : 0);
   }, 0);
   return bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)}GB` : `${Math.round(bytes / 1e6)}MB`;
+}
+
+/** The image of another commit that stands in for a project's own when this commit's does not build: the newest of this
+ * repository's images for this project and this configuration, an environment image as setup or a review built it (its
+ * tag is a bare key: not one made from a version of the code, `-src-`, nor an indexer layer). Null without one. */
+export function fallbackImage(cfg: ReviewConfig): EnvImage | null {
+  if (!envOwner.repo) return null;
+  const me = repoId(envOwner.repo), config = digest(cfg).slice(0, 16);
+  return envImages().labelled
+    .filter((i) => i.repo === me && i.project === cfg.name && i.config === config && /^arnx-env:[0-9a-f]+$/.test(i.tag))
+    .sort((a, b) => Date.parse(b.created) - Date.parse(a.created)).at(0) ?? null;
 }

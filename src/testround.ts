@@ -5,7 +5,7 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync }
   from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, posix } from "node:path";
+import { basename, dirname, join, posix } from "node:path";
 import { type AgentResult, Workspace } from "./agent";
 import { adapterFor } from "./adapters";
 import { bakedError, bakedIn, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
@@ -16,9 +16,10 @@ import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type Be
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
 import { type Boundary, maskedCopy, type Swap } from "./boundary";
 import { holdsIn, staleLine, staleRewrites, standInsLine, writeStandIns } from "./standins";
+import { fallbackImage } from "./envprune";
 import { filesAt, snapshot, takeSnapshot, type Withheld, withSandboxFiles } from "./change";
 import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
-import { ArnxError } from "./errors";
+import { EnvFailed } from "./errors";
 import { markUnproven } from "./diagnose";
 import { clip, emit, testMessage } from "./events";
 import { type Classified, classify, describeRun, funcOf, ownerFile, runBounded, runTests, type TestResult } from "./outcomes";
@@ -60,7 +61,12 @@ export interface Round {
   fixProof?: FixCheck;
   /** The project's type check (absent when it has none, and in answer rounds). */
   typecheck?: TypeCheck;
+  /** This commit's own environment could not be had: `failed` (the round is empty and made no model call) or `fallback`
+   * (the tests ran on the image built for another commit). `log` is a file in the round's folder. */
+  env?: EnvState;
 }
+
+export interface EnvState { state: "failed" | "fallback"; kind: "build" | "probe"; log: string }
 
 /** What a model's text means in the snapshot `snap`, `ours` (and the runners' reports) not being real text. */
 export const swapIn = (b: Boundary, snap: string, ours: (rel: string) => boolean = () => false): Swap =>
@@ -120,6 +126,21 @@ export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, e
     session.close();
   }
 };
+
+/** The stop of a round whose environment could not be had, and what the agent of that round is: nothing, no model asked. */
+export const ENV_FAILED = "env_failed: ";
+const envFailedAgent = (kind: "build" | "probe"): AgentResult => ({ finalText: "", costUsd: 0, turns: 0,
+  stop: `${ENV_FAILED}${kind}`, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, calls: 0 });
+
+/** The key of the image built for another commit that this commit's tests may run on, or null. Null when its image holds
+ * a copy of the code that runs reach and that differs from this code: those runs would test the other commit's code. */
+export function usableFallback(cfg: ReviewConfig, snap: string): string | null {
+  const image = fallbackImage(cfg);
+  if (!image) return null;
+  const baked = existsSync(snap) && readdirSync(snap).length ? bakedIn(cfg, image.tag, snap) : null;
+  if (baked?.differ.length) return null;
+  return image.tag.slice(image.tag.indexOf(":") + 1);
+}
 
 /** A round and what its hunt left (not saved with the round). */
 export interface Tested extends Round { hunt?: RoundHunt }
@@ -284,12 +305,12 @@ export async function probeRun(session: Runner, snap: string, cfg: ReviewConfig,
 /** Why a round stops before its brain writes a test: the environment runs no test at this commit (a member's
  * manifest that builds differently from the image, a build script that downloads). Every test would go without a
  * report, and the review would read as one that found nothing. */
-export function probeFailure(cfg: ReviewConfig, result: RunResult, log: string, copies?: CopyOnly): ArnxError {
+export function probeFailure(cfg: ReviewConfig, result: RunResult, log: string, copies?: CopyOnly): EnvFailed {
   const why = result.timedOut ? "timed out" : `exited ${result.exitCode ?? "?"} without a report`;
   const tail = result.output.trim().split("\n").slice(-6).map((l) => `  ${l}`).join("\n");
-  return new ArnxError(`${cfg.name}: the test environment runs no test at this commit: arnx's one-line test ` +
+  return new EnvFailed(`${cfg.name}: the test environment runs no test at this commit: arnx's one-line test ` +
     `${why}. The review stopped before writing tests (output: ${log})${tail ? `\n${tail}` : ""}` +
-    (copies ? `\n${copyStopText(cfg, copies)}` : ""));
+    (copies ? `\n${copyStopText(cfg, copies)}` : ""), "probe", basename(log));
 }
 
 export async function testRound(repo: string, head: string | null, cfg: ReviewConfig, o: {
@@ -309,7 +330,9 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   typecheck?: { changed: string[]; base?: string | null };
   /** A working-tree round (head null) copies untracked files too (opted in, or no commits yet); default: tracked
    * files only, since the agent reads the snapshot and the tests' output goes to the model. */
-  untracked?: boolean }): Promise<Tested> {
+  untracked?: boolean;
+  /** A commit whose environment cannot be had ends in an empty round saying so (a review; else the error is thrown). */
+  recordEnvFailure?: boolean }): Promise<Tested> {
   const say = (m: string) => o.progress?.(`${cfg.name}: ${m}`);
   const adapter = adapterFor(cfg);
   mkdirSync(o.outDir, { recursive: true });
@@ -318,6 +341,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   let leftOut: Withheld[] = [], fakedKeys: string[] = [];
   let saw = false, dbLeft: string[] | undefined, before: BeforeCheck | undefined, headKey = "";
   let hunt: RoundHunt | undefined;
+  let env: EnvState | undefined;
   // Once a round's files have run apart, every later run goes file by file; a file that did not finish alone is not
   // run again.
   let apart = false;
@@ -364,8 +388,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
     };
     const generatedNow = () => Object.fromEntries(collect(snap, o.writeDir, adapter.writable)
       .map((rel) => [rel, readFileSync(join(snap, rel), "utf8")]));
-    [agent, files, results] = await (o.sessionFactory ?? dockerSession)(cfg, snap, join(o.outDir, "env-build.log"),
-      async (session) => {
+    const body = async (session: Runner) => {
         say("checking that the environment runs a test");
         const probe = await probeRun(session, snap, cfg, o.writeDir, "probe.xml", RUN_TIMEOUT);
         if (!probe.seen) {
@@ -469,7 +492,34 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         }
         if (o.typecheck && cfg.typecheck) checked = await typecheckHere(session, snap, cfg, o.writeDir, say);
         return [a, f, r] as const;
-      }, undefined, undefined, swap);
+    };
+    const factory = o.sessionFactory ?? dockerSession;
+    const attempt = (key?: string) => factory(cfg, snap, join(o.outDir, "env-build.log"), body, key ? snap : undefined, key,
+      swap);
+    let got: Awaited<ReturnType<typeof attempt>> | null = null;
+    try {
+      got = await attempt();
+    } catch (e) {
+      // Only a review records a commit whose environment cannot be had; a connection that failed says nothing about it.
+      if (!(e instanceof EnvFailed) || e.network || !o.recordEnvFailure) throw e;
+      const fallback = usableFallback(cfg, snap);
+      say(fallback ? "this commit's own install does not build; trying the image built for another commit"
+        : "this commit's own install does not build");
+      if (fallback) {
+        try {
+          got = await attempt(fallback);
+          [headKey, env] = [fallback, { state: "fallback", kind: e.kind, log: e.log }];
+        } catch (e2) {
+          if (!(e2 instanceof EnvFailed)) throw e2;
+        }
+      }
+      if (!got) {
+        // Nothing was asked of a model: the round is empty and says why.
+        got = [envFailedAgent(e.kind), {}, []];
+        env = { state: "failed", kind: e.kind, log: e.log };
+      }
+    }
+    [agent, files, results] = got;
     // A test failing for a file the snapshot left out, or a key it holds a fake of, says nothing about the project.
     const tree = removed.length || fakedKeys.length ? filesAt(repo, head, !!o.untracked) : [];
     results = results.map((run) => run && markUnproven(run, { leftOut: removed, fakedKeys, all: tree }));
@@ -511,7 +561,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   const round: Round = { agent, files, classified, removed, ...(leftOut.length ? { leftOut } : {}),
     ...(fakedKeys.length ? { fakedKeys } : {}), ...(hungFiles.length ? { hungFiles } : {}), ...(notRunFiles.length ? { notRunFiles } : {}), sawResults: saw || !hasTests,
     ...(dbLeft ? { dbUntested: dbLeft } : {}), ...(before ? { before } : {}), ...(fixProof ? { fixProof } : {}),
-    ...(typecheck ? { typecheck } : {}) };
+    ...(typecheck ? { typecheck } : {}), ...(env ? { env } : {}) };
   // All a round says from here on is saved and read by people and coding agents, none of it through a model's filter.
   const masked = b ? maskedCopy(b, round) : { value: round, shown: false };
   return { ...masked.value, ...(masked.shown ? { standInsShown: true } : {}), ...(hunt ? { hunt } : {}) };

@@ -506,7 +506,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       const reusedCost = !prior ? 0 : (prior.second?.costUsd ?? 0) + prior.extras.reduce((a, u) => a + u.costUsd, 0);
       const opts = { brain, budgetUsd: Math.max(0, projectBudget - (cutUse?.costUsd ?? 0) - reusedCost), writeDir, runs: s.runs, outDir,
         sessionFactory: o.sessionFactory ?? dockerSession, progress: o.progress, coverage: scope.owned,
-        untracked: !!change.withUntracked,
+        untracked: !!change.withUntracked, recordEnvFailure: true,
         // The code before the change: its base (HEAD for uncommitted work); a first commit has none, nor has a
         // repository with no commits yet. Without one, or for a change to tests or docs only, there is no fix proof.
         ...(s.beforeCheck ? { before: { base: change.base === EMPTY_TREE ? null : change.base, diff: change.diff,
@@ -548,7 +548,8 @@ export async function runReview(repo: string, o: { settings: Settings;
         kept = true;
         [rnd, hunted, projSecond] = [saved.round, saved.hunted, saved.second];
         projExtras.push(...saved.extras);
-        o.progress?.(`${cfg.name} (${i + 1}/${n}): already tested before the interruption; kept`);
+        o.progress?.(`${cfg.name} (${i + 1}/${n}): ${rnd.env?.state === "failed" ? "not tested before the interruption (its environment failed); kept"
+          : "already tested before the interruption; kept"}`);
       } else {
         const { hunt, ...tested } = await withRole("reviewer", () => testRound(repo, change.head, cfg, opts),
           { project: cfg.name });
@@ -668,8 +669,10 @@ export async function runReview(repo: string, o: { settings: Settings;
         testFiles: Object.keys(rnd.files).filter((p) => adapterFor(cfg).isTestFile(posix.basename(p))).length,
         ...(rnd.hungFiles?.length ? { hungFiles: rnd.hungFiles } : {}),
         ...(rnd.notRunFiles?.length ? { notRunFiles: rnd.notRunFiles } : {}), sawResults: rnd.sawResults, stop: rnd.agent.stop,
+        // A round whose environment could not be had made no model call: it gave no report because it was never asked.
+        ...(rnd.env ? { env: { ...rnd.env, log: file.legacy ? rnd.env.log : `projects/${cfg.name}/${rnd.env.log}` } } : {}),
         // A round with no report and no test that ran is not a finished one (tests that ran speak for themselves).
-        ...(tests === 0 && !hasReport([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]) ? { noReport: true } : {}) });
+        ...(tests === 0 && !rnd.env && !hasReport([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]) ? { noReport: true } : {}) });
       agentCost += rnd.agent.costUsd;
       Object.assign(agentUse, addUsage(agentUse, rnd.agent.usage));
       agentUse.calls += rnd.agent.calls;
@@ -683,7 +686,8 @@ export async function runReview(repo: string, o: { settings: Settings;
       for (const t of c.errors) if (t.needs) couldNotRun.push({ test: t.testId, needs: t.needs, ...(t.fakedKey ? { faked: true } : {}) });
       rnd.fakedKeys?.forEach((p) => fakedKeys.add(p));
       skippedTests += c.skipped;
-      if (stop === "end_turn" && rnd.agent.stop !== "end_turn") stop = rnd.agent.stop;
+      // An environment that could not be had is said per project (stats), not as why the reviewer stopped.
+      if (stop === "end_turn" && rnd.agent.stop !== "end_turn" && !rnd.env) stop = rnd.agent.stop;
     }
     findings.forEach((f, i) => { f.id = `F${i + 1}`; });
     for (const f of findings) {
@@ -788,6 +792,8 @@ export async function runReview(repo: string, o: { settings: Settings;
     }
     // The events hold every call that ended, saved round or not: a round lost to a cut or a kill is still paid for.
     usage.splice(0, usage.length, ...withEventSpend(usage, usageFromEvents(join(rdir, EVENTS_FILE))));
+    // Nothing was asked of a model that has no call, no unpriced call and no cost (a review whose environments failed).
+    usage.splice(0, usage.length, ...usage.filter((u) => u.calls || u.unknownCalls || u.costUsd));
     // A model arnx has no price for ran with its cost unknown: its entry says so.
     if (!label) {
       const unpriced = new Set(unpricedModels(s, modelRefs(s)).map((m) => m.ref));

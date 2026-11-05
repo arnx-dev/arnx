@@ -7,6 +7,16 @@ export class ArnxError extends Error {
   override name = "ArnxError";
 }
 
+/** The test environment of this commit cannot be had: its image does not build (`build`, `log` the build's output) or
+ * runs no test (`probe`). `network`: the build failed on the connection, which is no verdict on the commit. `log` is a
+ * file name in the project's folder of the review. */
+export class EnvFailed extends ArnxError {
+  override name = "EnvFailed";
+  constructor(message: string, readonly kind: "build" | "probe", readonly log: string, readonly network = false) {
+    super(message);
+  }
+}
+
 /** What the user sees for an error arnx did not expect (exit code 2): one line naming it as a bug in arnx, never the
  * bundled source a runtime prints for an uncaught error. The stack follows only with ARNX_DEBUG=1. */
 export function internalError(e: unknown, env: Record<string, string | undefined>): string[] {
