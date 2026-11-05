@@ -586,3 +586,20 @@ test("the note is one sentence of paths and labels, absent when empty, in code: 
     leftOut: [{ path: "k.ts", line: 1, label: "a private key" }] })).toContain("`k.ts` (a private key)");
   expect(PROMPT_VERSION).toMatch(/^[0-9a-f]+$/);
 });
+
+test("only a real line end starts a diff section: a CR or U+2028 before `diff --git` is the file's own text", () => {
+  for (const mark of ["\r", " ", " "]) {
+    const repo = gitRepo(join(tmp(), `split-${mark.charCodeAt(0)}`));
+    const rows = Array.from({ length: 5 }, (_, i) => `MIIEowIBAAKCAQEA${String(i).repeat(48)}`);
+    const file = (tail: string) => [PRIVATE_KEY, ...rows.slice(0, 4), `#${mark}diff --git a/s.txt b/s.txt`, rows[4],
+      "-----END RSA " + "PRIVATE KEY-----", tail, ""].join("\n");
+    writeFileSync(join(repo, "k.txt"), file("one"));
+    commit(repo, "a key");
+    writeFileSync(join(repo, "k.txt"), file("two"));
+    editApp(repo);
+    const c = resolveChange(repo);
+    expect(c.withheld?.map((w) => w.path)).toEqual(["k.txt"]);
+    expect(c.diff).not.toContain(rows[4]!);
+    expect(c.diff).not.toContain("s.txt");
+  }
+});

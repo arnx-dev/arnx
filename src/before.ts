@@ -5,7 +5,7 @@
 import { posix } from "node:path";
 import { asError, ownerFile, type TestResult } from "./outcomes";
 import { testText } from "./shallow";
-import { splitLines } from "./util";
+import { DIFF_SECTION, splitLines } from "./util";
 
 /** regression: passes before the change. pre-existing: fails the same way before it. new-code: what it tests does not
  * exist before it. changed: fails before it, differently. unknown: anything that settles nothing (flaky, an error, a
@@ -229,7 +229,7 @@ export function textFix(f: Fix): Fix {
 export function namesAdded(diff: string, isTest: (name: string) => boolean): Set<string> {
   const names = (lines: string[]) => new Set(lines.flatMap((l) => l.slice(1).match(/[A-Za-z_$][\w$]*/g) ?? []));
   const added: string[] = [], removed: string[] = [];
-  for (const section of diff.split(/^(?=diff --git )/m)) {
+  for (const section of diff.split(DIFF_SECTION)) {
     const path = /^\+\+\+ b\/(.*)$/m.exec(section)?.[1] ?? /^--- a\/(.*)$/m.exec(section)?.[1] ?? "";
     if (!path || isTest(posix.basename(path))) continue;
     for (const line of section.split("\n")) {
@@ -262,7 +262,7 @@ const LANGUAGE = new Set(["async", "await", "class", "const", "elif", "else", "e
  * `old`: a file's text before the change, null when it is new. */
 export function newNames(diff: string, isTest: (name: string) => boolean, old: (path: string) => string | null): Set<string> {
   const before = new Set<string>();
-  for (const section of diff.split(/^(?=diff --git )/m)) {
+  for (const section of diff.split(DIFF_SECTION)) {
     const path = /^\+\+\+ b\/(.*)$/m.exec(section)?.[1];
     const text = path ? old(path) : null;
     if (text) for (const w of text.match(/[A-Za-z_$][\w$]*/g) ?? []) before.add(w);

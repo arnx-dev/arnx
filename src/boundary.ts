@@ -11,6 +11,7 @@ import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentModel, JsonModel } from "./llm";
 import { fake, hasSecretContent, isCertainRule, nameShaped, type SecretPin, suspects } from "./secrets";
+import { DIFF_SECTION } from "./util";
 import { ValueIndex } from "./valueindex";
 
 /** The shortest piece of a value taken for that value: shorter ones are too often a piece of something else. */
@@ -418,7 +419,7 @@ export function diffSuspects(diff: string, allow: readonly SecretPin[] = [], why
   const scan = (path: string, text: string) => {
     for (const v of suspects(path, text, allow.find((a) => a.path === path)?.matches ?? [], why)) out.add(v);
   };
-  for (const section of diff.split(/^(?=diff --git )/m)) {
+  for (const section of diff.split(DIFF_SECTION)) {
     const path = /^\+\+\+ b\/(.*)$/m.exec(section)?.[1] ?? /^--- a\/(.*)$/m.exec(section)?.[1] ?? "";
     const before: string[] = [], after: string[] = [];
     let hunks = false;

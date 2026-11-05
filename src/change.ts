@@ -20,7 +20,7 @@ import { excludePathspecs, hasKeyBody, isCertainRule, isCodePath, isSecretPath, 
   MAY_HOLD_KEY, mayShowPrivateKey, privateKeyBody, scanKeys, type SecretPin, standInsFor, suspects, usedAsName, WORD_RULE } from "./secrets";
 import { buildContextDir, manifestRule, REPORT_DIR, type Runner } from "./sandbox";
 import { standInsSetting } from "./settings";
-import { splitLines } from "./util";
+import { DIFF_SECTION, splitLines } from "./util";
 
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 export const MAX_DIFF_BYTES = 200_000;
@@ -80,7 +80,7 @@ export const removed = (c: Change) =>
 export function sliceDiff(diff: string, files: Iterable<string>): string {
   const keep = new Set(files);
   const unquote = (p: string) => p.replace(/^"|"$/g, "").replace(/^[ab]\//, "");
-  return diff.split(/^(?=diff --git )/m).filter((part) => {
+  return diff.split(DIFF_SECTION).filter((part) => {
     const plus = /^\+\+\+ (.+)$/m.exec(part)?.[1];
     const minus = /^--- (.+)$/m.exec(part)?.[1];
     const header = /^diff --git a\/(.+?) b\/(.+)$/m.exec(part);
@@ -341,7 +341,7 @@ function blobSide(repo: string, rev: string, path: string): FileSide {
 /** Each commit's side of the files of `diff`. One search first says which files may hold a key at all: a read per file
  * takes seconds on a big change. A search that fails leaves every file to read. */
 function blobSides(repo: string, diff: string) {
-  const paths = [...new Set(diff.split(/^(?=diff --git )/m).flatMap((section) => {
+  const paths = [...new Set(diff.split(DIFF_SECTION).flatMap((section) => {
     const { old, now } = sectionPaths(section);
     return [old, now].filter((p): p is string => p !== null);
   }))];
@@ -447,7 +447,7 @@ export function sealDiff(diff: string, allow: readonly SecretPin[], before: (pat
   const files: Blanked[] = [], withheld: Withheld[] = [];
   const beforeOnly = new Set<string>();
   const pins = (path: string) => allow.find((a) => a.path === path)?.matches ?? [];
-  const kept = diff.split(/^(?=diff --git )/m).flatMap((section) => {
+  const kept = diff.split(DIFF_SECTION).flatMap((section) => {
     const { old: oldPath, now: newPath } = sectionPaths(section);
     const path = newPath ?? oldPath ?? "";
     /** Why this side leaves the file out; otherwise its blanked lines by number. */
@@ -525,7 +525,7 @@ function shownText(section: string): string {
 
 /** The three files taking most of a diff, with their sizes ("package-lock.json 173 KB, README.md 25 KB, …"). */
 function largestFiles(diff: string): string {
-  const parts = diff.split(/^(?=diff --git )/m).map((part) => {
+  const parts = diff.split(DIFF_SECTION).map((part) => {
     const path = /^\+\+\+ b\/(.+)$/m.exec(part)?.[1] ?? /^--- a\/(.+)$/m.exec(part)?.[1] ?? "?";
     return { path, kb: Math.max(1, Math.floor(Buffer.byteLength(part) / 1000)) };
   }).sort((a, b) => b.kb - a.kb);
