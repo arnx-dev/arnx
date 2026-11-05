@@ -319,7 +319,7 @@ function leftOutReason(rel: string, read: { text: string; binary: boolean }, sca
 export type FileSide = { text: string; binary: boolean } | { line: number; label: string } | null;
 
 /** The working tree's side, what a snapshot of it copies. A link is its target's path: nothing here follows it. */
-function fileSide(repo: string, path: string): FileSide {
+export function fileSide(repo: string, path: string): FileSide {
   const p = join(repo, path);
   try {
     if (!lstatSync(p).isFile()) return null;

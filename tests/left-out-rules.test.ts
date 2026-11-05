@@ -2,9 +2,11 @@
 // does too; a pin is for one file's whole text and sends no key; a read that fails counts as a hit. Keys are built at run time.
 import { afterEach, expect, test } from "bun:test";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { changeLimits, keyInStream, resolveChange, takeSnapshot } from "../src/change";
+import { changeLimits, fileSide, keyInStream, resolveChange, takeSnapshot } from "../src/change";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { holdsPrivateKey, scanKeys, secretPins } from "../src/secrets";
 import { defaultSettings, type Settings, writeSettings } from "../src/settings";
@@ -197,6 +199,55 @@ test("a name that is not UTF-8, whose file cannot be read by that name, counts a
   expect(c.withheld?.length).toBe(1);
   expect(c.files).toEqual(["app.py"]);
   clean("the diff", c.diff, lines);
+});
+
+test("the same name from a commit: the search cannot be asked for it, so it counts as a hit", () => {
+  const repo = gitRepo(tmp());
+  const name = Buffer.concat([Buffer.from(join(repo, "k")), Buffer.from([0xff]), Buffer.from(".txt")]);
+  writeFileSync(name, "plain text one\n");
+  commit(repo, "an odd name");
+  writeFileSync(name, "plain text two\n");
+  editApp(repo);
+  commit(repo, "edit");
+  const c = resolveChange(repo);
+  expect(c.withheld?.map((w) => w.label)).toEqual(["could not be read"]);
+  expect(c.files).toEqual(["app.py"]);
+});
+
+test("a read that fails on a path the diff names counts as a hit: from a commit, and from the working tree", () => {
+  const repo = gitRepo(tmp());
+  put(repo, "k.txt", `${HDR}\nabc\n${END}\n`);
+  editApp(repo);
+  commit(repo, "a file");
+  const bin = mkdtempSync(join(tmpdir(), "arnx-git-"));
+  const real = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+  writeFileSync(join(bin, "git"), `#!/bin/sh\n[ "$3" = show ] && exit 2\nexec ${real} "$@"\n`);
+  chmodSync(join(bin, "git"), 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${bin}:${path}`;
+  try {
+    const c = resolveChange(repo);
+    expect(c.withheld?.map((w) => [w.path, w.label])).toEqual([["k.txt", "could not be read"]]);
+  } finally {
+    process.env.PATH = path;
+    rmSync(bin, { recursive: true, force: true });
+  }
+  expect(fileSide(repo, "no-such-file")).toEqual({ line: 1, label: "could not be read" });
+});
+
+test("a pure rename counts both its paths: a pin on each lets it through, a pin on the new one alone does not", () => {
+  const repo = gitRepo(tmp());
+  const text = `${pemOf(b64)}extra\nline\n`;
+  put(repo, "old.txt", text);
+  commit(repo, "a fixture");
+  renameSync(join(repo, "old.txt"), join(repo, "new.txt"));
+  editApp(repo);
+  commit(repo, "moved");
+  const pins = secretPins(text);
+  const both = resolveChange(repo, null, [{ path: "old.txt", matches: pins }, { path: "new.txt", matches: pins }]);
+  expect([both.files, both.withheld]).toEqual([["app.py", "new.txt"], undefined]);
+  const one = resolveChange(repo, null, [{ path: "new.txt", matches: pins }]);
+  expect([one.files, one.withheld?.map((w) => w.path)]).toEqual([["app.py"], ["new.txt"]]);
 });
 
 test("a stream that cannot read a file counts as a hit", () => {
