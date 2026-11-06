@@ -14,7 +14,9 @@ import { matcher } from "./ignore";
 import { type Coverage, coverageFiles, coverageMap, NO_TESTS, type ProjectProof, SCRIPTS, unexplainedFailing }
   from "./setup";
 import { staleLine, staleRewrites } from "./standins";
-import { SOURCE } from "./untested";
+import { isSourcePath, SOURCE } from "./untested";
+import { NOT_SET_UP } from "./draft";
+import { route } from "./route";
 
 // Rough minutes and USD per project, for the estimate shown before setup starts.
 const MIN_PER_PROJECT = [1, 3];
@@ -171,6 +173,22 @@ export function typecheckGaps(file: ReviewFile, read: (rel: string) => string, r
 /** `typecheckGaps` reading the working tree of `repo`. */
 export function repoTypecheckGaps(file: ReviewFile, repo: string): string[] {
   return typecheckGaps(file, (rel) => { try { return readFileSync(join(repo, rel), "utf8"); } catch { return ""; } }, repo);
+}
+
+/** Before a first review spends money: the changed source files its tests will not reach (no project covers them, or
+ * review.yaml says their tests do not run), with the reasons. Null when every changed source file is covered. */
+export function quickCoverageLine(file: ReviewFile, changed: string[]): string | null {
+  const sources = changed.filter(isSourcePath);
+  if (!sources.length) return null;
+  const r = route(file, sources, Infinity);
+  const left = [...r.uncovered, ...r.declared];
+  const paths = new Set(left.map((x) => x.path));
+  if (!paths.size) return null;
+  const reasons = [...new Set(left.map((x) => (x.reason === NOT_SET_UP ? "not set up yet" : x.reason).trim()))];
+  const n = sources.length;
+  const what = paths.size === n ? `all ${n} changed source file${n === 1 ? "" : "s"}`
+    : `${paths.size} of ${n} changed source file${n === 1 ? "" : "s"}`;
+  return `Not tested in this review: ${what} (${reasons.slice(0, 2).join("; ")}).`;
 }
 
 /** The lines of "Worth a look" after a proof, only what applies: the warnings, then what no project tests (a change

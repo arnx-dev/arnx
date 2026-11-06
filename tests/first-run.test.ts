@@ -13,6 +13,7 @@ import { NOT_SET_UP, quickDraft } from "../src/draft";
 import type { RunResult, Runner, SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { approveFile, NOTHING_TO_TEST, runSetup } from "../src/setup";
+import { quickCoverageLine } from "../src/setupview";
 import { ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
@@ -372,4 +373,31 @@ test("a project that only uses a changed file waits in a quick setup; only the f
   expect(sessions.flatMap((s) => s.commands).some((c) => c.includes("vitest"))).toBe(false);
   // Its tests do not run in the review: setup names it, so the review can say so.
   expect(r.waiting).toEqual(["web"]);
+});
+
+test("a first review says plainly which changed source files it will not test", () => {
+  const file = (uncovered: string) => parseReviewFile(`version: 1
+projects:
+  svc:
+    root: svc
+    language: python
+    image: python:3.12-slim
+    test_command: python -m pytest -q {targets}
+uncovered:
+${uncovered}`);
+  const f = file('  - {path: /web/, reason: "needs several services (redis, postgres, mysql); not set up"}\n' +
+    '  - {path: /ui/, reason: "web UI (React) tests; jest suite did not run in the sandbox"}\n');
+  // all: every changed source file is left out
+  expect(quickCoverageLine(f, ["ui/a.ts", "ui/b.ts"])).toBe("Not tested in this review: all 2 changed source files " +
+    "(web UI (React) tests; jest suite did not run in the sandbox).");
+  // some: tests, docs and covered files do not count
+  expect(quickCoverageLine(f, ["svc/app.py", "svc/tests/test_a.py", "README.md", "web/a.ts"]))
+    .toBe("Not tested in this review: 1 of 2 changed source files (needs several services (redis, postgres, mysql); " +
+      "not set up).");
+  // a project not set up yet reads "not set up"
+  expect(quickCoverageLine(file(`  - {path: /web/, reason: "${NOT_SET_UP}"}\n`), ["web/a.ts", "svc/b.py"]))
+    .toBe("Not tested in this review: 1 of 2 changed source files (not set up yet).");
+  // none: no line
+  expect(quickCoverageLine(f, ["svc/app.py", "README.md"])).toBeNull();
+  expect(quickCoverageLine(f, ["README.md"])).toBeNull();
 });
