@@ -199,7 +199,16 @@ export interface JsonModel {
   trace?: Trace;
   /** Told when a call stalls or loses its connection and is retried, so progress can say so. */
   notice?: (message: string) => void;
-  completeJson(system: string, user: string, schema: Record<string, unknown>): Promise<JsonReply>;
+  /** `signal`: abort the request (and stop retrying) when the caller no longer wants the reply. Providers that
+   * cannot cancel ignore it. */
+  completeJson(system: string, user: string, schema: Record<string, unknown>, signal?: AbortSignal): Promise<JsonReply>;
+}
+
+/** Aborts `own` when `signal` does. */
+function followSignal(signal: AbortSignal | undefined, own: AbortController): void {
+  if (!signal) return;
+  if (signal.aborted) own.abort();
+  else signal.addEventListener("abort", () => own.abort(), { once: true });
 }
 
 /** What one model was used for in a run: calls with known usage, calls billed with unknown usage, tokens and cost.
@@ -609,7 +618,8 @@ export class ResponsesJson implements JsonModel {
     this.graceSeconds = opts.graceSeconds ?? STORE_GRACE_SECONDS;
   }
 
-  async completeJson(system: string, user: string, schema: Record<string, unknown>): Promise<JsonReply> {
+  async completeJson(system: string, user: string, schema: Record<string, unknown>, signal?: AbortSignal)
+    : Promise<JsonReply> {
     const payload = { model: this.model, stream: true, reasoning: { effort: this.effort },
       ...(this.tier ? { service_tier: this.tier === "fast" ? "priority" : this.tier } : {}),
       ...(this.store !== undefined ? { store: this.store } : {}),
@@ -618,7 +628,7 @@ export class ResponsesJson implements JsonModel {
     const t0 = performance.now(), priced = this.tier ? `${this.model}@${this.tier}` : this.model;
     let data: Record<string, unknown>, unknown: number, tries: number;
     try {
-      [data, unknown, tries] = await this.post(payload);
+      [data, unknown, tries] = await this.post(payload, signal);
     } catch (e) {
       if (e instanceof ModelError) {
         emitJsonCall(this.ref, priced, t0, { cost: e.costUsd, usage: null, unknown: e.unknownCalls, error: e.message,
@@ -649,13 +659,14 @@ export class ResponsesJson implements JsonModel {
 
   /** The terminal response, and how many earlier attempts were accepted (status 200) but cut off: the provider may
    * bill those, and their usage is unknown; then the number of requests sent. Shared with ResponsesAgent. */
-  async post(payload: Record<string, unknown>): Promise<[Record<string, unknown>, number, number]> {
+  async post(payload: Record<string, unknown>, signal?: AbortSignal): Promise<[Record<string, unknown>, number, number]> {
     const { stream: _stream, ...rest } = payload;
     const body = this.background ? { ...rest, background: true } : payload;
-    return withProviderSlot(this.baseUrl, () => this.postWithinSlot(body));
+    return withProviderSlot(this.baseUrl, () => this.postWithinSlot(body, signal));
   }
 
-  private async postWithinSlot(payload: Record<string, unknown>): Promise<[Record<string, unknown>, number, number]> {
+  private async postWithinSlot(payload: Record<string, unknown>, signal?: AbortSignal)
+    : Promise<[Record<string, unknown>, number, number]> {
     let unknown = 0, attempt = 0, timeouts = 0;
     // What each attempt met while every one found the provider down; null once one failed otherwise.
     let down: string[] | null = [];
@@ -670,7 +681,9 @@ export class ResponsesJson implements JsonModel {
       [e.timedOut, e.tries] = [true, attempt];
       return failed(e);
     };
+    const cancelled = () => billedError(`${this.ref}: request cancelled`, 0, null, unknown);
     for (;;) {
+      if (signal?.aborted) throw cancelled();
       if (performance.now() >= deadline) throw late();
       attempt += 1;
       const started = performance.now();
@@ -679,8 +692,8 @@ export class ResponsesJson implements JsonModel {
         secs: Math.round((performance.now() - started) / 100) / 10, ...diagnostics });
       let delay = 0;
       try {
-        const data = this.background ? await this.backgroundAttempt(payload, deadline, attempt, diagnostics)
-          : await this.attempt(payload, deadline, diagnostics);
+        const data = this.background ? await this.backgroundAttempt(payload, deadline, attempt, diagnostics, signal)
+          : await this.attempt(payload, deadline, diagnostics, signal);
         const broke = data.status === "failed" ? noCredits(providerOf(this.ref), JSON.stringify(data.error ?? "")) : null;
         if (broke) throw broke;
         traced("ok");
@@ -688,6 +701,7 @@ export class ResponsesJson implements JsonModel {
         return [data, unknown, attempt];
       } catch (e) {
         traced(e instanceof Error ? e.message : String(e));
+        if (signal?.aborted) throw cancelled();
         if (e instanceof ModelError) {
           e.unknownCalls += unknown;
           e.tries = attempt;
@@ -723,8 +737,10 @@ export class ResponsesJson implements JsonModel {
   }
 
   /** One request. Network errors, timeouts and retryable statuses throw Retryable. */
-  private async attempt(payload: unknown, deadline: number, diagnostics: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async attempt(payload: unknown, deadline: number, diagnostics: Record<string, unknown>,
+                        signal?: AbortSignal): Promise<Record<string, unknown>> {
     const abort = new AbortController();
+    followSignal(signal, abort);
     const started = performance.now();
     let last = started, first: number | null = null, gap = 0, chunks = 0, accepted = false;
     let timeout: string | undefined;
@@ -795,7 +811,8 @@ export class ResponsesJson implements JsonModel {
    * generation (retried by the caller); a failed poll is tried again at the next tick. A response given up on before
    * it is terminal is cancelled. Traced: the create, each change of the polled status, the cancel. */
   private async backgroundAttempt(payload: unknown, deadline: number, attempt: number,
-                                  diagnostics: Record<string, unknown>): Promise<Record<string, unknown>> {
+                                  diagnostics: Record<string, unknown>, signal?: AbortSignal)
+    : Promise<Record<string, unknown>> {
     const started = performance.now();
     const note = (line: Record<string, unknown>) =>
       this.trace?.({ step: "poll", attempt, ...line, secs: Math.round((performance.now() - started) / 100) / 10 });
@@ -804,6 +821,7 @@ export class ResponsesJson implements JsonModel {
       const remaining = deadline - started, window = Math.min(this.connect, this.attemptLimit) * 1000;
       const kind = remaining <= window ? "total" : this.connect <= this.attemptLimit ? "connect" : "attempt";
       const abort = new AbortController();
+      followSignal(signal, abort);
       const timer = setTimeout(() => { timeout ??= kind; abort.abort(); }, Math.max(0, Math.min(remaining, window)));
       let data: Record<string, unknown>;
       try {
@@ -1172,7 +1190,8 @@ export class FallbackJson implements JsonModel {
     this.uses = [newUse(first.ref), newUse(second.ref)];
   }
 
-  async completeJson(system: string, user: string, schema: Record<string, unknown>): Promise<JsonReply> {
+  async completeJson(system: string, user: string, schema: Record<string, unknown>, signal?: AbortSignal)
+    : Promise<JsonReply> {
     const models = [this.first, this.second];
     for (const [i, m] of models.entries()) {
       // Set once, never cleared: calls run in parallel, and each reply names the model that gave it.
@@ -1180,7 +1199,7 @@ export class FallbackJson implements JsonModel {
       m.trace = outer ? (line) => outer({ model: m.ref, ...line }) : undefined;
       m.notice = this.notice;
       try {
-        const reply = await m.completeJson(system, user, schema);
+        const reply = await m.completeJson(system, user, schema, signal);
         tally(this.uses[i]!, reply[1], reply[2], reply[3]);
         this.lastModel = m.ref;
         return [reply[0], reply[1], reply[2], reply[3], m.ref];

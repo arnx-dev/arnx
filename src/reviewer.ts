@@ -300,6 +300,8 @@ export async function runReview(repo: string, o: { settings: Settings;
   secondHuntWaitMs?: number;
   /** The grace period after that wait (default localbrain.ts SECOND_HUNT_GRACE_MS). */
   secondHuntGraceMs?: number;
+  /** How long the end of a round waits for a hunter still out (default localbrain.ts LATE_HUNT_WAIT_MS). */
+  lateHuntWaitMs?: number;
   /** Send untracked files too (--untracked / --no-untracked; default: `[review] untracked`). */
   untracked?: boolean;
   /** Review a change of documentation only (default: it is not reviewed). */
@@ -445,7 +447,8 @@ export async function runReview(repo: string, o: { settings: Settings;
         prompts: promptsFor(repo),
         ...(o.hunter ? { hunter: o.hunter } : {}), ...(o.ranker ? { ranker: o.ranker } : {}), secondHunter,
         ...(o.secondHuntWaitMs === undefined ? {} : { secondHuntWaitMs: o.secondHuntWaitMs }),
-        ...(o.secondHuntGraceMs === undefined ? {} : { secondHuntGraceMs: o.secondHuntGraceMs }) });
+        ...(o.secondHuntGraceMs === undefined ? {} : { secondHuntGraceMs: o.secondHuntGraceMs }),
+        ...(o.lateHuntWaitMs === undefined ? {} : { lateHuntWaitMs: o.lateHuntWaitMs }) });
     };
     const secondHunter = o.secondHunter ?? (o.challenger && vendor(o.challenger.ref) !== vendor(refString(s.reviewer)) &&
       !(o.challenger instanceof FallbackJson) ? o.challenger : null);

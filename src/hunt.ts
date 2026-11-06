@@ -54,8 +54,8 @@ export function mergeSuspects(first: Suspect[], second: Suspect[]): Suspect[] {
  * are `o.changedDefinitions` when given, else read from the snapshot at `root` (none without either). Its attempts
  * are logged to hunt-second.jsonl in `o.outDir`, when given. */
 export async function secondHunt(root: string | null, cfg: ReviewConfig, o: { model: JsonModel; diff: string;
-  context: string; scope: Scope; outDir?: string; progress?: Say; changedDefinitions?: string; prompts?: Prompts })
-  : Promise<{ suspects: Suspect[]; use: ModelUse; failed?: true }> {
+  context: string; scope: Scope; outDir?: string; progress?: Say; changedDefinitions?: string; prompts?: Prompts;
+  signal?: AbortSignal }): Promise<{ suspects: Suspect[]; use: ModelUse; failed?: true }> {
   const say = (m: string) => o.progress?.(`${cfg.name}: ${m}`);
   const use = newUse(o.model.ref);
   if (o.outDir) {
@@ -68,7 +68,7 @@ export async function secondHunt(root: string | null, cfg: ReviewConfig, o: { mo
     const p = o.prompts ?? DEFAULT_PROMPTS;
     const user = p.secondHuntTask(cfg, o.diff, o.context, defs, o.scope);
     const [reply, cost, usage, unknown] = await withRole("second-hunt",
-      () => o.model.completeJson(p.huntSystem(), user, HUNT_SCHEMA));
+      () => o.model.completeJson(p.huntSystem(), user, HUNT_SCHEMA, o.signal));
     tally(use, cost, usage, unknown);
     return { suspects: parseSuspects(reply, o.model.ref.replace(/^[a-z]+:/, "")), use };
   } catch (e) {

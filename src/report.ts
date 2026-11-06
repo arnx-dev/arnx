@@ -893,11 +893,12 @@ const DIAGNOSTICS_SHOWN = 20;
 const OUTPUT_SHOWN = 15;
 
 function huntCounts(sus: SuspectOutcome[]): string {
-  const n = (o: SuspectOutcome["outcome"]) => sus.filter((x) => x.outcome === o).length;
+  const n = (o: SuspectOutcome["outcome"]) => sus.filter((x) => x.outcome === o && !x.late).length;
+  const late = sus.filter((x) => x.late).length;
   const opt = (o: SuspectOutcome["outcome"]) => n(o) ? [`${n(o)} ${o}`] : [];
   return [`${sus.length} suspected`, `${n("proven")} proven`, ...opt("same cause"), ...opt("disputed"), ...opt("unchecked"),
     ...opt("pending answer"), ...opt("pre-existing"), `${n("not reproduced")} not reproduced`, ...opt("inconclusive"),
-    `${n("not tested")} not tested`].join(" · ");
+    `${n("not tested")} not tested`, ...late ? [`${late} too late`] : []].join(" · ");
 }
 
 /** Final outcomes once the second model has judged the findings: a suspect is proven only when a finding its test

@@ -484,8 +484,8 @@ export function maskedAgent(model: AgentModel, b: Boundary): AgentModel {
 /** `model` asked with everything it is sent masked. */
 export function maskedJson(model: JsonModel, b: Boundary): JsonModel {
   if (wrapped.get(model) === b) return model;
-  const completeJson: JsonModel["completeJson"] = (system, user, schema) =>
-    model.completeJson(b.mask(system), b.mask(user), b.maskValue(schema));
+  const completeJson: JsonModel["completeJson"] = (system, user, schema, signal) =>
+    model.completeJson(b.mask(system), b.mask(user), b.maskValue(schema), signal);
   return wrap(model, b, "completeJson", completeJson);
 }
 

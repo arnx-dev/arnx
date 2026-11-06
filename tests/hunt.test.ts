@@ -390,10 +390,12 @@ test("a late repeat asks nothing", async () => {
   const { hunter, release } = gatedHunter("mine", 2);
   const agent = new ScriptedAgent([[MINE], [writeTests("S1")], [report(["S1"])]]);
   releasingAt(agent, 3, release);
-  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: hunter,
+  const { review, rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: hunter,
     sessionFactory: passing(), hunt: true, secondHuntWaitMs: 5, secondHuntGraceMs: 5 });
   expect(agent.calls).toHaveLength(3);
   expect(review.suspects!.map((s) => s.id)).toEqual(["S1"]);
+  const events = readFileSync(join(rdir, "events.jsonl"), "utf8");
+  expect(events).toContain('"source":"second-late"');
   expect(review.usage.find((u) => u.model.startsWith("openai:"))!.costUsd).toBe(0.05);
 });
 
@@ -411,8 +413,29 @@ test("one that arrives after the report is named, not lost", async () => {
   const late = review.suspects!.find((s) => s.claim === "late one")!;
   expect([late.id, late.outcome, late.reason]).toEqual(["S2", "not tested", "second hunter, too late to test"]);
   expect(render(review)).toContain("Second hunter, too late to test: 1 suspect");
+  expect(render(review)).toContain("1 not reproduced · 0 not tested · 1 too late");
   expect(JSON.parse(readFileSync(join(rdir, "projects/svc/hunt.json"), "utf8")).second_late).toHaveLength(1);
   expect(review.usage.find((u) => u.model.startsWith("openai:"))!.costUsd).toBe(0.05);
+  expect(load(rdir)).toEqual(review);
+});
+
+test("a late hunter that never answers lets the review finish; its use is unknown, nothing is named, its call is cancelled",
+  async () => {
+  const hunter = new FakeJson([]);
+  let signal: AbortSignal | undefined;
+  hunter.completeJson = ((_s: string, _u: string, _sc: unknown, sig?: AbortSignal) => {
+    signal = sig;
+    return new Promise((_res, rej) => sig?.addEventListener("abort", () => rej(new ModelError("cancelled"))));
+  }) as FakeJson["completeJson"];
+  const agent = new ScriptedAgent([[MINE], [writeTests("S1")], [report(["S1"])]]);
+  const t0 = performance.now();
+  const { review, rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: hunter,
+    sessionFactory: passing(), hunt: true, secondHuntWaitMs: 5, secondHuntGraceMs: 5, lateHuntWaitMs: 50 });
+  expect(performance.now() - t0).toBeLessThan(5000);
+  expect(signal?.aborted).toBe(true);
+  expect(review.suspects!.map((s) => s.id)).toEqual(["S1"]);
+  expect(review.usage.find((u) => u.model.startsWith("openai:"))!.unknownCalls).toBeGreaterThanOrEqual(1);
+  expect(render(review)).not.toContain("too late");
   expect(load(rdir)).toEqual(review);
 });
 

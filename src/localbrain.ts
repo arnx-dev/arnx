@@ -30,6 +30,9 @@ const TIMED_OUT = Symbol("timed out");
 /** How long a hunter that missed its wait gets on top of it: a loop that was blocked sees its timer fire before the
  * replies and polls that arrived meanwhile (one poll is `POLL_SECONDS`, 3 s). */
 export const SECOND_HUNT_GRACE_MS = 5_000;
+/** How long the end of a round waits for a second hunter still out after the tests; then its request is cancelled and
+ * its use counts as one unknown call. */
+export const LATE_HUNT_WAIT_MS = 45_000;
 /** At most this many suspects of a hunter that arrives after the tests started join them. */
 const LATE_SUSPECTS = 3;
 
@@ -79,6 +82,8 @@ export interface LocalModels {
   secondHuntWaitMs?: number;
   /** The grace period after that wait (default SECOND_HUNT_GRACE_MS). */
   secondHuntGraceMs?: number;
+  /** How long the end of a round waits for a hunter still out (default LATE_HUNT_WAIT_MS). */
+  lateHuntWaitMs?: number;
   /** The prompts (default: arnx's own; with the user's keys, the repository's overrides: userprompts.ts). */
   prompts?: Prompts;
   /** What is kept from every model (default: the reviewer's own boundary, when it has one). */
@@ -294,8 +299,9 @@ export class LocalBrain implements Brain {
     // What the tool-less hunters read: given (a brain without the snapshot), or read from the snapshot.
     const root = h.root ?? null;
     const prompts = this.p;
+    const cancel = new AbortController();
     const other = m.secondHunter ? secondHunt(root, cfg, { model: m.secondHunter, diff, context: h.context, scope,
-      outDir: x.outDir, progress: x.progress, prompts,
+      outDir: x.outDir, progress: x.progress, prompts, signal: cancel.signal,
       ...(h.changedDefinitions === undefined ? {} : { changedDefinitions: h.changedDefinitions }) }) : null;
     const parts = m.hunter ? partHunts(root, cfg, { model: m.hunter, diff, owned: scope.owned,
       searchDirs: h.searchDirs, scope, outDir: x.outDir, progress: x.progress, prompts,
@@ -313,7 +319,6 @@ export class LocalBrain implements Brain {
         .map((s, k) => ({ ...s, id: `S${have.length + k + 1}` }));
       if (!fresh.length) return [];
       state.suspects = [...have, ...fresh];
-      emit("hunt.list", { project: cfg.name, source: "second-late", suspects: arrived.suspects.map(shown) });
       fresh.forEach((s, k) => emit("hunt.suspect", { project: cfg.name, hyp_id: hypId(cfg.name, s.id), sid: s.id,
         rank: have.length + k + 1, ...shown(s) }));
       if (state.record) state.record.tested = state.suspects;
@@ -331,7 +336,7 @@ export class LocalBrain implements Brain {
       if (early === TIMED_OUT) {
         // Its suspects join the tests when they arrive before the reviewer's first report (see `fold`).
         other!.then((r) => { arrived = r; }, () => {});
-        state.late = () => this.lateSecond(x, other!, state, folded);
+        state.late = () => this.lateSecond(x, other!, state, folded, cancel, m.secondHunter!.ref);
         x.progress?.(`${cfg.name}: the second hunter is still out; testing without it`);
       }
       if (theirs) state.second = theirs.use;
@@ -424,9 +429,17 @@ export class LocalBrain implements Brain {
   /** The second hunter, back after the round: its cost counts. Its suspects that were not folded into the tests
    * (arrived after the first report, repeats aside) are named as too late to test, and kept in hunt.json. */
   private async lateSecond(x: ReviewInput, late: Promise<{ suspects: Suspect[]; use: ModelUse }>,
-    state: RoundHunt, folded: { done: boolean }): Promise<ModelUse> {
-    const r = await late;
-    if (!folded.done) emit("hunt.list", { project: x.cfg.name, source: "second-late", suspects: r.suspects.map(shown) });
+    state: RoundHunt, folded: { done: boolean }, cancel: AbortController, ref: string): Promise<ModelUse> {
+    const r = await within(late, this.m.lateHuntWaitMs ?? LATE_HUNT_WAIT_MS, 0);
+    if (r === TIMED_OUT) {
+      // Still out: its request is cancelled, nothing of it is named, and its cost is unknown (a call that ended in
+      // time is in the events, which count it).
+      cancel.abort();
+      x.progress?.(`${x.cfg.name}: the second hunter never answered; its call was cancelled`);
+      state.lateLeft = [];
+      return { ...newUse(ref), unknownCalls: 1 };
+    }
+    emit("hunt.list", { project: x.cfg.name, source: "second-late", suspects: r.suspects.map(shown) });
     const have = state.suspects ?? [];
     state.lateLeft = r.suspects.filter((s) => !have.some((o) => sameSuspect(o, s)))
       .map((s, k) => ({ ...s, id: `S${have.length + k + 1}` }));
