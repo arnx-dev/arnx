@@ -533,7 +533,7 @@ function statusLines(r: Review): string[] {
   const docs = new Set((r.docsOnly ?? []).flatMap((d) => d.files)).size;
   if (docs) out.push(`${plural(docs, "documentation file")} not reviewed; \`arnx review --docs\` includes ${docs === 1 ? "it" : "them"}.`);
   for (const t of r.typecheck ?? []) {
-    out.push(`Type check${multi(r) ? ` in \`${t.project}\`` : ""}: ${describeTypecheck(t)}${t.status === "clean" ? ""
+    out.push(`Type check${multi(r) ? ` in \`${t.project}\`` : ""}${t.status === "skipped" ? " " : ": "}${describeTypecheck(t)}${t.status === "clean" || t.status === "skipped" ? ""
       : " (see Type check below)"}.`);
   }
   for (const c of r.typecheckOnly ?? []) {
@@ -827,7 +827,8 @@ export function render(r: Review): string {
       "The project's own type check (`typecheck` in .arnx/review.yaml) ran once on the change, without arnx's " +
       "generated tests. It is information only: it changes no test, finding or exit code.", "");
     for (const t of checks) {
-      out.push(`- ${multi(r) ? `\`${t.project}\` ran` : "Ran"} \`${t.command}\`: ${describeTypecheck(t)}.`);
+      const did = t.status === "skipped" ? "Skipped" : "Ran";
+      out.push(`- ${multi(r) ? `\`${t.project}\` ${did.toLowerCase()}` : did} \`${t.command}\`: ${describeTypecheck(t).replace(/^skipped: /, "")}.`);
       if (t.gaps?.length) out.push(`  - ${gapsLine(t.gaps)}; these errors say nothing about the change.`);
       for (const d of t.diagnostics.slice(0, DIAGNOSTICS_SHOWN)) out.push(`  - ${describeDiagnostic(d)}`);
       const more = t.errors - Math.min(t.diagnostics.length, DIAGNOSTICS_SHOWN);
@@ -1187,7 +1188,7 @@ export function summary(r: Review, reviewMd: string, confirmedFails = CONFIRMED_
   for (const [reason, paths] of byReason(r.uncovered.filter((u) => isSourcePath(u.path)))) {
     out.push(`  Not tested (${reason}): ${paths.slice(0, 8).join(", ")}${paths.length > 8 ? `, … (+${paths.length - 8} more)` : ""}`);
   }
-  for (const t of r.typecheck ?? []) out.push(`  Type check${multi(r) ? ` (${t.project})` : ""}: ${describeTypecheck(t)}`);
+  for (const t of r.typecheck ?? []) out.push(`  Type check${multi(r) ? ` (${t.project})` : ""}${t.status === "skipped" ? " " : ": "}${describeTypecheck(t)}`);
   for (const c of r.typecheckOnly ?? []) {
     const checked = (r.typecheck ?? []).some((t) => t.project === c.project);
     out.push(`  ${checked ? "Type check only" : "No round of its own"} (${c.project}): its changed files reviewed by ` +

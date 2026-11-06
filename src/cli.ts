@@ -102,7 +102,7 @@ export const ownKeysLine = (providers: string[]) =>
   `Sends your change and the files arnx reads to ${providers.join(", ")}, with your keys. ${DOCKER_LINE}`;
 /** A path as one shell word: as is when it is plain, else single-quoted. */
 const shellWord = (p: string) => /^[\w@%+=:,./-]+$/.test(p) ? p : `'${p.replace(/'/g, "'\\''")}'`;
-export const GITIGNORE = "reviews/\nrun/\nsetup/\nusage.jsonl\nprecision.jsonl\n";
+export const GITIGNORE = "reviews/\nrun/\nsetup/\nusage.jsonl\nprecision.jsonl\ntypecheck.json\n";
 export const USAGE = `usage: arnx <command> [options]
 
 Tests every change your coding agent makes.

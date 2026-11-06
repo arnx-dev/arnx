@@ -3,9 +3,10 @@
 // "no report", never the exit code. No model or Docker: the sandbox is a fake that type checks like tsc.
 import { COPY_SUFFIX } from "../src/testround";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
 import { typescript } from "../src/adapters/typescript";
+import { GITIGNORE } from "../src/cli";
 import { parseReviewConfig, parseReviewFile, reviewConfigPath, stamp, stampFile } from "../src/config";
 import { ciTypeChecker, detect, typeCheckable } from "../src/detect";
 import { EVENTS_FILE, type TraceEvent } from "../src/events";
@@ -137,6 +138,11 @@ class FakeTs implements Runner {
     if (command.startsWith("gap-tsc")) {
       const out = ["a", "b", "c"].map((n, i) => `src/${n}.ts(${i + 1},9): error TS2305: Module '"@prisma/client"' has ` +
         "no exported member 'User'.").join("\n");
+      return { exitCode: 2, output: out, timedOut: false, seconds: 1 };
+    }
+    if (command.startsWith("swamp-tsc")) {
+      const out = Array.from({ length: 100 }, (_, i) => `src/a.ts(${i + 1},1): error TS2322: Type 'string' is not ` +
+        "assignable to type 'number'.").join("\n");
       return { exitCode: 2, output: out, timedOut: false, seconds: 1 };
     }
     if (command.startsWith("slow-tsc")) return { exitCode: null, output: "[timed out]", timedOut: true, seconds: 600 };
@@ -323,6 +329,118 @@ describe("a review", () => {
   });
 });
 
+describe("a swamped type check", () => {
+  beforeEach(() => project(TYPED));
+  const record = () => join(repo, ".arnx", "typecheck.json");
+  const many = (n: number) => "// TYPE-ERROR\n".repeat(n);
+  const swamp = () => writeFileSync(join(repo, "src", "old.ts"), many(100));
+  /** A committed baseline that is swamped, then a small change on top of it. */
+  const swampedBaseline = () => {
+    swamp();
+    writeFileSync(join(repo, "src", "calc.ts"), "export const add = (a: number, b: number) => a + b;\n");
+    commit(repo, "swamped");
+    writeFileSync(join(repo, "src", "calc.ts"), `export const add = (a: number, b: number) => a + b;\n${many(1)}`);
+  };
+
+  test("100 errors or more before the change are recorded, counted at the baseline and not from the change's own; " +
+    "the review still compares them", async () => {
+    swampedBaseline();
+    const { review: r } = await review();
+    expect(r.typecheck![0]).toMatchObject({ status: "errors", errors: 101, new: 1, preExisting: 100, before: "compared" });
+    const rec = JSON.parse(readFileSync(record(), "utf8")) as Record<string, { command: string; errors: number; at: string }>;
+    expect(rec.main!.command).toBe(TSC);
+    expect(rec.main!.errors).toBe(100);
+    expect(Math.abs(Date.now() - Date.parse(rec.main!.at))).toBeLessThan(60_000);
+  });
+
+  test("a change that adds 100 errors to a clean baseline shows them all and does not make the project swamped", async () => {
+    writeFileSync(join(repo, "src", "old.ts"), "export const n = 1;\n");
+    writeFileSync(join(repo, "src", "calc.ts"), "export const add = (a: number, b: number) => a + b;\n");
+    commit(repo, "clean");
+    writeFileSync(join(repo, "src", "calc.ts"), many(100));
+    const { review: r } = await review();
+    expect(r.typecheck![0]).toMatchObject({ status: "errors", errors: 100, new: 100, before: "compared" });
+    const rec = existsSync(record()) ? JSON.parse(readFileSync(record(), "utf8")) as Record<string, unknown> : {};
+    expect(rec.main).toBeUndefined();
+    const again = await review();
+    expect(again.review.typecheck![0]!.status).toBe("errors");
+  });
+
+  test("a project last swamped skips its check and says so", async () => {
+    swampedBaseline();
+    await review();
+    const seen: Seen[] = [];
+    const { review: r, rdir } = await review(SETTINGS, seen);
+    expect(r.typecheck).toEqual([{ project: "main", command: TSC, status: "skipped", errors: 0, inChangedFiles: 0,
+      diagnostics: [], skippedFor: { errors: 100, at: expect.any(String) }, secs: 0 }]);
+    expect(seen.flatMap((s) => s.commands).filter((c) => c === TSC)).toEqual([]);
+    expect(seen).toHaveLength(1);
+    expect([r.passed, r.missingRuns, exitCode(r)]).toEqual([1, 0, 0]);
+    const line = "skipped: 100 errors when last run; `arnx setup --project main` runs it again";
+    expect(describeTypecheck(r.typecheck![0]!)).toBe(line);
+    const md = readFileSync(join(rdir, "review.md"), "utf8");
+    expect(md).toContain(`\nType check ${line}.\n`);
+    expect(md.replace(/\n  /g, " ")).toContain(`- Skipped \`${TSC}\`: ${line.replace("skipped: ", "")}.\n`);
+    const json = JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")) as Record<string, unknown>;
+    expect((json.typecheck as Record<string, unknown>[])[0]).toMatchObject({ status: "skipped",
+      skipped_for: { errors: 100 } });
+    expect(load(rdir).typecheck).toEqual(r.typecheck!);
+  });
+
+  test("a changed command runs it again", async () => {
+    swampedBaseline();
+    await review();
+    writeFileSync(reviewConfigPath(repo), stamp(parseReviewConfig(`${YAML}typecheck: ${TSC} --incremental false\n`), "Dev",
+      "2026-10-20"));
+    const { review: r } = await review();
+    expect(r.typecheck![0]!.status).not.toBe("skipped");
+  });
+
+  test("an old record runs it again", async () => {
+    swampedBaseline();
+    await review();
+    const rec = JSON.parse(readFileSync(record(), "utf8")) as Record<string, { at: string }>;
+    rec.main!.at = new Date(Date.now() - 15 * 86_400_000).toISOString();
+    writeFileSync(record(), JSON.stringify(rec));
+    const { review: r } = await review();
+    expect(r.typecheck![0]).toMatchObject({ status: "errors", before: "compared" });
+    // The run wrote a fresh record, so the next review skips again.
+    expect((await review()).review.typecheck![0]!.status).toBe("skipped");
+    rec.main!.at = new Date(Date.now() - 13 * 86_400_000).toISOString();
+    writeFileSync(record(), JSON.stringify(rec));
+    expect((await review()).review.typecheck![0]!.status).toBe("skipped");
+  });
+
+  test("a change to the type-check config or the dependencies since the record runs it again", async () => {
+    swampedBaseline();
+    await review();
+    expect((await review()).review.typecheck![0]!.status).toBe("skipped");
+    // Committed config changes (not part of the reviewed change) invalidate the record all the same.
+    for (const [file, text] of [["tsconfig.json", '{"compilerOptions": {"strict": false}}\n'],
+      ["package-lock.json", '{"lockfileVersion": 3}\n'],
+      ["package.json", '{"devDependencies": {"typescript": "5.9.4", "vitest": "3.2.4"}}\n']] as const) {
+      swampedBaseline();
+      await review();
+      const calc = readFileSync(join(repo, "src", "calc.ts"), "utf8");
+      writeFileSync(join(repo, file), text);
+      commit(repo, `edit ${file}`);
+      writeFileSync(join(repo, "src", "calc.ts"), `${calc}// more\n`);
+      expect((await review()).review.typecheck![0]!.status).toBe("errors");
+    }
+  });
+
+  test("a change that itself edits the config runs the check", async () => {
+    swampedBaseline();
+    await review();
+    writeFileSync(join(repo, "tsconfig.json"), '{"compilerOptions": {"strict": false}}\n');
+    expect((await review()).review.typecheck![0]!.status).toBe("errors");
+  });
+
+  test("the record is local state: ignored by git, never in a snapshot", () => {
+    expect(GITIGNORE.split("\n")).toContain("typecheck.json");
+  });
+});
+
 test("a project without typecheck reviews exactly as before: no type check run, nothing in the report", async () => {
   project(YAML);
   const seen: Seen[] = [];
@@ -502,6 +620,12 @@ ${typecheck ? `    typecheck: ${typecheck}\n` : ""}uncovered: []
     expect(r.projects[0]!.typeGaps).toEqual([{ kind: "generated", module: "@prisma/client", errors: 3 }]);
     expect(approvalChecks(parseReviewFile(web("gap-tsc")), r.projects)).toContain(
       "web: the type check cannot see @prisma/client (3 errors)");
+  });
+
+  test("a setup that type checks 100 errors or more records them for later reviews", async () => {
+    await twice("swamp-tsc");
+    const rec = JSON.parse(readFileSync(join(repo, ".arnx", "typecheck.json"), "utf8")) as Record<string, { errors: number }>;
+    expect(rec.web!.errors).toBe(100);
   });
 
   test("approve says once that sibling packages are not built", () => {

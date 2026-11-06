@@ -576,6 +576,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   const log = [...others, ...lines.map((l) => JSON.stringify(l))];
   writeFileSync(precision, log.join("\n") + "\n");
   ignoreLocal(repo, "precision.jsonl");
+  ignoreLocal(repo, "typecheck.json");
   const keptRel = kept.map((p) => relative(repo, p).split(sep).join("/"));
   // Pinned: arnx check refuses to run these files once they change (accept --again records them anew). `pins`: this
   // machine's record of what arnx pinned (localPinsPath), so a pin edited in the repository is told apart.

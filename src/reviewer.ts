@@ -34,7 +34,7 @@ import { type AgentReport, type Checked, type Finding, type FixProof, hasReport,
   save, type SuspectOutcome, type Untested, adjudicate, CONFIRMED_FAILS, type DisputeKind, exitCode, firstLine, type Origin,
   sameCause, summaryRows, plural } from "./report";
 import { dockerSteps, type SessionFactory } from "./sandbox";
-import type { TypeCheck } from "./typecheck";
+import { skippedTypecheck, type TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
 import { docsFilter, route, uncoveredChange } from "./route";
 import { isSecretPath } from "./secrets";
@@ -523,6 +523,11 @@ export async function runReview(repo: string, o: { settings: Settings;
       tooLate: Suspect[]; resumed: boolean }
     // Projects whose kept round a failed model call stopped: tested again on resume.
     const redone = new Set<string>();
+    // A project whose type check was swamped before the change when last run (and whose config is unchanged) skips it.
+    const skipOf = (c: ReviewConfig) => {
+      const skipped = skippedTypecheck(repo, c, change.files);
+      return skipped ? { skipped } : {};
+    };
     const runProject = async (i: number): Promise<Done> => {
       const { project: cfg, owned, used } = routing.routed[i]!;
       o.progress?.(`${cfg.name} (${i + 1}/${n}): preparing the test environment`);
@@ -569,6 +574,7 @@ export async function runReview(repo: string, o: { settings: Settings;
         // The project's type check, once; its errors are compared with the code before the change when the
         // before/after check is on.
         ...(cfg.typecheck ? { typecheck: { changed: change.files,
+          ...skipOf(cfg),
           ...(s.beforeCheck ? { base: change.base === EMPTY_TREE ? null : change.base } : {}) } } : {}),
         // The hunt reads the snapshot the tests run on: the context pack is built on it here, the hunters run in the
         // brain.
@@ -653,7 +659,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     for (const c of file.legacy ? [] : routing.checkOnly) {
       o.progress?.(`${c.project.name}: ${c.project.typecheck ? "only its type check" : "no round of its own"}: its ` +
         `changed files are reviewed by ${c.by.join(", ")}`);
-      const t = await typecheckRound(repo, change.head, c.project, { changed: change.files,
+      const t = await typecheckRound(repo, change.head, c.project, { changed: change.files, ...skipOf(c.project),
         ...(s.beforeCheck ? { base: change.base === EMPTY_TREE ? null : change.base } : {}),
         outDir: join(rdir, "projects", c.project.name), sessionFactory: o.sessionFactory ?? dockerSession,
         ...(o.progress ? { progress: o.progress } : {}), untracked: !!change.withUntracked,

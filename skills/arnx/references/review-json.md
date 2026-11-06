@@ -139,13 +139,14 @@ tell the errors the change brought from those already there.
 |---|---|---|
 | `project` | string | The project. |
 | `command` | string | The command that ran: `typecheck` in `.arnx/review.yaml`. |
-| `status` | string | `clean`: no type errors. `errors`: type errors, counted below. `failed`: the command failed without reporting a type error (it could not start, or its output is not tsc's); `output` holds its end. `timed-out`: it ran out of time. |
+| `status` | string | `clean`: no type errors. `errors`: type errors, counted below. `failed`: the command failed without reporting a type error (it could not start, or its output is not tsc's); `output` holds its end. `timed-out`: it ran out of time. `skipped`: not run, the code before the change had 100 errors or more when last run (`skipped_for`). |
 | `errors` | number | Type errors on the change. |
 | `in_changed_files` | number | Those in files the change touches. |
 | `new` | number | Optional (present when `before` is `compared`). Errors the code before the change does not have: the change brought them. Fix these. |
 | `pre_existing` | number | Optional (present when `before` is `compared`). Errors the code before the change has too (same file, code and message). |
 | `before` | string | Optional (absent when there were no errors, or the before/after check is off). `compared`, or why the errors were not compared: `no-base` (the change has no code before it), `dependencies-changed`, `failed` (the type check did not run there). |
 | `diagnostics` | array | The first 100 errors, new ones and those in changed files first. Each has `file` (relative to the repository root; empty for an error about no file, such as a bad tsconfig), `line`, `column`, `code` (such as `TS2322`), `message`, `changed` (true when the change touches the file) and, when compared, `new`. |
+| `skipped_for` | object | Optional (only when `status` is `skipped`). `errors` the code before the change had when last run, and `at` when. |
 | `output` | string | Optional (only when `status` is `failed` or `timed-out`). The end of the command's output. |
 | `gaps` | array | Optional (absent when none). Modules the type check cannot see, each named by 3 or more errors: `{kind, module, errors}` with `kind` `generated` (a client a generator writes, such as `@prisma/client`), `sibling` (a package of the workspace that is not built) or `missing`. Those errors say nothing about the change. |
 | `secs` | number | How long it took, on the change and on the code before it. |

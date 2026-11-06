@@ -27,7 +27,7 @@ import { baseName, type Classified, classify, describeRun, funcOf, ownerFile, ru
 import { buildContextOf, DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
   type SessionFactory } from "./sandbox";
 import type { Say } from "./progress";
-import { describeTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
+import { describeTypecheck, recordTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
   typeCheckOf, workspaceNames } from "./typecheck";
 import { databaseEnv, dbUntested, untestedFiles } from "./untested";
 import { clearReach, countable, type Reach, readReach, reachedSince } from "./reached";
@@ -375,7 +375,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   /** Run the project's type check (`cfg.typecheck`) once after the final runs, without the generated tests:
    * `changed` are the change's files (repository paths); with errors, `base` (null: the change has none; absent: no
    * comparison) is the code before the change to compare them with. */
-  typecheck?: { changed: string[]; base?: string | null };
+  typecheck?: { changed: string[]; base?: string | null; skipped?: TypeCheck };
   /** A working-tree round (head null) copies untracked files too (opted in, or no commits yet); default: tracked
    * files only, since the agent reads the snapshot and the tests' output goes to the model. */
   untracked?: boolean;
@@ -570,7 +570,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
           const own = new Set(o.coverage);
           reached = reachedSince(reach, probeReach).filter((p) => own.has(p));
         }
-        if (o.typecheck && cfg.typecheck) checked = await typecheckHere(session, snap, cfg, o.writeDir, say);
+        if (o.typecheck && cfg.typecheck && !o.typecheck.skipped) checked = await typecheckHere(session, snap, cfg, o.writeDir, say);
         return [a, f, r] as const;
     };
     const factory = o.sessionFactory ?? dockerSession;
@@ -618,7 +618,10 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
     if (o.evidence) {
       evidence = roundEvidence(snap, results, files, hunt, agent, o.writeDir, o.evidence, before, o.brain.boundary, say);
     }
-    if (checked) {
+    if (o.typecheck?.skipped) {
+      typecheck = o.typecheck.skipped;
+      say(`type check: ${describeTypecheck(typecheck)}`);
+    } else if (checked) {
       typecheck = await typecheckDone(repo, cfg, checked, { ...o.typecheck!, headSnap: snap, headKey, tmp,
         outDir: o.outDir, sessionFactory: o.sessionFactory ?? dockerSession, say, ...(baked ? {} : { swap }) });
     }
@@ -701,8 +704,12 @@ function clearArnxFiles(snap: string, cfg: ReviewConfig, writeDir: string): void
  * review's. */
 export async function typecheckRound(repo: string, head: string | null, cfg: ReviewConfig, o: { changed: string[];
   base?: string | null; outDir: string; sessionFactory?: SessionFactory; progress?: Say; untracked?: boolean;
-  boundary?: Boundary }): Promise<TypeCheck | null> {
+  boundary?: Boundary; skipped?: TypeCheck }): Promise<TypeCheck | null> {
   if (!cfg.typecheck) return null;
+  if (o.skipped) {
+    o.progress?.(`${cfg.name}: type check: ${describeTypecheck(o.skipped)}`);
+    return o.skipped;
+  }
   const say = (m: string) => o.progress?.(`${cfg.name}: ${m}`);
   const sessionFactory = o.sessionFactory ?? dockerSession;
   mkdirSync(o.outDir, { recursive: true });
@@ -781,6 +788,9 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
       }
     }
   }
+  // What the code before the change had decides whether later reviews skip the check, never what the change adds.
+  if (before?.status === "compared") recordTypecheck(repo, cfg, before.errors!.length);
+  else if (run.status === "clean") recordTypecheck(repo, cfg, 0);
   const t = typeCheckOf(cfg, run, o.changed, secs, before, workspaceNames(o.headSnap));
   emit("typecheck.done", { project: cfg.name, status: t.status, errors: t.errors, in_changed_files: t.inChangedFiles,
     ...(t.new === undefined ? {} : { new: t.new, pre_existing: t.preExisting }), ...(t.before ? { before: t.before } : {}),

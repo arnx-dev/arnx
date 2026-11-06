@@ -369,7 +369,7 @@ test("precision.jsonl stays out of git, also in a repository set up before arnx 
   writeFileSync(join(rdir, "tests", "tests", "g", "test_a.py"), "def test_F1():\n    assert False\n");
   expect(await cli.run("accept", "--no-answers")).toBe(0);
   expect(await cli.run("accept", "--no-answers", "--again")).toBe(0);
-  expect(readFileSync(gitignore, "utf8")).toBe("reviews/\nrun/\nsetup/\nusage.jsonl\nprecision.jsonl\n");
+  expect(readFileSync(gitignore, "utf8")).toBe("reviews/\nrun/\nsetup/\nusage.jsonl\nprecision.jsonl\ntypecheck.json\n");
 });
 
 test("a plain init writes [cloud] with models = false, so switching is one word", async () => {

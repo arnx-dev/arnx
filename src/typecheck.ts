@@ -3,7 +3,8 @@
 // more on the code before the change, to tell the errors the change brought from those already there. Types are
 // deterministic, so once is enough. It is information: it never changes a test's outcome, a finding, whether a run
 // reported, or the exit code.
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
@@ -17,12 +18,19 @@ export const DIAGNOSTICS_KEPT = 100;
 const OUTPUT_KEPT = 2000;
 
 /** clean: exit code 0; errors: tsc reported type errors; failed: the command failed without reporting any (it could
- * not start, or its output is not tsc's); timed-out. */
-export const TYPECHECK_STATUSES = ["clean", "errors", "failed", "timed-out"] as const;
+ * not start, or its output is not tsc's); timed-out; skipped: not run, the project had SWAMPED_ERRORS or more errors
+ * before the change when last run (`skippedFor`). */
+export const TYPECHECK_STATUSES = ["clean", "errors", "failed", "timed-out", "skipped"] as const;
 export type TypeCheckStatus = typeof TYPECHECK_STATUSES[number];
 /** How the errors were compared with the code before the change. */
 export const TYPECHECK_BEFORE = ["compared", "no-base", "dependencies-changed", "failed"] as const;
 export type TypeCheckBefore = typeof TYPECHECK_BEFORE[number];
+
+/** Errors before the change at which a type check says nothing about it: later reviews skip it for RECORD_DAYS. */
+export const SWAMPED_ERRORS = 100;
+export const RECORD_DAYS = 14;
+/** Local state under .arnx/, never committed or sent anywhere: `{ project: { command, errors, at, inputs } }`. */
+export const TYPECHECK_RECORD = "typecheck.json";
 
 /** One error tsc reported; `file` relative to the repository root ("" for an error about no file, such as a bad
  * tsconfig). */
@@ -49,6 +57,8 @@ export interface TypeCheck {
   before?: TypeCheckBefore;
   /** The first DIAGNOSTICS_KEPT errors: new ones first, then those in changed files. */
   diagnostics: Diagnostic[];
+  /** Skipped: the errors the code before the change had when last run, and when. */
+  skippedFor?: { errors: number; at: string };
   /** The end of the output, when the check failed or timed out. */
   output?: string;
   /** Modules the check cannot see (a generated client, an unbuilt package) that three or more errors name: those
@@ -149,6 +159,59 @@ export function typeCheckOf(cfg: ReviewConfig, run: TypeCheckRun, changed: Itera
     secs: Math.round(secs * 10) / 10 };
 }
 
+/** What a type check depends on besides code: the tsconfigs, manifests, lockfiles and pyproject of the repository root
+ * and of the project's folder, hashed; a record made under other contents is stale. */
+const INPUT_FILE = /^(tsconfig[^/]*\.json|package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|pyproject\.toml)$/;
+export function typecheckInputs(repo: string, cfg: ReviewConfig): string {
+  const h = createHash("sha256");
+  for (const dir of new Set([".", cfg.workdir || "."])) {
+    let names: string[] = [];
+    try { names = readdirSync(join(repo, dir)).filter((n) => INPUT_FILE.test(n)).sort(); } catch { /* no folder */ }
+    for (const n of names) {
+      try { h.update(`${posix.join(dir, n)}\0${readFileSync(join(repo, dir, n))}\0`); } catch { /* unreadable */ }
+    }
+  }
+  return h.digest("hex");
+}
+
+type Records = Record<string, { command: string; errors: number; at: string; inputs: string }>;
+function readRecords(repo: string): Records {
+  try {
+    const d = JSON.parse(readFileSync(join(repo, ".arnx", TYPECHECK_RECORD), "utf8")) as unknown;
+    return d && typeof d === "object" && !Array.isArray(d) ? d as Records : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Remember what the code before the change had: SWAMPED_ERRORS or more is kept (with the command and the inputs it
+ * ran under) so reviews skip the check; fewer clears the project's entry. Never throws: it is a convenience. */
+export function recordTypecheck(repo: string, cfg: ReviewConfig, errors: number, now = new Date()): void {
+  try {
+    const all = readRecords(repo);
+    if (errors >= SWAMPED_ERRORS) {
+      all[cfg.name] = { command: cfg.typecheck!, errors, at: now.toISOString(), inputs: typecheckInputs(repo, cfg) };
+    } else if (all[cfg.name]) delete all[cfg.name];
+    else return;
+    mkdirSync(join(repo, ".arnx"), { recursive: true });
+    writeFileSync(join(repo, ".arnx", TYPECHECK_RECORD), `${JSON.stringify(all, null, 2)}\n`);
+  } catch { /* the check just runs next time */ }
+}
+
+/** The skipped result for a project whose record is current: swamped, the same command, under 14 days old, the same
+ * config and dependencies, and the change touches none of them. Null: run the check. */
+export function skippedTypecheck(repo: string, cfg: ReviewConfig, changed: Iterable<string>, now = new Date())
+  : TypeCheck | null {
+  const rec = readRecords(repo)[cfg.name];
+  if (!rec || rec.errors < SWAMPED_ERRORS || rec.command !== cfg.typecheck) return null;
+  const age = now.getTime() - Date.parse(rec.at);
+  if (!(age >= -60_000 && age < RECORD_DAYS * 86_400_000)) return null;
+  if (rec.inputs !== typecheckInputs(repo, cfg)) return null;
+  for (const f of changed) if (INPUT_FILE.test(posix.basename(f))) return null;
+  return { project: cfg.name, command: cfg.typecheck!, status: "skipped", errors: 0, inChangedFiles: 0, diagnostics: [],
+    skippedFor: { errors: rec.errors, at: rec.at }, secs: 0 };
+}
+
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
 /** The gaps of a type check in a few words: "the type check cannot see @prisma/client (312 errors)". */
@@ -164,8 +227,11 @@ const NOT_COMPARED: Record<Exclude<TypeCheckBefore, "compared">, string> = {
 
 /** The result in a few words, for review.md, the summary and setup ("3 type errors: 1 new with this change, …"). */
 export function describeTypecheck(t: Pick<TypeCheck, "status" | "errors" | "inChangedFiles" | "new" | "preExisting"
-  | "before">): string {
+  | "before"> & Partial<Pick<TypeCheck, "skippedFor" | "project">>): string {
   if (t.status === "clean") return "no type errors";
+  if (t.status === "skipped") {
+    return `skipped: ${t.skippedFor?.errors ?? SWAMPED_ERRORS} errors when last run; \`arnx setup --project ${t.project}\` runs it again`;
+  }
   if (t.status === "timed-out") return `timed out after ${TYPECHECK_TIMEOUT} s`;
   if (t.status === "failed") return "did not run: the command failed without reporting a type error";
   const compared = t.before === "compared" ? `: ${t.new} new with this change, ${t.preExisting} already there before it`
