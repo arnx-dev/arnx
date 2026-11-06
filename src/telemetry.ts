@@ -223,7 +223,8 @@ export function reviewData(review: Review, o: { settings: Settings; languages: s
     providers: s.cloud?.models ? ["arnx"]
       : providersOf([s.reviewer, s.challenger, s.challengerFallback, s.hunter, s.secondHunter], s),
     findings: f.length, confirmed: verdict("confirmed"), disputed: verdict("disputed"),
-    unjudged: f.length - verdict("confirmed") - verdict("disputed"), questions: review.questions.length,
+    // An open verdict waits on an answer: it was judged. The schema keeps its two counts.
+    unjudged: f.length - verdict("confirmed") - verdict("disputed") - verdict("open"), questions: review.questions.length,
     tests_written: int(review.testsWritten), passed: int(review.passed), flaky: review.flaky.length,
     errors: review.errors.length, suspects: review.suspects?.length ?? 0, cost_micro_usd: micro(review.costUsd),
     unknown_calls: int(review.usage.reduce((n, u) => n + (u.unknownCalls ?? 0), 0)), seconds: int(review.seconds),

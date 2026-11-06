@@ -7,7 +7,7 @@ import { join, posix } from "node:path";
 import { adapterFor } from "./adapters";
 import { isPreExisting } from "./before";
 import type { Billed, Brain, HuntRecord, Totals } from "./brain";
-import { inPool } from "./challenge";
+import { applyOrigin, inPool } from "./challenge";
 import { shallowKind } from "./shallow";
 import { clip, emit, EventLog, EVENTS_FILE, hypId, testMessage, withEvents, withRole } from "./events";
 import { added, type Change, describe, describeBlanked, describeWithheld, EMPTY_TREE, filesAt, removed, resolveChange, sliceDiff,
@@ -31,7 +31,8 @@ import { elsewhereNote, leftOutNote, PROMPT_VERSION, type Suspect } from "./prom
 import { changedSources, databaseEnv, framed, framesIn, isSourcePath, loadedTests, notReached, untestedFiles } from "./untested";
 import { pythonTypeGap } from "./setupview";
 import { type AgentReport, type Checked, type Finding, type FixProof, hasReport, parseReports, reportedTests, type ProjectStat, type Review,
-  save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause, summaryRows, plural } from "./report";
+  save, type SuspectOutcome, type Untested, adjudicate, CONFIRMED_FAILS, type DisputeKind, exitCode, firstLine, type Origin,
+  sameCause, summaryRows, plural } from "./report";
 import { dockerSteps, type SessionFactory } from "./sandbox";
 import type { TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
@@ -52,7 +53,12 @@ export const AGENT_SHARE = 0.85;
 export const PROJECT_CONCURRENCY = 2;
 
 interface SavedVerdict { verdict: string; reason: string; dependsOn: string | null; judge: string | null;
-  model: string; cost: number; sameAs?: string }
+  model: string; cost: number; sameAs?: string; kind?: DisputeKind; origin?: Origin }
+
+/** The findings sent to the second opinion: all but those that fail with the same message before the change, unless
+ * the brain asks where a failure is from. */
+export const toJudge = (findings: Finding[], brain: Pick<Brain, "judgesOrigin">) =>
+  findings.filter((f) => brain.judgesOrigin || !isPreExisting(f));
 
 /** Whether a review's report says a provider outage cut work that a resume does again. A report without one finished:
  * there is nothing to resume. Not once its findings were accepted. */
@@ -762,8 +768,9 @@ export async function runReview(repo: string, o: { settings: Settings;
       emit("before.finding", { project: f.project, finding: f.id, test_id: f.testId, status: f.before.status,
         detail: testMessage(f.before.detail), ...(keptRound.has(f.project) ? { resumed: true } : {}) });
     }
-    // Findings that fail the same way before the change are not the change's: they are not challenged or grouped.
-    const challenged = findings.filter((f) => !isPreExisting(f));
+    // Findings that fail the same way before the change are not the change's: they are not challenged or grouped,
+    // unless the second opinion says where a failure is from.
+    const challenged = toJudge(findings, brain);
     const left = () => Math.max(0, s.reviewBudgetUsd - agentCost - (huntSecond?.costUsd ?? 0) -
       extraUses.reduce((n, u) => n + u.costUsd, 0));
     // Every second-model attempt and call goes to second-opinion.jsonl, so a slow or failed call can be traced.
@@ -783,10 +790,10 @@ export async function runReview(repo: string, o: { settings: Settings;
     // Shown as it is proven: its test failed on every run, not before the change, and the second opinion agrees.
     // A suspect is proven by just this (adjudicate).
     const reveal = (f: Finding) => {
-      if (f.verdict !== "confirmed" || f.dependsOn || !justJudged.has(f.id) || revealed.has(f.id)) return;
+      if (f.verdict !== "confirmed" || f.dependsOn || isPreExisting(f) || !justJudged.has(f.id) || revealed.has(f.id)) return;
       revealed.add(f.id);
       shown++;
-      o.progress?.(`✓ proven: ${clip(f.explanation || firstLine(f.message), 140)} (${f.id}, failing test ` +
+      o.progress?.(`${CONFIRMED_FAILS ? "✓ proven" : "worth a look"}: ${clip(f.explanation || firstLine(f.message), 140)} (${f.id}, failing test ` +
         `${f.file ?? f.testId})`);
     };
     // What each second opinion is sent, saved as sent, so a replay of it is exact.
@@ -821,6 +828,11 @@ export async function runReview(repo: string, o: { settings: Settings;
           if (v.dependsOn) f.dependsOn = v.dependsOn;
           if (v.judge) f.judge = v.judge;
           if (v.sameAs) f.sameAs = v.sameAs;
+          if (v.kind) f.disputeKind = v.kind;
+          if (v.origin) {
+            f.origin = v.origin;
+            applyOrigin(f, v.origin, v.reason);
+          }
           emit("challenge.verdict", { project: f.project, finding: f.id, test_id: f.testId,
             hyp_id: f.suspect ? hypId(f.project, f.suspect) : null, outcome: "ok", verdict: v.verdict,
             reason: clip(v.reason), depends_on: v.dependsOn, judge: v.model, cost_usd: v.cost, resumed: true });
@@ -835,7 +847,8 @@ export async function runReview(repo: string, o: { settings: Settings;
         if (f.verdict === null) return;
         verdicts[`${f.project}::${f.testId}`] = { verdict: f.verdict, reason: f.reason, dependsOn: f.dependsOn ?? null,
           judge: f.judge ?? null, model: label ? `${label}/challenge` : f.judge ?? challengerRef, cost,
-          ...f.sameAs ? { sameAs: f.sameAs } : {} };
+          ...f.sameAs ? { sameAs: f.sameAs } : {}, ...f.disputeKind ? { kind: f.disputeKind } : {},
+          ...f.origin ? { origin: f.origin } : {} };
         writeFileSync(verdictsFile, JSON.stringify(verdicts) + "\n");
         justJudged.add(f.id);
         reveal(f);

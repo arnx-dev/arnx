@@ -222,6 +222,9 @@ export interface Brain {
   readonly label?: string;
   /** Whether a resumed round can be given the suspects of its cut hunt (`ReviewInput.prior`); a remote brain hunts again. */
   readonly reusesHunt?: boolean;
+  /** Whether its second opinion says where a failure is from: findings that fail with the same message before the
+   * change are then sent too, and stay pre-existing unless its reply moves them (challenge.ts applyOrigin). */
+  readonly judgesOrigin?: boolean;
   /** The repository's own prompts this brain runs (.arnx/prompts.toml): the keys and the hash of every template in
    * use, recorded with the review. Absent when it runs arnx's defaults, or its own (arnx cloud). */
   readonly overrides?: { keys: string[]; hash: string };
@@ -231,7 +234,7 @@ export interface Brain {
    * environment cannot run costs nothing; `tools` may still arrive later. */
   agentRound<K extends RoundKind>(kind: K, input: RoundInputs[K], tools: Promise<RoundTools>): Promise<RoundResult>;
   /** Questions merged, a second opinion on each finding, findings grouped by cause. Findings that fail the same way
-   * before the change are not sent. */
+   * before the change are not sent, unless the brain judges origin. */
   judge(findings: Finding[], questions: string[], diffs: Record<string, string>, o: JudgeOptions): Promise<Judged>;
   /** The review is over. */
   finish(totals: Totals): Promise<Billed | null>;

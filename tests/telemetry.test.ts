@@ -175,6 +175,16 @@ test("review payload: counts only, providers not models, before/after counts", a
     before: { regression: 1, pre_existing: 1, new_code: 1, changed: 0, unknown: 0 } });
 });
 
+test("review payload: an open verdict, which waits on an answer, is not counted as unjudged", () => {
+  const review = sampleReview({ findings: [
+    { ...finding("F1", "t::a", "a", "f.py", "m", "e", "open"), dependsOn: "Q1" },
+    finding("F2", "t::b", "b", "f.py", "m", "e", "confirmed"),
+    finding("F3", "t::c", "c", "f.py", "m", "e", null),
+  ] });
+  const data = reviewData(review, { settings: defaultSettings(), languages: ["python"], diffBytes: 10 });
+  expect([data.findings, data.confirmed, data.disputed, data.unjudged]).toEqual([3, 1, 0, 1]);
+});
+
 test("review payload: an effort or provider outside the schema is folded into it, never sent as text", () => {
   const providers = { myprovider: { api: "messages" as const, url: "https://llm.example.com", key_env: "MY_KEY" } };
   const s = { ...defaultSettings(), effort: "xhigh", providers,

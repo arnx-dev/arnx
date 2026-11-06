@@ -1,12 +1,16 @@
 import { expect, test } from "bun:test";
-import { challengeUser, explainUser, orderDiff } from "../src/prompts";
+import { CHALLENGE_SCHEMA, challengeUser, explainUser, orderDiff } from "../src/prompts";
+import { JUDGE_PROMPT, JUDGE_SCHEMA } from "../src/judgeprompt";
 import { Boundary, maskedJson } from "../src/boundary";
-import { challenge, CONCURRENCY, inPool } from "../src/challenge";
-import { sameTest } from "../src/report";
+import { applyOrigin, challenge, CONCURRENCY, GATES, inPool, settleVerdict } from "../src/challenge";
+import { confirmed, exitCode, findingStatus, notChecked, sameTest } from "../src/report";
 import { ModelError } from "../src/errors";
 import { billedError, FallbackJson } from "../src/llm";
-import { FakeJson } from "./helpers/fakes";
-import { finding } from "./helpers/review";
+import { FakeJson, ScriptedAgent } from "./helpers/fakes";
+import { LocalBrain } from "../src/localbrain";
+import { toJudge } from "../src/reviewer";
+import { finding, sampleReview } from "./helpers/review";
+import type { Before, BeforeStatus } from "../src/before";
 
 const f = (i: number) => finding(`F${i}`, `t.py::test_${i}`, `test_${i}`, "app/t.py", "assert 1 == 2", "why");
 
@@ -219,4 +223,201 @@ test("the grouping call sees the diff ordered, with the same footer", () => {
     { "t.py": "from src.b import x" });
   expect(u).toContain("# src/b.py");
   expect(u).toContain("[1 more file changed: src/a.py; not shown]");
+});
+
+// ---- the structured reply and its gates (the "new" judge prompt, behind replay)
+
+const PACK = (callers: string, extra = "") => ["## Commit message", "Parse dates in the importer", "",
+  "## Target names", "- `parse` (function, app/p.py:3)", "", "## Callers", callers, "", "## Project tests",
+  "`parse`: no project test found", "", "## Docs", "no doc found", extra].join("\n");
+const NO_CALLER = PACK("`parse` (app/p.py:3): no caller found");
+const P_DIFF = "diff --git a/app/p.py b/app/p.py\n--- a/app/p.py\n+++ b/app/p.py\n@@ -1 +1 @@\n-def parse(x): pass\n+def parse(x): return x\n" +
+  "diff --git a/app/cli.py b/app/cli.py\n--- a/app/cli.py\n+++ b/app/cli.py\n@@ -10 +10 @@\n-    run()\n+    run(parse)\n";
+const reply = (over: Record<string, unknown> = {}) => ({ caller: "none", input_from: "", intent: "", kind: "defect",
+  origin: "this-change", verdict: "confirmed", reason: "it drops the year", depends_on: "", ...over });
+
+test("a confirmation naming no findable caller becomes disputed as unreachable", () => {
+  const s = settleVerdict(reply(), NO_CALLER, P_DIFF, []);
+  expect([s.verdict, s.kind, s.gate]).toEqual(["disputed", "unreachable", "caller"]);
+  expect(s.reason).toContain("`parse`");
+});
+
+test("a confirmation stays when the pack finds a decorator, an export, a string, a getattr or a config entry", () => {
+  for (const callers of ["`parse` (app/p.py:3): no caller by name; exported",
+    "`parse` (app/p.py:3): no caller by name; reached by its decorator `@app.route(\"/p\")`",
+    "`parse` (app/p.py:3): no caller found\n- named in a string at app/r.py:4: REGISTRY = [\"parse\"]",
+    "`parse` (app/p.py:3): no caller found\n- may be reached by `getattr` at app/r.py:9: getattr(mod, \"pa\" + x)",
+    "`parse` (app/p.py:3): no caller found\n- named in setup.cfg:7: console_scripts = parse",
+    "`parse` (app/p.py:3): 2 caller lines\n- app/cli.py:10 in `main`\n    run(parse)"]) {
+    expect(settleVerdict(reply(), PACK(callers), P_DIFF, []).verdict).toBe("confirmed");
+  }
+});
+
+test("a missed caller does not turn a confirmation into a dispute", () => {
+  // The search stopped, some caller entries were left out, the test uses none of the changed definitions, or the
+  // pack is missing: none of these says no caller exists.
+  const stopped = PACK("`parse` (app/p.py:3): no caller found in the files read before the search stopped");
+  const cut = PACK("`parse` (app/p.py:3): no caller found\n[2 more not shown]");
+  const other = NO_CALLER.replace("## Target names\n", "## Target names\n(the test uses none of the changed definitions: these are the changed definitions of app/p.py)\n");
+  const late = NO_CALLER + "\n\n(the search stopped at its time limit after 900 files: callers, tests and docs farther from the change may be missing)";
+  for (const pack of [stopped, cut, other, late, ""]) expect(settleVerdict(reply(), pack, P_DIFF, []).verdict).toBe("confirmed");
+  // The second opinion names a caller the diff shows, which the search by name did not find.
+  expect(settleVerdict(reply({ caller: "app/cli.py:10 passes it to run()" }), NO_CALLER, P_DIFF, []).verdict).toBe("confirmed");
+  // Naming the definition itself, or a test, is no caller.
+  expect(settleVerdict(reply({ caller: "app/p.py:3" }), NO_CALLER, P_DIFF, []).verdict).toBe("disputed");
+  expect(settleVerdict(reply({ caller: "tests/test_p.py:5" }), NO_CALLER, P_DIFF + "diff --git a/tests/test_p.py b/tests/test_p.py\n", []).verdict).toBe("disputed");
+});
+
+test("a confirmation citing documented intent becomes disputed as intended", () => {
+  const s = settleVerdict(reply({ caller: "app/cli.py:10", intent: "docs/import.md:12 says two-digit years are kept as written" }),
+    PACK("`parse` (app/p.py:3): 1 caller line"), P_DIFF, []);
+  expect([s.verdict, s.kind, s.gate]).toEqual(["disputed", "intended", "intent"]);
+  expect(s.reason).toContain("docs/import.md:12");
+  for (const empty of ["", " ", "none", "None.", "n/a", "no evidence of intent", "not stated"]) {
+    expect(settleVerdict(reply({ caller: "app/cli.py:10", intent: empty }), PACK("`parse` (app/p.py:3): 1 caller line"), P_DIFF, []).verdict)
+      .toBe("confirmed");
+  }
+});
+
+test("a confirmation that depends on a question is open and sets no exit code", () => {
+  const s = settleVerdict(reply({ caller: "app/cli.py:10", depends_on: "Q1" }), PACK("`parse` (app/p.py:3): 1 caller line"),
+    P_DIFF, ["Should a two-digit year be kept?"]);
+  expect([s.verdict, s.dependsOn, s.gate]).toEqual(["open", "Q1", "question"]);
+  const r = sampleReview({ findings: [{ ...f(1), verdict: s.verdict, dependsOn: s.dependsOn, reason: s.reason }] });
+  expect(confirmed(r)).toHaveLength(0);
+  expect(notChecked(r)).toHaveLength(0);
+  expect(exitCode(r)).toBe(0);
+  expect(findingStatus(r.findings[0]!)).toBe("waiting-on-answer");
+});
+
+test("open with no such question is disputed", () => {
+  for (const dep of ["", "Q9", "maybe"]) {
+    const s = settleVerdict(reply({ verdict: "open", depends_on: dep }), NO_CALLER, P_DIFF, ["One?"]);
+    expect([s.verdict, s.kind, s.dependsOn ?? null]).toEqual(["disputed", "open-question", null]);
+  }
+  expect(settleVerdict(reply({ verdict: "open", depends_on: "Q1" }), NO_CALLER, P_DIFF, ["One?"]).verdict).toBe("open");
+});
+
+test("each gate has a replay switch", () => {
+  const all = reply({ intent: "the docstring says so", depends_on: "Q1" });
+  expect(settleVerdict(all, NO_CALLER, P_DIFF, ["One?"], new Set()).verdict).toBe("confirmed");
+  expect(settleVerdict(all, NO_CALLER, P_DIFF, ["One?"], new Set(["intent"])).kind).toBe("intended");
+  expect(settleVerdict(all, NO_CALLER, P_DIFF, ["One?"], new Set(["question"])).verdict).toBe("open");
+  expect(settleVerdict(all, NO_CALLER, P_DIFF, ["One?"], new Set(["caller"])).kind).toBe("unreachable");
+  expect([...GATES]).toEqual(["caller", "intent", "question"]);
+});
+
+test("a dispute keeps the kind the second opinion gave, and a reply outside the schema is not a verdict", () => {
+  const s = settleVerdict(reply({ verdict: "disputed", kind: "bad-test", reason: "the test mocks the parser" }), NO_CALLER, P_DIFF, []);
+  expect([s.verdict, s.kind, s.reason]).toEqual(["disputed", "bad-test", "the test mocks the parser"]);
+  expect(settleVerdict(reply({ verdict: "disputed", kind: "defect" }), NO_CALLER, P_DIFF, []).kind).toBeUndefined();
+  expect(settleVerdict(reply({ verdict: "maybe" }), NO_CALLER, P_DIFF, []).verdict).toBeNull();
+  expect(settleVerdict(reply({ origin: "older" }), PACK("`parse` (app/p.py:3): 1 caller line"), P_DIFF, []).origin).toBe("older");
+  expect(settleVerdict(reply({ origin: "sometime" }), NO_CALLER, P_DIFF, []).origin).toBeUndefined();
+});
+
+const before = (status: BeforeStatus, detail = "d"): Before => ({ status, detail, runs: ["failed"] });
+
+test("the second opinion's origin demotes a regression it calls older or a new feature", () => {
+  for (const origin of ["older", "new-feature"] as const) {
+    const x = { ...f(1), before: before("regression", "passes on the code before the change (1 run), fails with it") };
+    applyOrigin(x, origin, "the cap was there before");
+    expect(x.before!.status).toBe("unknown");
+    expect(x.before!.detail).toContain("the cap was there before");
+  }
+  for (const origin of ["this-change", "unclear", undefined] as const) {
+    const x = { ...f(1), before: before("regression") };
+    applyOrigin(x, origin, "r");
+    expect(x.before!.status).toBe("regression");
+  }
+});
+
+test("the second opinion can move a same-message failure to this change", async () => {
+  const moved = { ...f(1), before: before("pre-existing", "fails with the same message on the code before the change (1 run)") };
+  const kept = { ...f(2), before: before("pre-existing") };
+  const added = { ...f(3), before: before("pre-existing") };
+  const model = new FakeJson([reply({ caller: "app/cli.py:10" }), reply({ caller: "app/cli.py:10", origin: "older" }),
+    reply({ caller: "app/cli.py:10", origin: "new-feature" })]);
+  await challenge([moved, kept, added], { concurrency: 1, model, diff: P_DIFF, sources: {}, budgetUsd: 1, variant: "new",
+    evidence: () => PACK("`parse` (app/p.py:3): 1 caller line") });
+  expect([moved.before!.status, kept.before!.status, added.before!.status]).toEqual(["changed", "pre-existing", "new-code"]);
+  expect(moved.before!.detail).toContain("fails with the same message there");
+  expect(moved.before!.detail).not.toContain("did not cause");
+  expect(exitCode(sampleReview({ findings: [moved] }))).toBe(1);
+  expect(exitCode(sampleReview({ findings: [kept] }))).toBe(0);
+});
+
+test("no reply leaves a same-message failure pre-existing and exit code 0", async () => {
+  const x = { ...f(1), before: before("pre-existing") };
+  await challenge([x], { model: new FakeJson([new ModelError("HTTP 500")]), diff: P_DIFF, sources: {}, budgetUsd: 1, variant: "new" });
+  expect(x.before!.status).toBe("pre-existing");
+  expect(exitCode(sampleReview({ findings: [x] }))).toBe(0);
+  // The current prompt asks no origin: a same-message failure is not moved by it.
+  const y = { ...f(2), before: before("pre-existing") };
+  await challenge([y], { model: new FakeJson([{ verdict: "confirmed", reason: "r", origin: "this-change" }]), diff: P_DIFF,
+    sources: {}, budgetUsd: 1 });
+  expect(y.before!.status).toBe("pre-existing");
+});
+
+test("the new prompt sends the evidence pack and asks for the structured reply, gated", async () => {
+  const schemas: unknown[] = [];
+  const model = new FakeJson([reply(), reply({ caller: "app/cli.py:10", verdict: "disputed", kind: "bad-test" }),
+    reply({ caller: "app/cli.py:10", depends_on: "Q1" })]);
+  const spy = { ref: model.ref, completeJson: (s: string, u: string, schema: Record<string, unknown>) => {
+    schemas.push(schema);
+    return model.completeJson(s, u);
+  } };
+  const findings = [f(1), f(2), f(3)];
+  await challenge(findings, { concurrency: 1, model: spy, diff: P_DIFF, sources: {}, budgetUsd: 1, variant: "new",
+    questions: ["Keep two-digit years?"], evidence: (x) => x.id === "F1" ? NO_CALLER : PACK("`parse` (app/p.py:3): 1 caller line") });
+  expect(model.calls[0]).toContain("<evidence>\n" + NO_CALLER);
+  expect(model.calls[0]).toContain("If you cannot name a caller, do not confirm.");
+  expect(model.calls[0]).not.toContain("do not dispute it");
+  expect(model.calls[2]).toContain("Q1: Keep two-digit years?");
+  expect(schemas[0]).toBe(JUDGE_SCHEMA);
+  expect(Object.keys((JUDGE_SCHEMA as { properties: object }).properties)).toEqual(["caller", "input_from", "intent", "kind",
+    "origin", "verdict", "reason", "depends_on"]);
+  expect(findings.map((x) => [x.verdict, x.disputeKind ?? null, x.dependsOn ?? null])).toEqual([["disputed", "unreachable", null],
+    ["disputed", "bad-test", null], ["open", null, "Q1"]]);
+  // Without a pack the prompt says none was built, and no gate reads one.
+  const lone = new FakeJson([reply()]);
+  const y = [f(4)];
+  await challenge(y, { model: lone, diff: P_DIFF, sources: {}, budgetUsd: 1, variant: "new" });
+  expect(lone.calls[0]).toContain("(no evidence pack");
+  expect(y[0]!.verdict).toBe("confirmed");
+});
+
+test("the current prompt is today's: same text, same schema, two verdicts", async () => {
+  const schemas: unknown[] = [];
+  const model = new FakeJson([{ verdict: "confirmed", reason: "r", depends_on: "Q1" }]);
+  const spy = { ref: model.ref, completeJson: (s: string, u: string, schema: Record<string, unknown>) => {
+    schemas.push(schema);
+    return model.completeJson(s, u);
+  } };
+  const x = [f(1)];
+  await challenge(x, { model: spy, diff: "d", sources: {}, budgetUsd: 1, questions: ["One?"], evidence: () => NO_CALLER });
+  expect(schemas[0]).toBe(CHALLENGE_SCHEMA);
+  expect(model.calls[0]).not.toContain("<evidence>");
+  expect([x[0]!.verdict, x[0]!.dependsOn]).toEqual(["confirmed", "Q1"]);
+  expect(JUDGE_PROMPT).toBe("current");
+});
+
+test("same-message failures go to a local judge that asks their origin, and the rest of judging is as before", async () => {
+  const same = { ...f(1), before: before("pre-existing") };
+  const other = { ...f(2), before: before("regression") };
+  const brain = (judge?: "current" | "new") => new LocalBrain({ agentModel: new ScriptedAgent([]), prices: {},
+    challenger: new FakeJson([]), ...(judge ? { judge } : {}) });
+  expect(brain().judgesOrigin).toBe(false);
+  expect(brain("new").judgesOrigin).toBe(true);
+  expect(toJudge([same, other], brain()).map((x) => x.id)).toEqual(["F2"]);
+  expect(toJudge([same, other], brain("new")).map((x) => x.id)).toEqual(["F1", "F2"]);
+  // A same-message failure the judge leaves older is not grouped with the change's findings.
+  const model = new FakeJson([reply({ caller: "app/cli.py:10", origin: "older" }), reply({ caller: "app/cli.py:10" }),
+    { groups: [{ findings: ["F2"], title: "t", input: "", actual: "", expected: "", consequence: "", severity: "low" }] }]);
+  const local = new LocalBrain({ agentModel: new ScriptedAgent([]), prices: {}, challenger: model, judge: "new" });
+  await local.judge([same, other], [], {}, { diff: P_DIFF, sources: {}, maxQuestions: 3, budgetLeft: () => 1, trace: () => {},
+    evidence: () => PACK("`parse` (app/p.py:3): 1 caller line"), suspectFile: () => undefined });
+  expect(same.before!.status).toBe("pre-existing");
+  expect(model.calls[2]).not.toContain(`<finding id="F1">`);
+  expect(model.calls[2]).toContain(`<finding id="F2">`);
 });

@@ -2,7 +2,7 @@
 // the change and passes after it is not always a fix, and what already failed is named, not only counted.
 import { expect, test } from "bun:test";
 import { judgeFix, newNames, vacuousBefore, type Before, type BeforeRun } from "../src/before";
-import { adjudicate, exitCode, findingStatus, neededQuestions, nextSteps, render, summary, summaryRows, yourCall,
+import { adjudicate, CONFIRMED_FAILS, exitCode, findingStatus, neededQuestions, nextSteps, render, summary, summaryRows, yourCall,
   type SuspectOutcome } from "../src/report";
 import { finding, sampleReview } from "./helpers/review";
 
@@ -139,4 +139,19 @@ test("an unproven pass has no regression prefix", () => {
   expect(text).not.toContain("regression");
   expect(text).not.toContain("caused by the change");
   expect(render(r)).not.toContain("regression ·");
+});
+
+test("the fallback switch: confirmed findings fail the run today, and read worth a look with exit 0 when it is on", () => {
+  const r = sampleReview({ findings: [f("F1", "test_a", "confirmed", "real")], questions: [], questionProjects: [] });
+  expect(CONFIRMED_FAILS).toBe(true);
+  expect(exitCode(r)).toBe(1);
+  expect(summary(r, "review.md")).toContain("1 issue confirmed (1 finding)");
+  expect(exitCode(r, false)).toBe(0);
+  const text = summary(r, "review.md", false);
+  expect(text).toContain("1 issue worth a look (1 finding)");
+  expect(text).not.toContain("confirmed");
+  // A finding no second opinion saw still fails the run.
+  const unseen = sampleReview({ findings: [f("F1", "test_a", "confirmed", "real"), f("F2", "test_b", null, CUT)], questions: [],
+    questionProjects: [] });
+  expect(exitCode(unseen, false)).toBe(1);
 });

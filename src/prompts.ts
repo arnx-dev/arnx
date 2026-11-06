@@ -121,6 +121,8 @@ function sectionPath(part: string): string {
 const NOTES = /\n\n(?=This change also edits files not shown here|These files look like secrets and are left out)/;
 const DOC_FILE = /\.(md|mdx|rst|txt|adoc)$|(^|\/)(docs?|documentation)\//i;
 const TEST_FILE = /(^|\/)(tests?|__tests__|spec|specs)\/|(^|[._-])(test|tests|spec)(?=[._-]|$)|_test\.|\.test\.|\.spec\./i;
+/** Whether a path looks like a test file or sits in a test folder. */
+export const isTestPath = (path: string) => TEST_FILE.test(path);
 
 /** The diff for a model that reads at most `limit` characters of it. A diff within the limit is returned as it is. A longer
  * one is put in the order of what the reader needs: the file `first` (the suspect's), the files the test names, other

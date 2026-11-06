@@ -59,7 +59,15 @@ export interface Finding {
   shallow?: Shallow;
   /** Its project was tested on the image built for another commit (its dependencies may differ). */
   fallback?: true;
+  /** Why the second opinion disputed it, when its reply said (the structured reply): the behaviour is meant, no real
+   * caller gives that input, the test is wrong, or it waited on a question the review did not ask. */
+  disputeKind?: DisputeKind;
+  /** Where the second opinion puts the failure (the structured reply): this change, older code, what it adds. */
+  origin?: Origin;
 }
+
+export type DisputeKind = "intended" | "unreachable" | "bad-test" | "open-question";
+export type Origin = "this-change" | "older" | "new-feature" | "unclear";
 
 /** How a finding from a fallback image is labelled wherever it is shown. */
 export const FALLBACK_LABEL = "ran on another commit's image";
@@ -284,8 +292,14 @@ export const incomplete = (r: Review) => r.stop !== "end_turn" || r.missingRuns 
   !!r.couldNotRun?.length || (r.projectStats ?? []).some((p) => p.noReport || !!p.env || !!p.hungFiles?.length || !!p.notRunFiles?.length);
 /** Findings from a project tested on another commit's image are shown, labelled, and do not fail the run. */
 const counts = (r: Review) => (f: Finding) => !(r.projectStats ?? []).some((p) => p.name === f.project && p.env);
-export const exitCode = (r: Review) => (confirmed(r).filter(counts(r)).length || notChecked(r).filter(counts(r)).length ? 1
-  : incomplete(r) ? 2 : 0);
+/** Whether a confirmed finding fails the run. False is the agreed fallback for a second opinion that misses its
+ * release gates: a confirmed finding then reads "worth a look" and the run exits 0 on it. */
+export const CONFIRMED_FAILS = true;
+/** What a confirmed issue is called in the summary. */
+export const confirmedWord = (fails = CONFIRMED_FAILS) => fails ? "confirmed" : "worth a look";
+export const exitCode = (r: Review, confirmedFails = CONFIRMED_FAILS) =>
+  ((confirmedFails && confirmed(r).filter(counts(r)).length) || notChecked(r).filter(counts(r)).length ? 1
+    : incomplete(r) ? 2 : 0);
 
 export interface Marks {
   findings: Record<string, string | null>;
@@ -382,7 +396,8 @@ function untrackedLines(r: Review): string[] {
   return out;
 }
 
-const opinion = (f: Finding) => f.verdict ? `${f.verdict} by the second opinion` : "not challenged";
+const opinion = (f: Finding) => f.verdict
+  ? `${f.verdict}${f.verdict === "disputed" && f.disputeKind ? ` (${f.disputeKind})` : ""} by the second opinion` : "not challenged";
 
 /** Why a project's reviewer stopped, in words. A failed call the provider is known to have caused is named in the
  * provider's own line (failureLine), not here. */
@@ -1059,7 +1074,7 @@ export function summaryStatus(r: Review): { problems: string[]; untested: number
   return { problems, untested: m, of: n, none: !problems.length && none };
 }
 
-export function summary(r: Review, reviewMd: string): string {
+export function summary(r: Review, reviewMd: string, confirmedFails = CONFIRMED_FAILS): string {
   const { problems } = statusOf(r);
   const st = summaryStatus(r);
   const said = problems.join("; ");
@@ -1074,7 +1089,7 @@ export function summary(r: Review, reviewMd: string): string {
   // With --quiet this is the only place that says part of the change was not sent.
   if (r.untrackedLeftOut) out.push(`${plural(r.untrackedLeftOut, "untracked file")} left out (--untracked includes them).`);
   const issues = summaryRows(r);
-  if (issues.length) out.push(issuesLine(r, issues));
+  if (issues.length) out.push(issuesLine(r, issues, confirmedFails));
   const fixes = fixed(r).length;
   if (fixes) out.push(`${plural(fixes, "test")} fail${fixes === 1 ? "s" : ""} before this change and pass${fixes === 1 ? "es" : ""} with it.`);
   const open = notChecked(r);
@@ -1194,8 +1209,8 @@ export function nextSteps(r: Review, rows: SummaryRow[] = summaryRows(r)): strin
 
 /** The summary's count: issues (rows) by where they stand, the findings in them, and what the code before the change
  * settles when it says the same of every confirmed finding. */
-function issuesLine(r: Review, rows: SummaryRow[]): string {
-  const kinds = ([["✗", "confirmed"], ["!", "not checked"], ["?", "waiting on a question"], ["·", "disputed"]] as const)
+function issuesLine(r: Review, rows: SummaryRow[], confirmedFails = CONFIRMED_FAILS): string {
+  const kinds = ([["✗", confirmedWord(confirmedFails)], ["!", "not checked"], ["?", "waiting on a question"], ["·", "disputed"]] as const)
     .map(([mark, word]) => [rows.filter((row) => row.mark === mark).length, word] as const).filter(([n]) => n);
   // What the code before the change settles describes the confirmed issues: it goes with their count.
   const counted = kinds.map(([n, word], i) => `${i ? n : plural(n, "issue")} ${word}`);
@@ -1207,7 +1222,7 @@ function issuesLine(r: Review, rows: SummaryRow[]): string {
     : before[0] === "regression" ? "their tests pass before the change"
     : before[0] === "pre-existing" ? "already failing before the change" : "";
   // Confirmed comes first among the kinds.
-  if (settled && kinds[0]?.[1] === "confirmed" && kinds.length > 1) {
+  if (settled && kinds[0]?.[1] === confirmedWord(confirmedFails) && kinds.length > 1) {
     return `${counted[0]}, ${settled}; ${counted.slice(1).join(", ")} (${plural(findings, "finding")}).`;
   }
   return `${counted.join(", ")} (${plural(findings, "finding")})${settled ? `; ${settled}` : ""}.`;

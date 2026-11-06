@@ -8,12 +8,13 @@ import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { ModelError, NoCredits, SetupRequired } from "../src/errors";
 import { allPrices, FallbackJson, type JsonModel, type JsonReply } from "../src/llm";
 import { CHALLENGE_SCHEMA, DEFAULT_PROMPTS } from "../src/prompts";
+import { JUDGE_SCHEMA, NEW_SYSTEM } from "../src/judgeprompt";
 import { runReview } from "../src/reviewer";
 import type { SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { defaultModel, loadContext, main, type Row } from "../scripts/replay-judge";
 import { FakeJson, FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
-import { commit, initRepo } from "./helpers/gitutil";
+import { commit, initRepo, runGit } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
 import { PROJECTS } from "./helpers/yaml";
@@ -419,14 +420,107 @@ test("--help names the arguments and needs nothing else", async () => {
   }
 });
 
-test("only the current prompt can be replayed, and flags it does not have are refused", async () => {
+test("a prompt it does not have, and flags it does not have, are refused", async () => {
+  const f = fixture();
+  const model = new FakeJson([]);
+  const { code, text } = await replay(f, model, "--prompt", "next");
+  expect(code).toBe(2);
+  expect(text).toContain("new");
+  expect(text).toContain("current");
+  expect((await replay(f, model, "--gates", "maybe")).code).toBe(2);
+  expect((await replay(f, model, "--temperature", "1")).code).toBe(2);
+  expect(model.calls).toHaveLength(0);
+});
+
+// ---- the new prompt: an evidence pack and a structured reply, settled by gates
+
+/** The fixture as a clone holding the reviewed commit: `parse` changes, and a caller exists in `cli.py`. */
+function committed(o: { preExisting?: boolean; linked?: boolean } = {}) {
+  const f = fixture({ ...o, grades: ["real-minor", "intended"] });
+  initRepo(f.repo);
+  writeFileSync(join(f.repo, "app.py"), "def parse(x):\n    return None\n");
+  writeFileSync(join(f.repo, "cli.py"), "from app import parse\n\ndef main(argv):\n    return parse(argv[1])\n");
+  writeFileSync(join(f.repo, ".gitignore"), ".arnx/reviews/\n");
+  commit(f.repo, "base");
+  const base = runGit(f.repo, "rev-parse", "HEAD").trim();
+  writeFileSync(join(f.repo, "app.py"), "def parse(x):\n    return x.strip()\n");
+  commit(f.repo, "Parse trims its input");
+  const head = runGit(f.repo, "rev-parse", "HEAD").trim();
+  const diff = runGit(f.repo, "diff", base, head);
+  writeFileSync(join(f.rdir, "change.diff"), diff);
+  writeFileSync(join(f.rdir, "events.jsonl"), JSON.stringify({ type: "review.started", data: { head, base,
+    change_kind: "range" } }) + "\n");
+  writeFileSync(f.grades, readFileSync(f.grades, "utf8").replaceAll("\tabc\t", `\t${head.slice(0, 9)}\t`));
+  const roundFile = join(f.rdir, "projects", "main", "round.json");
+  const round = JSON.parse(readFileSync(roundFile, "utf8"));
+  round.round.files[TEST] = "from app import parse\ndef test_one(): assert parse(' a') == 'a '\ndef test_two(): assert parse(1)\n";
+  writeFileSync(roundFile, JSON.stringify(round));
+  return f;
+}
+const S = (over: Record<string, unknown>) => ({ caller: "cli.py:4", input_from: "argv", intent: "", kind: "defect",
+  origin: "this-change", verdict: "confirmed", reason: "r", depends_on: "", ...over });
+
+test("the new prompt sends each finding's evidence pack from the reviewed commit, and asks for the structured reply", async () => {
+  const f = committed();
+  const model = new Recording([S({}), S({ verdict: "disputed", kind: "bad-test" })]);
+  const { code } = await replay(f, model, "--prompt", "new");
+  expect(code).toBe(0);
+  expect(model.systems[0]).toBe(NEW_SYSTEM);
+  expect(model.schemas[0]).toBe(JUDGE_SCHEMA);
+  expect(model.calls[0]).toContain("<evidence>\n## Commit message\nParse trims its input");
+  expect(model.calls[0]).toContain("`parse` (app.py:1)");
+  expect(model.calls[0]).toContain("cli.py:4");
+  for (const c of model.calls) expect(c).not.toContain(SENTINEL);
+  const rows = rowsIn(join(f.out, "openai_gpt-5.5-2026-04-23-new-1.jsonl"));
+  expect(rows.map((r) => [r.verdict, r.said, r.kind ?? null])).toEqual([["confirmed", "confirmed", null], ["disputed", "disputed", "bad-test"]]);
+});
+
+test("the gates settle the replayed replies, and --gates off scores the same rows without them, sending nothing", async () => {
+  const f = committed();
+  const model = new Recording([S({ intent: "app.py:1 docstring: parse keeps the text as given" }), S({ depends_on: "Q1" })]);
+  const on = await replay(f, model, "--prompt", "new");
+  expect(metric(on.text, "false_confirms")).toBe("0.0");
+  expect(metric(on.text, "real_confirmed")).toBe("0.0/1");
+  expect(on.text).toContain("gates fired: caller 0, intent 1, question 1");
+  const rows = rowsIn(join(f.out, "openai_gpt-5.5-2026-04-23-new-1.jsonl"));
+  expect(rows.map((r) => [r.verdict, r.gate ?? null, r.depends_on ?? null])).toEqual([["disputed", "intent", null],
+    ["open", "question", "Q1"]]);
+  const off = await replay(f, new FakeJson([]), "--prompt", "new", "--gates", "off");
+  expect(off.code).toBe(0);
+  expect(metric(off.text, "real_confirmed")).toBe("1.0/1");
+  // Without the question gate a confirmation on a question waits, as today.
+  expect(metric(off.text, "false_confirms")).toBe("1.0");
+  expect(metric(off.text, "runs_failing_no_defect")).toBe("0.0/1");
+});
+
+test("--gates names the gates to run, each on its own", async () => {
+  const f = committed();
+  const model = new Recording([S({ intent: "app.py:1 docstring: parse keeps the text as given" }), S({ depends_on: "Q1" })]);
+  await replay(f, model, "--prompt", "new");
+  const some = await replay(f, new FakeJson([]), "--prompt", "new", "--gates", "caller,question");
+  expect(some.text).toContain("gates fired: caller 0, intent 0, question 1");
+  expect(metric(some.text, "real_confirmed")).toBe("1.0/1");
+  expect((await replay(f, new FakeJson([]), "--prompt", "new", "--gates", "caller,bogus")).code).toBe(2);
+});
+
+test("a same-message failure the replayed reply puts in this change counts", async () => {
+  const f = committed({ preExisting: true });
+  const moved = await replay(f, new FakeJson([S({ verdict: "disputed", kind: "bad-test" }), S({})]), "--prompt", "new");
+  expect(metric(moved.text, "runs_failing_no_defect")).toBe("1.0/1");
+});
+
+test("a same-message failure the replayed reply calls older stays where it was", async () => {
+  const f = committed({ preExisting: true });
+  const older = await replay(f, new FakeJson([S({ verdict: "disputed", kind: "bad-test" }), S({ origin: "older" })]), "--prompt", "new");
+  expect(metric(older.text, "runs_failing_no_defect")).toBe("0.0/1");
+});
+
+test("the new prompt cannot be built without the reviewed commit, and nothing is sent", async () => {
   const f = fixture();
   const model = new FakeJson([]);
   const { code, text } = await replay(f, model, "--prompt", "new");
   expect(code).toBe(2);
-  expect(text).toContain("new");
-  expect(text).toContain("current");
-  expect((await replay(f, model, "--gates", "on")).code).toBe(2);
+  expect(text).toContain("cannot build alpha abc r1 F1");
   expect(model.calls).toHaveLength(0);
 });
 

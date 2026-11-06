@@ -15,6 +15,8 @@ import { partHunts, parseSuspects, rankSuspects, sameSuspect, secondHunt } from 
 import { type AgentModel, FallbackJson, type JsonModel, type ModelUse, newUse, parseJsonObject } from "./llm";
 import { DEFAULT_PROMPTS, isModelKey, PROMPT_VERSION, type Prompts, scopeTold, type Suspect } from "./prompts";
 import { mergeQuestions } from "./questions";
+import { isPreExisting } from "./before";
+import { JUDGE_PROMPT, type JudgeVariant } from "./judgeprompt";
 import { standInsText } from "./standins";
 import { type Finding, parseReport, parseReports, questionTexts } from "./report";
 import type { Prices } from "./settings";
@@ -60,6 +62,8 @@ export interface LocalModels {
   prompts?: Prompts;
   /** What is kept from every model (default: the reviewer's own boundary, when it has one). */
   boundary?: Boundary;
+  /** The second opinion's prompt variant (default JUDGE_PROMPT). */
+  judge?: JudgeVariant;
 }
 
 /** The hunt of one review round: started once the sandbox has run a test, finished when the reviewer replies to it. */
@@ -78,6 +82,8 @@ export class LocalBrain implements Brain {
   private readonly p: Prompts;
   readonly m: LocalModels;
   readonly boundary: Boundary;
+  /** The structured reply says where a failure is from: a failure with the same message before the change is sent. */
+  readonly judgesOrigin: boolean;
 
   constructor(m: LocalModels) {
     // Whoever made them, every model here goes through the one filter: one boundary, filled as the run finds its values.
@@ -86,6 +92,7 @@ export class LocalBrain implements Brain {
     this.m = { ...m, agentModel: m.agentModel && maskedAgent(m.agentModel, b), challenger: json(m.challenger),
       hunter: json(m.hunter), ranker: json(m.ranker), secondHunter: json(m.secondHunter) };
     this.p = m.prompts ?? DEFAULT_PROMPTS;
+    this.judgesOrigin = (m.judge ?? JUDGE_PROMPT) === "new";
     const keys = this.p.overridden.filter(isModelKey); // the fix prompt's keys are no model's
     if (keys.length) this.overrides = { keys, hash: this.p.hash };
   }
@@ -376,13 +383,15 @@ export class LocalBrain implements Brain {
     const spent = findings.length ? await challenge(findings, { model: challenger, diff: o.diff, timedOut,
       diffOf: (f) => diffs[f.project] ?? o.diff, suspectFile: o.suspectFile,
       ...(o.evidence ? { evidence: o.evidence } : {}), ...(o.sent ? { sent: o.sent } : {}), sources: o.sources, budgetUsd: remaining, questions: asked,
-      trace: o.trace, progress: o.progress, skip, onJudged: (f, cost) => o.judged?.(f, cost), prompts: this.p }) : null;
+      trace: o.trace, progress: o.progress, skip, onJudged: (f, cost) => o.judged?.(f, cost), prompts: this.p,
+      variant: this.m.judge ?? JUDGE_PROMPT }) : null;
     // The grouping call is skipped only when the second model answered none of the findings in time (any timeout
     // kind, by the error's flag; the older message test is kept).
     const stalled = findings.length > 0 && findings.every((f) => f.reason === `not challenged: ${STALLED}` ||
       timedOut.has(f.id) || f.reason.includes("no reply within"));
     if (spent && stalled) o.trace({ step: "explain", outcome: "skipped", reason: STALLED });
-    const groups = spent && !stalled ? await explain(findings, { model: challenger, diff: o.diff, sources: o.sources,
+    // A failure with the same message before the change that its origin left there is not the change's: not grouped.
+    const groups = spent && !stalled ? await explain(findings.filter((f) => !isPreExisting(f)), { model: challenger, diff: o.diff, sources: o.sources,
       budgetUsd: remaining, use: spent, trace: o.trace, progress: o.progress, prompts: this.p }) : [];
     // A challenger with a fallback keeps its own per-model use (second opinions and grouping, both models).
     const uses = challenger instanceof FallbackJson ? challenger.uses : spent ? [spent] : [];
