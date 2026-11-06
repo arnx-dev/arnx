@@ -945,24 +945,34 @@ export function withUncovered(text: string, add: { path: string; reason: string 
 /** A project proven in this setup: its settings, the services it lists, and the file's allowed env names. */
 export interface ProvenBlock { spec: unknown; services: Record<string, unknown>; allow: string[] }
 
-const slashes = (p: string) => p.replace(/^\/+|\/+$/g, "");
-const sameOrNested = (a: string, b: string) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+/** A project's working folder as the file names it: "./" and edge slashes dropped, an omitted root is ".". */
+const folder = (root: unknown): string => {
+  const p = (typeof root === "string" ? root : ".").replace(/\/+/g, "/").replace(/^(\.\/)+/, "").replace(/^\/+|\/+$/g, "");
+  return p === "" ? "." : p;
+};
+const sameOrNested = (a: string, b: string) => a === "." || b === "." || a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 
 /** `yaml` with each project in `blocks` that it leaves out put back, with its services, and its `/<root>/` entry
- * under uncovered taken out. A project is not put back when another project in the file has its root or a root
- * inside or around it (the agent restructured), or when the file defines a service of that name differently. */
-export function restoreProven(yaml: string, blocks: Map<string, ProvenBlock>): { yaml: string; restored: string[] } {
+ * under uncovered taken out. A project is not put back (the new file wins; `replaced` names it) when its folder
+ * overlaps one of another project in the file, "." being the ancestor of every folder; nor when the file defines a
+ * service of that name differently. */
+export function restoreProven(yaml: string, blocks: Map<string, ProvenBlock>):
+  { yaml: string; restored: string[]; replaced: string[] } {
   const doc = parseDocument(yaml);
-  if (doc.errors.length || !blocks.size) return { yaml, restored: [] };
+  if (doc.errors.length || !blocks.size) return { yaml, restored: [], replaced: [] };
   const js = doc.toJS() as { projects?: Record<string, { root?: unknown }>; services?: Record<string, unknown>;
     uncovered?: { path?: unknown }[]; allow_env_names?: string[] } | null;
-  if (!js || !js.projects || typeof js.projects !== "object") return { yaml, restored: [] };
-  const roots = (): string[] => Object.values(js.projects!).map((p) => slashes(String(p?.root ?? ""))).filter(Boolean);
+  if (!js || !js.projects || typeof js.projects !== "object") return { yaml, restored: [], replaced: [] };
+  const roots = (): string[] => Object.values(js.projects!).map((p) => folder(p?.root));
   const restored: string[] = [];
+  const replaced: string[] = [];
   for (const [name, b] of blocks) {
     if (name in js.projects) continue;
-    const root = slashes(String((b.spec as { root?: unknown } | null)?.root ?? ""));
-    if (!root || roots().some((r) => sameOrNested(r, root))) continue;
+    const root = folder((b.spec as { root?: unknown } | null)?.root);
+    if (roots().some((r) => sameOrNested(r, root))) {
+      replaced.push(name);
+      continue;
+    }
     const clash = Object.entries(b.services).some(([k, v]) => js.services?.[k] !== undefined &&
       JSON.stringify(js.services[k]) !== JSON.stringify(v));
     if (clash) continue;
@@ -983,12 +993,13 @@ export function restoreProven(yaml: string, blocks: Map<string, ProvenBlock>): {
     if (isSeq(list)) {
       for (let i = list.items.length - 1; i >= 0; i--) {
         const u = (list.items[i] as { toJSON?: () => unknown }).toJSON?.() as { path?: unknown } | undefined;
-        if (typeof u?.path === "string" && slashes(u.path) === root && /\/$/.test(u.path)) list.items.splice(i, 1);
+        if (typeof u?.path === "string" && folder(u.path) === root && /\/$/.test(u.path)) list.items.splice(i, 1);
       }
     }
     restored.push(name);
   }
-  return restored.length ? { yaml: doc.toString({ flowCollectionPadding: false, lineWidth: 0 }), restored } : { yaml, restored };
+  return restored.length ? { yaml: doc.toString({ flowCollectionPadding: false, lineWidth: 0 }), restored, replaced }
+    : { yaml, restored, replaced };
 }
 
 /** What restoreProven needs to put project `name` back: its settings, its services and the allowed env names. */
@@ -1655,6 +1666,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const putBack = (text: string): string => {
       const blocks = new Map([...state.provenBlocks].filter(([n]) => !keep.has(n) && !state.webUi.has(n)));
       const r = restoreProven(text, blocks);
+      if (r.replaced.length) {
+        state.notice += `(${r.replaced.join(", ")} ran in this setup, but its folder overlaps a project in this file: ` +
+          "the file's project stays.)\n";
+      }
       if (!r.restored.length) return text;
       try {
         parseReviewFile(withOurs(r.yaml));
@@ -1795,7 +1810,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       // The rest is right: propose runs each project changed since it was proven, instead of a round trip per project.
       const failed: string[] = [];
       for (const name of unproven) {
-        const r = await tryProject({ yaml: args.yaml, project: name });
+        const r = await tryProject({ yaml: parsed.yaml, project: name });
         if (!r.startsWith(`the suite of ${name} runs:`)) {
           failed.push(r);
         }

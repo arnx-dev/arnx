@@ -361,3 +361,41 @@ uncovered:
   expect(f.projects.map((p) => p.name)).toEqual(["api"]);
   expect(f.uncovered).toEqual([{ path: "/web/", reason: TIME_LEFT_OUT }]);
 });
+
+const fastExceptWeb = (clock: { ms: number }) =>
+  async <T>(cfg: { name: string }, snap: string, _log: string, body: (r: Runner) => Promise<T>) =>
+    body(new FakeSession(snap, () => {
+      if (cfg.name !== "web") return [junitXml([["api/tests/test_api.py", "test_f", "passed", ""]]), "1 passed", false];
+      clock.ms += 11 * MIN;
+      return [junitXml([["web/tests/test_web.py", "test_f", "failed", "boom"]]), "1 failed", false];
+    }));
+
+test("at the limit, a proven project that overlaps the last file's projects is not put back: the file is still accepted", async () => {
+  const clock = { ms: 0 };
+  const repo = twoProjects();
+  mkdirSync(join(repo, "api", "lib"), { recursive: true });
+  writeFileSync(join(repo, "api", "lib", "lib.py"), "X = 1\n");
+  commit(repo, "lib");
+  const second = `version: 1
+projects:
+  lib:
+    root: api/lib
+    language: python
+    image: python:3.12-slim
+    install: [pip install pytest]
+    test_command: python -m pytest -q {targets}
+  web:
+    root: web
+    language: python
+    image: python:3.12-slim
+    install: [pip install pytest]
+    test_command: python -m pytest -q {targets}
+`;
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("try_project", { yaml: second, project: "lib" })], [tool("try_project", { yaml: second, project: "web" })],
+    [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"),
+    sessionFactory: fastExceptWeb(clock), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+  expect([r.ok, r.stop]).toEqual([true, "time"]);
+  expect(parseReviewFile(r.yamlText!).projects.map((p) => p.name)).toEqual(["lib"]);
+});
