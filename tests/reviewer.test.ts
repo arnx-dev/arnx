@@ -298,6 +298,24 @@ test("a file a failing stack trace goes through is not listed", async () => {
   expect(through.untested![0]!.files).toEqual(["other.py"]);
 });
 
+test("a file a test run reached is not listed, though no test names it", async () => {
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a + b\n");
+  runGit(repo, "add", "other.py");
+  runGit(repo, "commit", "-q", "-m", "other");
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a - b\n");
+  const body = "def test_add():\n    # covers app and other\n    assert open('x').read() == 'app other'\n";
+  const model = new ScriptedAgent([[tool("write_file", { path: GEN, content: body })],
+    [text(reportFor(`${GEN}::test_add`))]]);
+  // What arnx's Python hook notes in the report folder: code under /src that ran.
+  const sess: SessionFactory = (cfg, snap, log, run) => fakeFactory((command) => {
+    if (command.includes("final-")) writeFileSync(join(snap, ".arnx-run", "reached-41.txt"), "ran /src/other.py\n");
+    return [junitXml([[GEN, "test_add", "passed", ""]]), "", false];
+  })(cfg, snap, log, run);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
+    sessionFactory: sess });
+  expect(review.untested![0]!.files).toEqual(["app.py"]);
+});
+
 test("a file named only by a test that could not load is not reached", async () => {
   writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a + b\n");
   runGit(repo, "add", "other.py");

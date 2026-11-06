@@ -1,7 +1,7 @@
 // Docker end to end: real sandbox and Postgres, scripted models. Run with ARNX_DOCKER_TESTS=1.
 import { describe, expect, test } from "bun:test";
 import { blankMarks } from "./helpers/review";
-import { appendFileSync, cpSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
 import { basename, dirname, join } from "node:path";
 import { accept } from "../src/accept";
@@ -11,7 +11,9 @@ import { isApproved, loadReviewFile, parseReviewConfig, parseReviewFile, reviewC
 import type { AgentModel, Block, JsonModel } from "../src/llm";
 import { recheckJson, recheckReview, recheckSummary } from "../src/recheck";
 import { docker, dockerSteps, ensureEnv, networkNotice, Session } from "../src/sandbox";
-import { runTests } from "../src/outcomes";
+import { runTests, type TestResult } from "../src/outcomes";
+import { python } from "../src/adapters/python";
+import { clearReach, readReach } from "../src/reached";
 import { dockerSession } from "../src/testround";
 import { fake } from "../src/secrets";
 import { EVENTS_FILE } from "../src/events";
@@ -560,4 +562,108 @@ def test_encoded_as_written():
     // Where tests run it is the code as written.
     expect(readFileSync(join(snap, "shop/mfst.py"), "utf8")).toContain(GUESS);
   }, 600_000);
+
+  // arnx's Python hook (reached.ts) must change no test's outcome: every test, the project's own sitecustomize and
+  // PYTHONPATH, and its coverage numbers are the same with it as without it, under xdist, on Pythons with and without
+  // sys.monitoring.
+  for (const image of ["python:3.12-slim", "python:3.11-slim"]) {
+    test(`the run hook notes what pytest ran and changes nothing a test sees, under xdist and coverage (${image})`, async () => {
+      const snap = join(tmp(), "reach");
+      writeReachProject(snap);
+      const cfg = parseReviewConfig(`version: 1\nimage: ${image}\ninstall: [pip install -r requirements.txt]\n` +
+        "test_command: python -m pytest -q -n 2 --cov=app --cov-report=term {targets}\nenv:\n  PYTHONPATH: /src/own\n");
+      const outcomes = (results: TestResult[] | null) =>
+        Object.fromEntries((results ?? []).map((t) => [t.testId, t.outcome]));
+      const total = (output: string) => /^TOTAL\s.*$/m.exec(output)?.[0];
+      const times: Record<"plain" | "hook", number[]> = { plain: [], hook: [] };
+      await dockerSession(cfg, snap, join(tmp(), "build.log"), async (s) => {
+        for (let i = 0; i < 3; i++) {
+          clearReach(snap);
+          const [hooked, withHook] = await runTests(s, snap, cfg, ["tests"], "hook.xml", 600);
+          const reach = readReach(snap);
+          const command = python.command(cfg.testCommand, ["tests"], "/src/.arnx-run/plain.xml", "pytest");
+          expect(command.startsWith("export PYTHONPATH=")).toBe(true);
+          const plain = await s.run(command.slice(command.indexOf("; ") + 2), 600);
+          const without = python.parseReport(readFileSync(join(snap, ".arnx-run", "plain.xml"), "utf8"), "pytest", ".");
+          expect(outcomes(withHook)).toEqual(outcomes(without));
+          expect(Object.values(outcomes(without)).sort()).toEqual(["failed", ...Array(5).fill("passed")]);
+          expect(total(hooked.output)).toBeTruthy();
+          expect(total(hooked.output)).toBe(total(plain.output));
+          // Notes from the controller, both workers and a test's own subprocess.
+          expect(readdirSync(join(snap, ".arnx-run")).filter((n) => /^reached-\d+\.txt$/.test(n)).length).toBeGreaterThanOrEqual(3);
+          const seen = Object.fromEntries(reach);
+          const sysmon = image.includes("3.12");
+          // helper.py is only reached through core.py; unused.py by nothing.
+          expect(seen["app/core.py"]).toBe(sysmon ? "ran" : "loaded");
+          expect(seen["app/helper.py"]).toBe(sysmon ? "ran" : "loaded");
+          expect(seen["app/unused.py"]).toBeUndefined();
+          expect(Object.keys(seen).every((p) => !p.startsWith(".arnx-run/") && !p.includes("site-packages"))).toBe(true);
+          times.hook.push(hooked.seconds);
+          times.plain.push(plain.seconds);
+        }
+      });
+      const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[1]!;
+      console.log(`run hook on ${image}: ${median(times.hook).toFixed(2)} s with it, ${median(times.plain).toFixed(2)} s ` +
+        `without (median of 3)`);
+    }, 900_000);
+  }
+
+  test("a review does not list a changed file a test only reached through other code, and still lists one conftest loads", async () => {
+    const repo = initRepo(join(tmp(), "reachrev"));
+    writeReachProject(repo);
+    rmSync(join(repo, "tests", "test_a.py"));
+    mkdirSync(dirname(reviewConfigPath(repo)));
+    writeFileSync(reviewConfigPath(repo), "version: 1\nimage: python:3.12-slim\ninstall: [pip install -r " +
+      "requirements.txt]\ntest_command: python -m pytest -q -n 2 {targets}\n");
+    commit(repo, "app");
+    const [ok] = await approveConfig(repo, { by: "Dev", at: "2026-11-05" });
+    expect(ok).toBe(true);
+    for (const f of ["core", "helper", "base", "unused"]) appendFileSync(join(repo, "app", `${f}.py`), "\n\nCHANGED = 1\n");
+    commit(repo, "a change");
+    const gen = "tests/arnx_generated/test_total.py";
+    const done = text('{"tests": [], "suspected_defects": [], "questions": []}');
+    const agent = new ScriptedAgent([
+      [tool("write_file", { path: gen, content: "import app.core\n\n\ndef test_total():\n    assert app.core.total([1, 2]) == 3\n" })],
+      [done], [done], [done],
+    ]);
+    const settings = { ...defaultSettings(), consentAt: "2026-11-05T00:00:00Z", fixProofMax: 0 };
+    const { review } = await runReview(repo, { settings, agentModel: agent, challenger: new FakeJson([]) });
+    expect(review.missingRuns).toBe(0);
+    expect(review.passed).toBe(1);
+    // By name alone, helper.py would be listed too.
+    expect(review.untested![0]!.files.sort()).toEqual(["app/base.py", "app/unused.py"]);
+  }, 900_000);
 });
+
+/** A small project for the run hook: app/core.py calls app/helper.py, conftest loads app/base.py, nothing reaches
+ * app/unused.py; its own sitecustomize is on its PYTHONPATH (/src/own). */
+function writeReachProject(root: string): void {
+  const files: Record<string, string> = {
+    "requirements.txt": "pytest>=8,<9\npytest-xdist\npytest-cov\n",
+    "app/__init__.py": "",
+    "app/core.py": "from app import helper\n\n\ndef total(xs):\n    return helper.add_all(xs)\n",
+    "app/helper.py": "def add_all(xs):\n    s = 0\n    for x in xs:\n        s += x\n    return s\n",
+    "app/base.py": "LIMIT = 3\n\n\ndef limit():\n    return LIMIT\n",
+    "app/unused.py": "def never():\n    return 1\n",
+    "conftest.py": "import app.base\n",
+    "own/sitecustomize.py": "import os\nos.environ[\"OWN_SITECUSTOMIZE\"] = \"ran\"\n",
+    "tests/test_a.py": [
+      "import os", "import subprocess", "import sys", "", "import app.core", "", "",
+      "def test_total():", "    assert app.core.total([1, 2]) == 3", "", "",
+      "def test_fails():", "    assert app.core.total([1]) == 2", "", "",
+      "def test_own_sitecustomize_ran():", "    assert os.environ.get(\"OWN_SITECUSTOMIZE\") == \"ran\"",
+      "    assert sys.modules[\"sitecustomize\"].__file__ == \"/src/own/sitecustomize.py\"", "", "",
+      "def test_own_pythonpath():", "    assert \"/src/own\" in sys.path", "", "",
+      "def test_subprocess():",
+      "    out = subprocess.run([sys.executable, \"-c\", \"import app.base; print(app.base.limit())\"], capture_output=True, text=True)",
+      "    assert out.stdout.strip() == \"3\", out.stderr", "", "",
+      "def test_no_hook_output():",
+      "    out = subprocess.run([sys.executable, \"-c\", \"pass\"], capture_output=True, text=True)",
+      "    assert out.stdout == \"\" and out.stderr == \"\"", "",
+    ].join("\n"),
+  };
+  for (const [rel, body] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), body);
+  }
+}

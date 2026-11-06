@@ -1,5 +1,6 @@
 // The Python adapter: pytest, JUnit XML (xunit1), test_*.py files.
-import { posix } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, posix } from "node:path";
 import { endOnce, pyRepr, shQuote } from "../util";
 import { parseJunit } from "./junit";
 import type { Adapter, Listing } from "./types";
@@ -185,6 +186,94 @@ export function parsePytestList(output: string, exitCode: number | null): Listin
   return (exitCode === 1 && broken.size) || (exitCode === 0 && files.size) ? listing : null;
 }
 
+/** arnx's sitecustomize.py, in a folder of its own in the report folder, first on PYTHONPATH for test runs (see
+ * reached.ts). Not a pytest plugin, on purpose: a plugin that fails to import stops the run, while a sitecustomize
+ * that is not found only leaves no notes. It runs the project's own sitecustomize after it. */
+export const REACH_HOOK = String.raw`# Written by arnx for its test runs. It notes which files under the code's root a run executes, as paths only (never
+# values or source), in reached-<pid>.txt one folder up: "ran <path>" for a function's code, "loaded <path>" for a
+# module's or class's body. It never raises and never prints; then the project's own sitecustomize, if any, runs.
+import sys
+
+
+def _arnx_reach():
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = os.path.dirname(here)
+    root = os.path.dirname(out) + os.sep
+    seen = {}
+
+    def note(path, kind):
+        try:
+            if seen.get(path) in (kind, "ran"):
+                return
+            seen[path] = kind
+            if path.startswith("<"):
+                return
+            if not os.path.isabs(path):
+                path = os.path.join(os.getcwd(), path)
+            if not path.startswith(root) or path.startswith(out + os.sep) or os.sep + "site-packages" + os.sep in path:
+                return
+            fd = os.open(os.path.join(out, "reached-%d.txt" % os.getpid()), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            try:
+                os.write(fd, ("%s %s\n" % (kind, path)).encode("utf-8", "surrogateescape"))
+            finally:
+                os.close(fd)
+        except Exception:
+            pass
+
+    mon = getattr(sys, "monitoring", None)
+    if mon is not None:
+        # 4: no tool claims it (debuggers, coverage, profilers and optimizers have 0, 1, 2 and 5; Hypothesis takes 3).
+        tool = 4
+        if mon.get_tool(tool) is not None:
+            return
+        mon.use_tool_id(tool, "arnx")
+        disable = mon.DISABLE
+
+        def start(code, offset):
+            try:
+                note(code.co_filename, "ran" if code.co_flags & 1 else "loaded")
+            except Exception:
+                pass
+            return disable
+
+        mon.register_callback(tool, mon.events.PY_START, start)
+        mon.set_events(tool, mon.events.PY_START)
+    elif hasattr(sys, "addaudithook"):
+        def audit(event, args):
+            if event == "exec":
+                try:
+                    note(args[0].co_filename, "loaded")
+                except Exception:
+                    pass
+
+        sys.addaudithook(audit)
+
+
+def _arnx_next():
+    """The sitecustomize Python would have run without this folder on the path, or None."""
+    import os
+    import _frozen_importlib_external as ext
+    here = os.path.dirname(os.path.abspath(__file__))
+    return ext.PathFinder.find_spec("sitecustomize", [p for p in sys.path if os.path.abspath(p or os.curdir) != here])
+
+
+try:
+    _arnx_reach()
+except Exception:
+    pass
+try:
+    import _frozen_importlib
+    _arnx_spec = _arnx_next()
+except Exception:
+    _arnx_spec = None
+if _arnx_spec is not None:
+    # Its errors are reported as Python reports them, as if this file were not here.
+    del sys.modules["sitecustomize"]
+    _frozen_importlib._load(_arnx_spec)
+`;
+const HOOK_DIR = "py";
+
 const WORDS = {
   language: "Python",
   runner: "pytest",
@@ -211,7 +300,9 @@ export const python: Adapter = {
       ? [] : ["test_command: must run pytest and contain {targets}"],
   runs: () => /\bpytest\b/,
   reportSaid: (output) => [...output.matchAll(/generated xml file: (\S+)/g)].at(-1)?.[1] ?? null,
+  // The project's PYTHONPATH (review.yaml's env, or the image's) stays, after the hook's folder.
   command: (testCommand, targets, reportPath) =>
+    `export PYTHONPATH=${shQuote(posix.join(posix.dirname(reportPath), HOOK_DIR))}\${PYTHONPATH:+:\$PYTHONPATH}; ` +
     testCommand.replaceAll("{targets}", targets.map(shQuote).join(" ")) +
     " -p no:cacheprovider --continue-on-collection-errors -o junit_family=xunit1 -o faulthandler_timeout=60" +
     ` --junitxml=${shQuote(reportPath)}`,
@@ -219,6 +310,17 @@ export const python: Adapter = {
   listCommand: (testCommand, targets) => testCommand.replaceAll("{targets}", targets.map(shQuote).join(" ")) +
     " -p no:cacheprovider --continue-on-collection-errors --collect-only -q",
   parseList: (output, _listed, exitCode) => parsePytestList(output, exitCode),
+  reportSetup: (snapshot) => {
+    const dir = join(snapshot, ".arnx-run", HOOK_DIR), path = join(dir, "sitecustomize.py");
+    mkdirSync(dir, { recursive: true });
+    let was: string | null = null;
+    try {
+      was = readFileSync(path, "utf8");
+    } catch {
+      // not written yet
+    }
+    if (was !== REACH_HOOK) writeFileSync(path, REACH_HOOK);
+  },
   skip: pythonSkip,
   drop: pythonDrop,
   unmark: pythonUnmark,

@@ -42,8 +42,9 @@ test("golden: env image key, Dockerfile and run command match Python's", () => {
   const cfg = parseReviewConfig(SANDBOX_CFG);
   expect(envKey(cfg, join(GOLDEN, "envkey"))).toBe(golden("envkey.txt"));
   expect(dockerfile(cfg)).toBe(golden("dockerfile.txt"));
+  // After the PYTHONPATH arnx's run hook adds in front (reached.ts), which the Python version did not have.
   expect(python.command(cfg.testCommand, ["tests/x y.py", "a'b"], "/src/.arnx-run/final-1.xml", "pytest"))
-    .toBe(golden("pytest-command.txt"));
+    .toBe("export PYTHONPATH=/src/.arnx-run/py${PYTHONPATH:+:$PYTHONPATH}; " + golden("pytest-command.txt"));
 });
 
 test("golden: prompts match Python's byte for byte", () => {

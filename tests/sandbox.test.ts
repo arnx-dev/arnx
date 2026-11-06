@@ -158,7 +158,8 @@ test("test_run_argv_is_locked_down", () => {
 
 test("test_pytest_command", () => {
   const cmd = python.command(parseReviewConfig(CFG).testCommand, ["tests/x y.py"], "/src/.arnx-run/final-1.xml", "pytest");
-  expect(cmd.startsWith("python -m pytest -q 'tests/x y.py' ")).toBe(true);
+  expect(cmd.startsWith("export PYTHONPATH=/src/.arnx-run/py${PYTHONPATH:+:$PYTHONPATH}; python -m pytest -q 'tests/x y.py' "))
+    .toBe(true);
   expect(cmd).toContain("--junitxml=/src/.arnx-run/final-1.xml");
   expect(cmd).toContain("junit_family=xunit1");
   expect(cmd).toContain("--continue-on-collection-errors");

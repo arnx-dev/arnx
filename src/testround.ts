@@ -29,6 +29,7 @@ import type { Say } from "./progress";
 import { describeTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
   typeCheckOf } from "./typecheck";
 import { databaseEnv, dbUntested, untestedFiles } from "./untested";
+import { clearReach, type Reach, readReach, reachedSince } from "./reached";
 import { projectSource, shallowKind } from "./shallow";
 
 export const TOOL_TIMEOUT = 300;
@@ -55,6 +56,9 @@ export interface Round {
   sawResults: boolean;
   /** Changed files with SQL that no generated test ran against the project's database (absent without one). */
   dbUntested?: string[];
+  /** Changed files (of the round's coverage) the final runs executed, by the runner's own notes (reached.ts), less what
+   * arnx's one-line test's run showed. Absent when the runs left no notes: no data, not "none reached". */
+  reached?: string[];
   /** The before/after check of the tests that failed in every run (absent when it is off or none failed). */
   before?: BeforeCheck;
   /** The fix proof: passing tests on the code before the change (absent when it is off or no test passed). */
@@ -353,6 +357,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   let fixProof: FixCheck | undefined;
   let baked = false;
   let checked: TypeCheckRun | undefined, typecheck: TypeCheck | undefined;
+  let reached: string[] | undefined;
   const dbNames = databaseEnv(cfg.env, cfg.services);
   try {
     const snap = join(tmp, "repo");
@@ -401,6 +406,9 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
           writeFileSync(log, said.output);
           throw probeFailure(cfg, said, log, session.copies?.(probe.result.output));
         }
+        // What any test of the folder loads (conftest and its imports) is no test's reach.
+        const probeReach: Reach = readReach(snap);
+        clearReach(snap);
         let counter = 0;
         // Runs name the generated test files, never the tests directory: for some languages (Rust) that directory
         // also holds the project's own tests, which are not part of the review.
@@ -450,6 +458,8 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         // and a flaky test is one that fails only sometimes. A file that passed is carried into the later runs as it
         // was. A run without a report repeats everything.
         const r: (TestResult[] | null)[] = [];
+        // The agent's runs are not the final ones.
+        clearReach(snap);
         const ran = (repeat: number, res: TestResult[], carried: boolean, secs?: number) => res.forEach((t) =>
           emit("test.run", { project: cfg.name, repeat, test_id: t.testId, func: funcOf(t), file: t.fileAttr,
             outcome: t.outcome, message: testMessage(t.message), carried,
@@ -493,6 +503,12 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
             ran(i + 1, kept, true);
             ran(i + 1, got, false, secs);
           }
+        }
+        // Read before the type check, which clears the report folder.
+        const reach = readReach(snap);
+        if (o.coverage && reach.size) {
+          const own = new Set(o.coverage);
+          reached = reachedSince(reach, probeReach).filter((p) => own.has(p));
         }
         if (o.typecheck && cfg.typecheck) checked = await typecheckHere(session, snap, cfg, o.writeDir, say);
         return [a, f, r] as const;
@@ -564,7 +580,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   const hungFiles = Object.keys(hungLimits).sort(), notRunFiles = [...notRunSet].sort();
   const round: Round = { agent, files, classified, removed, ...(leftOut.length ? { leftOut } : {}),
     ...(fakedKeys.length ? { fakedKeys } : {}), ...(hungFiles.length ? { hungFiles } : {}), ...(notRunFiles.length ? { notRunFiles } : {}), sawResults: saw || !hasTests,
-    ...(dbLeft ? { dbUntested: dbLeft } : {}), ...(before ? { before } : {}), ...(fixProof ? { fixProof } : {}),
+    ...(dbLeft ? { dbUntested: dbLeft } : {}), ...(reached ? { reached } : {}), ...(before ? { before } : {}), ...(fixProof ? { fixProof } : {}),
     ...(typecheck ? { typecheck } : {}), ...(env ? { env } : {}) };
   // All a round says from here on is saved and read by people and coding agents, none of it through a model's filter.
   const masked = b ? maskedCopy(b, round) : { value: round, shown: false };

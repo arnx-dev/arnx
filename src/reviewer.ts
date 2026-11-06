@@ -676,13 +676,13 @@ export async function runReview(repo: string, o: { settings: Settings;
       for (const f of ownSources) sourceSet.add(f);
       if (of) {
         const adapter = adapterFor(cfg);
-        // What a test is shown to reach: its stack frames, and the names its code uses. A file whose tests did not load,
-        // or did not finish, shows nothing.
+        // What a test is shown to reach: its stack frames, the names its code uses, and what the runs executed (the
+        // runner's own notes, Python only). A file whose tests did not load, or did not finish, shows nothing.
         const frames = [...rnd.classified.findings, ...rnd.classified.flaky].filter((t) => !t.needs && !t.fakedKey)
           .flatMap((t) => framesIn(t.message));
         const loaded = loadedTests(rnd.files, rnd.classified, [...rnd.hungFiles ?? [], ...rnd.notRunFiles ?? []]);
         const byText = new Set(untestedFiles(ownedNow, rnd.files, adapter));
-        const missed = notReached(ownedNow, { tests: loaded, frames }, adapter);
+        const missed = notReached(ownedNow, { tests: loaded, frames, ...(rnd.reached ? { ran: rnd.reached } : {}) }, adapter);
         const reasons: Record<string, string> = {};
         for (const f of missed) if (!byText.has(f)) reasons[f] = "a test only mentions it as text";
         // A file the reviewer named stays listed, unless a failing test's frame goes through it.
