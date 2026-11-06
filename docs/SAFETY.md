@@ -161,7 +161,7 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
 arnx works best on single-package Python and TypeScript repositories. A repository with several packages is set up one part at a time: a review
 waits up to 10 minutes for the part its change touches, and `arnx setup` stops at 40 minutes overall (`setup_minutes`
 under `[budget]`). Parts it did not reach are listed under `uncovered`, for `arnx setup --add`. Tests that run only in a
-browser (Playwright, Cypress, Storybook, vitest's browser mode) are not run, and a web UI app gets one try at its unit
+browser (Playwright, Cypress, Storybook, vitest's browser mode) are not run, and a web UI app gets two full tries at its unit
 tests.
 
 ## What a review sends
