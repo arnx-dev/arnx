@@ -101,7 +101,7 @@ test("review --json: the summary's findings, questions, status and next, from th
   expect(fields).toEqual({
     review_id: RID, review_md: ".arnx/reviews/x/review.md", review_json: ".arnx/reviews/x/review.json",
     change: "uncommitted (base 1a2b3c4)", files_changed: 4, added: 140, removed: 3, status: "complete",
-    issues: 2, findings: [
+    issues: 2, finding_count: 2, findings: [
       { ids: ["F1"], state: "confirmed", confirmed: true, regression: false, projects: ["main"],
         title: "Any member can invite.", severity: null },
       { ids: ["F2"], state: "disputed", confirmed: false, regression: false, projects: ["main"], title: "Duplicates.",

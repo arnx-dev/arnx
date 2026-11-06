@@ -2106,7 +2106,7 @@ export function reviewJson(r: Review, reviewMd: string, reviewJsonPath: string)
     added: r.added, removed: r.removed,
     status: st.problems.length ? "incomplete" : st.none ? "not-tested" : st.untested ? "partly-covered" : "complete",
     ...(r.sourceFiles !== undefined ? { source_files: r.sourceFiles } : {}),
-    issues: rows.length, findings: rows.map((row) => ({ ids: row.ids, state: row.state, confirmed: row.mark === "✗",
+    issues: rows.length, finding_count: rows.reduce((a, row) => a + row.ids.length, 0), findings: rows.map((row) => ({ ids: row.ids, state: row.state, confirmed: row.mark === "✗",
       regression: row.regression, projects: row.projects, title: row.title, severity: row.severity ?? null,
       ...(row.fallback ? { fallback: true } : {}) })),
     pre_existing: r.findings.filter((f) => findingStatus(f) === "pre-existing").map((f) => f.id),

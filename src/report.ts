@@ -722,7 +722,9 @@ export function render(r: Review): string {
   const covers = coveredQuestions(r);
   if (grouped) {
     const parts = groupsOf(r, caused);
-    if (parts.length) out.push(`${plural(parts.length, "issue")} from ${plural(caused.length, "failing test")}, most severe first.`, "");
+    // The same rows and counts as the terminal summary and `arnx review --json`.
+    const rows = summaryRows(r);
+    if (parts.length) out.push(`${plural(rows.length, "issue")} from ${plural(rows.reduce((a, row) => a + row.ids.length, 0), "finding")}, most severe first.`, "");
     const minor = parts.findIndex(({ group }) => group?.severity === "low");
     parts.forEach(({ group, findings }, i) => {
       if (i === minor && minor > 0) out.push("## Also found (minor)", "", "Lower severity: worth a look, not urgent.", "");
@@ -907,7 +909,7 @@ export function sameCause(sus: SuspectOutcome[], groups: Group[], findings: Find
 }
 
 const troubled = (p: ProjectStat) => !!p.env || p.missingRuns > 0 || !!p.hungFiles?.length || !!p.notRunFiles?.length || !p.sawResults || !!p.noReport;
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /** Why a round has no report: a provider outage cut it, or the reviewer gave none. */
 const noReportWhy = (p: ProjectStat, r: Review) => p.stop?.startsWith("api_error") || (r.providerFailures ?? []).some(resumes)
@@ -1196,7 +1198,8 @@ export function nextSteps(r: Review, rows: SummaryRow[] = summaryRows(r)): strin
 function issuesLine(r: Review, rows: SummaryRow[]): string {
   const kinds = ([["✗", "confirmed"], ["!", "not checked"], ["?", "waiting on a question"], ["·", "disputed"]] as const)
     .map(([mark, word]) => [rows.filter((row) => row.mark === mark).length, word] as const).filter(([n]) => n);
-  const counted = kinds.map(([n, word], i) => `${i ? n : plural(n, "issue")} ${word}`).join(", ");
+  // What the code before the change settles describes the confirmed issues: it goes with their count.
+  const counted = kinds.map(([n, word], i) => `${i ? n : plural(n, "issue")} ${word}`);
   const findings = rows.reduce((a, row) => a + row.ids.length, 0);
   const sure = rows.filter((row) => row.mark === "✗").length;
   const before = [...new Set(confirmed(r).map((f) => f.before?.status))];
@@ -1204,7 +1207,11 @@ function issuesLine(r: Review, rows: SummaryRow[]): string {
     : before[0] === "new-code" ? `${sure === 1 ? "" : sure === 2 ? "both " : "all "}in new code`
     : before[0] === "regression" ? "their tests pass before the change"
     : before[0] === "pre-existing" ? "already failing before the change" : "";
-  return `${counted} (${plural(findings, "finding")})${settled ? `; ${settled}` : ""}.`;
+  // Confirmed comes first among the kinds.
+  if (settled && kinds[0]?.[1] === "confirmed" && kinds.length > 1) {
+    return `${counted[0]}, ${settled}; ${counted.slice(1).join(", ")} (${plural(findings, "finding")}).`;
+  }
+  return `${counted.join(", ")} (${plural(findings, "finding")})${settled ? `; ${settled}` : ""}.`;
 }
 
 /** The cost in one word, and a note when calls cut off mid-reply could not be priced, or a model has no price. */

@@ -70,7 +70,7 @@ test("findings that share one cause are grouped and explained as input, actual, 
     ],
   });
   const md = render(r);
-  expect(md).toContain("2 issues from 3 failing tests, most severe first.");
+  expect(md).toContain("2 issues from 3 findings, most severe first.");
   expect(md).toContain("### Issue 1 · mount() strips the wrong number of characters when the path has a parameter\n\n" +
     "- Input: a request to /users/12345/profile under mount('/users/:id', app)\n- Actual: the app sees /45/profile\n" +
     "- Expected: the app sees /profile\n- Why it matters: routes under a parameterised mount get the wrong path\n" +

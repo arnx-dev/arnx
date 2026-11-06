@@ -2,7 +2,8 @@
 // right), each finding's state said only when it is not confirmed.
 import { expect, test } from "bun:test";
 import type { Finding } from "../src/report";
-import { summary } from "../src/report";
+import { render, summary } from "../src/report";
+import { reviewJson } from "../src/cli";
 import { finding, sampleReview } from "./helpers/review";
 
 const newCode = { status: "new-code" as const, detail: "", runs: [] };
@@ -40,7 +41,7 @@ test("rows not confirmed are counted apart and their findings carry their state"
   groups: [{ findings: ["F1", "F2"], title: DISCOUNT, input: "", actual: "", expected: "", consequence: "" },
     { findings: ["F3", "F4"], title: BULK, input: "", actual: "", expected: "", consequence: "" }] }), "m");
   expect(s.split("\n").slice(1, 5)).toEqual([
-    "1 issue confirmed, 1 waiting on a question, 1 disputed (5 findings); their tests pass before the change.",
+    "1 issue confirmed, their tests pass before the change; 1 waiting on a question, 1 disputed (5 findings).",
     `  ✗ 1  regression: ${DISCOUNT}  F1, F2`,
     `  ? 2  ${BULK.padEnd(DISCOUNT.length + 12)}  F3 disputed; F4 depends on Q1`,
     `  · 3  ${"assert 0".padEnd(DISCOUNT.length + 12)}  F5 disputed`,
@@ -91,4 +92,31 @@ test("Partly covered wins over No findings", () => {
   const s = said(quiet({ untested: [{ project: "main", files: ["a.py"], of: 2 }] as never, sourceFiles: 2 }));
   expect(s).toContain("Partly covered");
   expect(s).not.toContain("No findings");
+});
+
+test("a disputed finding that names a question counts as disputed", () => {
+  const r = shop({ findings: [f("F1"), f("F2", { verdict: "disputed", dependsOn: "Q1" })],
+    groups: [{ findings: ["F1"], title: DISCOUNT, input: "", actual: "", expected: "", consequence: "" },
+      { findings: ["F2"], title: BULK, input: "", actual: "", expected: "", consequence: "" }] });
+  expect(summary(r, "m").split("\n")[1]).toBe("1 issue confirmed, in new code; 1 disputed (2 findings).");
+});
+
+test("the before-change note belongs to the confirmed count", () => {
+  const r = shop({ findings: [f("F1"), f("F2", { verdict: "disputed" })],
+    groups: [{ findings: ["F1"], title: DISCOUNT, input: "", actual: "", expected: "", consequence: "" },
+      { findings: ["F2"], title: BULK, input: "", actual: "", expected: "", consequence: "" }] });
+  const line = summary(r, "m").split("\n")[1]!;
+  expect(line).toBe("1 issue confirmed, in new code; 1 disputed (2 findings).");
+});
+
+test("terminal line, review.md and --json give the same issue and finding counts", () => {
+  // Three findings in two issues; F2 shares F1's call; an unreported failing test is not a finding.
+  const r = shop({ findings: [f("F1"), f("F2", { sameAs: "F1" }), f("F3", { verdict: "disputed" })],
+    groups: [{ findings: ["F1", "F2"], title: DISCOUNT, input: "", actual: "", expected: "", consequence: "" },
+      { findings: ["F3"], title: BULK, input: "", actual: "", expected: "", consequence: "" }], questions: [],
+    unclaimed: [{ project: "main", testId: "t.py::scratch", message: "boom" }] });
+  expect(summary(r, "m").split("\n")[1]).toBe("1 issue confirmed, in new code; 1 disputed (3 findings).");
+  expect(render(r)).toContain("2 issues from 3 findings, most severe first.");
+  const [, , json] = reviewJson(r, "m", "j");
+  expect([json.issues, json.finding_count]).toEqual([2, 3]);
 });

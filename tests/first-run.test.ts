@@ -219,7 +219,11 @@ test("the review's last progress line says what came of the things it checked", 
   const s = (outcome: string) => ({ project: "svc", id: "S1", outcome }) as never;
   expect(checkedLine([s("proven"), s("not reproduced"), s("not tested")])).toBe("Checked 3: 1 proven, 2 dropped");
   // One thing checked that proved two issues: the count matches the two "✓ proven" lines.
-  expect(checkedLine([s("proven"), s("not tested")], 2)).toBe("Checked 2: 1 proven (2 issues), 1 dropped");
+  expect(checkedLine([s("proven"), s("not tested")], { tests: 2, issues: 1 }))
+    .toBe("Checked 2: 1 proven (2 tests, 1 issue), 1 dropped");
+  // The bracket shows only when a number differs from the proven count.
+  expect(checkedLine([s("proven"), s("proven")], { tests: 2, issues: 2 })).toBe("Checked 2: 2 proven");
+  expect(checkedLine([s("proven"), s("proven")], { tests: 2, issues: 1 })).toBe("Checked 2: 2 proven (2 tests, 1 issue)");
   // Disputed things are still in the report, for the developer to decide: never called dropped.
   expect(checkedLine([s("proven"), s("same cause"), s("pending answer"), s("pre-existing"), s("disputed")]))
     .toBe("Checked 5: 2 proven, 1 needs your answer, 1 failing before this change too, 1 disputed");
@@ -230,9 +234,9 @@ test("the review's last progress line says what came of the things it checked", 
 test("suspects an outage left untested are not called dropped", async () => {
   const { checkedLine } = await import("../src/reviewer");
   const s = (outcome: string) => ({ project: "svc", id: "S1", outcome }) as never;
-  expect(checkedLine([s("not tested"), s("not tested"), s("not tested")], 0, "Anthropic unavailable"))
+  expect(checkedLine([s("not tested"), s("not tested"), s("not tested")], { down: "Anthropic unavailable" }))
     .toBe("Checked 3: 0 proven, 3 not tested: Anthropic unavailable");
-  expect(checkedLine([s("proven"), s("not tested"), s("not reproduced")], 0, "Anthropic unavailable"))
+  expect(checkedLine([s("proven"), s("not tested"), s("not reproduced")], { down: "Anthropic unavailable" }))
     .toBe("Checked 3: 1 proven, 1 not tested: Anthropic unavailable, 1 dropped");
 });
 

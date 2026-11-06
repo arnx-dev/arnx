@@ -31,7 +31,7 @@ import { elsewhereNote, leftOutNote, PROMPT_VERSION, type Suspect } from "./prom
 import { changedSources, databaseEnv, framed, framesIn, isSourcePath, loadedTests, notReached, untestedFiles } from "./untested";
 import { pythonTypeGap } from "./setupview";
 import { type AgentReport, type Checked, type Finding, type FixProof, hasReport, parseReports, reportedTests, type ProjectStat, type Review,
-  save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause } from "./report";
+  save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause, summaryRows, plural } from "./report";
 import { dockerSteps, type SessionFactory } from "./sandbox";
 import type { TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
@@ -833,7 +833,6 @@ export async function runReview(repo: string, o: { settings: Settings;
     const failures = label ? [cloudFailure(projectStats.map((p) => p.stop ?? "end_turn"))].filter((f) => f !== null)
       : providerFailures(calls, s);
     const outage = failures.find(resumes);
-    if (suspects.length) o.progress?.(checkedLine(suspects, shown, outage ? `${outage.name} unavailable` : undefined));
     for (const x of suspects) {
       emit("suspect.outcome", { project: x.project, hyp_id: hypId(x.project, x.id), outcome: x.outcome, tests: x.tests,
         findings: x.findings, ...x.reason ? { reason: clip(x.reason) } : {} });
@@ -894,6 +893,11 @@ export async function runReview(repo: string, o: { settings: Settings;
       ...(baseEmpty ? { beforeBaseEmpty: baseEmpty } : {}),
       ...(failures.length ? { providerFailures: failures } : {}),
     };
+    // Issues are the confirmed rows the summary shows; tests are the "proven" lines above.
+    if (suspects.length) {
+      o.progress?.(checkedLine(suspects, { tests: shown, issues: summaryRows(review).filter((x) => x.mark === "✗").length,
+        down: outage ? `${outage.name} unavailable` : undefined }));
+    }
     // The local brain bills nothing (the user's keys pay the providers), so its answer changes nothing here.
     await finish(stop, { stop, projectsReviewed: done.filter((d) => d.rnd.env?.state !== "failed").length, testsWritten: written, passed, findings: findings.length,
       flaky: flaky.length, seconds: review.seconds });
@@ -934,7 +938,8 @@ export async function runReview(repo: string, o: { settings: Settings;
 
 /** What came of the things a review checked, said once they are judged: proven, waiting on an answer, failing the same
  * way before the change, and the rest dropped (a test that passed, did not run, or the second opinion disputed). */
-export function checkedLine(sus: SuspectOutcome[], shown = 0, down?: string): string {
+export function checkedLine(sus: SuspectOutcome[], o: { tests?: number; issues?: number; down?: string } = {}): string {
+  const { tests, issues: issueCount, down } = o;
   const n = (...o: SuspectOutcome["outcome"][]) => sus.filter((x) => o.includes(x.outcome)).length;
   const proven = n("proven", "same cause");
   const answer = n("pending answer");
@@ -943,8 +948,11 @@ export function checkedLine(sus: SuspectOutcome[], shown = 0, down?: string): st
   // With a provider down, the suspects that got no test were not tested: that is no verdict on the code.
   const untested = down ? n("not tested") : 0;
   const dropped = sus.length - proven - answer - before - disputed - untested;
-  // One thing checked can prove more than one issue: the count matches the "✓ proven" lines shown.
-  const issues = shown > proven ? ` (${shown} issues)` : "";
+  // One thing checked can prove several tests (the "✓ proven" lines) and several tests make one issue: the bracket
+  // says so, only when a number differs from the proven count.
+  const units = [...tests ? [plural(tests, "test")] : [], ...issueCount !== undefined ? [plural(issueCount, "issue")] : []];
+  const differs = (!!tests && tests !== proven) || (issueCount !== undefined && issueCount !== proven);
+  const issues = differs ? ` (${units.join(", ")})` : "";
   return [`Checked ${sus.length}: ${proven} proven${issues}`, ...answer ? [`${answer} need${answer === 1 ? "s" : ""} your answer`]
     : [], ...before ? [`${before} failing before this change too`] : [], ...disputed ? [`${disputed} disputed`] : [],
     ...untested ? [`${untested} not tested: ${down}`] : [], ...dropped ? [`${dropped} dropped`] : []].join(", ");
