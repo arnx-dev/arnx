@@ -170,6 +170,10 @@ runs it once on the change, without arnx's generated tests, and when it reports 
 change, so review.md says which type errors are new with the change and which were already there. It is reported on
 its own, under "Type check": it never fails a test, turns a run into no report, or sets the exit code.
 
+arnx does not type check Python. When the repository's CI runs mypy, pyright, basedpyright or ty (a mention in a comment
+or a `pip install` line does not count), setup and review print one line naming the Python projects whose types are not
+checked, and review.md and review.json (`types_unchecked`) record it. Run your own type checker as well.
+
 ## After a review
 
 1. Mark the review: `arnx triage` steps through the issues in the terminal (arrow keys move, space selects, enter goes

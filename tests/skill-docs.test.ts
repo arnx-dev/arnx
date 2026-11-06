@@ -55,6 +55,7 @@ function full(): Record<string, unknown> {
   untrackedIncluded: ["notes.md"], untrackedLeftOut: 1,
   leftOutFiles: [{ path: "k.ts", line: 1, label: "a private key" }], couldNotRun: [{ test: "t.py::a", needs: "k.ts" }], fakedKeys: ["f.ts"], skippedTests: 1,
   unclaimed: [{ project: "main", testId: "tests/g/test_a.py::test_scratch", message: "assert 1 == 2" }], leftOutTouched: ["k.ts"],
+  typesUnchecked: { tool: "mypy", from: "main.yml", projects: ["main"] },
       blankedLines: [{ path: "src/auth.ts", lines: [4] }],
   usage: [{ model: "anthropic:m", calls: 1, unknownCalls: 0, input: 1, output: 1, cacheRead: 0, cacheWrite: 0,
     costUsd: 0.1 }] as Review["usage"],

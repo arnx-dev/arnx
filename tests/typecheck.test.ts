@@ -14,7 +14,7 @@ import { runReview } from "../src/reviewer";
 import type { RunResult, Runner, SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { runSetup, runSuite } from "../src/setup";
-import { typecheckGaps } from "../src/setupview";
+import { pythonTypeGap, typecheckGaps } from "../src/setupview";
 import { describeTypecheck, markNew, parseTsc } from "../src/typecheck";
 import { FakeJson, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
@@ -488,7 +488,7 @@ uncovered: []
     commit(r, "ci");
     expect(ciTypeChecker(r)).toEqual({ tool: "mypy", from: "main.yml" });
     expect(typecheckGaps(pyFile(), reader(r), r)).toEqual([
-      "api: CI type checks with mypy (main.yml); arnx does not, so types are not checked"]);
+      "CI type checks with mypy (main.yml); arnx does not, so types are not checked for: api"]);
   });
 
   test("one whose CI runs none says nothing", () => {
@@ -498,5 +498,55 @@ uncovered: []
     commit(r, "ci");
     expect(ciTypeChecker(r)).toBeNull();
     expect(typecheckGaps(pyFile(), reader(r), r)).toEqual([]);
+  });
+
+  const multiFile = () => parseReviewFile(`version: 1
+projects:
+  api:
+    root: services/api
+    language: python
+    image: python:3.12-slim
+    test_command: python -m pytest -q {targets}
+  worker:
+    root: services/worker
+    language: python
+    image: python:3.12-slim
+    test_command: python -m pytest -q {targets}
+  web:
+    root: web
+    language: typescript
+    image: node:22
+    test_command: npx vitest run {targets}
+uncovered: []
+`);
+  const ciWith = (run: string) => {
+    const r = initRepo(join(tmp(), "py"));
+    mkdirSync(join(r, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(r, ".github", "workflows", "main.yml"), `jobs:\n  t:\n    steps:\n${run}`);
+    commit(r, "ci");
+    return r;
+  };
+
+  test("a repo with several Python projects gets one line naming them all", () => {
+    const r = ciWith("      - run: mypy .\n");
+    const gaps = typecheckGaps(multiFile(), reader(r), r);
+    expect(gaps).toEqual(["CI type checks with mypy (main.yml); arnx does not, so types are not checked for: api, worker"]);
+    expect(pythonTypeGap(multiFile(), r)).toEqual({ tool: "mypy", from: "main.yml", projects: ["api", "worker"] });
+    expect(pythonTypeGap(multiFile(), r, ["worker"])).toEqual({ tool: "mypy", from: "main.yml", projects: ["worker"] });
+    expect(pythonTypeGap(multiFile(), r, ["web"])).toBeNull();
+  });
+
+  test("review.md says which Python projects' types were not checked", () => {
+    const r = sampleReview({ typesUnchecked: { tool: "mypy", from: "main.yml", projects: ["api", "worker"] } });
+    expect(render(r)).toContain("- CI type checks with mypy (main.yml); arnx does not, so types are not checked for: `api`, `worker`");
+    expect(render(sampleReview())).not.toContain("types are not checked");
+  });
+
+  test("a comment or an install line is not a type check", () => {
+    const r = ciWith("      # TODO: add mypy later\n      - run: pip install mypy\n      - run: uv add --dev pyright # tools\n" +
+      "      - run: pytest\n");
+    expect(ciTypeChecker(r)).toBeNull();
+    const r2 = ciWith("      - run: pip install mypy && mypy src\n");
+    expect(ciTypeChecker(r2)).toEqual({ tool: "mypy", from: "main.yml" });
   });
 });

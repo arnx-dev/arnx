@@ -113,6 +113,13 @@ export function typeCheckable(read: (rel: string) => string, root: string): bool
   });
 }
 
+/** CI text without comments and without install clauses (`pip install mypy`, `uv add --dev pyright`), which name a
+ * tool without running it. */
+function withoutNoise(text: string): string {
+  return text.split("\n").map((l) => l.replace(/(^|\s)#.*$/, "")
+    .replace(/\b(?:pip3?|pipx|uv|poetry|conda|npm|apt(?:-get)?)\b(?: [^&|;]*?)? (?:install|add)\b[^&|;]*/g, "")).join("\n");
+}
+
 /** The Python type checker a repository's CI runs (mypy, pyright, basedpyright, ty), and the CI file naming it. */
 export function ciTypeChecker(repo: string): { tool: string; from: string } | null {
   const files: string[] = [];
@@ -127,7 +134,7 @@ export function ciTypeChecker(repo: string): { tool: string; from: string } | nu
     try {
       text = readFileSync(join(repo, rel), "utf8");
     } catch { continue; }
-    const m = /\b(basedpyright|pyright|mypy|ty check)\b/.exec(text);
+    const m = /\b(basedpyright|pyright|mypy|ty check)\b/.exec(withoutNoise(text));
     if (m) return { tool: m[1] === "ty check" ? "ty" : m[1]!, from: rel.split("/").at(-1)! };
   }
   return null;

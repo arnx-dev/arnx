@@ -6,6 +6,7 @@ import { describe, filesAt, git, leftOutUntracked, resolveChange, someNames, unt
 import { type Baseline, BASELINE_FILE, type BaselineTest, describeBaselineChanges, parseBaseline, readBaseline } from "./baseline";
 import { fileDigest, isProven, parseReviewFile, readSecretPins, type ReviewFile, sandboxOnlyOf, secretPinsOf }
   from "./config";
+import type { TypesUnchecked } from "./report";
 import { ciTypeChecker, detect, typeCheckable } from "./detect";
 import { ArnxError } from "./errors";
 import { refString, type Settings, untrackedSetting } from "./settings";
@@ -157,18 +158,30 @@ export function approvalScreen(file: ReviewFile, repo: string, o: { proofs?: Pro
  * `typecheck`, and a Python project whose CI runs a type checker (arnx does not check Python types yet). `read`
  * gives a file's text (relative to `repo`), "" when there is none. */
 export function typecheckGaps(file: ReviewFile, read: (rel: string) => string, repo?: string): string[] {
-  const ci = repo ? ciTypeChecker(repo) : null;
   const out: string[] = [];
   for (const p of file.projects) {
-    if (p.typecheck) continue;
-    if (p.language === "typescript" && typeCheckable(read, p.workdir)) {
+    if (!p.typecheck && p.language === "typescript" && typeCheckable(read, p.workdir)) {
       out.push(`${p.name}: has a tsconfig but no type check, so reviews do not type check it`);
-    } else if (p.language === "python" && ci) {
-      out.push(`${p.name}: CI type checks with ${ci.tool} (${ci.from}); arnx does not, so types are not checked`);
     }
   }
+  const py = repo ? pythonTypeGap(file, repo) : null;
+  if (py) out.push(pythonGapLine(py));
   return out;
 }
+
+/** What the CI of a repository type checks in Python that arnx does not: one entry for the repository, naming the
+ * Python projects without a `typecheck` (only those in `only`, when given). Null when CI runs none or no project applies. */
+export function pythonTypeGap(file: ReviewFile, repo: string, only?: string[]): TypesUnchecked | null {
+  const ci = ciTypeChecker(repo);
+  if (!ci) return null;
+  const projects = file.projects.filter((p) => !p.typecheck && p.language === "python" && (!only || only.includes(p.name)))
+    .map((p) => p.name);
+  return projects.length ? { ...ci, projects } : null;
+}
+
+/** The one repository-level line for `pythonTypeGap`. */
+export const pythonGapLine = (g: TypesUnchecked): string =>
+  `CI type checks with ${g.tool} (${g.from}); arnx does not, so types are not checked for: ${g.projects.join(", ")}`;
 
 /** `typecheckGaps` reading the working tree of `repo`. */
 export function repoTypecheckGaps(file: ReviewFile, repo: string): string[] {

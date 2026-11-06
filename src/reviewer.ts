@@ -29,6 +29,7 @@ import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, 
 import { CONTEXT_LIMIT, contextPack } from "./context";
 import { elsewhereNote, leftOutNote, PROMPT_VERSION, type Suspect } from "./prompts";
 import { changedSources, databaseEnv, framed, framesIn, isSourcePath, loadedTests, notReached, untestedFiles } from "./untested";
+import { pythonTypeGap } from "./setupview";
 import { type AgentReport, type Checked, type Finding, type FixProof, hasReport, parseReports, reportedTests, type ProjectStat, type Review,
   save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause } from "./report";
 import { dockerSteps, type SessionFactory } from "./sandbox";
@@ -407,6 +408,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     const leftOutFiles = new Map((change.withheld ?? []).map((w) => [w.path, w]));
     const couldNotRun: { test: string; needs: string; faked?: boolean }[] = [];
     const unclaimed: NonNullable<Review["unclaimed"]> = [];
+    const typesUnchecked = pythonTypeGap(file, repo, routing.routed.map((x) => x.project.name));
     const fakedKeys = new Set<string>();
     let skippedTests = 0;
     const projectStats: ProjectStat[] = [];
@@ -870,6 +872,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       ...(change.blanked ? { blankedLines: change.blanked } : {}),
       ...(leftOutFiles.size ? { leftOutFiles: [...leftOutFiles.values()].sort((a, b) => a.path < b.path ? -1 : 1) } : {}),
       ...(unclaimed.length ? { unclaimed } : {}),
+      ...(typesUnchecked ? { typesUnchecked } : {}),
       ...(couldNotRun.length ? { couldNotRun } : {}), ...(fakedKeys.size ? { fakedKeys: [...fakedKeys].sort(), ...(skippedTests ? { skippedTests } : {}) } : {}),
       ...(change.withheld?.length || change.namedOut?.length ? { leftOutTouched: [...change.withheld?.map((w) => w.path) ?? [], ...change.namedOut ?? []].sort() } : {}),
       ...(change.untrackedIncluded ? { untrackedIncluded: change.untrackedIncluded } : {}),

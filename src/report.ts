@@ -134,6 +134,8 @@ export interface Checked { project: string; test: string; expects: string }
 export interface FixProof { testId: string; project: string; file: string | null; beforeStatus: FixStatus;
   beforeRuns: string[]; beforeDetail: string; asText?: true }
 
+export interface TypesUnchecked { tool: string; from: string; projects: string[] }
+
 export interface Review {
   /** Something it quotes was masked: review.md says so. */
   standInsShown?: boolean;
@@ -227,6 +229,8 @@ export interface Review {
   /** Each reviewed project's type check, in review order (absent when no project has one). Information only: it sets
    * no finding, status or exit code. */
   typecheck?: TypeCheck[];
+  /** Python projects whose types no review checks while the repository's CI does (the tool, the CI file); absent when none. */
+  typesUnchecked?: TypesUnchecked;
   /** Calls a model provider failed because it was down or refused the key, per provider and kind (absent when none
    * did). Information only: it sets no status or exit code; the work those calls missed does. */
   providerFailures?: ProviderFailure[];
@@ -805,6 +809,10 @@ export function render(r: Review): string {
     `- Flaky or unconfirmed (failed in some runs only): ${ticks(r.flaky) || "none"}`,
     `- Errors (the test could not run): ${ticks(r.errors) || "none"}`,
     `- Runs without a report (timed out or crashed): ${r.missingRuns}`);
+  if (r.typesUnchecked) {
+    const g = r.typesUnchecked;
+    out.push(`- CI type checks with ${g.tool} (${g.from}); arnx does not, so types are not checked for: ${ticks(g.projects)}`);
+  }
   if (r.unclaimed?.length) {
     out.push(`- Failing tests the reviewer did not report (scratch or replaced): ${ticks(r.unclaimed.map((u) => u.testId))}`);
   }
@@ -1236,6 +1244,7 @@ export function save(r: Review, rdir: string, diff: string): void {
     usage: (r.usage ?? []).map((u) => rekey(u, snake)), ...(r.timings ? { timings: rekey(r.timings, snake) } : {}),
     ...(r.fixProof ? { fix_proof: r.fixProof.map((x) => rekey(x, snake)) } : {}),
     ...(r.typecheck ? { typecheck: r.typecheck.map((t) => rekey(t, snake)) } : {}),
+    ...(r.typesUnchecked ? { types_unchecked: r.typesUnchecked } : {}),
     ...(r.providerFailures ? { provider_failures: r.providerFailures } : {}),
     ...(r.unclaimed ? { unclaimed: r.unclaimed.map((u) => rekey(u, snake)) } : {}),
     exit_code: exitCode(r) };
