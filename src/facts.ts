@@ -65,6 +65,8 @@ export interface ProjectFacts {
   lockApt: string[];
   /** Dependency names that hint at the test setup (ts-node, tsx). */
   deps: string[];
+  /** JavaScript: the Prisma schema (relative to installRoot) when the project depends on Prisma and one exists. */
+  prisma?: string;
 }
 
 export interface Facts { projects: ProjectFacts[]; jobs: CiJob[]; services: ServiceFact[] }
@@ -258,6 +260,12 @@ export function readFacts(repo: string, paths: string[], candidates: Candidate[]
     f.deps = deps.filter((d) => /^(ts-node|tsx|@swc\/register|esbuild-register)$/.test(d));
     const testText = [...(tests.get(c) ?? []).slice(0, 40), at(c.root, "conftest.py"), at(c.root, "tests/conftest.py")]
       .map(read).join("\n");
+    if (c.language === "typescript" && deps.some((d) => d === "prisma" || d === "@prisma/client")) {
+      const schemas = paths.filter((p) => posix.basename(p) === "schema.prisma" && (c.root === "." || p.startsWith(`${c.root}/`)))
+        .sort((a, b) => a.length - b.length);
+      const at0 = f.installRoot === "." ? "" : `${f.installRoot}/`;
+      if (schemas[0] && schemas[0].startsWith(at0)) f.prisma = schemas[0].slice(at0.length);
+    }
     servicesOf(f, deps, testText, tied, compose.apps.filter((a) => a.dir === c.root), services);
     for (const name of [".env.example", ".env.sample", ".env.template", ".env.test", ".env.dist", "env.example"]) {
       for (const m of read(at(c.root, name)).matchAll(/^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=/gm)) {

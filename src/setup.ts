@@ -44,7 +44,7 @@ import { copyManifests, dockerExec, dockerSteps, envKey, envTag, type ExecFactor
 import type { ScipIndex } from "./scip";
 import { EXEC, SetupExec, type TriedEnv } from "./setupexec";
 import { loadSettings, refString, type Settings, settingsPath, setupRef } from "./settings";
-import { QUICK_TYPECHECK_TIMEOUT, runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
+import { QUICK_TYPECHECK_TIMEOUT, runTypecheck, TYPECHECK_TIMEOUT, type TypeGap, typeGaps, workspaceNames } from "./typecheck";
 import { SOURCE } from "./untested";
 import { BROWSER_TESTS, UI_RUNS, type BrowserSuite, browserSuites, uiFramework, WEB_UI } from "./browser";
 import { otherLanguageOf } from "./languages";
@@ -75,6 +75,8 @@ export interface SuiteCounts { acceptedFailing: number; unexpected: string[]; ba
   hints?: Hint[];
   /** The type check did not run, timed out or failed without reporting: information, never a failed proof. */
   typecheckProblem?: string;
+  /** Modules the type check cannot see (a generated client, an unbuilt package): its errors say nothing about the change. */
+  typeGaps?: TypeGap[];
   /** A quick look's run: the test files the runner listed, all of which the whole suite would run. */
   listed?: string[];
   /** The look saw where the runner collects arnx's one-line test, and it is not where review.yaml says: nothing ran. */
@@ -422,8 +424,9 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     if (ignored) return [false, `${summary}; but ${ignored}`, tailOf(tail), skips, failing, "", counts] as Out;
     if (probed && cfg.typecheck) {
       // The type check runs once the suite runs. It is information: whatever it says, the tests ran.
-      const t = await typecheckNote(session, cfg, quick);
-      const kept = t.problem ? { ...counts, typecheckProblem: t.problem } : counts;
+      const t = await typecheckNote(session, cfg, quick, workspaceNames(snap));
+      const kept = { ...counts, ...t.problem ? { typecheckProblem: t.problem } : {},
+        ...t.gaps.length ? { typeGaps: t.gaps } : {} };
       return [true, `${summary}${t.note}`, tailOf(t.problem ? t.output : result.output), skips, failing, said, kept] as Out;
     }
     return probed ? [true, summary, tailOf(result.output), skips, failing, said, counts] as Out
@@ -435,29 +438,35 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
   return [ok, said(summary), tail, skips.map(said), failing, said(hints), counts];
 }
 
+/** The gaps of a type check in a few words: "the type check cannot see @prisma/client (312 errors)". */
+export function gapsLine(gaps: TypeGap[]): string {
+  return `the type check cannot see ${gaps.map((g) => `${g.module} (${plural(g.errors, "error")})`).join(", ")}`;
+}
+
 /** The type check's part of a proof's summary ("; type check: ..."): what it found, or why it gave nothing. It never
  * fails the proof (information, like a review's). `problem`: it did not run, timed out, or failed without reporting
  * a type error; `output`: the end of what it printed. */
-export async function typecheckNote(session: Runner, cfg: ReviewConfig, quick = false)
-  : Promise<{ note: string; problem?: string; output: string }> {
+export async function typecheckNote(session: Runner, cfg: ReviewConfig, quick = false, workspace: string[] = [])
+  : Promise<{ note: string; problem?: string; output: string; gaps: TypeGap[] }> {
   const timeout = quick ? QUICK_TYPECHECK_TIMEOUT : TYPECHECK_TIMEOUT;
   let t;
   try {
     t = await runTypecheck(session, cfg, timeout);
   } catch (e) {
     if (!(e instanceof OutOfTime)) throw e;
-    return { note: "; type check: not run, out of time", problem: "not run, out of time", output: "" };
+    return { note: "; type check: not run, out of time", problem: "not run, out of time", output: "", gaps: [] };
   }
   if (t.status === "failed") {
     const problem = "failed without reporting a type error (it could not start, or its output is not tsc's)";
-    return { note: `; type check: ${problem}`, problem, output: t.output };
+    return { note: `; type check: ${problem}`, problem, output: t.output, gaps: [] };
   }
   if (t.status === "timed-out") {
     const problem = `timed out after ${timeout} s`;
-    return { note: `; type check: ${problem}`, problem, output: t.output };
+    return { note: `; type check: ${problem}`, problem, output: t.output, gaps: [] };
   }
   const errors = t.errors.length;
-  return { note: `; type check: ${errors ? plural(errors, "type error") : "no type errors"}`, output: "" };
+  return { note: `; type check: ${errors ? plural(errors, "type error") : "no type errors"}`, output: "",
+    gaps: typeGaps(t.errors, workspace) };
 }
 
 /** runSuite's answer for a project with no tests of its own: its environment proven by arnx's one-line test (and the
@@ -476,9 +485,9 @@ async function noOwnTests(session: Runner, snap: string, cfg: ReviewConfig, sile
   }
   if (ignored) return [false, `${NO_OWN_TESTS}; but ${ignored}`, tailOf(tail), [], [], "", { ...none, stoppedAt: "config" }];
   if (cfg.typecheck) {
-    const t = await typecheckNote(session, cfg, quick);
+    const t = await typecheckNote(session, cfg, quick, workspaceNames(snap));
     return [true, `${NO_OWN_TESTS}${t.note}`, tailOf(t.problem ? t.output : tail), [], [],  "",
-      t.problem ? { ...none, typecheckProblem: t.problem } : none];
+      { ...none, ...t.problem ? { typecheckProblem: t.problem } : {}, ...t.gaps.length ? { typeGaps: t.gaps } : {} }];
   }
   return [true, NO_OWN_TESTS, tailOf(tail), [], [], "", none];
 }
@@ -549,7 +558,11 @@ export interface ProjectProof { name: string; summary: string; skips: string[]; 
   /** Tests that need a file left out or a real key: in no baseline. */
   unproven?: Unproven[];
   /** Tests its test_command leaves out, kept by the agent (coverageGap). */
-  gap?: string }
+  gap?: string;
+  /** The type check did not run, timed out or failed without reporting: said at approval, never a failed proof. */
+  typecheckProblem?: string;
+  /** Modules the type check cannot see: a generated client, an unbuilt package. */
+  typeGaps?: TypeGap[] }
 
 /** The whole-suite run of setup that proved a project, on the file and the code it ran with: `digest`, the project's
  * part of review.yaml, notes left out (runDigest); `env`, what its suite needs (envDigest); `snapshot`, the code (withSandbox)
@@ -1692,6 +1705,35 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           "and nothing else would say so. Run them too (a longer suite is fine: reviews run only the tests arnx writes), " +
           "or, if they cannot run in the sandbox, try the project again unchanged: the gap is then shown to the user.";
       }
+      // A type check that did not run, or errors about a module it cannot see, go back to the agent once; tried again
+      // unchanged, they stand and are said at approval.
+      if (ok && counts.typecheckProblem && !shown.has("typecheck") && !timeIsUp(limit)) {
+        hold("typecheck");
+        const line = `the type check of ${name}: ${counts.typecheckProblem}`;
+        state.problem = `${name}: ${line}`;
+        attempt({ ok: false, reused: false, summary: clip(summary, 500), failing: failing.length, skips: skips.length,
+          hints: clip(line, 1000) });
+        say(`${name}: runs, but its type check: ${counts.typecheckProblem}; asking the agent`);
+        return `the suite of ${name} runs (${summary}), but ${line}.\n${tail}\nIt is information, not a failed ` +
+          "proof. If the command or its heap can be fixed (typecheck in review.yaml), fix it; otherwise try the project " +
+          "again unchanged: the problem is then shown to the user.";
+      }
+      const gaps = ok ? (counts.typeGaps ?? []) : [];
+      if (gaps.length && !shown.has("types") && !timeIsUp(limit)) {
+        hold("types");
+        const line = gapsLine(gaps);
+        state.problem = `${name}: ${line}`;
+        attempt({ ok: false, reused: false, summary: clip(summary, 500), failing: failing.length, skips: skips.length,
+          hints: clip(line, 1000) });
+        say(`${name}: runs, but ${line}; asking the agent`);
+        const fixes = [
+          gaps.some((g) => g.kind === "generated") ? "A generated client belongs in install: add its generate step (for " +
+            "Prisma, npx prisma generate --schema=PATH; it downloads engines, so it runs in install, never in test_command)." : "",
+          gaps.some((g) => g.kind === "sibling") ? "Do not build sibling packages to hide it (a built copy changes the " +
+            "image for every code version)." : "",
+          "Otherwise try the project again unchanged: the gap is then shown to the user."].filter(Boolean).join(" ");
+        return `the suite of ${name} runs (${summary}), but ${line}, so its errors say nothing about a change. ${fixes}`;
+      }
       // The suite runs (some tests pass) and the current code fails others: a different failure from one that never ran.
       const ran = !ok && counts.unexpected.length > 0 && /\b[1-9]\d* passed\b/.test(summary);
       state.failing = ran ? counts.unexpected : [];
@@ -1723,7 +1765,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       state.proofs.set(name, { name, summary, skips,
         failed: counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined)),
         ...(counts.unproven ? { unproven: counts.unproven } : {}),
-        ...(gap ? { gap: gap.line } : {}) });
+        ...(gap ? { gap: gap.line } : {}),
+        ...(counts.typecheckProblem ? { typecheckProblem: counts.typecheckProblem } : {}),
+        ...(counts.typeGaps ? { typeGaps: counts.typeGaps } : {}) });
       // A TypeScript project that can be type checked and has no typecheck yet: say so while the agent is here.
       const typed = cfg.language === "typescript" && !cfg.typecheck && typeCheckable(readSnap, cfg.workdir)
         ? ` ${name} has a tsconfig.json and typescript among its dependencies: add typecheck (for example ` +

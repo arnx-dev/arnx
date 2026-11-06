@@ -14,8 +14,8 @@ import { runReview } from "../src/reviewer";
 import { OutOfTime, type RunResult, type Runner, type SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { runSetup, runSuite, typecheckNote } from "../src/setup";
-import { pythonTypeGap, typecheckGaps } from "../src/setupview";
-import { describeTypecheck, markNew, parseTsc, QUICK_TYPECHECK_TIMEOUT, TYPECHECK_TIMEOUT } from "../src/typecheck";
+import { approvalChecks, pythonTypeGap, typecheckGaps } from "../src/setupview";
+import { describeTypecheck, markNew, parseTsc, QUICK_TYPECHECK_TIMEOUT, TYPECHECK_TIMEOUT, typeGaps } from "../src/typecheck";
 import { FakeJson, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
@@ -126,6 +126,11 @@ class FakeTs implements Runner {
       return { exitCode, output, timedOut: false, seconds: 1.5 };
     }
     if (command.startsWith("no-time-tsc")) throw new OutOfTime(10);
+    if (command.startsWith("gap-tsc")) {
+      const out = ["a", "b", "c"].map((n, i) => `src/${n}.ts(${i + 1},9): error TS2305: Module '"@prisma/client"' has ` +
+        "no exported member 'User'.").join("\n");
+      return { exitCode: 2, output: out, timedOut: false, seconds: 1 };
+    }
     if (command.startsWith("slow-tsc")) return { exitCode: null, output: "[timed out]", timedOut: true, seconds: 600 };
     if (command.startsWith("missing-tsc")) {
       return { exitCode: 127, output: "sh: 1: missing-tsc: not found", timedOut: false, seconds: 0.1 };
@@ -298,6 +303,38 @@ test("several projects: each type check is named after its project", () => {
   expect(summary(r, "review.md")).toContain("\n  Type check (api): timed out after 600 s\n");
 });
 
+describe("typeGaps", () => {
+  const err = (code: string, message: string, file = "src/a.ts") => ({ file, line: 1, column: 1, code, message });
+  const prisma = (file: string) => err("TS2305", `Module '"@prisma/client"' has no exported member 'User'.`, file);
+
+  test("errors about one missing module are named as a gap", () => {
+    const errors = [prisma("a.ts"), prisma("b.ts"), prisma("c.ts"),
+      err("TS2307", "Cannot find module '@acme/core' or its corresponding type declarations."),
+      err("TS2307", "Cannot find module '@acme/core' or its corresponding type declarations.", "src/b.ts"),
+      err("TS2307", "Cannot find module '@acme/core/sub' or its corresponding type declarations.", "src/c.ts"),
+      err("TS2307", "Cannot find module './local' or its corresponding type declarations.", "src/d.ts"),
+      err("TS2307", "Cannot find module './local' or its corresponding type declarations.", "src/e.ts"),
+      err("TS2307", "Cannot find module './local' or its corresponding type declarations.", "src/f.ts"),
+      err("TS2322", "Type 'string' is not assignable to type 'number'.")];
+    expect(typeGaps(errors, ["@acme/core"])).toEqual([
+      { kind: "generated", module: "@prisma/client", errors: 3 },
+      { kind: "sibling", module: "@acme/core", errors: 3 }]);
+    expect(typeGaps([...errors.slice(0, 3), ...Array.from({ length: 3 }, (_, i) =>
+      err("TS2307", "Cannot find module 'left-pad' or its corresponding type declarations.", `src/${i}.ts`))], []))
+      .toEqual([{ kind: "generated", module: "@prisma/client", errors: 3 },
+        { kind: "missing", module: "left-pad", errors: 3 }]);
+  });
+
+  test("scattered errors are not", () => {
+    const errors = [prisma("a.ts"), prisma("b.ts"),
+      err("TS2307", "Cannot find module 'x' or its corresponding type declarations."),
+      err("TS2307", "Cannot find module 'y' or its corresponding type declarations."),
+      err("TS2307", "Cannot find module 'z' or its corresponding type declarations."),
+      err("TS2322", "Type 'string' is not assignable to type 'number'.")];
+    expect(typeGaps(errors, [])).toEqual([]);
+  });
+});
+
 describe("setup", () => {
   beforeEach(() => {
     repo = initRepo(join(tmp(), "repo"));
@@ -375,6 +412,43 @@ ${typecheck ? `    typecheck: ${typecheck}\n` : ""}uncovered: []
     await typecheckNote(runner, cfg, false);
     expect(seen).toEqual([QUICK_TYPECHECK_TIMEOUT, TYPECHECK_TIMEOUT]);
     expect(QUICK_TYPECHECK_TIMEOUT).toBe(180);
+  });
+
+  const twice = async (typecheck: string) => {
+    const m = new ScriptedAgent([
+      [tool("try_project", { yaml: web(typecheck) })],
+      [tool("try_project", { yaml: web(typecheck) })],
+      [tool("propose", { yaml: web(typecheck) })],
+      [text("done")],
+    ]);
+    const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: sandbox() });
+    const said = (call: number) => (m.calls[call]!.messages.at(-1)!.content as Record<string, unknown>[])
+      .map((x) => String(x.content)).join("\n");
+    return { r, said };
+  };
+
+  test("a gap goes back once, then is said under Worth a look", async () => {
+    const { r, said } = await twice("gap-tsc");
+    expect(said(1)).toContain("the type check cannot see @prisma/client (3 errors)");
+    expect(said(1)).toContain("prisma generate");
+    expect(said(1)).not.toContain("When every project runs, submit");
+    // Tried again unchanged, the run stands and the proof keeps the gap.
+    expect(said(2)).toContain("the suite of web runs");
+    expect(r.ok).toBe(true);
+    expect(r.projects[0]!.typeGaps).toEqual([{ kind: "generated", module: "@prisma/client", errors: 3 }]);
+    expect(approvalChecks(parseReviewFile(web("gap-tsc")), r.projects)).toContain(
+      "web: the type check cannot see @prisma/client (3 errors)");
+  });
+
+  test("a type check that failed is proven, and approve names the problem in one short line", async () => {
+    const { r, said } = await twice("missing-tsc");
+    expect(said(1)).toContain("the type check of web: failed without reporting");
+    expect(said(1)).toContain("sh: 1: missing-tsc: not found");
+    expect(r.ok).toBe(true);
+    expect(r.projects[0]!.typecheckProblem).toContain("failed without reporting a type error");
+    const checks = approvalChecks(parseReviewFile(web("missing-tsc")), r.projects);
+    expect(checks).toEqual(["web: type check failed without reporting a type error (it could not start, or its " +
+      "output is not tsc's)"]);
   });
 
   test("try_project tells the agent to add typecheck to a TypeScript project that can be type checked", async () => {

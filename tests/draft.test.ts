@@ -356,3 +356,29 @@ test("an image without corepack installs it first", () => {
   expect(install("22\n", "n22")).toStartWith("corepack enable && ");
   expect(install("22\n", "n22b")).not.toContain("npm install -g corepack");
 });
+
+test("a project with a prisma schema generates its client in install", () => {
+  const files = (extra: Record<string, string>) => ({
+    "package.json": pkg({ private: true, packageManager: "pnpm@9.12.0", workspaces: ["packages/*"] }),
+    "pnpm-workspace.yaml": "packages:\n  - 'packages/*'\n",
+    "pnpm-lock.yaml": "",
+    "packages/lib/package.json": pkg({ dependencies: { "@prisma/client": "5.0.0" }, devDependencies: { vitest: "3.0.0" } }),
+    "packages/lib/src/a.test.ts": "",
+    ...extra });
+  const withSchema = projects(detect(repoWith(files({ "packages/lib/prisma/schema.prisma": "generator client {}\n" }))));
+  const lib = Object.values(withSchema).find((p) => p.root === "packages/lib")!;
+  expect(lib.install.join("\n")).toContain("pnpm install --frozen-lockfile && npx prisma generate " +
+    "--schema=packages/lib/prisma/schema.prisma");
+});
+
+test("a project that uses prisma but holds no schema adds no generate step", () => {
+  const files = (extra: Record<string, string>) => ({
+    "package.json": pkg({ private: true, packageManager: "pnpm@9.12.0", workspaces: ["packages/*"] }),
+    "pnpm-workspace.yaml": "packages:\n  - 'packages/*'\n",
+    "pnpm-lock.yaml": "",
+    "packages/lib/package.json": pkg({ dependencies: { "@prisma/client": "5.0.0" }, devDependencies: { vitest: "3.0.0" } }),
+    "packages/lib/src/a.test.ts": "",
+    ...extra });
+  const none = Object.values(projects(detect(repoWith(files({})))));
+  expect(none.map((p) => p.install.join("\n")).join("\n")).not.toContain("prisma");
+});

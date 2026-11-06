@@ -3,7 +3,8 @@
 // more on the code before the change, to tell the errors the change brought from those already there. Types are
 // deterministic, so once is enough. It is information: it never changes a test's outcome, a finding, whether a run
 // reported, or the exit code.
-import { posix } from "node:path";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, posix } from "node:path";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
 import { OutOfTime, type Runner } from "./sandbox";
@@ -160,4 +161,64 @@ export function describeDiagnostic(d: Diagnostic): string {
   const where = d.file ? `\`${d.file}:${d.line}:${d.column}\` ` : "";
   const tags = [...(d.new ? ["new"] : []), ...(d.changed ? ["changed file"] : [])];
   return `${where}${d.code}${tags.length ? ` (${tags.join(", ")})` : ""}: ${d.message}`;
+}
+
+/** A module the type check cannot see, named by several errors: `generated` (a client a generator writes, here
+ * Prisma's), `sibling` (a package of the workspace, not built), `missing` (any other package). */
+export interface TypeGap { kind: "generated" | "sibling" | "missing"; module: string; errors: number }
+
+/** Errors that name one module this many times or more are a gap; fewer are the project's own. */
+export const GAP_ERRORS = 3;
+const GENERATED = /^(@prisma|\.prisma)\/client(\/|$)/;
+
+/** The modules the type check cannot find (TS2307 "Cannot find module", TS2305 "has no exported member") that three
+ * or more errors name: a generated client or an unbuilt package, not a mistake of the change. `workspace`: the
+ * package names of the workspace. Relative imports are the project's own. */
+export function typeGaps(errors: TscError[], workspace: string[]): TypeGap[] {
+  const count = new Map<string, number>();
+  for (const e of errors) {
+    const m = e.code === "TS2307" ? /^Cannot find module '([^']+)'/.exec(e.message)
+      : e.code === "TS2305" ? /^Module '"([^"]+)"' has no exported member/.exec(e.message) : null;
+    const name = m?.[1];
+    if (!name || name.startsWith(".") && !name.startsWith(".prisma/") || name.startsWith("/")) continue;
+    count.set(name, (count.get(name) ?? 0) + 1);
+  }
+  // A subpath ("@acme/core/sub") is its package's.
+  const pkgOf = (n: string) => workspace.find((w) => n === w || n.startsWith(`${w}/`));
+  const gaps = new Map<string, TypeGap>();
+  for (const [name, n] of count) {
+    const generated = GENERATED.test(name);
+    const module = generated ? "@prisma/client" : pkgOf(name) ?? name;
+    const kind = generated ? "generated" : pkgOf(name) ? "sibling" : "missing";
+    const g = gaps.get(module) ?? { kind, module, errors: 0 };
+    g.errors += n;
+    gaps.set(module, g);
+  }
+  return [...gaps.values()].filter((g) => g.errors >= GAP_ERRORS);
+}
+
+/** The package names of the workspace under `snap` (the "name" of each package.json outside node_modules, three
+ * folders deep). */
+export function workspaceNames(snap: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string, depth: number) => {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const n of names) {
+      if (n === "node_modules" || n.startsWith(".")) continue;
+      const p = join(dir, n);
+      if (n === "package.json") {
+        try {
+          const name = (JSON.parse(readFileSync(p, "utf8")) as { name?: unknown }).name;
+          if (typeof name === "string" && depth > 0) out.push(name);
+        } catch { /* not a manifest */ }
+      } else if (depth < 3 && statSync(p, { throwIfNoEntry: false })?.isDirectory()) walk(p, depth + 1);
+    }
+  };
+  walk(snap, 0);
+  return out;
 }

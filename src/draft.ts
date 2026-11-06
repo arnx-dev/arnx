@@ -361,14 +361,17 @@ function jsProject(c: Candidate, f: ProjectFacts, d: Detection, mark: MarkFn): R
   const workspace = f.installRoot !== c.root || d.workspaces.includes(c.root);
   // Dependencies install outside /src, which the code hides at run time; deps_dir links their node_modules back
   // before each run (depsLink in sandbox.ts). A workspace installs whole, so each package's node_modules is there.
+  // A generated client is made where the network is: install runs while the image builds, test runs have none.
+  const generate = f.prisma ? ` && npx prisma generate --schema=${f.prisma}` : "";
   if (workspace) {
     if (f.installRoot !== c.root) p.install_root = f.installRoot;
-    p.install = [`${corepack}mkdir -p /opt/ws && cp -a . /opt/ws/ && cd /opt/ws && ${ci}`];
+    p.install = [`${corepack}mkdir -p /opt/ws && cp -a . /opt/ws/ && cd /opt/ws && ${ci}${generate}`];
     p.deps_dir = "/opt/ws";
     mark(["install", 0], "one install for the workspace; check that its packages resolve");
   } else {
     const files = f.needsTree ? "-a ." : ["package.json", ...f.lockfile ? [f.lockfile] : [], ...f.copy].join(" ");
-    p.install = [`${corepack}mkdir -p /opt/deps && cp ${f.copy.includes(".yarn") && !f.needsTree ? "-r " : ""}${files} /opt/deps/ && cd /opt/deps && ${ci}`];
+    const schema = f.prisma && !f.needsTree ? `cp --parents ${f.prisma} /opt/deps/ && ` : "";
+    p.install = [`${corepack}mkdir -p /opt/deps && ${schema}cp ${f.copy.includes(".yarn") && !f.needsTree ? "-r " : ""}${files} /opt/deps/ && cd /opt/deps && ${ci}${generate}`];
     p.deps_dir = "/opt/deps";
   }
   const loader = f.deps.includes("tsx") ? " --import tsx" : f.deps.includes("ts-node")
