@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse } from "yaml";
 import { parseReviewFile } from "../src/config";
@@ -381,4 +382,42 @@ test("a project that uses prisma but holds no schema adds no generate step", () 
     ...extra });
   const none = Object.values(projects(detect(repoWith(files({})))));
   expect(none.map((p) => p.install.join("\n")).join("\n")).not.toContain("prisma");
+});
+
+// Runs a drafted install line in a scratch folder with the package manager and npx stood in by functions: what it
+// copies, and what npx was given.
+function runInstall(repo: string, line: string): { deps: string; npx: string; status: number | null } {
+  const deps = join(tmp(), "deps");
+  const out = join(tmp(), "npx.out");
+  const script = `corepack() { :; }\npnpm() { :; }\nnpx() { printf '%s\\n' "$@" > '${out}'; }\n` +
+    line.replaceAll("/opt/deps", deps);
+  const r = spawnSync("bash", ["-c", script], { cwd: repo, encoding: "utf8", env: { ...process.env, HOME: "/nonexistent" } });
+  return { deps, npx: existsSync(out) ? readFileSync(out, "utf8") : "", status: r.status };
+}
+
+test("a prisma schema path with a space and a $ is quoted: the right file is installed and nothing else runs", () => {
+  const path = "my app/pri$ma/schema.prisma";
+  const repo = repoWith({
+    "package.json": pkg({ packageManager: "pnpm@9.12.0", dependencies: { "@prisma/client": "5.0.0" },
+      devDependencies: { vitest: "3" } }),
+    "pnpm-lock.yaml": "", "src/a.test.ts": "", [path]: "generator client {}\n" });
+  const lib = Object.values(projects(detect(repo)))[0]!;
+  const line = lib.install.join("\n");
+  expect(line).toContain("--schema='my app/pri$ma/schema.prisma'");
+  const r = runInstall(repo, line);
+  expect(r.status).toBe(0);
+  expect(readFileSync(join(r.deps, path), "utf8")).toBe("generator client {}\n");
+  expect(r.npx).toBe(`prisma\ngenerate\n--schema=${path}\n`);
+});
+
+test("a project outside a workspace copies its schema next to its manifests and generates there", () => {
+  const repo = repoWith({
+    "package.json": pkg({ packageManager: "pnpm@9.12.0", dependencies: { prisma: "5.0.0" }, devDependencies: { vitest: "3" } }),
+    "pnpm-lock.yaml": "", "src/a.test.ts": "", "prisma/schema.prisma": "generator client {}\n" });
+  const lib = Object.values(projects(detect(repo)))[0]!;
+  expect(lib.install[0]).toContain("cp --parents prisma/schema.prisma /opt/deps/");
+  const r = runInstall(repo, lib.install.join("\n"));
+  expect(r.status).toBe(0);
+  expect(readFileSync(join(r.deps, "prisma/schema.prisma"), "utf8")).toBe("generator client {}\n");
+  expect(r.npx).toBe("prisma\ngenerate\n--schema=prisma/schema.prisma\n");
 });

@@ -12,8 +12,9 @@ import { ArnxError } from "./errors";
 import { refString, type Settings, untrackedSetting } from "./settings";
 import { BROWSER_TESTS, WEB_UI } from "./browser";
 import { matcher } from "./ignore";
-import { type Coverage, coverageFiles, coverageMap, gapsLine, NO_TESTS, type ProjectProof, SCRIPTS, unexplainedFailing }
+import { type Coverage, coverageFiles, coverageMap, NO_TESTS, type ProjectProof, SCRIPTS, unexplainedFailing }
   from "./setup";
+import { gapsLine } from "./typecheck";
 import { staleLine, staleRewrites } from "./standins";
 import { isSourcePath, SOURCE } from "./untested";
 import { NOT_SET_UP } from "./draft";
@@ -88,8 +89,14 @@ export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = [], ho
         `so not in ${BASELINE_FILE}: \`arnx allow-secret PATH\` to run ${proof.unproven.length === 1 ? "it" : "them"}`);
     }
     if (proof?.gap) out.push(`${p.name}: ${proof.gap}; test_command leaves them out`);
-    if (proof?.typecheckProblem) out.push(`${p.name}: type check ${proof.typecheckProblem}`);
-    if (proof?.typeGaps?.length) out.push(`${p.name}: ${gapsLine(proof.typeGaps)}`);
+    if (proof?.typecheckProblem) out.push(`${p.name}: type check ${proof.typecheckProblem.replace(/ \(.*\)$/, "")}`);
+    if (proof?.typeGaps?.length) {
+      out.push(`${p.name}: ${gapsLine(proof.typeGaps)}`);
+      const siblings = proof.typeGaps.filter((g) => g.kind === "sibling").map((g) => g.module);
+      if (siblings.length) {
+        out.push(`${p.name}: workspace packages are not built; arnx builds none of them (${siblings.join(", ")})`);
+      }
+    }
     if (p.knownFailing.length) {
       const silent = unexplainedFailing(p);
       out.push(`${p.name}: ${p.knownFailing.length} test file(s) set aside as known failing` +

@@ -28,7 +28,7 @@ import { buildContextOf, DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_
   type SessionFactory } from "./sandbox";
 import type { Say } from "./progress";
 import { describeTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
-  typeCheckOf } from "./typecheck";
+  typeCheckOf, workspaceNames } from "./typecheck";
 import { databaseEnv, dbUntested, untestedFiles } from "./untested";
 import { clearReach, countable, type Reach, readReach, reachedSince } from "./reached";
 import { projectSource, shallowKind } from "./shallow";
@@ -770,7 +770,7 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
       }
     }
   }
-  const t = typeCheckOf(cfg, run, o.changed, secs, before);
+  const t = typeCheckOf(cfg, run, o.changed, secs, before, workspaceNames(o.headSnap));
   emit("typecheck.done", { project: cfg.name, status: t.status, errors: t.errors, in_changed_files: t.inChangedFiles,
     ...(t.new === undefined ? {} : { new: t.new, pre_existing: t.preExisting }), ...(t.before ? { before: t.before } : {}),
     secs: t.secs, ...(error ? { error: clip(error, 500) } : {}) });

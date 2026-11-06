@@ -15,7 +15,7 @@ import { OutOfTime, type RunResult, type Runner, type SessionFactory } from "../
 import { defaultSettings } from "../src/settings";
 import { runSetup, runSuite, typecheckNote } from "../src/setup";
 import { approvalChecks, pythonTypeGap, typecheckGaps } from "../src/setupview";
-import { describeTypecheck, markNew, parseTsc, QUICK_TYPECHECK_TIMEOUT, TYPECHECK_TIMEOUT, typeGaps } from "../src/typecheck";
+import { describeTypecheck, markNew, parseTsc, QUICK_TYPECHECK_TIMEOUT, TYPECHECK_TIMEOUT, typeGaps, workspaceNames } from "../src/typecheck";
 import { FakeJson, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
@@ -102,6 +102,10 @@ function tsc(snap: string, workdir: string): [string, number] {
       if (statSync(p).isDirectory()) walk(p);
       else if (name.endsWith(".ts")) {
         readFileSync(p, "utf8").split("\n").forEach((l, i) => {
+          if (l.includes("GAP-ERROR")) {
+            lines.push(`${posix.relative(join(snap, workdir), p)}(${i + 1},7): error TS2307: Cannot find module ` +
+              "'@prisma/client' or its corresponding type declarations.");
+          }
           if (l.includes("TYPE-ERROR")) {
             lines.push(`${posix.relative(join(snap, workdir), p)}(${i + 1},7): error TS2322: Type 'string' is not ` +
               "assignable to type 'number'.");
@@ -234,6 +238,18 @@ describe("a review", () => {
         errors: 2, in_changed_files: 1, new: 1, pre_existing: 1, before: "compared", secs: 3 });
     });
 
+  test("errors about one module the type check cannot see are kept as a gap, and the report says they are not the change's",
+    async () => {
+      writeFileSync(join(repo, "src", "old.ts"), "export const n = 1;\n");
+      writeFileSync(join(repo, "src", "calc.ts"), "export const add = (a: number, b: number) => a + b;\n" +
+        "// GAP-ERROR\n// GAP-ERROR\n// GAP-ERROR\n");
+      const { review: r, rdir } = await review();
+      expect(r.typecheck![0]!.gaps).toEqual([{ kind: "generated", module: "@prisma/client", errors: 3 }]);
+      expect(readFileSync(join(rdir, "review.md"), "utf8")).toContain("the type check cannot see @prisma/client " +
+        "(3 errors); these errors say nothing about the change");
+      expect((load(rdir).typecheck![0] as { gaps?: unknown }).gaps).toEqual(r.typecheck![0]!.gaps);
+    });
+
   test("an error only in a generated test is left out: no type errors", async () => {
     writeFileSync(join(repo, "src", "calc.ts"), "export const add = (a: number, b: number) => a + b;\n");
     writeFileSync(join(repo, "src", "old.ts"), "export const n = 1;\n");
@@ -301,6 +317,27 @@ test("several projects: each type check is named after its project", () => {
     "check below).\n");
   expect(md).toContain("\n- `web` ran `npx tsc --noEmit -p tsconfig.json`: no type errors.\n");
   expect(summary(r, "review.md")).toContain("\n  Type check (api): timed out after 600 s\n");
+});
+
+describe("workspaceNames", () => {
+  const manifest = (dir: string, name: string) => {
+    mkdirSync(join(dir), { recursive: true });
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name }));
+  };
+  test("declared workspace folders are the siblings; examples and node_modules are not", () => {
+    const root = join(tmp(), "ws");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "top", workspaces: ["packages/*"] }));
+    manifest(join(root, "packages", "core"), "@acme/core");
+    manifest(join(root, "examples", "demo"), "left-pad");
+    manifest(join(root, "packages", "core", "node_modules", "dep"), "dep");
+    expect(workspaceNames(root)).toEqual(["@acme/core"]);
+    // Without a declaration, every manifest below the root outside node_modules counts.
+    const bare = join(tmp(), "bare");
+    manifest(join(bare, "a"), "pa");
+    manifest(join(bare, "node_modules", "x"), "nx");
+    expect(workspaceNames(bare)).toEqual(["pa"]);
+  });
 });
 
 describe("typeGaps", () => {
@@ -440,6 +477,14 @@ ${typecheck ? `    typecheck: ${typecheck}\n` : ""}uncovered: []
       "web: the type check cannot see @prisma/client (3 errors)");
   });
 
+  test("approve says once that sibling packages are not built", () => {
+    const proof = { name: "web", summary: "1 passed", skips: [],
+      typeGaps: [{ kind: "sibling" as const, module: "@acme/core", errors: 5 }] };
+    expect(approvalChecks(parseReviewFile(web(TSC)), [proof])).toEqual([
+      "web: the type check cannot see @acme/core (5 errors)",
+      "web: workspace packages are not built; arnx builds none of them (@acme/core)"]);
+  });
+
   test("a type check that failed is proven, and approve names the problem in one short line", async () => {
     const { r, said } = await twice("missing-tsc");
     expect(said(1)).toContain("the type check of web: failed without reporting");
@@ -447,8 +492,7 @@ ${typecheck ? `    typecheck: ${typecheck}\n` : ""}uncovered: []
     expect(r.ok).toBe(true);
     expect(r.projects[0]!.typecheckProblem).toContain("failed without reporting a type error");
     const checks = approvalChecks(parseReviewFile(web("missing-tsc")), r.projects);
-    expect(checks).toEqual(["web: type check failed without reporting a type error (it could not start, or its " +
-      "output is not tsc's)"]);
+    expect(checks).toEqual(["web: type check failed without reporting a type error"]);
   });
 
   test("try_project tells the agent to add typecheck to a TypeScript project that can be type checked", async () => {

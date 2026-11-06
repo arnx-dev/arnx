@@ -147,6 +147,7 @@ tell the errors the change brought from those already there.
 | `before` | string | Optional (absent when there were no errors, or the before/after check is off). `compared`, or why the errors were not compared: `no-base` (the change has no code before it), `dependencies-changed`, `failed` (the type check did not run there). |
 | `diagnostics` | array | The first 100 errors, new ones and those in changed files first. Each has `file` (relative to the repository root; empty for an error about no file, such as a bad tsconfig), `line`, `column`, `code` (such as `TS2322`), `message`, `changed` (true when the change touches the file) and, when compared, `new`. |
 | `output` | string | Optional (only when `status` is `failed` or `timed-out`). The end of the command's output. |
+| `gaps` | array | Optional (absent when none). Modules the type check cannot see, each named by 3 or more errors: `{kind, module, errors}` with `kind` `generated` (a client a generator writes, such as `@prisma/client`), `sibling` (a package of the workspace that is not built) or `missing`. Those errors say nothing about the change. |
 | `secs` | number | How long it took, on the change and on the code before it. |
 
 ## Each provider failure

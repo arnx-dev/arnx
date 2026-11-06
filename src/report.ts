@@ -13,7 +13,7 @@ import { type ModelUse, parseJsonObject } from "./llm";
 import { type ProviderFailure, resumes } from "./outage";
 import { type Shallow, SHALLOW_NOTE } from "./shallow";
 import { isSourcePath } from "./untested";
-import { describeDiagnostic, describeTypecheck, type TypeCheck } from "./typecheck";
+import { describeDiagnostic, describeTypecheck, gapsLine, type TypeCheck } from "./typecheck";
 import { pyTruthy, splitLines } from "./util";
 
 /** rewrite: the bug is real but the test is wrong; the owner says why on a `Rewrite:` line after the Mark line, and
@@ -815,6 +815,7 @@ export function render(r: Review): string {
       "generated tests. It is information only: it changes no test, finding or exit code.", "");
     for (const t of checks) {
       out.push(`- ${multi(r) ? `\`${t.project}\` ran` : "Ran"} \`${t.command}\`: ${describeTypecheck(t)}.`);
+      if (t.gaps?.length) out.push(`  - ${gapsLine(t.gaps)}; these errors say nothing about the change.`);
       for (const d of t.diagnostics.slice(0, DIAGNOSTICS_SHOWN)) out.push(`  - ${describeDiagnostic(d)}`);
       const more = t.errors - Math.min(t.diagnostics.length, DIAGNOSTICS_SHOWN);
       if (more > 0) {

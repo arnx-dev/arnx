@@ -65,7 +65,8 @@ function full(): Record<string, unknown> {
   // `output` comes only with a check that failed or timed out; here only to see every field written.
   typecheck: [{ project: "main", command: "npx tsc --noEmit", status: "errors", errors: 1, inChangedFiles: 1, new: 1,
     preExisting: 0, before: "compared", diagnostics: [{ file: "a.ts", line: 1, column: 2, code: "TS2322",
-      message: "m", changed: true, new: true }], output: "a.ts(1,2): error TS2322: m", secs: 1 }],
+      message: "m", changed: true, new: true }], output: "a.ts(1,2): error TS2322: m", secs: 1,
+    gaps: [{ kind: "generated", module: "@prisma/client", errors: 3 }] }],
   // `key` comes only with a refused key; here only to see every field written.
   providerFailures: [{ provider: "myprovider", name: "myprovider (llm.example.com)", kind: "auth", detail: "HTTP 401",
     calls: 2, failed: 2, attempts: 2, roles: ["challenge"], missing: ["challenge"], key: "MY_PROVIDER_KEY" }] });

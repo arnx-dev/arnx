@@ -51,6 +51,9 @@ export interface TypeCheck {
   diagnostics: Diagnostic[];
   /** The end of the output, when the check failed or timed out. */
   output?: string;
+  /** Modules the check cannot see (a generated client, an unbuilt package) that three or more errors name: those
+   * errors say nothing about the change. Absent when there are none. */
+  gaps?: TypeGap[];
   secs: number;
 }
 
@@ -120,7 +123,8 @@ export function markNew(after: TscError[], before: TscError[]): boolean[] {
 /** The project's result. `changed`: the change's files (repository paths); `before`: the comparison with the code
  * before the change, with its errors when it ran (absent: not compared). */
 export function typeCheckOf(cfg: ReviewConfig, run: TypeCheckRun, changed: Iterable<string>, secs: number,
-                            before?: { status: TypeCheckBefore; errors?: TscError[] }): TypeCheck {
+                            before?: { status: TypeCheckBefore; errors?: TscError[] }, workspace: string[] = []): TypeCheck {
+  const gaps = typeGaps(run.errors, workspace);
   const touched = new Set(changed);
   const fresh = before?.errors ? markNew(run.errors, before.errors) : null;
   const all: Diagnostic[] = run.errors.map((e, i) => ({ ...e, changed: touched.has(e.file),
@@ -134,10 +138,16 @@ export function typeCheckOf(cfg: ReviewConfig, run: TypeCheckRun, changed: Itera
     ...(fresh ? { new: newCount, preExisting: all.length - newCount } : {}),
     ...(before ? { before: before.status } : {}), diagnostics,
     ...(run.status === "failed" || run.status === "timed-out" ? { output: run.output.slice(-OUTPUT_KEPT) } : {}),
+    ...(gaps.length ? { gaps } : {}),
     secs: Math.round(secs * 10) / 10 };
 }
 
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+/** The gaps of a type check in a few words: "the type check cannot see @prisma/client (312 errors)". */
+export function gapsLine(gaps: TypeGap[]): string {
+  return `the type check cannot see ${gaps.map((g) => `${g.module} (${plural(g.errors, "error")})`).join(", ")}`;
+}
 
 const NOT_COMPARED: Record<Exclude<TypeCheckBefore, "compared">, string> = {
   "no-base": "the change has no code before it",
@@ -197,28 +207,42 @@ export function typeGaps(errors: TscError[], workspace: string[]): TypeGap[] {
   return [...gaps.values()].filter((g) => g.errors >= GAP_ERRORS);
 }
 
-/** The package names of the workspace under `snap` (the "name" of each package.json outside node_modules, three
- * folders deep). */
+/** The package names of the workspace under `snap`: the manifests in the folders the root declares (package.json
+ * `workspaces`, pnpm-workspace.yaml `packages`) or, with no declaration, every manifest below the root; never
+ * node_modules; four folders deep at most. */
 export function workspaceNames(snap: string): string[] {
+  const read = (f: string) => { try { return readFileSync(join(snap, f), "utf8"); } catch { return ""; } };
+  let globs: string[] = [];
+  try {
+    const w = (JSON.parse(read("package.json") || "{}") as { workspaces?: unknown }).workspaces;
+    const list = Array.isArray(w) ? w : (w as { packages?: unknown } | undefined)?.packages;
+    if (Array.isArray(list)) globs = list.filter((g): g is string => typeof g === "string");
+  } catch { /* no manifest */ }
+  globs.push(...[...read("pnpm-workspace.yaml").matchAll(/^\s*-\s*['"]?([^'"\s#]+)['"]?/gm)].map((m) => m[1]!));
+  const asRegex = (g: string) => new RegExp(`^${g.replace(/^\.\//, "").replace(/\/$/, "")
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\0").replace(/\*/g, "[^/]+").replaceAll("\0", ".*")}$`);
+  const wanted = globs.filter((g) => !g.startsWith("!")).map(asRegex);
+  const unwanted = globs.filter((g) => g.startsWith("!")).map((g) => asRegex(g.slice(1)));
   const out: string[] = [];
-  const walk = (dir: string, depth: number) => {
+  const walk = (rel: string, depth: number) => {
     let names: string[];
     try {
-      names = readdirSync(dir);
+      names = readdirSync(join(snap, rel));
     } catch {
       return;
     }
     for (const n of names) {
       if (n === "node_modules" || n.startsWith(".")) continue;
-      const p = join(dir, n);
+      const at = rel ? `${rel}/${n}` : n;
       if (n === "package.json") {
+        if (!rel || (wanted.length && !(wanted.some((r) => r.test(rel)) && !unwanted.some((r) => r.test(rel))))) continue;
         try {
-          const name = (JSON.parse(readFileSync(p, "utf8")) as { name?: unknown }).name;
-          if (typeof name === "string" && depth > 0) out.push(name);
+          const name = (JSON.parse(read(at)) as { name?: unknown }).name;
+          if (typeof name === "string") out.push(name);
         } catch { /* not a manifest */ }
-      } else if (depth < 3 && statSync(p, { throwIfNoEntry: false })?.isDirectory()) walk(p, depth + 1);
+      } else if (depth < 4 && statSync(join(snap, at), { throwIfNoEntry: false })?.isDirectory()) walk(at, depth + 1);
     }
   };
-  walk(snap, 0);
+  walk("", 0);
   return out;
 }

@@ -44,7 +44,7 @@ import { copyManifests, dockerExec, dockerSteps, envKey, envTag, type ExecFactor
 import type { ScipIndex } from "./scip";
 import { EXEC, SetupExec, type TriedEnv } from "./setupexec";
 import { loadSettings, refString, type Settings, settingsPath, setupRef } from "./settings";
-import { QUICK_TYPECHECK_TIMEOUT, runTypecheck, TYPECHECK_TIMEOUT, type TypeGap, typeGaps, workspaceNames } from "./typecheck";
+import { QUICK_TYPECHECK_TIMEOUT, runTypecheck, TYPECHECK_TIMEOUT, gapsLine, type TypeGap, typeGaps, workspaceNames } from "./typecheck";
 import { SOURCE } from "./untested";
 import { BROWSER_TESTS, UI_RUNS, type BrowserSuite, browserSuites, uiFramework, WEB_UI } from "./browser";
 import { otherLanguageOf } from "./languages";
@@ -436,11 +436,6 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
         tailOf(tail), skips, failing, "", counts] as Out;
   }, undefined, key, swap);
   return [ok, said(summary), tail, skips.map(said), failing, said(hints), counts];
-}
-
-/** The gaps of a type check in a few words: "the type check cannot see @prisma/client (312 errors)". */
-export function gapsLine(gaps: TypeGap[]): string {
-  return `the type check cannot see ${gaps.map((g) => `${g.module} (${plural(g.errors, "error")})`).join(", ")}`;
 }
 
 /** The type check's part of a proof's summary ("; type check: ..."): what it found, or why it gave nothing. It never
@@ -1731,7 +1726,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
             "Prisma, npx prisma generate --schema=PATH; it downloads engines, so it runs in install, never in test_command)." : "",
           gaps.some((g) => g.kind === "sibling") ? "Do not build sibling packages to hide it (a built copy changes the " +
             "image for every code version)." : "",
-          "Otherwise try the project again unchanged: the gap is then shown to the user."].filter(Boolean).join(" ");
+          gaps.every((g) => g.kind === "missing") ? "Add the dependency to install, or try the project again unchanged: " +
+            "the gap is then shown to the user." : "Otherwise try the project again unchanged: the gap is then shown to the user."]
+          .filter(Boolean).join(" ");
         return `the suite of ${name} runs (${summary}), but ${line}, so its errors say nothing about a change. ${fixes}`;
       }
       // The suite runs (some tests pass) and the current code fails others: a different failure from one that never ran.

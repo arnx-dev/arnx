@@ -341,6 +341,11 @@ export function corepackStep(image: string): string {
   return `${major >= 25 ? "npm install -g corepack && " : ""}corepack enable && `;
 }
 
+/** A path as one shell word: left as it is when it holds only safe characters, else in single quotes. */
+export function shellQuote(path: string): string {
+  return /^[\w@%+=:,./-]+$/.test(path) ? path : `'${path.replaceAll("'", `'\\''`)}'`;
+}
+
 function jsProject(c: Candidate, f: ProjectFacts, d: Detection, mark: MarkFn): Raw {
   const manager = f.manager?.value ?? "npm";
   let runner = c.runner && ["vitest", "jest", "node", "bun"].includes(c.runner) ? c.runner : null;
@@ -362,15 +367,15 @@ function jsProject(c: Candidate, f: ProjectFacts, d: Detection, mark: MarkFn): R
   // Dependencies install outside /src, which the code hides at run time; deps_dir links their node_modules back
   // before each run (depsLink in sandbox.ts). A workspace installs whole, so each package's node_modules is there.
   // A generated client is made where the network is: install runs while the image builds, test runs have none.
-  const generate = f.prisma ? ` && npx prisma generate --schema=${f.prisma}` : "";
+  const generate = f.prisma ? ` && npx prisma generate --schema=${shellQuote(f.prisma)}` : "";
   if (workspace) {
     if (f.installRoot !== c.root) p.install_root = f.installRoot;
     p.install = [`${corepack}mkdir -p /opt/ws && cp -a . /opt/ws/ && cd /opt/ws && ${ci}${generate}`];
     p.deps_dir = "/opt/ws";
     mark(["install", 0], "one install for the workspace; check that its packages resolve");
   } else {
-    const files = f.needsTree ? "-a ." : ["package.json", ...f.lockfile ? [f.lockfile] : [], ...f.copy].join(" ");
-    const schema = f.prisma && !f.needsTree ? `cp --parents ${f.prisma} /opt/deps/ && ` : "";
+    const files = f.needsTree ? "-a ." : ["package.json", ...f.lockfile ? [f.lockfile] : [], ...f.copy].map(shellQuote).join(" ");
+    const schema = f.prisma && !f.needsTree ? `cp --parents ${shellQuote(f.prisma)} /opt/deps/ && ` : "";
     p.install = [`${corepack}mkdir -p /opt/deps && ${schema}cp ${f.copy.includes(".yarn") && !f.needsTree ? "-r " : ""}${files} /opt/deps/ && cd /opt/deps && ${ci}${generate}`];
     p.deps_dir = "/opt/deps";
   }
