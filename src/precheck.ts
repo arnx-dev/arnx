@@ -23,7 +23,7 @@ export const SAMPLE_FILES = 3;
 
 /** What stopped the try before the whole suite ran: why, in a sentence, the runner's output, and what the failures
  * of the sample point to. `kind`: what stopped it (a probe that is not seen counts as the listing). */
-export interface Early { summary: string; output: string; hints: string; kind: "listing" | "placement" | "sample" }
+export interface Early { summary: string; output: string; hints: string; kind: "listing" | "sample" }
 
 /** Said with every early stop: the agent may know better, and the whole suite settles it. */
 const AGAIN = " (Tried again unchanged, the project runs its whole suite.)";

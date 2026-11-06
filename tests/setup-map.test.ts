@@ -57,6 +57,8 @@ const WEB = `  web:
     test_command: npx vitest run {targets}
 `;
 const BOTH = `version: 1\nprojects:\n${API}${WEB}`;
+/** BOTH with web's environment changed `n` times: a try in a changed environment runs the whole suite again. */
+const bothEnv = (n: number) => BOTH.replace("npx vitest run {targets}", `npx vitest run${" --silent".repeat(n)} {targets}`);
 
 /** A session whose vitest run writes `xml` where --outputFile says, like the real runner. */
 class VitestSession extends FakeSession {
@@ -117,9 +119,9 @@ test("source files outside every project are grouped by the shallowest folder no
 test("a web UI app gets two runs; propose asks once about the rest, then lists it under uncovered itself", async () => {
   addWebTest();
   const m = new ScriptedAgent([
-    [tool("try_project", { yaml: BOTH, project: "web" })],
-    [tool("try_project", { yaml: BOTH, project: "web" })],
-    [tool("try_project", { yaml: BOTH, project: "web" })],
+    [tool("try_project", { yaml: bothEnv(1), project: "web" })],
+    [tool("try_project", { yaml: bothEnv(2), project: "web" })],
+    [tool("try_project", { yaml: bothEnv(3), project: "web" })],
     [tool("try_project", { yaml: BOTH, project: "api" })],
     [tool("propose", { yaml: BOTH })],
     [tool("propose", { yaml: BOTH })],
@@ -181,9 +183,9 @@ test("a web UI app gets two runs of its tests", async () => {
   addWebTest();
   const failing = webFails();
   const m = new ScriptedAgent([
-    [tool("try_project", { yaml: BOTH, project: "web" })],
-    [tool("try_project", { yaml: BOTH, project: "web" })],
-    [tool("try_project", { yaml: BOTH, project: "web" })],
+    [tool("try_project", { yaml: bothEnv(1), project: "web" })],
+    [tool("try_project", { yaml: bothEnv(2), project: "web" })],
+    [tool("try_project", { yaml: bothEnv(3), project: "web" })],
     [tool("try_project", { yaml: BOTH, project: "api" })],
     [tool("propose", { yaml: BOTH })],
     [tool("propose", { yaml: BOTH })],
@@ -197,6 +199,31 @@ test("a web UI app gets two runs of its tests", async () => {
   expect(parseReviewFile(r.yamlText!).uncovered).toContainEqual({ path: "/web/", reason: "web UI" });
 });
 
+test("stops on the project's settings are not runs of a web UI app's tests", async () => {
+  addWebTest();
+  // tests_dir holds the project's own tests: the suite never runs.
+  const inSrc = BOTH + "    tests_dir: src\n";
+  const m = new ScriptedAgent([
+    [tool("try_project", { yaml: inSrc, project: "web" })],
+    [tool("try_project", { yaml: inSrc, project: "web" })],
+    [tool("try_project", { yaml: inSrc, project: "web" })],
+    [text("stop")],
+  ]);
+  await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: webFails() });
+  for (const call of [1, 2, 3]) expect(result(m, call)).not.toContain("web UI app");
+});
+
+test("a rerun of the files that failed last time is not a run of a web UI app's tests", async () => {
+  addWebTest();
+  const m = new ScriptedAgent([
+    ...[1, 2, 3, 4].map(() => [tool("try_project", { yaml: BOTH, project: "web" })]),
+    [text("stop")],
+  ]);
+  await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: webFails() });
+  // The first full run counts once; the reruns of its failing files never reach two.
+  for (const call of [1, 2, 3, 4]) expect(result(m, call)).not.toContain("web UI app");
+});
+
 test("a web UI app whose try first needs a file .arnxignore leaves out is not charged a run for it", async () => {
   addWebTest();
   writeFileSync(join(repo, "web", "fixture.json"), "{}\n");
@@ -205,8 +232,8 @@ test("a web UI app whose try first needs a file .arnxignore leaves out is not ch
   const missing = "Error: ENOENT: no such file or directory, open '/src/web/fixture.json'";
   const web: SessionFactory = async (cfg, snap, _log, body) => body(new FakeSession(snap, () =>
     [junitXml([["web/src/app.test.tsx", "renders", "error", missing]]), missing, false]));
-  const m = new ScriptedAgent([[tool("try_project", { yaml: BOTH, project: "web" })],
-    [tool("try_project", { yaml: BOTH, project: "web" })], [text("stop")]]);
+  const m = new ScriptedAgent([[tool("try_project", { yaml: bothEnv(1), project: "web" })],
+    [tool("try_project", { yaml: bothEnv(2), project: "web" })], [text("stop")]]);
   await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: web });
   expect(result(m, 1)).not.toContain("web UI app");
   expect(result(m, 2)).toContain("web is a web UI app (react-dom among its dependencies), which gets two runs");
@@ -227,7 +254,7 @@ test("a web UI app that is the only project ends setup after its two runs", asyn
   const only = `version: 1\nprojects:\n${WEB}`;
   const m = new ScriptedAgent([
     [tool("try_project", { yaml: only })],
-    [tool("try_project", { yaml: only })],
+    [tool("try_project", { yaml: only.replace("{targets}", "--silent {targets}") })],
     [tool("propose", { yaml: only })],
     [text("unreachable")],
   ]);

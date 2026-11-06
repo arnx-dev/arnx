@@ -79,13 +79,14 @@ export interface SuiteCounts { acceptedFailing: number; unexpected: string[]; ba
   listed?: string[];
   /** The look saw where the runner collects arnx's one-line test, and it is not where review.yaml says: nothing ran. */
   placement?: Placement;
-  /** The look stopped the try before the whole suite ran, here. */
-  stoppedAt?: "listing" | "placement" | "sample" }
+  /** The try stopped before the project's UI tests ran: at the listing or the sample, or on settings ("config": the
+   * project's own tests sit in tests_dir, the placement or the .arnx/ folder is wrong, the one-line test did not run). */
+  stoppedAt?: "listing" | "sample" | "config" }
 
 /** Whether a failed try spends one of a web UI app's runs: its tests were listed or sampled and failed, or its suite
  * ran and passed nothing. A build failure (no counts), a placement and a passing run never do. */
 export function countsAsUiRun(c: SuiteCounts, ok: boolean): boolean {
-  if (ok || c.placement || c.stoppedAt === "placement") return false;
+  if (ok || c.placement || c.stoppedAt === "config") return false;
   return c.stoppedAt === "listing" || c.stoppedAt === "sample" || c.passed === 0;
 }
 
@@ -286,7 +287,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
   const none = noCounts();
   // A review clears and collects every writable file in tests_dir: the project's own tests may not live there.
   const own = ownTestsIn(cfg, snap, acceptedTestsDir);
-  if (own.length) return [false, ownTestsProblem(cfg, own), "", [], [], "", none];
+  if (own.length) return [false, ownTestsProblem(cfg, own), "", [], [], "", { ...none, stoppedAt: "config" }];
   if (outputLog) rmSync(outputLog, { force: true });
   /** The end of `output`, the whole of it kept in outputLog. A run can print the real values it holds. */
   const tailOf = (raw: string): string => {
@@ -343,7 +344,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
       return [false, "the project's test run collects files under .arnx/ (a test arnx placed in .arnx/tests/ ran). " +
         "arnx keeps its accepted tests there so your own run never runs them: make the runner leave .arnx/ out " +
         "(pytest: norecursedirs or testpaths; vitest, jest: exclude), then run setup again", tailOf(result.output), [],
-        [], "", none] as Out;
+        [], "", { ...none, stoppedAt: "config" }] as Out;
     }
     // A project with no tests of its own has no suite to run: arnx's one-line test, which reviews depend on anyway,
     // proves the environment instead.
@@ -468,9 +469,9 @@ async function noOwnTests(session: Runner, snap: string, cfg: ReviewConfig, sile
       `one-line test placed in ${writeDirOf(cfg)}/ did not run either: install the runner in install (the project may ` +
       "not list it; installing it outside the repository, for example under /opt/deps, keeps the manifests as they " +
       "are) and give a test_command that runs it on {targets}. Do not write tests in test_command: arnx writes them",
-      tailOf(tail), [], [], "", none];
+      tailOf(tail), [], [], "", { ...none, stoppedAt: "config" }];
   }
-  if (ignored) return [false, `${NO_OWN_TESTS}; but ${ignored}`, tailOf(tail), [], [], "", none];
+  if (ignored) return [false, `${NO_OWN_TESTS}; but ${ignored}`, tailOf(tail), [], [], "", { ...none, stoppedAt: "config" }];
   if (cfg.typecheck) {
     const t = await typecheckNote(session, cfg, quick);
     return [true, `${NO_OWN_TESTS}${t.note}`, tailOf(t.problem ? t.output : tail), [], [],  "",
@@ -1697,7 +1698,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       if (!ok) {
         say(`${name}: ✗ does not run yet: ${gist(summary)}`);
         // A UI app's runs are for a suite that will not run in a sandbox: one whose tests pass goes on like any other.
-        const ui = uiApp ? webUi(gist(summary), counts) : null; // web UI rule
+        const ui = uiApp && !onlySubset ? webUi(gist(summary), counts) : null; // web UI rule
         if (ui) return ui;
         return `the suite of ${name} does not run yet: ${summary}${skipped}${hints ? `\n${hints}` : ""}\n${tail}`;
       }
