@@ -263,7 +263,8 @@ test("a passing test beside a finding is judged from the findings' runs; the fin
   };
   const steps = () => new ScriptedAgent([[tool("write_file", { path: file, content: "from app import add\n" +
     "def test_add():\n    assert add(2, 3) == 5\ndef test_add2():\n    assert add(1, 1) == 2\n" })],
-  [text(JSON.stringify({ tests: [{ test: `${file}::test_add2`, expects: "one and one" }], suspected_defects: [],
+  [text(JSON.stringify({ tests: [{ test: `${file}::test_add`, expects: "five" }, { test: `${file}::test_add2`, expects: "one and one" }],
+    suspected_defects: [],
     questions: [] }))], [text("{}")]]);
   const run = async (settings: typeof SETTINGS) => {
     const seen: Seen[] = [];

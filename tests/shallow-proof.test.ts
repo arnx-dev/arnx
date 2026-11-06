@@ -48,7 +48,8 @@ test("a test that reads the code as text proves no fix and no regression; the re
   writeFileSync(reviewConfigPath(repo), stamp(parseReviewConfig(YAML), "Dev", "2026-10-26"));
   commit(repo, "add subtracts");
   writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a + b\n");
-  const report = JSON.stringify({ tests: [{ test: id("add"), expects: "add sums" }], suspected_defects: [],
+  const report = JSON.stringify({ tests: [{ test: id("add"), expects: "add sums" }, { test: id("text"), expects: "t" },
+    { test: id("sample"), expects: "s" }, { test: id("reg"), expects: "r" }], suspected_defects: [],
     questions: [] });
   const agent = new ScriptedAgent([Object.entries(FILES).map(([path, content]) => tool("write_file", { path, content })),
     [text(report)], [text(report)]]);

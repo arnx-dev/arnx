@@ -85,7 +85,8 @@ test("Anthropic: 529 on every attempt is an outage, 401 a refused key", async ()
 
 const YAML = "version: 1\nimage: python:3.12-slim\ntest_command: python -m pytest -q {targets}\n";
 const GEN = "tests/arnx_generated/test_add.py";
-const REPORT = '{"tests": [{"test": "tests/arnx_generated/test_add.py::test_add", "expects": "add sums"}],' +
+const REPORT = '{"tests": [{"test": "tests/arnx_generated/test_add.py::test_add", "expects": "add sums"},' +
+  ' {"test": "tests/arnx_generated/test_add.py::test_more", "expects": "one and one"}],' +
   ' "suspected_defects": [], "questions": []}';
 const SETTINGS = { ...defaultSettings(), providers: TABLES, beforeCheck: false, consentAt: "2026-10-20T00:00:00Z" };
 const tmp = useTmp();
