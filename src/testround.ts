@@ -22,7 +22,7 @@ import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { EnvFailed } from "./errors";
 import { markUnproven } from "./diagnose";
 import { clip, emit, testMessage } from "./events";
-import { type Classified, classify, describeRun, funcOf, ownerFile, runBounded, runTests, type TestResult } from "./outcomes";
+import { baseName, type Classified, classify, describeRun, funcOf, ownerFile, runBounded, runTests, type TestResult } from "./outcomes";
 import { buildContextOf, DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
   type SessionFactory } from "./sandbox";
 import type { Say } from "./progress";
@@ -31,6 +31,8 @@ import { describeTypecheck, runTypecheck, type TscError, type TypeCheck, type Ty
 import { databaseEnv, dbUntested, untestedFiles } from "./untested";
 import { clearReach, countable, type Reach, readReach, reachedSince } from "./reached";
 import { projectSource, shallowKind } from "./shallow";
+import { judgeEvidence, snapshotTree } from "./evidence";
+import { parseReports } from "./report";
 
 export const TOOL_TIMEOUT = 300;
 export const RUN_TIMEOUT = 600;
@@ -65,6 +67,9 @@ export interface Round {
   fixProof?: FixCheck;
   /** The project's type check (absent when it has none, and in answer rounds). */
   typecheck?: TypeCheck;
+  /** The evidence pack of each test that failed in every run, by test id (evidence.ts): built from the snapshot, for the
+   * second opinion. */
+  evidence?: Record<string, string>;
   /** This commit's own environment could not be had: `failed` (the round is empty and made no model call) or `fallback`
    * (the tests ran on the image built for another commit). `log` is a file in the round's folder. */
   env?: EnvState;
@@ -340,7 +345,10 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
    * files only, since the agent reads the snapshot and the tests' output goes to the model. */
   untracked?: boolean;
   /** A commit whose environment cannot be had ends in an empty round saying so (a review; else the error is thrown). */
-  recordEnvFailure?: boolean }): Promise<Tested> {
+  recordEnvFailure?: boolean;
+  /** Build each failing test's evidence pack from the snapshot: `diff` is the project's part of the change, `message`
+   * its commit message. */
+  evidence?: { diff: string; message: string } }): Promise<Tested> {
   const say = (m: string) => o.progress?.(`${cfg.name}: ${m}`);
   const adapter = adapterFor(cfg);
   mkdirSync(o.outDir, { recursive: true });
@@ -358,6 +366,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   let baked = false;
   let checked: TypeCheckRun | undefined, typecheck: TypeCheck | undefined;
   let reached: string[] | undefined;
+  let evidence: Record<string, string> | undefined;
   const dbNames = databaseEnv(cfg.env, cfg.services);
   try {
     const snap = join(tmp, "repo");
@@ -560,6 +569,8 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         sessionFactory: o.sessionFactory ?? dockerSession, say, ...(baked ? {} : { swap }),
         ...(o.brain.boundary ? { boundary: o.brain.boundary } : {}) }));
     }
+    // While the snapshot is here: what the second opinion is told about each failing test's code.
+    if (o.evidence) evidence = roundEvidence(snap, results, files, hunt, agent, o.writeDir, o.evidence, before, say);
     if (checked) {
       typecheck = await typecheckDone(repo, cfg, checked, { ...o.typecheck!, headSnap: snap, headKey, tmp,
         outDir: o.outDir, sessionFactory: o.sessionFactory ?? dockerSession, say, ...(baked ? {} : { swap }) });
@@ -587,11 +598,46 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   const round: Round = { agent, files, classified, removed, ...(leftOut.length ? { leftOut } : {}),
     ...(fakedKeys.length ? { fakedKeys } : {}), ...(hungFiles.length ? { hungFiles } : {}), ...(notRunFiles.length ? { notRunFiles } : {}), sawResults: saw || !hasTests,
     ...(dbLeft ? { dbUntested: dbLeft } : {}), ...(reached ? { reached } : {}), ...(before ? { before } : {}), ...(fixProof ? { fixProof } : {}),
-    ...(typecheck ? { typecheck } : {}), ...(env ? { env } : {}) };
+    ...(typecheck ? { typecheck } : {}), ...(env ? { env } : {}), ...(evidence ? { evidence } : {}) };
   // All a round says from here on is saved and read by people and coding agents, none of it through a model's filter.
   const masked = b ? maskedCopy(b, round) : { value: round, shown: false };
   return { ...masked.value, ...(masked.shown ? { standInsShown: true } : {}), ...(hunt ? { hunt } : {}) };
 }
+
+/** The evidence pack of each test that failed in every run, read from the round's snapshot (evidence.ts). A test the
+ * reviewer tied to a suspect gets the suspect's file as its own. */
+function roundEvidence(snap: string, results: (TestResult[] | null)[], files: Record<string, string>,
+  hunt: RoundHunt | undefined, agent: AgentResult, writeDir: string, o: { diff: string; message: string },
+  before: BeforeCheck | undefined, say: Say): Record<string, string> | undefined {
+  const failing = classify(results).findings;
+  if (!failing.length) return undefined;
+  const report = parseReports([...agent.earlierTexts ?? [], agent.finalText]);
+  const suspectOf = new Map<string, string>();
+  for (const t of report.tests) {
+    if (typeof t !== "object" || t === null || Array.isArray(t)) continue;
+    const { test, suspect } = t as Record<string, unknown>;
+    if (typeof test === "string" && typeof suspect === "string") suspectOf.set(funcOfId(test), suspect.trim());
+  }
+  const tree = snapshotTree(snap);
+  const t0 = performance.now();
+  const out: Record<string, string> = {};
+  for (const t of failing) {
+    const file = ownerFile(t.fileAttr, Object.keys(files));
+    const source = file ? files[file] ?? "" : "";
+    const func = funcOf(t);
+    const suspect = hunt?.suspects?.find((s) => s.id === suspectOf.get(func))?.file;
+    const was = before?.tests[t.testId];
+    const shallow = shallowKind(source || undefined, func);
+    out[t.testId] = judgeEvidence({ tree, diff: o.diff, testSource: source, func, commitMessage: o.message, writeDir,
+      ...(file ? { testFile: file } : {}), ...(suspect ? { suspectFile: suspect } : {}), ...(was ? { before: was } : {}),
+      ...(shallow ? { shallow } : {}) });
+  }
+  const secs = (performance.now() - t0) / 1000;
+  if (secs >= 5) say(`evidence for the second opinion took ${Math.round(secs)}s`);
+  return out;
+}
+
+const funcOfId = (test: string) => baseName(test.split("::").at(-1) ?? "").trim();
 
 /** Clears what arnx wrote into a snapshot: the generated files and the runners' reports. A type check then sees the
  * project's own files only. */

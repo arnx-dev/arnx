@@ -4,6 +4,7 @@ import { boundaryOf } from "./boundary";
 import { survivable } from "./errors";
 import { clip, emit, hypId, withRole } from "./events";
 import { type JsonModel, type ModelUse, newUse, tally, type Trace } from "./llm";
+import type { SentInput } from "./brain";
 import type { Say } from "./progress";
 import { CHALLENGE_SCHEMA, DEFAULT_PROMPTS, type Prompts } from "./prompts";
 import { codeText } from "./codetext";
@@ -82,6 +83,10 @@ export async function challenge(findings: Finding[], o: { model: JsonModel; diff
   diffOf?: (f: Finding) => string;
   /** The file the finding's suspect is in: its diff is shown first when the change is long. */
   suspectFile?: (f: Finding) => string | undefined;
+  /** The finding's evidence pack, when its round built one. */
+  evidence?: (f: Finding) => string | undefined;
+  /** Before each call, what it is sent, masked as it leaves, and the evidence pack. */
+  sent?: (f: Finding, input: SentInput) => void;
   sources: Record<string, string>; budgetUsd: number; questions?: string[]; trace?: Trace;
   progress?: Say;
   /** Findings judged before (a resumed review): not sent again. */
@@ -124,10 +129,16 @@ export async function challenge(findings: Finding[], o: { model: JsonModel; diff
     const secs = () => Math.round((performance.now() - t0) / 100) / 10;
     const user = judgeUser(p, o.model, o.diffOf?.(f) ?? o.diff, f, o.sources[f.file ?? ""] ?? "",
       o.suspectFile?.(f), questions);
+    const system = p.challengeSystem();
+    if (o.sent) {
+      const b = boundaryOf(o.model);
+      const evidence = o.evidence?.(f) ?? "";
+      o.sent(f, b ? { system: b.mask(system), user: b.mask(user), evidence: b.mask(evidence) } : { system, user, evidence });
+    }
     let data: Record<string, unknown>, callCost = 0, by: string | undefined;
     try {
       const [reply, cost, usage, unknown, model] = await withRole("challenge",
-        () => o.model.completeJson(p.challengeSystem(), user, CHALLENGE_SCHEMA), { finding: f.id, project: f.project });
+        () => o.model.completeJson(system, user, CHALLENGE_SCHEMA), { finding: f.id, project: f.project });
       tally(use, cost, usage, unknown);
       [data, callCost, by] = [reply, cost, model];
       trace({ finding: f.id, outcome: "ok", secs: secs(), cost_usd: cost });

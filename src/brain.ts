@@ -161,6 +161,10 @@ export interface JudgeOptions {
   sources: Record<string, string>;
   /** The file a finding's suspect is in, when it has one: its diff comes first when the change is long. */
   suspectFile?(f: Finding): string | undefined;
+  /** A finding's evidence pack (evidence.ts), when its round built one. */
+  evidence?(f: Finding): string | undefined;
+  /** Before each second opinion's call, what it is sent, masked as it leaves. */
+  sent?(f: Finding, input: SentInput): void;
   /** The project each question came from, in the order of `questions`. */
   questionProjects?: string[];
   maxQuestions: number;
@@ -177,6 +181,9 @@ export interface JudgeOptions {
   trace: Trace;
   progress?: Say;
 }
+
+/** What a second opinion is sent for one finding, and its evidence pack ("" when none). */
+export interface SentInput { system: string; user: string; evidence: string }
 
 /** Verdicts are written onto the findings (verdict, reason, dependsOn, judge). */
 export interface Judged {

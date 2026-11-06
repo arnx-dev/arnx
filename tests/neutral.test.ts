@@ -80,7 +80,7 @@ projects:
   const settings = { ...defaultSettings(), beforeCheck: false, consentAt: "2026-10-12T00:00:00Z" };
   const { rdir } = await runReview(repo, { settings, agentModel: agent, challenger: second, sessionFactory: session,
     hunt: true, now: NOW });
-  check("hunt", rdir, ["change.diff", "projects", "review.json", "review.md", "second-opinion.jsonl", "state.json",
+  check("hunt", rdir, ["change.diff", "projects", "review.json", "review.md", "second-opinion-input.jsonl", "second-opinion.jsonl", "state.json",
     "verdicts.json"]);
 });
 
@@ -109,7 +109,7 @@ test("a plain review writes the same review.json and review.md", async () => {
   const settings = { ...defaultSettings(), beforeCheck: false, consentAt: "2026-10-11T00:00:00Z" };
   const { rdir } = await runReview(repo, { settings, agentModel: agent, challenger: judge,
     sessionFactory: fakeFactory(runs), now: NOW });
-  check("plain", rdir, ["change.diff", "review.json", "review.md", "round.json", "second-opinion.jsonl", "state.json",
+  check("plain", rdir, ["change.diff", "review.json", "review.md", "round.json", "second-opinion-input.jsonl", "second-opinion.jsonl", "state.json",
     "tests", "transcript.jsonl", "verdicts.json"]);
   expect(existsSync(join(rdir, "review.md"))).toBe(true);
 });

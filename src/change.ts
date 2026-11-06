@@ -1333,3 +1333,14 @@ function scrubText(p: string, limit = SCAN_LIMIT): { text: string; binary: boole
     return null;
   }
 }
+
+/** The messages of the change's commits, newest first: what its author said it does. Uncommitted work has none. */
+export function changeMessage(repo: string, change: Pick<Change, "kind" | "base" | "head">): string {
+  if (change.head === null || change.kind === "worktree" || change.kind === "no-commits") return "";
+  const range = change.base === EMPTY_TREE ? [change.head] : [`${change.base}..${change.head}`];
+  try {
+    return git(repo, ["log", "-n", "50", "--format=%B", ...range]).trim();
+  } catch {
+    return "";
+  }
+}

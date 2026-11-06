@@ -374,7 +374,8 @@ export class LocalBrain implements Brain {
     const skip = o.resumed?.() ?? new Set<string>();
     const timedOut = new Set<string>();
     const spent = findings.length ? await challenge(findings, { model: challenger, diff: o.diff, timedOut,
-      diffOf: (f) => diffs[f.project] ?? o.diff, suspectFile: o.suspectFile, sources: o.sources, budgetUsd: remaining, questions: asked,
+      diffOf: (f) => diffs[f.project] ?? o.diff, suspectFile: o.suspectFile,
+      ...(o.evidence ? { evidence: o.evidence } : {}), ...(o.sent ? { sent: o.sent } : {}), sources: o.sources, budgetUsd: remaining, questions: asked,
       trace: o.trace, progress: o.progress, skip, onJudged: (f, cost) => o.judged?.(f, cost), prompts: this.p }) : null;
     // The grouping call is skipped only when the second model answered none of the findings in time (any timeout
     // kind, by the error's flag; the older message test is kept).
