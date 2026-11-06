@@ -131,6 +131,9 @@ export function roundCut(saved: { round: Round; hunted?: Suspect[] | null }, out
   }
 }
 
+/** Why a suspect of the second hunter was not tested. */
+const TOO_LATE = "second hunter, too late to test";
+
 const vendor = (ref: string) => ref.split(":")[0];
 const snake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 
@@ -295,6 +298,8 @@ export async function runReview(repo: string, o: { settings: Settings;
   projectConcurrency?: number;
   /** How long the tests wait for the second hunter (default localbrain.ts SECOND_HUNT_WAIT_MS). */
   secondHuntWaitMs?: number;
+  /** The grace period after that wait (default localbrain.ts SECOND_HUNT_GRACE_MS). */
+  secondHuntGraceMs?: number;
   /** Send untracked files too (--untracked / --no-untracked; default: `[review] untracked`). */
   untracked?: boolean;
   /** Review a change of documentation only (default: it is not reviewed). */
@@ -439,7 +444,8 @@ export async function runReview(repo: string, o: { settings: Settings;
       return new LocalBrain({ agentModel: o.agentModel, prices: allPrices(s), challenger: o.challenger,
         prompts: promptsFor(repo),
         ...(o.hunter ? { hunter: o.hunter } : {}), ...(o.ranker ? { ranker: o.ranker } : {}), secondHunter,
-        ...(o.secondHuntWaitMs === undefined ? {} : { secondHuntWaitMs: o.secondHuntWaitMs }) });
+        ...(o.secondHuntWaitMs === undefined ? {} : { secondHuntWaitMs: o.secondHuntWaitMs }),
+        ...(o.secondHuntGraceMs === undefined ? {} : { secondHuntGraceMs: o.secondHuntGraceMs }) });
     };
     const secondHunter = o.secondHunter ?? (o.challenger && vendor(o.challenger.ref) !== vendor(refString(s.reviewer)) &&
       !(o.challenger instanceof FallbackJson) ? o.challenger : null);
@@ -511,7 +517,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     // Projects are tested PROJECT_CONCURRENCY at a time (each in its own sandbox); their results are then gathered in
     // review order, so ids, questions and the report do not depend on which finished first.
     interface Done { i: number; rnd: Round; hunted: Suspect[] | null; ended: boolean; second: ModelUse | null; extras: ModelUse[];
-      resumed: boolean }
+      tooLate: Suspect[]; resumed: boolean }
     // Projects whose kept round a failed model call stopped: tested again on resume.
     const redone = new Set<string>();
     const runProject = async (i: number): Promise<Done> => {
@@ -533,7 +539,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       const projectBudget = s.reviewBudgetUsd * AGENT_SHARE / n;
       const roundFile = join(outDir, "round.json");
       type SavedRound = { round: Round; hunted: Suspect[] | null; second: ModelUse | null; extras: ModelUse[];
-        ended?: true };
+        ended?: true; tooLate?: Suspect[] };
       const saved = resumed && existsSync(roundFile) ? JSON.parse(readFileSync(roundFile, "utf8")) as SavedRound : null;
       // A round a failed model call stopped (a provider outage) is tested again; its verdicts are dropped below.
       const cutRound = !!saved && roundCut(saved, outDir);
@@ -590,10 +596,12 @@ export async function runReview(repo: string, o: { settings: Settings;
       let rnd: Round, kept = false, hunted: Suspect[] | null = null, projSecond: ModelUse | null = null;
       let ended = false;
       const projExtras: ModelUse[] = [];
+      let tooLate: Suspect[] = [];
       if (saved && !cutRound) {
         kept = true;
         [rnd, hunted, projSecond] = [saved.round, saved.hunted, saved.second];
         ended = !!saved.ended;
+        tooLate = saved.tooLate ?? [];
         projExtras.push(...saved.extras);
         o.progress?.(`${cfg.name} (${i + 1}/${n}): ${rnd.env?.state === "failed" ? "not tested before the interruption (its environment failed); kept"
           : "already tested before the interruption; kept"}`);
@@ -607,6 +615,7 @@ export async function runReview(repo: string, o: { settings: Settings;
           projExtras.push(...hunt.extras);
           // A hunter still out when the tests started: its cost counts once it returns.
           if (hunt.late) projSecond = await hunt.late();
+          tooLate = hunt.lateLeft ?? [];
         }
         if (cutUse) projExtras.push(cutUse);
         // A hunt done again was paid for before: that cost stays in the review.
@@ -615,7 +624,8 @@ export async function runReview(repo: string, o: { settings: Settings;
           projSecond = prior.second;
           projExtras.push(...prior.extras);
         }
-        writeFileSync(roundFile, JSON.stringify({ round: rnd, hunted, second: projSecond, extras: projExtras, ...(ended ? { ended: true } : {}) }) + "\n");
+        writeFileSync(roundFile, JSON.stringify({ round: rnd, hunted, second: projSecond, extras: projExtras, ...(ended ? { ended: true } : {}),
+          ...(tooLate.length ? { tooLate } : {}) }) + "\n");
       }
       const c = rnd.classified;
       if (!rnd.env || rnd.env.state === "fallback") soFar.projectsReviewed += 1;
@@ -624,7 +634,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       const named0 = reportedTests([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]);
       soFar.findings += c.findings.filter((t) => claimed(t, named0)).length;
       soFar.flaky += c.flaky.length;
-      return { i, rnd, hunted, ended, second: projSecond, extras: projExtras, resumed: kept };
+      return { i, rnd, hunted, ended, second: projSecond, extras: projExtras, tooLate, resumed: kept };
     };
     // A range ending anywhere but the checked-out commit tests an older tree: setup (which proves this one) cannot mend it.
     const atCheckedOut = change.kind !== "range" || change.head === commitOf(repo, "HEAD");
@@ -648,7 +658,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       if (t) typecheck.push(t);
     }
     const keptRound = new Set<string>();
-    for (const { i, rnd, hunted, ended, second: projSecond, extras: projExtras, resumed: kept } of done) {
+    for (const { i, rnd, hunted, ended, second: projSecond, extras: projExtras, tooLate, resumed: kept } of done) {
       const { project: cfg, owned } = routing.routed[i]!;
       const ps = projSecond as ModelUse | null;
       if (ps) huntSecond = huntSecond ? mergeUse(huntSecond, ps) : ps;
@@ -674,6 +684,9 @@ export async function runReview(repo: string, o: { settings: Settings;
       });
       findings.push(...projectFindings);
       if (h?.length) suspects.push(...suspectOutcomes(cfg.name, h, rnd, report, projectFindings));
+      // The second hunter answered after the first report: named, not tested.
+      suspects.push(...tooLate.map((x) => ({ project: cfg.name, id: x.id, file: x.file, line: x.line, claim: x.claim,
+        by: x.by, outcome: "not tested" as const, tests: [], reason: TOO_LATE, late: true as const })));
       checked.push(...buildChecked(rnd, report, cfg.name));
       for (const q of report.questions) {
         const asked = plainQuestion(isObject(q) && typeof q.question === "string" ? q.question : text(q));

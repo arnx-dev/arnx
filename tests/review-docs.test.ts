@@ -139,7 +139,7 @@ test("a second hunter still out when the hunt ends does not let an empty hunt re
     return [{ suspects: [], questions: [] }, 0.01];
   };
   const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: slow,
-    sessionFactory: session, hunt: true, secondHuntWaitMs: 5 });
+    sessionFactory: session, hunt: true, secondHuntWaitMs: 5, secondHuntGraceMs: 5 });
   expect(agent.calls.length).toBeGreaterThan(1);
   finishes(review);
 });

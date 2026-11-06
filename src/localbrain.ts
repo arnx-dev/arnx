@@ -27,12 +27,24 @@ import { filesToAsk } from "./untested";
 export const SECOND_HUNT_WAIT_MS = 90_000;
 const TIMED_OUT = Symbol("timed out");
 
-/** The promise's value, or TIMED_OUT when it takes longer than `ms` (the promise itself keeps running). */
-function within<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+/** How long a hunter that missed its wait gets on top of it: a loop that was blocked sees its timer fire before the
+ * replies and polls that arrived meanwhile (one poll is `POLL_SECONDS`, 3 s). */
+export const SECOND_HUNT_GRACE_MS = 5_000;
+/** At most this many suspects of a hunter that arrives after the tests started join them. */
+const LATE_SUSPECTS = 3;
+
+/** The promise's value, or TIMED_OUT when it takes longer than `ms` plus `graceMs` (the promise itself keeps
+ * running). When the timer fires, the promise gets one more grace period before it counts as late. */
+function within<T>(p: Promise<T>, ms: number, graceMs = SECOND_HUNT_GRACE_MS): Promise<T | typeof TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined, grace: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([p, new Promise<typeof TIMED_OUT>((r) => {
-    timer = setTimeout(() => r(TIMED_OUT), ms);
-  })]).finally(() => clearTimeout(timer));
+    timer = setTimeout(() => {
+      grace = setTimeout(() => r(TIMED_OUT), graceMs);
+    }, ms);
+  })]).finally(() => {
+    clearTimeout(timer);
+    clearTimeout(grace);
+  });
 }
 
 /** A suspect as the hunt events show it. */
@@ -65,6 +77,8 @@ export interface LocalModels {
   secondHunter?: JsonModel | null;
   /** How long the tests wait for the second hunter (default SECOND_HUNT_WAIT_MS). */
   secondHuntWaitMs?: number;
+  /** The grace period after that wait (default SECOND_HUNT_GRACE_MS). */
+  secondHuntGraceMs?: number;
   /** The prompts (default: arnx's own; with the user's keys, the repository's overrides: userprompts.ts). */
   prompts?: Prompts;
   /** What is kept from every model (default: the reviewer's own boundary, when it has one). */
@@ -121,7 +135,7 @@ export class LocalBrain implements Brain {
     const t = await tools;
     let hunting = hunt !== null && !x.prior;
     say(hunting ? "looking for defects" : "writing tests");
-    let asked = false, askedSuspects = false;
+    let asked = false;
     const decide = async (reply: string, turn: number): Promise<string | null> => {
       if (hunting && hunt) {
         hunting = false;
@@ -138,8 +152,7 @@ export class LocalBrain implements Brain {
       t.onStep?.({ type: "final", turn, text: reply, report: parseReports([reply]),
         suspects: hunt?.state.suspects ?? [], ...huntOf() });
       const facts = (await t.facts?.()) ?? NO_FACTS;
-      if (hunt && !askedSuspects) {
-        askedSuspects = true;
+      if (hunt) {
         const m = hunt.afterTests(reply);
         if (m) return m;
       }
@@ -288,16 +301,37 @@ export class LocalBrain implements Brain {
       searchDirs: h.searchDirs, scope, outDir: x.outDir, progress: x.progress, prompts,
       ...(h.parts ? { parts: h.parts } : {}) })
       : null;
+    let arrived: { suspects: Suspect[]; use: ModelUse } | null = null;
+    const folded = { done: false };
+    /** The second hunter's suspects that came after the hunt but before the first report: new ones, at most
+     * LATE_SUSPECTS, numbered after the others. */
+    const fold = (): Suspect[] => {
+      if (!arrived || folded.done || !state.suspects) return [];
+      folded.done = true;
+      const have = state.suspects;
+      const fresh = arrived.suspects.filter((s) => !have.some((o) => sameSuspect(o, s))).slice(0, LATE_SUSPECTS)
+        .map((s, k) => ({ ...s, id: `S${have.length + k + 1}` }));
+      if (!fresh.length) return [];
+      state.suspects = [...have, ...fresh];
+      emit("hunt.list", { project: cfg.name, source: "second-late", suspects: arrived.suspects.map(shown) });
+      fresh.forEach((s, k) => emit("hunt.suspect", { project: cfg.name, hyp_id: hypId(cfg.name, s.id), sid: s.id,
+        rank: have.length + k + 1, ...shown(s) }));
+      if (state.record) state.record.tested = state.suspects;
+      return fresh;
+    };
+    let stage = 0;
     const afterHunt = async (reply: string) => {
       const data = parseJsonObject(reply);
       const mine = parseSuspects(data, m.agentModel.model);
       // The second hunter gets SECOND_HUNT_WAIT after the reviewer's own hunt; if it is still out (a slow model, a
       // dropped connection) the tests start without it, and its cost is counted when it returns.
-      const [early, split] = await Promise.all([other ? within(other, m.secondHuntWaitMs ?? SECOND_HUNT_WAIT_MS)
-        : null, parts]);
+      const [early, split] = await Promise.all([other ? within(other, m.secondHuntWaitMs ?? SECOND_HUNT_WAIT_MS,
+        m.secondHuntGraceMs) : null, parts]);
       const theirs = early === TIMED_OUT ? null : early;
       if (early === TIMED_OUT) {
-        state.late = () => this.lateSecond(x, other!, state);
+        // Its suspects join the tests when they arrive before the reviewer's first report (see `fold`).
+        other!.then((r) => { arrived = r; }, () => {});
+        state.late = () => this.lateSecond(x, other!, state, folded);
         x.progress?.(`${cfg.name}: the second hunter is still out; testing without it`);
       }
       if (theirs) state.second = theirs.use;
@@ -344,7 +378,22 @@ export class LocalBrain implements Brain {
       return { message: hunted.length || !clean ? prompts.proveTask(cfg, hunted, x.maxQuestions) : null,
         spent: (theirs?.use.costUsd ?? 0) + (split?.use.costUsd ?? 0) + rankUse.costUsd };
     };
-    const afterTests = (reply: string) => this.untestedAsk(x, state.suspects ?? [], reply);
+    // After the first report: the suspects that came late are asked for, then the ones left without a test.
+    const afterTests = (reply: string): string | null => {
+      if (stage === 0) {
+        stage = 1;
+        const fresh = fold();
+        if (fresh.length) {
+          x.progress?.(`${cfg.name}: the second hunter answered; checking ${fresh.length} more`);
+          return prompts.proveTask(cfg, fresh, x.maxQuestions);
+        }
+      }
+      if (stage === 1) {
+        stage = 2;
+        return this.untestedAsk(x, state.suspects ?? [], reply);
+      }
+      return null;
+    };
     return { user: prompts.huntTask(cfg, diff, h.context, scopeTold(x.scoped, scope)), afterHunt, afterTests, state };
   }
 
@@ -354,7 +403,8 @@ export class LocalBrain implements Brain {
     return { user: `${this.p.reviewTask(x.cfg, x.diff, x.maxQuestions, scopeTold(x.scoped, x.scope))}\n\n` +
       this.p.proveTask(x.cfg, p.suspects, x.maxQuestions),
     afterHunt: () => Promise.reject(new Error("a resumed round has no hunt")),
-    afterTests: (reply) => this.untestedAsk(x, p.suspects, reply), state };
+    afterTests: ((done = false) => (reply: string) => done ? null : (done = true, this.untestedAsk(x, p.suspects, reply)))(),
+    state };
   }
 
   /** The message about suspects the reply left without a test or a reason, or null when none is left. */
@@ -371,18 +421,22 @@ export class LocalBrain implements Brain {
     return this.p.untestedSuspectsTask(left);
   }
 
-  /** The second hunter, arrived after the tests started: its cost counts; its suspects are kept in hunt.json, not
-   * tested. */
+  /** The second hunter, back after the round: its cost counts. Its suspects that were not folded into the tests
+   * (arrived after the first report, repeats aside) are named as too late to test, and kept in hunt.json. */
   private async lateSecond(x: ReviewInput, late: Promise<{ suspects: Suspect[]; use: ModelUse }>,
-    state: RoundHunt): Promise<ModelUse> {
+    state: RoundHunt, folded: { done: boolean }): Promise<ModelUse> {
     const r = await late;
-    emit("hunt.list", { project: x.cfg.name, source: "second-late", suspects: r.suspects.map(shown) });
+    if (!folded.done) emit("hunt.list", { project: x.cfg.name, source: "second-late", suspects: r.suspects.map(shown) });
+    const have = state.suspects ?? [];
+    state.lateLeft = r.suspects.filter((s) => !have.some((o) => sameSuspect(o, s)))
+      .map((s, k) => ({ ...s, id: `S${have.length + k + 1}` }));
     if (state.record) state.record.second_late = r.suspects;
     if (!x.outDir) return r.use;
     const huntFile = join(x.outDir, "hunt.json");
     if (existsSync(huntFile)) {
       const h = JSON.parse(readFileSync(huntFile, "utf8")) as Record<string, unknown>;
-      writeFileSync(huntFile, JSON.stringify({ ...h, second_late: r.suspects }, null, 2) + "\n");
+      writeFileSync(huntFile, JSON.stringify({ ...h, ...folded.done ? { tested: state.suspects } : {},
+        second_late: r.suspects }, null, 2) + "\n");
     }
     return r.use;
   }

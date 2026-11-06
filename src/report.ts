@@ -89,6 +89,8 @@ export interface SuspectOutcome {
   tests: string[];
   findings?: string[];
   reason?: string;
+  /** The second hunter named it after the reviewer's first report: it was not tested. */
+  late?: true;
   /** "same cause": the suspect whose cause its tests failed for (see `sameCause`). */
   sameAs?: string;
 }
@@ -292,7 +294,7 @@ export const confirmed = (r: Review) => active(r).filter((f) => f.verdict === "c
 /** Failing tests the second opinion gave no verdict on (its budget ran out, it did not answer). */
 export const notChecked = (r: Review) => active(r).filter((f) => f.verdict !== "confirmed" && f.verdict !== "disputed" && !f.dependsOn);
 /** Suspects the hunt named when the review wrote no test at all: "nothing found" would then say nothing. */
-const neverTested = (r: Review) => r.testsWritten === 0 ? (r.suspects ?? []).filter((s) => s.outcome === "not tested")
+const neverTested = (r: Review) => r.testsWritten === 0 ? (r.suspects ?? []).filter((s) => s.outcome === "not tested" && !s.late)
   : [];
 export const incomplete = (r: Review) => r.stop !== "end_turn" || r.missingRuns > 0 || neverTested(r).length > 0 ||
   !!r.couldNotRun?.length || (r.projectStats ?? []).some((p) => p.noReport || !!p.env || !!p.hungFiles?.length || !!p.notRunFiles?.length);
@@ -815,6 +817,8 @@ export function render(r: Review): string {
         : `not tested${x.reason ? `: ${x.reason}` : ""}`;
       out.push(`- ${x.id}${where} \`${x.file}:${x.line}\`: ${x.claim} — ${what}.`);
     }
+    const late = sus.filter((x) => x.late).length;
+    if (late) out.push("", `Second hunter, too late to test: ${late} suspect${late === 1 ? "" : "s"}.`);
     out.push("");
   }
   const checks = r.typecheck ?? [];

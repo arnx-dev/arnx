@@ -323,28 +323,109 @@ test("a tiered price bills a prompt over its size at the second rate", () => {
   expect(costUsd("claude-haiku-5-5", u(200_000), PRICES)).toBeCloseTo(0.1 + 2.5, 6);
 });
 
-test("a slow second hunter does not hold up the tests; its late suspects are kept, untested, and paid for", async () => {
-  writeFileSync(join(repo, "svc/calc.py"), "def spread(xs):\n    return -0.5\n");
-  const session: SessionFactory = async (_cfg, snap, _log, body) =>
-    body(new FakeSession(snap, () => [junitXml([[GEN, "test_ok", "passed", ""]]), "1 passed", false]));
-  const agent = new ScriptedAgent([
-    [text(JSON.stringify({ suspects: [{ file: "svc/calc.py", line: 2, claim: "mine", why: "", input: "", expected: "",
-      actual: "" }], questions: [] }))],
-    [tool("write_file", { path: `svc/${GEN}`, content: "import calc\ndef test_ok(): pass\n" })],
-    [text(JSON.stringify({ tests: [{ test: `${GEN}::test_ok`, expects: "x", suspect: "S1" }], suspected_defects: [],
-      questions: [] }))]]);
+const suspect = (line: number, claim: string) => ({ file: "svc/calc.py", line, claim, why: "", input: "", expected: "",
+  actual: "" });
+const report = (ids: string[]) => text(JSON.stringify({ tests: ids.map((id) => ({ test: `${GEN}::test_${id}`,
+  expects: "x", suspect: id })), suspected_defects: [], questions: [] }));
+const writeTests = (...ids: string[]) => tool("write_file", { path: `svc/${GEN}`,
+  content: `import calc\n${ids.map((id) => `def test_${id}(): pass\n`).join("")}` });
+const passing = (): SessionFactory => async (_cfg, snap, _log, body) =>
+  body(new FakeSession(snap, () => [junitXml([[GEN, "test_S1", "passed", ""], [GEN, "test_S2", "passed", ""]]),
+    "2 passed", false]));
+
+/** A second hunter that answers when the test lets it, and a hook that lets it answer on the agent's n-th call. */
+function gatedHunter(claim: string, line = 9) {
+  let release = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  const hunter = new FakeJson([]);
+  hunter.completeJson = async () => {
+    await gate;
+    return [{ suspects: [suspect(line, claim)], questions: [] }, 0.05];
+  };
+  return { hunter, release };
+}
+/** An agent that lets `release` go before answering its call number `n` (counting from 1), and waits a moment. */
+function releasingAt(agent: ScriptedAgent, n: number, release: () => void) {
+  const create = agent.create.bind(agent);
+  agent.create = async (a) => {
+    if (agent.calls.length + 1 === n) {
+      release();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    return create(a);
+  };
+}
+const MINE = text(JSON.stringify({ suspects: [suspect(2, "mine")], questions: [] }));
+
+test("a reply arriving just after the wait counts", async () => {
+  const agent = new ScriptedAgent([[MINE], [writeTests("S1", "S2")], [report(["S1", "S2"])]]);
   const slow = new FakeJson([]);
   slow.completeJson = async () => {
-    await new Promise((r) => setTimeout(r, 80));
-    return [{ suspects: [{ file: "svc/calc.py", line: 9, claim: "late one", why: "", input: "", expected: "",
-      actual: "" }], questions: [] }, 0.05];
+    await new Promise((r) => setTimeout(r, 60));
+    return [{ suspects: [suspect(9, "just after")], questions: [] }, 0.05];
   };
   const { review, rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: slow,
-    sessionFactory: session, hunt: true, secondHuntWaitMs: 5 });
-  expect(String(agent.calls[1]!.messages.at(-1)!.content)).not.toContain("late one");
-  const hunt = JSON.parse(readFileSync(join(rdir, "projects/svc/hunt.json"), "utf8"));
-  expect(hunt.second_late.map((s: { claim: string }) => s.claim)).toEqual(["late one"]);
+    sessionFactory: passing(), hunt: true, secondHuntWaitMs: 5, secondHuntGraceMs: 2000 });
+  expect(String(agent.calls[1]!.messages.at(-1)!.content)).toContain("just after");
+  expect(review.suspects!.map((s) => s.id)).toEqual(["S1", "S2"]);
+  expect(JSON.parse(readFileSync(join(rdir, "projects/svc/hunt.json"), "utf8")).second_late).toBeUndefined();
+});
+
+test("a late suspect before the first report is tested", async () => {
+  const { hunter, release } = gatedHunter("late one");
+  const agent = new ScriptedAgent([[MINE], [writeTests("S1")], [report(["S1"])],
+    [writeTests("S1", "S2")], [report(["S1", "S2"])]]);
+  releasingAt(agent, 3, release);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: hunter,
+    sessionFactory: passing(), hunt: true, secondHuntWaitMs: 5, secondHuntGraceMs: 5 });
+  const follow = String(agent.calls[3]!.messages.at(-1)!.content);
+  expect(follow).toStartWith("Now test.");
+  expect(follow).toContain("S2 `svc/calc.py:9`: late one");
+  expect(follow).not.toContain("S1 ");
+  expect(review.suspects!.map((s) => [s.id, s.outcome])).toEqual([["S1", "not reproduced"], ["S2", "not reproduced"]]);
   expect(review.usage.find((u) => u.model.startsWith("openai:"))!.costUsd).toBe(0.05);
+});
+
+test("a late repeat asks nothing", async () => {
+  const { hunter, release } = gatedHunter("mine", 2);
+  const agent = new ScriptedAgent([[MINE], [writeTests("S1")], [report(["S1"])]]);
+  releasingAt(agent, 3, release);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: hunter,
+    sessionFactory: passing(), hunt: true, secondHuntWaitMs: 5, secondHuntGraceMs: 5 });
+  expect(agent.calls).toHaveLength(3);
+  expect(review.suspects!.map((s) => s.id)).toEqual(["S1"]);
+  expect(review.usage.find((u) => u.model.startsWith("openai:"))!.costUsd).toBe(0.05);
+});
+
+test("one that arrives after the report is named, not lost", async () => {
+  const { hunter, release } = gatedHunter("late one");
+  const agent = new ScriptedAgent([[MINE], [writeTests("S1")], [report(["S1"])]]);
+  const done: SessionFactory = async (_cfg, snap, _log, body) => {
+    const r = await body(new FakeSession(snap, () => [junitXml([[GEN, "test_S1", "passed", ""]]), "1 passed", false]));
+    release();
+    return r;
+  };
+  const { review, rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: hunter,
+    sessionFactory: done, hunt: true, secondHuntWaitMs: 5, secondHuntGraceMs: 5 });
+  expect(agent.calls).toHaveLength(3);
+  const late = review.suspects!.find((s) => s.claim === "late one")!;
+  expect([late.id, late.outcome, late.reason]).toEqual(["S2", "not tested", "second hunter, too late to test"]);
+  expect(render(review)).toContain("Second hunter, too late to test: 1 suspect");
+  expect(JSON.parse(readFileSync(join(rdir, "projects/svc/hunt.json"), "utf8")).second_late).toHaveLength(1);
+  expect(review.usage.find((u) => u.model.startsWith("openai:"))!.costUsd).toBe(0.05);
+  expect(load(rdir)).toEqual(review);
+});
+
+test("a second hunter still out when the first hunt is empty never reads as nothing suspected", async () => {
+  const { hunter, release } = gatedHunter("late one");
+  const agent = new ScriptedAgent([[text(JSON.stringify({ suspects: [], questions: [] }))],
+    [report([])], [writeTests("S1")], [report(["S1"])]]);
+  releasingAt(agent, 2, release);
+  const said: string[] = [];
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: hunter,
+    sessionFactory: passing(), hunt: true, secondHuntWaitMs: 5, secondHuntGraceMs: 5, progress: (m) => said.push(m) });
+  expect(said.join("\n")).not.toContain("nothing suspected");
+  expect(review.suspects!.map((s) => s.claim)).toEqual(["late one"]);
 });
 
 test("part hunts keep each part's suspects at its index, at most PART_CONCURRENCY at once, a failed part empty", async () => {

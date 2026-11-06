@@ -147,6 +147,9 @@ export interface RoundHunt {
   /** A hunter still out when the tests started: wait for it once the round is over. Its suspects are recorded, not
    * tested; its use is returned. */
   late: (() => Promise<ModelUse>) | null;
+  /** Set once `late` returns: its suspects that were not tested, numbered after the tested ones (named in the
+   * report as too late to test). */
+  lateLeft?: Suspect[];
   /** Every hunter's list, once the reviewer replied to the hunt (`second_late` added when a late hunter returns). */
   record?: HuntRecord;
   /** The hunt answered with an empty list, no hunter failed, and the round ended there: nothing was suspected. */

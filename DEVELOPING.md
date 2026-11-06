@@ -275,7 +275,11 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
 - `agent.turn` (`agent.ts`): one agent turn: stop reason, tools called, `paths` (the path argument of each `read_file`,
   `list_dir` and `grep` call, in order; never contents), tool errors, writes, test runs.
 - `hunt.list`, `hunt.suspect`, `hunt.merged`, `hunt.dropped` (`localbrain.ts`): each hunter's list, the ranked
-  suspects, where a listed suspect went (`hunt.merged` has `duplicate`).
+  suspects, where a listed suspect went (`hunt.merged` has `duplicate`). The second hunter gets
+  `SECOND_HUNT_WAIT_MS` plus `SECOND_HUNT_GRACE_MS` (`within`); one still out then does not end the round as "nothing
+  suspected". Its suspects that arrive before the reviewer's first report (new ones, at most 3, after `sameSuspect`) are
+  asked for with `proveTask` and listed as `hunt.list` `second-late`; later ones are `suspect.outcome` "not tested"
+  with `late: true`, and the report says "Second hunter, too late to test: N suspects". Its spend is recorded either way.
 - `test.files`, `test.run`, `test.run_missing`, `test.classified` (`testround.ts`): generated files, each result of each
   repeat (`func`; `run_seconds` for runs that were not carried), the class of each test; a run without a report says
   `timed_out`, `exit_code` and `seconds`. Final runs go through `runBounded`: all files together within the run limit (600 s); when
