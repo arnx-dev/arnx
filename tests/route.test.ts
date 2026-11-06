@@ -25,8 +25,8 @@ test("owned files go to their owner, most-changed project first", () => {
 test("files no project covers are listed with the recorded reason", () => {
   const f = parseReviewFile(PROJECTS);
   const r = route(f, ["infra/main.tf", "README.md", "services/pay/x.py"], 4);
-  expect(r.uncovered).toEqual([{ path: "infra/main.tf", reason: "Terraform; no adapter" },
-    { path: "README.md", reason: "no project covers it" }]);
+  // a doc no project covers is not uncovered (route-docs.test.ts)
+  expect(r.uncovered).toEqual([{ path: "infra/main.tf", reason: "Terraform; no adapter" }]);
   expect(names(r)).toEqual([["pay", ["services/pay/x.py"], []]]);
 });
 

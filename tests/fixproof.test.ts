@@ -213,7 +213,9 @@ test("a change that touches no source (tests, docs) proves no fix: no session on
   commit(repo, "notes");
   writeFileSync(join(repo, "NOTES.md"), "more notes\n");
   const seen: Seen[] = [];
-  const { review: r } = await review(SETTINGS, seen);
+  // documentation alone is reviewed only on request
+  const { review: r } = await runReview(repo, { settings: SETTINGS, agentModel: agent(),
+    challenger: new FakeJson([]), sessionFactory: sessions(seen), docs: true });
   expect(r.testsWritten).toBe(4);
   expect(seen).toHaveLength(1);
   expect(r.fixProof).toBeUndefined();

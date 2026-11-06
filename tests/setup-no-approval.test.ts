@@ -310,6 +310,7 @@ test("--json: review and check carry the re-proof and its changes", async () => 
 test("the automatic proof reads untracked files when the review does", async () => {
   const repo = await changed();
   writeFileSync(join(repo, "notes.md"), "scratch\n");
+  writeFileSync(join(repo, "scratch.py"), "X = 1\n"); // not documentation alone
   const seen: boolean[] = [];
   const cli = new Cli({ cwd: repo, env: ENV, ...STOP, approveSessions: suites([PASS], [], seen) });
   await cli.run("review", "--untracked", "--quiet");

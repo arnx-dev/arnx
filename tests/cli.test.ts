@@ -151,7 +151,7 @@ test("usage errors say which command and how to see its options; --help after a 
   expect(commandHelp("check")).toBe("arnx check                run the accepted tests: what still fails\n" +
     "arnx check --review [id]  run a review's confirmed tests before accepting\n\n--quiet hides progress. --json prints " +
     "one JSON object.");
-  expect(commandHelp("review")).toBe("arnx review [--range A..B] [--untracked] [--no-hunt] [--resume]\n" +
+  expect(commandHelp("review")).toBe("arnx review [--range A..B] [--untracked] [--no-hunt] [--docs] [--resume]\n" +
     "     test the change: branch commits, uncommitted work, or the last commit\n\n" +
     "--quiet hides progress. --local or --cloud picks the models for one run. --json prints one JSON object.");
   expect(commandHelp("logout")).toBe("arnx login | arnx logout | arnx credits  arnx cloud: sign this machine in or " +

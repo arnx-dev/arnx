@@ -28,13 +28,13 @@ import { type Account, byokHint, CloudClient, credentialsPath, deleteCredentials
 import { dockerSession, suffixReviewCopies } from "./testround";
 import type { SessionFactory } from "./sandbox";
 import { branchBase, changeLimits, describe, describeBlanked, fakedKeysText, git, hasCommits, leftOutBrief, pinOfFile, repoRoot, resolveChange } from "./change";
-import { route, setupParts, uncoveredChange } from "./route";
+import { docsFilter, route, setupParts, uncoveredChange } from "./route";
 import { SOURCE } from "./untested";
 import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, readSecretPins, type ReviewFile,
   projectDigest, restDigest, reviewConfigPath, secretPinsOf, stampedBaseline, stampedQuick, withoutSecretPins,
   withSecretPins } from "./config";
 import { getAdapter } from "./adapters";
-import { ArnxError, EnvFailed, internalError, SetupRequired } from "./errors";
+import { ArnxError, EnvFailed, internalError, OnlyDocs, SetupRequired } from "./errors";
 import { type Baseline, baselinePath, parseBaseline, readBaseline, writeBaseline } from "./baseline";
 import { FILE as IGNORE_FILE, initialIgnore } from "./ignore";
 import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter, unpricedModels,
@@ -127,7 +127,7 @@ Prepare, once per repository (the first review sets up what it needs)
   remove [--yes] [--tests]              what arnx put in this repository: listed, deleted with --yes
 
 Review, after each change
-  review [--range A..B] [--untracked] [--no-hunt] [--resume]
+  review [--range A..B] [--untracked] [--no-hunt] [--docs] [--resume]
                                         test the change: branch commits, uncommitted work, or the last commit
 
 Decide
@@ -205,6 +205,7 @@ const COMMANDS: Record<string, { options: Options; positionals: number }> = Obje
   approve: { options: { yes: { type: "boolean" }, project: { type: "string" }, quiet: { type: "boolean" } },
     positionals: 0 },
   review: { options: { range: { type: "string" }, quiet: { type: "boolean" }, "no-hunt": { type: "boolean" },
+    docs: { type: "boolean" },
     resume: { type: "boolean" }, untracked: { type: "boolean" }, "no-untracked": { type: "boolean" }, ...MODELS },
     positionals: 0 },
   accept: { options: { again: { type: "boolean" }, "no-answers": { type: "boolean" }, quiet: { type: "boolean" },
@@ -1526,7 +1527,8 @@ class Commands {
     try {
       result = await (this.d.runReview ?? runReview)(repo, { settings: s, agentModel, challenger,
         range: (a.values.range as string | undefined) ?? null, progress: progress.say, hunt: !a.values["no-hunt"],
-        hunter, ranker, ...(secondHunter ? { secondHunter } : {}), resume: !!a.values.resume, untracked });
+        hunter, ranker, ...(secondHunter ? { secondHunter } : {}), resume: !!a.values.resume, untracked,
+        docs: !!a.values.docs });
     } finally {
       progress.stop();
     }
@@ -1557,6 +1559,9 @@ class Commands {
       if (e instanceof ArnxError) return null;
       throw e;
     }
+    // Documentation alone is nothing to test: said before any environment is built or any model asked.
+    const isDoc = docsFilter(repo, change.withUntracked ? null : change.head, !!a.values.docs);
+    if (change.files.length && change.files.every(isDoc)) throw new OnlyDocs(change.files);
     if (fresh) {
       const attempt = own ? readFileSync(reviewConfigPath(repo), "utf8") : undefined;
       // A review tries the attempt once more (its first run was the first try); after that, `arnx setup` does.
@@ -1594,7 +1599,7 @@ class Commands {
       // Not tried again by later reviews (unless what stopped it was not this setup's): `arnx setup --add` does.
       if (code === 2) quickFailed(repo, parts);
       // Said only when a project reviews the rest; otherwise the refusal that follows says the next step.
-      if (!uncoveredChange(file, change.files, Number.MAX_SAFE_INTEGER)) {
+      if (!uncoveredChange(file, change.files, Number.MAX_SAFE_INTEGER, isDoc)) {
         this.d.out(`Reviewing the rest; ${parts.join(", ")} stays not set up (arnx setup --add tries again).`);
       }
     }
@@ -1615,7 +1620,8 @@ class Commands {
     // What stops the change (nothing to review, too large, a secret) is said now, before any proof runs.
     const change = resolveChange(repo, (a.values.range as string | undefined) ?? null, secretPinsOf(file.raw),
       { untracked });
-    const why = uncoveredChange(file, change.files, s.maxProjects);
+    const why = uncoveredChange(file, change.files, s.maxProjects,
+      docsFilter(repo, change.withUntracked ? null : change.head, !!a.values.docs));
     if (why) throw new SetupRequired(why);
   }
 
@@ -1629,7 +1635,7 @@ class Commands {
     try {
       result = await (this.d.runReview ?? runReview)(repo, { settings: s, brain: cloud(progress.say),
         range: (a.values.range as string | undefined) ?? null, progress: progress.say, hunt: !a.values["no-hunt"],
-        resume: !!a.values.resume, untracked });
+        resume: !!a.values.resume, untracked, docs: !!a.values.docs });
     } finally {
       progress.stop();
     }
@@ -2183,6 +2189,7 @@ export function reviewJson(r: Review, reviewMd: string, reviewJsonPath: string)
   const rows = summaryRows(r);
   const needed = neededQuestions(r);
   const problems = st.problems.length ? st.problems
+    : st.nothing ? ["nothing was suspected in this change, so no test was written"]
     : st.none ? [`no test was seen reaching any of ${st.of} changed source file${st.of === 1 ? "" : "s"}, so finding nothing says nothing`]
     : st.untested ? [`no test was seen reaching ${st.untested} of ${st.of} changed source file${st.of === 1 ? "" : "s"}, so finding nothing ` +
       "there says nothing about them"] : [];

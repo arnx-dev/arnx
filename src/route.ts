@@ -6,18 +6,22 @@
 // entries, whose changed files are all owned by projects reviewed in this run, would review the same files a second
 // time: it gets its type check alone (`checkOnly`), no agent round. When any of those files has no owner under review
 // (no project owns it, or its owner is over max_projects), it is routed as before, so no changed file leaves the review.
-import { posix } from "node:path";
+import { spawnSync } from "node:child_process";
+import { extname, posix } from "node:path";
 import { BROWSER_TESTS, WEB_UI } from "./browser";
 import type { ReviewConfig, ReviewFile } from "./config";
 import { MANY_SERVICES_SAID } from "./facts";
 import { matcher } from "./ignore";
+import { isTestPath } from "./detect";
 import { otherLanguageOf, sourceLanguageOf } from "./languages";
 import { SOURCE } from "./untested";
 
 export interface Routed { project: ReviewConfig; owned: string[]; used: string[] }
 /** A project reached only through entries that hold other projects, its changed files reviewed by their owners. */
 export interface CheckOnly { project: ReviewConfig; used: string[]; by: string[] }
-export interface Routing { routed: Routed[]; notReviewed: string[]; uncovered: { path: string; reason: string }[];
+/** A project whose changed files are all documentation: no round, no type check. */
+export interface DocsOnly { project: ReviewConfig; files: string[] }
+export interface Routing { routed: Routed[]; notReviewed: string[]; docsOnly: DocsOnly[]; uncovered: { path: string; reason: string }[];
   /** Files routed to a project that owns them only by `**` while review.yaml lists them as uncovered: reviewed with
    * the rest, but not tested, and reported so. `uncovered` keeps its meaning (no project covers it). */
   declared: { path: string; reason: string }[];
@@ -29,6 +33,48 @@ export interface Routing { routed: Routed[]; notReviewed: string[]; uncovered: {
 export function usesBlocked(project: ReviewConfig, path: string, listed: boolean): boolean {
   const lang = listed ? sourceLanguageOf(path) : null;
   return !!lang && lang.id !== project.language;
+}
+
+const DOC_EXT = new Set([".md", ".mdx", ".rst", ".adoc", ".txt"]);
+const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp"]);
+const DOC_NAME = /^(README|LICENSE|LICENCE|NOTICE|CHANGELOG|CHANGES|AUTHORS|CONTRIBUTORS|CONTRIBUTING|CODE_OF_CONDUCT|SECURITY)([-._].*)?$/i;
+const DOC_DIR = /(^|\/)(docs?|documentation|\.github|\.changeset)\//;
+const DATA_DIR = /(^|\/)(tests?|__tests__|fixtures?|testdata|spec|specs)\//;
+const CODE_TXT = /^(requirements|constraints)[^/]*\.txt$|^CMakeLists\.txt$/i;
+
+/** Whether a changed path is documentation by its name alone: a text file of prose (.md .mdx .rst .adoc), a changeset,
+ * README, LICENSE, NOTICE, CHANGELOG or AUTHORS files, a .txt or an image under a docs folder. Code is never
+ * documentation, wherever it sits (a docstring lives in a .py file), nor is anything under a tests folder or a
+ * dependency list. Whether a test reads the file is docsFilter's to tell. */
+export function isDocFile(path: string): boolean {
+  const base = posix.basename(path);
+  const ext = extname(base).toLowerCase();
+  if (isTestPath(path) || DATA_DIR.test(path) || CODE_TXT.test(base)) return false;
+  if (path.startsWith(".changeset/")) return true;
+  if (DOC_NAME.test(base) && (ext === "" || DOC_EXT.has(ext))) return true;
+  if ([".md", ".mdx", ".rst", ".adoc"].includes(ext)) return true;
+  return (ext === ".txt" || IMAGE_EXT.has(ext)) && DOC_DIR.test(path);
+}
+
+/** Which changed paths count as documentation in one review: isDocFile, except a file some source or test file of the
+ * repository names (a test that reads its text, a loader of a template) is data for code, and `--docs` (`all`) makes
+ * none. `head`: the reviewed commit; null reads the working tree, untracked files too. */
+export function docsFilter(repo: string, head: string | null, all: boolean): (path: string) => boolean {
+  if (all) return () => false;
+  const memo = new Map<string, boolean>();
+  const isRead = (path: string): boolean => {
+    const args = ["-C", repo, "grep", "-l", "-F", ...(head ? [] : ["--untracked"]), "-e", posix.basename(path),
+      ...(head ? [head] : [])];
+    const r = spawnSync("git", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    if (r.error || (r.status !== 0 && r.status !== 1)) return true; // unknown: reviewed
+    return r.stdout.split("\n").map((l) => (head && l.startsWith(`${head}:`) ? l.slice(head.length + 1) : l))
+      .some((p) => p && p !== path && !isDocFile(p) && (SOURCE.test(p) || isTestPath(p)));
+  };
+  return (path) => {
+    if (!isDocFile(path)) return false;
+    if (!memo.has(path)) memo.set(path, !isRead(path));
+    return memo.get(path)!;
+  };
 }
 
 export const NO_PROJECT = "no project covers it";
@@ -44,7 +90,8 @@ export function holdsProject(entry: string, self: ReviewConfig, all: readonly Re
     m(`${bare(p.workdir)}/arnx-probe`));
 }
 
-export function route(file: ReviewFile, changed: string[], maxProjects: number): Routing {
+export function route(file: ReviewFile, changed: string[], maxProjects: number,
+                      isDoc: (path: string) => boolean = isDocFile): Routing {
   const projects = file.projects.map((project) => {
     const deps = project.uses.filter((u) => !holdsProject(u, project, file.projects));
     return { project, owns: matcher(project.owns.join("\n")), uses: matcher(project.uses.join("\n")),
@@ -69,14 +116,20 @@ export function route(file: ReviewFile, changed: string[], maxProjects: number):
         covered = true;
       }
     }
-    if (!covered) uncovered.push({ path, reason: reasons.find((r) => r.test(path))?.reason ?? NO_PROJECT });
-    else {
+    // A doc no project covers is nothing to cover.
+    if (!covered) {
+      if (!isDoc(path)) uncovered.push({ path, reason: reasons.find((r) => r.test(path))?.reason ?? NO_PROJECT });
+    } else {
       const listed = reasons.find((r) => r.test(path));
       // A project's own root (owns without `**`) wins over a broad entry.
       if (listed && !projects.some((p) => p.owns(path) && !broad(p))) declared.push({ path, reason: listed.reason });
     }
   }
-  const hit = projects.filter((p) => p.owned.length || p.used.length)
+  const reached = projects.filter((p) => p.owned.length || p.used.length);
+  // A project reached by documentation alone gets no round and no type check.
+  const docsOnly = reached.filter((p) => [...p.owned, ...p.used].every(isDoc))
+    .map((p) => ({ project: p.project, files: [...p.owned, ...p.used] }));
+  const hit = reached.filter((p) => ![...p.owned, ...p.used].every(isDoc))
     .sort((a, b) => b.owned.length - a.owned.length || (a.project.name < b.project.name ? -1 : 1));
   const ownersOf = (path: string, among: typeof hit) => among.filter((q) => q.owned.includes(path));
   // Reached only through entries holding other projects, every changed file it reaches owned by another project here.
@@ -97,7 +150,7 @@ export function route(file: ReviewFile, changed: string[], maxProjects: number):
   return {
     routed: routed.map(({ project, owned, used }) => ({ project, owned, used })),
     notReviewed: notReviewed.map((p) => p.project.name),
-    uncovered, declared, checkOnly,
+    docsOnly, uncovered, declared, checkOnly,
   };
 }
 
@@ -141,9 +194,11 @@ export function setupParts(file: ReviewFile, changed: string[], failed: Set<stri
 
 /** Why a review of `changed` cannot run: no project covers any of it (each file with the reason it is uncovered).
  * Null when a project reviews it. */
-export function uncoveredChange(file: ReviewFile, changed: string[], maxProjects: number): string | null {
-  const routing = route(file, changed, maxProjects);
-  if (routing.routed.length) return null;
+export function uncoveredChange(file: ReviewFile, changed: string[], maxProjects: number,
+                                isDoc: (path: string) => boolean = isDocFile): string | null {
+  const routing = route(file, changed, maxProjects, isDoc);
+  // Nothing covers it and nothing is left but documentation: the review says it has nothing to test.
+  if (routing.routed.length || !routing.uncovered.length) return null;
   const paths = routing.uncovered.map((u) => `${u.path} (${u.reason})`).join(", ");
   return `no project covers this change: ${paths}. Run \`arnx setup --add\` to cover these paths. arnx works best on single-package Python and TypeScript repos; browser-only tests aren't run.`;
 }

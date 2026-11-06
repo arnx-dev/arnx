@@ -187,12 +187,14 @@ test("facts given as a promise are awaited: a remote CLI's facts word the follow
 
 test("during the hunt a step lists only the calls that reach the CLI; the refusal the model reads is unchanged",
   async () => {
-    const hunt = JSON.stringify({ suspects: [], questions: [] });
+    const hunt = JSON.stringify({ suspects: [{ file: "b.py", line: 1, claim: "c", why: "w", input: "i", expected: "e",
+      actual: "a" }], questions: [] });
     const model = new ScriptedAgent([
       [tool("read_file", { path: "a.py" }), tool("write_file", { path: GEN, content: "x" }), tool("run_tests")],
       [text(hunt)],
       [tool("write_file", { path: GEN, content: "def test_a(): pass\n" }), tool("run_tests")],
-      [text(JSON.stringify({ tests: [], suspected_defects: [], questions: [] }))],
+      [text(JSON.stringify({ tests: [{ test: `${GEN}::test_a`, expects: "e", suspect: "S1" }], suspected_defects: [],
+        questions: [] }))],
     ]);
     const log: Logged[] = [];
     await new LocalBrain({ agentModel: model, prices: PRICES }).agentRound("review",

@@ -76,7 +76,7 @@ export interface LocalModels {
 /** The hunt of one review round: started once the sandbox has run a test, finished when the reviewer replies to it. */
 interface Hunt {
   user: string;
-  afterHunt: (reply: string) => Promise<{ message: string; spent: number }>;
+  afterHunt: (reply: string) => Promise<{ message: string | null; spent: number }>;
   /** Asked once when the tests reply: a message about suspects left without a test, or null. */
   afterTests: (reply: string) => string | null;
   state: RoundHunt;
@@ -127,6 +127,11 @@ export class LocalBrain implements Brain {
         hunting = false;
         const next = await hunt.afterHunt(reply);
         opts.budgetUsd = Math.max(0, opts.budgetUsd - next.spent);
+        // No suspect: nothing to prove, so the round ends here and spends nothing more.
+        if (next.message === null) {
+          say("nothing suspected; no tests written");
+          return null;
+        }
         say("writing tests");
         return next.message;
       }
@@ -328,8 +333,10 @@ export class LocalBrain implements Brain {
         tested: hunted };
       state.record = record;
       if (x.outDir) writeFileSync(join(x.outDir, "hunt.json"), JSON.stringify(record, null, 2) + "\n");
-      x.progress?.(`${cfg.name}: checking ${hunted.length} thing${hunted.length === 1 ? "" : "s"} in this change`);
-      return { message: prompts.proveTask(cfg, hunted, x.maxQuestions),
+      if (hunted.length) {
+        x.progress?.(`${cfg.name}: checking ${hunted.length} thing${hunted.length === 1 ? "" : "s"} in this change`);
+      }
+      return { message: hunted.length ? prompts.proveTask(cfg, hunted, x.maxQuestions) : null,
         spent: (theirs?.use.costUsd ?? 0) + (split?.use.costUsd ?? 0) + rankUse.costUsd };
     };
     const afterTests = (reply: string) => this.untestedAsk(x, state.suspects ?? [], reply);

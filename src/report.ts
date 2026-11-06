@@ -109,6 +109,8 @@ export interface ProjectStat {
   stop?: string;
   /** The round ended with no report: no tests, no reasons, no questions (set only then). */
   noReport?: boolean;
+  /** The hunt named no suspect and the round ended there: nothing was tested, and nothing was asked of it. */
+  noSuspects?: boolean;
   /** This commit's own environment could not be had: `failed` (nothing was tested) or `fallback` (tested on the image
    * built for another commit; its findings do not fail the run). `log` is a file under the review's folder. */
   env?: { state: "failed" | "fallback"; kind: "build" | "probe"; log: string; old?: true };
@@ -207,6 +209,8 @@ export interface Review {
   /** Projects that got their type check only: the change reached them through a `uses` entry holding other projects,
    * and those projects (`by`) reviewed the files. */
   typecheckOnly?: { project: string; by: string[] }[];
+  /** Projects the change reached with documentation only: no round, no type check. */
+  docsOnly?: { project: string; files: string[] }[];
   uncovered: { path: string; reason: string }[];
   /** The project each question came from, parallel to `questions`. */
   questionProjects: string[];
@@ -447,7 +451,7 @@ function statusOf(r: Review): { problems: string[]; notes: string[]; hasEnv: boo
       }
     } else if (p.missingRuns) {
       problems.push(`\`${p.name}\`: ${plural(p.missingRuns, "run")} gave no report (timed out or crashed)`);
-    } else if (!p.tests) {
+    } else if (!p.tests && !p.noSuspects) {
       notes.push(p.testFiles ? `\`${p.name}\`: no run reported its tests` : `\`${p.name}\`: the reviewer wrote no tests`);
     }
   }
@@ -505,6 +509,7 @@ function statusLines(r: Review): string[] {
     : r.couldNotRun?.length ? " If it is a test fixture, allow it with `arnx allow-secret PATH`, then `arnx review` again."
     : " Run `arnx review` again to cover it.";
   const out = [problems.length ? `Incomplete: ${problems.join("; ")}.${again}`
+    : suspectedNothing(r) ? NOTHING_SUSPECTED
     : cov.none ? `Not tested: arnx saw no test reach any of the ${cov.n} changed source file${cov.n === 1 ? "" : "s"}, so finding nothing says ` +
       "nothing about this change."
     : cov.m ? `Partly covered: arnx saw no test reach ${cov.m} of the ${cov.n} changed source file${cov.n === 1 ? "" : "s"} below, so finding ` +
@@ -1069,13 +1074,19 @@ export function summaryRows(r: Review): SummaryRow[] {
   });
 }
 
+/** The hunt named no suspect in any project's round, and the rounds ended there: nothing was tested on purpose. */
+const suspectedNothing = (r: Review) => (r.projectStats ?? []).length > 0 && (r.projectStats ?? []).every((p) => p.noSuspects);
+export const NOTHING_SUSPECTED = "Nothing suspected in this change; no tests written.";
+
 /** What the summary's status says: why the review is incomplete (`problems`), or, with none, how many of the changed
  * source files no test refers to (`untested` of `of`: partly covered when above 0). */
-export function summaryStatus(r: Review): { problems: string[]; untested: number; of: number; none: boolean } {
+export function summaryStatus(r: Review): { problems: string[]; untested: number; of: number; none: boolean;
+  nothing: boolean } {
   const { problems } = statusOf(r);
   const { m, n, none } = coverage(r);
+  const nothing = !problems.length && suspectedNothing(r);
   // Incomplete comes first: its own lines say what is missing.
-  return { problems, untested: m, of: n, none: !problems.length && none };
+  return { problems, untested: m, of: n, none: !problems.length && (none || nothing), nothing };
 }
 
 export function summary(r: Review, reviewMd: string, confirmedFails = CONFIRMED_FAILS): string {
@@ -1083,6 +1094,7 @@ export function summary(r: Review, reviewMd: string, confirmedFails = CONFIRMED_
   const st = summaryStatus(r);
   const said = problems.join("; ");
   const status = problems.length ? `Incomplete: ${said}.`
+    : st.nothing ? NOTHING_SUSPECTED
     : st.none ? `Not tested: no test seen reaching any of ${files(st.of)}, so finding nothing says nothing.`
     : st.untested ? `Partly covered: no test seen reaching ${st.untested} of ${files(st.of)}, so finding ` +
       "nothing there says nothing about them." : "";

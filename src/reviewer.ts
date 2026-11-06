@@ -14,7 +14,7 @@ import { added, type Change, describe, describeBlanked, describeWithheld, EMPTY_
   someNames, treeSuspects, untrackedLine, commitOf, changeMessage } from "./change";
 import { maskedCopy } from "./boundary";
 import { configSuspects, fileDigest, loadReviewFile, parseReviewFile, type ReviewConfig, reviewConfigPath, sandboxOnlyOf, secretPinsOf } from "./config";
-import { ArnxError, SetupRequired } from "./errors";
+import { ArnxError, OnlyDocs, SetupRequired } from "./errors";
 import { huntParts } from "./hunt";
 import { projectIndex } from "./indexer";
 import { closers, spendClosers } from "./interrupt";
@@ -36,7 +36,7 @@ import { type AgentReport, type Checked, type Finding, type FixProof, hasReport,
 import { dockerSteps, type SessionFactory } from "./sandbox";
 import type { TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
-import { route, uncoveredChange } from "./route";
+import { docsFilter, route, uncoveredChange } from "./route";
 import { isSecretPath } from "./secrets";
 import { commitMessageValues } from "./evidence";
 import { cloudModels, modelRefs, refString, type Settings } from "./settings";
@@ -297,6 +297,8 @@ export async function runReview(repo: string, o: { settings: Settings;
   secondHuntWaitMs?: number;
   /** Send untracked files too (--untracked / --no-untracked; default: `[review] untracked`). */
   untracked?: boolean;
+  /** Review a change of documentation only (default: it is not reviewed). */
+  docs?: boolean;
   /** The judgement side (default: LocalBrain over the models above). */
   brain?: Brain })
   : Promise<{ review: Review; rdir: string }> {
@@ -334,9 +336,12 @@ export async function runReview(repo: string, o: { settings: Settings;
   // Elsewhere (a fresh clone, CI) check trusts the committed pins: an edit of accepted tests shows only here.
   const acceptedEdited = changeEditsAccepted(repo, change);
   if (acceptedEdited.length) o.progress?.(`this change edits accepted tests: ${someNames(acceptedEdited, 5)}`);
-  const uncovered = uncoveredChange(file, change.files, s.maxProjects);
+  // Documentation alone is nothing to test: said before anything is set up, sent or spent (`docs` reviews it).
+  const isDoc = docsFilter(repo, change.withUntracked ? null : change.head, !!o.docs);
+  if (change.files.length && change.files.every(isDoc)) throw new OnlyDocs(change.files);
+  const uncovered = uncoveredChange(file, change.files, s.maxProjects, isDoc);
   if (uncovered) throw new SetupRequired(uncovered);
-  const routing = route(file, change.files, s.maxProjects);
+  const routing = route(file, change.files, s.maxProjects, isDoc);
   // A round clears the writable files in tests_dir: one holding the project's own tests would drop them unseen.
   const tree = filesAt(repo, change.head, !!change.withUntracked);
   const crowded = routing.routed.flatMap(({ project: cfg }) => {
@@ -735,6 +740,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       written += c.findings.length + c.flaky.length + c.errors.length + c.passed.length;
       missingRuns += c.missingRuns;
       const tests = c.findings.length + c.flaky.length + c.errors.length + c.passed.length;
+      const noSuspects = hunted?.length === 0 && tests === 0 && !rnd.env && rnd.agent.stop === "end_turn";
       projectStats.push({ name: cfg.name, tests, passed: c.passed.length, missingRuns: c.missingRuns,
         testFiles: Object.keys(rnd.files).filter((p) => adapterFor(cfg).isTestFile(posix.basename(p))).length,
         ...(rnd.hungFiles?.length ? { hungFiles: rnd.hungFiles } : {}),
@@ -745,7 +751,9 @@ export async function runReview(repo: string, o: { settings: Settings;
         // A round with no report and no test that ran is not a finished one (tests that ran speak for themselves).
         // Failing tests with no report to claim them are unreported as well.
         // A report that claims no test while one fails is no report of that test either.
-        ...(!rnd.env && ((tests === 0 && !hasReport([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText])) ||
+        // A hunt that named no suspect ended its round on purpose: its reply is the whole report.
+        ...(noSuspects ? { noSuspects: true as const } : {}),
+        ...(!rnd.env && !noSuspects && ((tests === 0 && !hasReport([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText])) ||
           (c.findings.length > 0 && reportedTests([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]) === null)) ? { noReport: true } : {}) });
       agentCost += rnd.agent.costUsd;
       Object.assign(agentUse, addUsage(agentUse, rnd.agent.usage));
@@ -910,6 +918,8 @@ export async function runReview(repo: string, o: { settings: Settings;
       costUsd: Math.round(usage.reduce((a, u) => a + u.costUsd, 0) * 10_000) / 10_000, usage,
       seconds: elapsed(), stop, writeDir: writeDirs[first.name]!,
       language: first.language, projects: routing.routed.map((r) => r.project.name), notReviewed: routing.notReviewed,
+      ...(routing.docsOnly.length && !file.legacy ? { docsOnly: routing.docsOnly.map((d) => ({
+        project: d.project.name, files: d.files })) } : {}),
       ...(routing.checkOnly.length && !file.legacy ? { typecheckOnly: routing.checkOnly.map((c) => ({
         project: c.project.name, by: c.by })) } : {}),
       uncovered: [...routing.uncovered, ...routing.declared],

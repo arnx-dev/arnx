@@ -117,6 +117,8 @@ the last commit. `arnx review --range A..B` picks any other span. In a repositor
 every file git does not ignore (less what `.arnxignore` and the secrets filter leave out), so there is no code before
 it for the before/after check; over the size limit, commit part of the files first and review the rest.
 
+A change of documentation only (`.md`, `.rst`, README, LICENSE and the like; never code, and never a file some source or test file names) is not reviewed: arnx says so and exits 2, like an empty change, before anything is built or sent. `arnx review --docs` reviews it anyway. When the hunt names no suspect, the round ends there: no test is written, the report says "Nothing suspected in this change; no tests written.", and no fix proof runs.
+
 The hunter also reads where the project uses each function the change touches, two levels out, found by name. With
 `context = "precise"` under `[review]` in `.arnx/config.toml`, arnx first indexes each project's code in its test
 image (scip-python, scip-typescript or rust-analyzer; no network) and follows the function itself, so another

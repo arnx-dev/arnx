@@ -32,6 +32,15 @@ export class NoChange extends ArnxError {
   override name = "NoChange";
 }
 
+/** The change holds documentation only (exit code 2, like an empty change): nothing to test unless `--docs` asks. */
+export class OnlyDocs extends NoChange {
+  override name = "OnlyDocs";
+  constructor(files: readonly string[]) {
+    const shown = files.slice(0, 3).join(", ") + (files.length > 3 ? `, +${files.length - 3} more` : "");
+    super(`nothing to test: only documentation changed (${shown}). \`arnx review --docs\` reviews it anyway.`);
+  }
+}
+
 /** The change is over the size a review reads; a smaller --range fixes it, except for the first commit (`root`). */
 export class ChangeTooLarge extends ArnxError {
   override name = "ChangeTooLarge";
