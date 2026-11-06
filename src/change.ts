@@ -276,16 +276,16 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
   }
   // Generated files stay in the snapshot but are not counted and never go to a model.
   const marked = markedGenerated(repo, files, head);
-  const firstLines = (path: string, deleted: boolean): string[] => {
+  const fileLines = (path: string, deleted: boolean): string[] | undefined => {
     const side = deleted ? null : head === null ? fileSide(repo, path) : blobSide(repo, head, path);
-    return side && "text" in side && !side.binary ? splitLines(side.text.slice(0, 2000)).slice(0, 5) : [];
+    return side && "text" in side && !side.binary ? splitLines(side.text) : undefined;
   };
   const genOut = new Set<string>();
   diff = diff.split(DIFF_SECTION).filter((section) => {
     const { old, now } = sectionPaths(section);
     const path = now ?? old;
     if (path === null || !section.startsWith("diff --git ") ||
-      !(isGenerated(path) || marked.has(path) || looksGenerated(section, firstLines(path, now === null)))) return true;
+      !(isGenerated(path) || marked.has(path) || looksGenerated(section, fileLines(path, now === null)))) return true;
     genOut.add(path);
     return false;
   }).join("");

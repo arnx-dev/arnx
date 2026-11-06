@@ -84,10 +84,13 @@ export function longLines(lines: readonly string[]): boolean {
   const sorted = lines.map((l) => l.length).sort((x, y) => x - y);
   return sorted[Math.floor(sorted.length / 2)]! >= 500;
 }
-/** Whether one file's section of a diff looks machine-made: long added lines, or `first` (the first lines of the file as
- * reviewed) carries a generator's marker. */
-export const looksGenerated = (section: string, first: readonly string[] = []): boolean => hasGeneratedMarker(first) ||
-  longLines(splitLines(section).filter((l) => l.startsWith("+") && !l.startsWith("+++")).map((l) => l.slice(1)));
+/** Whether one file's section of a diff looks machine-made: `file` (the file's lines as reviewed; the added lines when
+ * it is not given) is long-lined, or its first lines carry a generator's marker. */
+export const looksGenerated = (section: string, file?: readonly string[]): boolean => {
+  const added = splitLines(section).filter((l) => l.startsWith("+") && !l.startsWith("+++")).map((l) => l.slice(1));
+  const lines = file ?? added;
+  return hasGeneratedMarker(lines) || longLines(lines);
+};
 
 const CODE_EXTENSIONS = new Set(["py", "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "cs", "go", "java", "kt", "rb",
   "php", "swift", "c", "h", "cpp", "hpp", "md", "toml", "yaml", "yml", "lock", "cfg", "ini"]);

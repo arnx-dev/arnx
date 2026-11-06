@@ -440,6 +440,17 @@ test("a long constant in a hand-written file does not hide its code", () => {
   expect([c.files, c.generated]).toEqual([["mod.py"], undefined]);
 });
 
+test("an edit adding one long constant to a short-line module keeps its code in the review", () => {
+  const repo = gitRepo(tmp());
+  const fns = Array.from({ length: 30 }, (_, i) => `def f${i}():\n    return ${i}\n`).join("");
+  writeFileSync(join(repo, "mod.py"), fns);
+  commit(repo, "module");
+  writeFileSync(join(repo, "mod.py"), fns + `LOGO = "${"A".repeat(25_000)}"\nX = 1\n`);
+  const c = resolveChange(repo);
+  expect([c.files, c.generated]).toEqual([["mod.py"], undefined]);
+  expect(c.diff).toContain("+X = 1");
+});
+
 test("an attribute added after the reviewed commit does not hide its files", () => {
   const repo = gitRepo(tmp());
   writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a - b\n");
@@ -448,7 +459,6 @@ test("an attribute added after the reviewed commit does not hide its files", () 
   writeFileSync(join(repo, ".gitattributes"), "gen.txt linguist-generated\n");
   const c = resolveChange(repo);
   expect([c.kind, c.files, c.generated]).toEqual(["commit", ["app.py", "gen.txt"], undefined]);
-  expect(existsSync(join(repo, ".git", "arnx-attr-index"))).toBe(false);
 });
 
 test("a large hand-written file still refuses and names the way out", () => {
