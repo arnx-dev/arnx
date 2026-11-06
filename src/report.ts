@@ -721,10 +721,7 @@ export function render(r: Review): string {
     if (parts.length) out.push(`${plural(parts.length, "issue")} from ${plural(caused.length, "failing test")}, most severe first.`, "");
     const minor = parts.findIndex(({ group }) => group?.severity === "low");
     parts.forEach(({ group, findings }, i) => {
-      if (i === minor) {
-        out.push("## Also found (minor)", "", "Leftover debug output, logging, test helpers and the like: worth a look, " +
-          "not urgent.", "");
-      }
+      if (i === minor && minor > 0) out.push("## Also found (minor)", "", "Lower severity: worth a look, not urgent.", "");
       const g = group ?? { findings: [], title: "", input: "", actual: "", expected: "", consequence: "" };
       const title = g.title || findings[0]!.explanation.split("\n")[0] || firstLine(findings[0]!.message);
       out.push(`### Issue ${i + 1} · ${title}`, "");
@@ -1088,7 +1085,7 @@ export function summary(r: Review, reviewMd: string): string {
   const width = Math.max(0, ...rows.map(([, title]) => title.length));
   const minor = issues.findIndex((row) => row.severity === "low");
   rows.forEach(([head, title, ids], i) => {
-    if (i === minor) out.push("  Minor:");
+    if (i === minor && minor > 0) out.push("  Minor:");
     out.push(`${head}  ${title.padEnd(width)}  ${ids}`);
   });
   const already = r.findings.filter(isPreExisting);

@@ -300,3 +300,29 @@ test("a saved review counts its changed source files from change.diff", () => {
   rmSync(join(rdir, "change.diff"));
   expect(load(rdir).sourceFiles).toBe(11);
 });
+
+test("the minor heading does not describe what its issues are", () => {
+  const r = sampleReview({
+    findings: [finding("F1", "t.js::a", "a", "t.js", "500", "", "confirmed", "yes"),
+      finding("F2", "t.js::d", "d", "t.js", "x", "", "confirmed", "yes")],
+    questions: [], questionProjects: [], flaky: [],
+    groups: [
+      { findings: ["F1"], title: "errors become 500", input: "", actual: "", expected: "", consequence: "", severity: "high" },
+      { findings: ["F2"], title: "odd name", input: "", actual: "", expected: "", consequence: "", severity: "low" }],
+  });
+  const md = render(r);
+  expect(md).toContain("## Also found (minor)\n\nLower severity: worth a look, not urgent.");
+  expect(md).not.toContain("Leftover debug output");
+});
+
+test("a lone low issue has no 'also found' heading", () => {
+  const r = sampleReview({
+    findings: [finding("F1", "t.js::d", "d", "t.js", "x", "", "confirmed", "yes")],
+    questions: [], questionProjects: [], flaky: [],
+    groups: [{ findings: ["F1"], title: "odd name", input: "", actual: "", expected: "", consequence: "", severity: "low" }],
+  });
+  const md = render(r);
+  expect(md).not.toContain("Also found");
+  expect(md).not.toContain("Lower severity");
+  expect(summary(r, "review.md")).not.toContain("Minor:");
+});
