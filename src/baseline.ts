@@ -27,6 +27,10 @@ export const baselinePath = (repo: string) => join(repo, BASELINE_FILE);
  * run to run, so they are left out. */
 export const testKey = (id: string) => id.replace(/ at 0x[0-9a-f]+/gi, " at 0x");
 
+/** What a failing test is compared by: its id, or for a whole file that does not load its file, since the id a runner
+ * gives that failure is its own. */
+export const failKey = (id: string, file: string, load: boolean) => load ? `load:${file}` : testKey(id);
+
 /** The keys (testKey) of `tests`. */
 export const keysOf = (tests: BaselineTest[]) => new Set(tests.map((t) => testKey(t.id)));
 

@@ -337,3 +337,14 @@ test("setup sends tests left out of test_command back to the agent once; kept, t
   expect(approvalChecks(parseReviewFile(narrow), r.projects)).toContain("main: 25 of 26 files that look like tests " +
     "never ran (tests/slow 25); test_command leaves them out");
 });
+
+test("a file recorded as not loading matches whatever id the runner later gives that failure", () => {
+  const cfg = parseReviewConfig(YAML);
+  const base = [{ id: "tests/test_e.py::tests/test_e.py", file: "tests/test_e.py", first: "no module", load: true as const }];
+  const run = [t("tests/test_a.py", "test_a", "passed"),
+    t("tests/test_e.py", "tests.test_e", "error", "collection failure\nE   ModuleNotFoundError: x")];
+  const [ok, , counts] = suiteOk(run, cfg, undefined, undefined, base);
+  expect(ok).toBe(true);
+  expect(counts.left).toEqual([]);
+  expect(counts.baselineFailing).toBe(1);
+});

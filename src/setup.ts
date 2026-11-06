@@ -8,7 +8,7 @@ import { dirname, join, posix } from "node:path";
 import { isMap as isYamlMap, isScalar, isSeq, parseDocument, visit } from "yaml";
 import { type AgentResult, StopRound, Workspace } from "./agent";
 import { type Baseline, BASELINE_FILE, type BaselineTest, baselineDigest, describeBaselineChanges, entryOf, keysOf,
-  readBaseline, testKey, writeBaseline } from "./baseline";
+  failKey, readBaseline, testKey, writeBaseline } from "./baseline";
 import { Boundary, boundaryOf, type Swap } from "./boundary";
 import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
@@ -130,7 +130,7 @@ export function suiteOk(results: TestResult[] | null, cfg: ReviewConfig, accepte
   if (!results.length) return [false, "the suite ran no tests", none];
   const mine = accepted ? acceptedOf(cfg, accepted, acceptedTestsDir) : { pinned: [], changed: [] };
   const record = baseline === "record";
-  const known = record ? new Set<string>() : keysOf(baseline);
+  const known = record ? new Set<string>() : new Set(baseline.map((b) => failKey(b.id, b.file, !!b.load)));
   const counts = new Map<string, number>();
   const unexpected: string[] = [];
   const failed: TestResult[] = [];
@@ -153,12 +153,13 @@ export function suiteOk(results: TestResult[] | null, cfg: ReviewConfig, accepte
       continue;
     }
     failed.push(t);
-    failing.add(testKey(t.testId));
-    if (record || known.has(testKey(t.testId))) baselineFailing++;
+    const key = failKey(t.testId, t.fileAttr, loadFailure(t));
+    failing.add(key);
+    if (record || known.has(key)) baselineFailing++;
     else unexpected.push(t.testId);
   }
   // A baseline test leaves once it no longer fails, a flaky one too: should it fail again, the rerun tells.
-  const left = record ? [] : baseline.filter((b) => !failing.has(testKey(b.id))).map((b) => b.id);
+  const left = record ? [] : baseline.filter((b) => !failing.has(failKey(b.id, b.file, !!b.load))).map((b) => b.id);
   const summary = [...counts.keys()].sort().filter((o) => counts.get(o)).map((o) => `${counts.get(o)} ${o}`).join(", ") +
     (acceptedFailing ? ` (${acceptedFailing} accepted test${acceptedFailing === 1 ? "" : "s"} still fail` +
       `${acceptedFailing === 1 ? "s" : ""})` : "") +
@@ -1568,6 +1569,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       // A run that went back to the agent, tried again in the same environment: that run stands.
       const held = state.held.get(name);
       let onlySubset = false;
+      // A quick setup's try repeated unchanged: its look runs again, tolerating files that do not load.
+      let retriedQuick = false;
       // The project's part of the file the run ran with.
       let ranWith = runDigest(f, name);
       try {
@@ -1594,6 +1597,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           }
         } else {
           const look = state.looked.get(name) !== env;
+          retriedQuick = !look && !!o.quick;
           [ok, summary, tail, skips, failing, hints, counts] = await runSuite(cfg, snap, log, { sessionFactory: factory,
             failureModel: o.failureModel, key: keyOf(cfg), acceptedTestsDir: accepted,
             accepted: trusted, leftOut, baseline: "record", precheck: look || !!o.quick, quick: !!o.quick, tolerate: !look, boundary, swap });
@@ -1741,6 +1745,11 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const skipped = skips.length ? `\nSkipped tests and why: ${skips.join("; ")}. A test skipped because it needs ` +
         "a database, a service or an environment variable is not tested in this environment: provide what it asks " +
         "for (a service and env) unless it needs the internet." : "";
+      if (!ok && retriedQuick && (counts.stoppedAt === "listing" || counts.stoppedAt === "sample")) {
+        // A quick setup never runs the whole suite: the same stop again ends the try.
+        say(`${name}: ✗ ${gist(summary)}`);
+        throw new StopRound(`stopped: ${state.problem}. Setup ends here.`);
+      }
       if (!ok) {
         say(`${name}: ✗ does not run yet: ${gist(summary)}`);
         // A UI app's runs are for a suite that will not run in a sandbox: one whose tests pass goes on like any other.

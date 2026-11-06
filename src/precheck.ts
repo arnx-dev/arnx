@@ -115,6 +115,21 @@ export async function precheck(session: Runner, snap: string, cfg: ReviewConfig,
   return (await look(session, snap, cfg, acceptedTestsDir)).early;
 }
 
+/** Why a file did not load, from the runner's output: the last "E" line under its "ERROR collecting" header, else the
+ * reason on its short-summary line. */
+function loadReason(output: string, file: string): string {
+  const lines = output.split("\n");
+  const at = lines.findIndex((l) => /^_+ ERROR collecting /.test(l) && l.split(/\s+/).includes(file));
+  if (at >= 0) {
+    const rest = lines.slice(at + 1);
+    const end = rest.findIndex((l) => /^_{3,} /.test(l) || /^={3,} /.test(l));
+    const e = (end < 0 ? rest : rest.slice(0, end)).filter((l) => /^E\s/.test(l)).at(-1);
+    if (e) return e.replace(/^E\s+/, "").trim();
+  }
+  const short = lines.find((l) => l.startsWith(`ERROR ${file}`));
+  return short?.replace(/^ERROR \S+( - )?/, "").trim() || "the file does not load";
+}
+
 /** What the look saw: what stops the try (null when nothing does), how many tests and files the runner listed, and
  * the sample's run when one ran and nothing stopped it (a quick setup takes it for the suite's run). */
 export interface Look { early: Early | null; tests: number; files: number;
@@ -141,8 +156,10 @@ export async function look(session: Runner, snap: string, cfg: ReviewConfig, acc
                            baseline: BaselineTest[] | "record" = "record",
                            { files, tolerate = false }: { files?: () => string[]; tolerate?: boolean } = {}): Promise<Look> {
   const proof = baseline === "record" ? null : baseline;
-  // A quick setup never runs the whole suite, so tried again unchanged it does not.
-  const again = proof || files ? "" : AGAIN;
+  // What tried again unchanged does: a full setup runs the whole suite; a quick setup never does, so it records the
+  // files that do not load and runs the small ones, and stops if anything else stops it.
+  const again = proof ? "" : files ? " (Tried again unchanged, the quick setup ends here.)" : AGAIN;
+  const loads = " (Tried again unchanged, these files are recorded as not loading and the small files stand for the suite.)";
   // `tolerate` (a quick setup tried again unchanged): files that do not load stop nothing; the files the sample
   // leaves out are the coverage gap's to say.
   const known = (file: string) => tolerate || !!proof && (proof.some((t) => t.load && t.file === file) ||
@@ -156,7 +173,7 @@ export async function look(session: Runner, snap: string, cfg: ReviewConfig, acc
     const { listing, result } = listed;
     counts = { tests: listing.tests ?? listing.files.length, files: listing.files.length, listed: listing.files };
     const why = listingProblem(listing, result.exitCode, known);
-    if (why) return { ...none, ...counts, early: { summary: why + again, output: result.output, hints: "", kind: "listing" } };
+    if (why) return { ...none, ...counts, early: { summary: why + (!proof && files && listing.broken.length && !listing.failed ? loads : again), output: result.output, hints: "", kind: "listing" } };
     if (!listing.files.length) return { ...none, ...counts };
     const probe = await probeListed(session, snap, cfg);
     if (probe && !probe.seen) {
@@ -166,9 +183,9 @@ export async function look(session: Runner, snap: string, cfg: ReviewConfig, acc
     }
     sample = sampleOf(listing, cfg, snap, acceptedTestsDir);
     if (tolerate && listing.broken.length) {
-      const said = result.output.split("\n");
-      loadErrors = listing.broken.map((f) => ({ testId: `${f}::${f}`, fileAttr: f, name: f, outcome: "error",
-        message: `collection failure\nE   ${said.find((l) => l.includes(f) && /^ERROR /.test(l))?.replace(/^ERROR \S+( - )?/, "") || "the file does not load"}` }));
+      loadErrors = listing.broken.map((f) => ({ testId: `${f}::${f.replace(/\.py$/, "").replaceAll("/", ".")}`,
+        fileAttr: f, name: f.replace(/\.py$/, "").replaceAll("/", "."), outcome: "error",
+        message: `collection failure\nE   ${loadReason(result.output, f)}` }));
     }
   } else {
     // No list form (or no listing to trust): with `files` (the project's test files, relative to the repository), a

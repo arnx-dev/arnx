@@ -470,7 +470,7 @@ test("a project with compiled extensions brings them back at run", () => {
   };
   const native = (extra: Record<string, string>) => Object.values(projects(detect(repoOf(extra))))[0]!;
   // .pyx files, or ext_modules in setup.py, mean the install builds them and test runs have no compiler or network.
-  for (const extra of <Record<string, string>[]>[{ "pkg/fast.pyx": "def f(): pass\n" },
+  for (const extra of <Record<string, string>[]>[{ "pkg/setup.py": "from setuptools import setup\nfrom Cython.Build import cythonize\nsetup(name='pkg', ext_modules=cythonize('fast.pyx'))\n" },
     { "pkg/setup.py": "from setuptools import setup, Extension\nsetup(name='pkg', ext_modules=[Extension('a', ['a.c'])])\n" }]) {
     const p = native(extra);
     expect(p.install.join("\n")).toContain("python setup.py build_ext --inplace && find . -name '*.so' | tar czf /opt/ext.tgz -T -");
@@ -479,6 +479,20 @@ test("a project with compiled extensions brings them back at run", () => {
   const plain = native({});
   expect(plain.install.join("\n")).not.toContain("build_ext");
   expect(plain.test_command).toBe("python -m pytest {targets}");
-  const d = detect(repoOf({ "pkg/fast.pyx": "def f(): pass\n" }));
-  expect(unsure(d).join("\n")).toContain("a .pyx change is not rebuilt");
+  expect(native({ "pkg/setup.py": "from setuptools import setup, Extension\nsetup(name='pkg', ext_modules=[Extension('a', ['a.c'])])\n" })
+    .notes.join(" ")).toContain("not rebuilt");
+  expect(plain.notes).toBeUndefined();
+});
+
+test("a .pyx file with no setup.py adds no build_ext: the project's own install builds it", () => {
+  const repo = initRepo(join(tmp(), "pyx"));
+  for (const [p, body] of Object.entries({ "pkg/pyproject.toml": "[build-system]\nrequires=['meson-python']\n[project]\nname='pkg'\nversion='1'\n",
+    "pkg/fast.pyx": "def f(): pass\n", "pkg/tests/test_a.py": "def test_a():\n    pass\n" })) {
+    mkdirSync(dirname(join(repo, p)), { recursive: true });
+    writeFileSync(join(repo, p), body);
+  }
+  commit(repo, "files");
+  const p = Object.values(projects(detect(repo)))[0]!;
+  expect(p.install.join("\n")).not.toContain("build_ext");
+  expect(p.test_command).toBe("python -m pytest {targets}");
 });

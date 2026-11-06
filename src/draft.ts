@@ -415,7 +415,7 @@ function pythonProject(f: ProjectFacts, mark: MarkFn): Raw {
     const into = posix.relative(f.installRoot, f.root);
     install.push(`${into ? `cd ${shellQuote(into)} && ` : ""}python setup.py build_ext --inplace && ` +
       "find . -name '*.so' | tar czf /opt/ext.tgz -T -");
-    mark(["install", install.length - 1], "a .pyx change is not rebuilt: the compiled files come from the image");
+    p.notes = ["Compiled extensions are built when the image is built: a change to a .pyx or C source is not rebuilt, so tests run the extensions built from the code at setup."];
   }
   if (f.apt.length) mark(["install", 0], `system packages ${f.jobs[0] ?? "CI"} installs`);
   if (f.installRoot !== f.root) p.install_root = f.installRoot;

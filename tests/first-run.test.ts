@@ -472,3 +472,38 @@ test("a quick setup tried again unchanged runs a few small files, never the whol
   expect(r.ok).toBe(true);
   expect(r.runs[0]!.summary).toStartWith("quick look:");
 });
+
+test("a quick look records a file that does not load as a file-level entry, with the reason", async () => {
+  const repo = twoProjects();
+  const draft = quickDraft(detected(repo), ["svc/app.py"])!.yaml;
+  const output = TESTS.map((f) => `${f}::test_x`).join("\n") + "\n_____ ERROR collecting tests/test_e.py _____\n" +
+    "E   ModuleNotFoundError: No module named 'redis'\nERROR tests/test_e.py\n";
+  const model = new ScriptedAgent([[tool("propose", { yaml: draft })], [tool("propose", { yaml: draft })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(runner("svc", { exit: 1, output }), []), quick: { files: ["svc/app.py"] } });
+  expect(r.ok).toBe(true);
+  const failed = r.projects[0]!.failed!;
+  expect(failed.map((x) => [x.file, x.load, x.first])).toEqual([["tests/test_e.py", true,
+    "ModuleNotFoundError: No module named 'redis'"]]);
+});
+
+test("a quick setup whose small files fail, tried again unchanged, ends: the whole suite never runs", async () => {
+  const bad = (command: string): Answer => {
+    const a = runner("svc")(command);
+    return TESTS.slice(0, 3).some((f) => command.includes(f)) && !command.includes("--collect-only")
+      ? { xml: junitXml(TESTS.slice(0, 3).map((f) => [`svc/${f}`, "test_x", "failed", "boom"] as [string, string, string, string])),
+        output: "3 failed" } : a;
+  };
+  const repo = twoProjects();
+  const draft = quickDraft(detected(repo), ["svc/app.py"])!.yaml;
+  const sessions: Session[] = [];
+  const model = new ScriptedAgent([[tool("propose", { yaml: draft })], [tool("propose", { yaml: draft })],
+    [tool("propose", { yaml: draft })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(bad, sessions), quick: { files: ["svc/app.py"] } });
+  expect(r.ok).toBe(false);
+  expect(JSON.stringify(model.calls[0]!.messages)).toContain("Tried again unchanged, the quick setup ends here");
+  const whole = sessions.flatMap((s) => s.commands).filter((c) => !c.includes("--collect-only") &&
+    !c.includes("test_arnx_probe") && !TESTS.some((f) => c.includes(f)));
+  expect(whole).toEqual([]);
+});
