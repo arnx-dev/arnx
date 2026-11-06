@@ -2101,8 +2101,8 @@ export function reviewJson(r: Review, reviewMd: string, reviewJsonPath: string)
     : st.none ? [`no test was seen reaching any of ${st.of} changed source file${st.of === 1 ? "" : "s"}, so finding nothing says nothing`]
     : st.untested ? [`no test was seen reaching ${st.untested} of ${st.of} changed source file${st.of === 1 ? "" : "s"}, so finding nothing ` +
       "there says nothing about them"] : [];
-  // A confirmed finding that does not fail the run is still a finding: the result never reads "clean" over it.
-  const found = code === 1 || (code === 0 && confirmed(r).length > 0);
+  // A confirmed finding is a finding whether or not the run finished or failed on it; `status` says how complete it is.
+  const found = code === 1 || confirmed(r).length > 0;
   return [found ? "findings" : code === 2 ? "incomplete" : "clean", code, {
     review_id: r.id, review_md: reviewMd, review_json: reviewJsonPath, change: r.change, files_changed: r.filesChanged,
     added: r.added, removed: r.removed,

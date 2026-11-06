@@ -70,7 +70,7 @@ Also written, for arnx and people: `prompt_version`, `write_dir`, `write_dirs`, 
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | string | `F1`, `F2`, ...: the id in `review.md` and in your report. |
-| `status` | string | `confirmed`: failed in every run and not disputed; worth a look; does not set the exit code; fix these. `not-checked`: failed in every run, but no second opinion saw it (its budget ran out, or it did not answer); sets exit code 1; read it before acting. `disputed`: the second opinion disagrees (also when the test waits on an answer: disputed comes first). `waiting-on-answer`: the test assumes an answer to `depends_on`. `pre-existing`: fails the same way on the code before the change. Only `confirmed` is yours to fix. |
+| `status` | string | `confirmed`: failed in every run and not disputed; worth a look; does not set the exit code; read it, and fix it if the user marks it real. `not-checked`: failed in every run, but no second opinion saw it (its budget ran out, or it did not answer); sets exit code 1; read it before acting. `disputed`: the second opinion disagrees (also when the test waits on an answer: disputed comes first). `waiting-on-answer`: the test assumes an answer to `depends_on`. `pre-existing`: fails the same way on the code before the change. Only `confirmed` is yours to fix. |
 | `verdict` | string or null | The second opinion: `confirmed`, `disputed`, or null when it did not judge (budget, API error; exits 1 like `not-checked`). |
 | `reason` | string | The second opinion's reason. |
 | `test_id` | string | The test, as the runner names it (`path::name`). |

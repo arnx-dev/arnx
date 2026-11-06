@@ -153,8 +153,8 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   writes: patterns for them, the test fixture folders (`tests/`, `fixtures/`, `testdata/`, …) kept with `!` lines,
   and any other data-like file the repository has, by name. An existing `.arnxignore` is left as it is. A `!` line
   keeps what it matches again; the last line that matches a path decides.
-
-- The second opinion still confirms some findings that are not real, so confirmed findings are worth a look and do not fail the run.
+- The second opinion still confirms some findings that are not real, so confirmed findings are worth a look and do not
+  fail the run.
 
 ## What a review sends
 

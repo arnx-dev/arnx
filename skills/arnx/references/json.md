@@ -240,9 +240,9 @@ A summary of the review, as the terminal shows it. The whole review is `review_j
 
 | `result` | Exit | When |
 |---|---|---|
-| `findings` | 0 or 1 | A confirmed finding (exit 0) or a not-checked one (exit 1). |
-| `incomplete` | 2 | No finding, and the review did not finish (`problems` says why). |
-| `clean` | 0 | No finding, and the review finished. |
+| `findings` | 0, 1 or 2 | A confirmed finding (exit 0, or 2 when the review did not finish) or a not-checked one (exit 1). |
+| `incomplete` | 2 | No confirmed or not-checked finding, and the review did not finish (`problems` says why). |
+| `clean` | 0 | No confirmed or not-checked finding (disputed ones do not count), and the review finished. |
 
 `not-ready` (doctor's checks failed) and `error` (no consent, no environment set up, …) are as above.
 

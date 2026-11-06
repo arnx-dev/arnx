@@ -163,3 +163,13 @@ test("review --json: a confirmed finding that does not fail the run is still res
   const [result, code] = reviewJson(r, "m", "j");
   expect([result, code]).toEqual(["findings", 0]);
 });
+
+test("review --json result: findings whenever a confirmed finding exists, clean when all are disputed", async () => {
+  const { reviewJson } = await import("../src/cli");
+  const cut = sampleReview({ findings: [f("F1", "test_a", "confirmed", "real")], questions: [], questionProjects: [], stop: "budget" });
+  const [r1, c1] = reviewJson(cut, "m", "j");
+  expect([r1, c1]).toEqual(["findings", 2]);
+  const disputed = sampleReview({ findings: [f("F1", "test_a", "disputed", "no")], questions: [], questionProjects: [] });
+  const [r2, c2] = reviewJson(disputed, "m", "j");
+  expect([r2, c2]).toEqual(["clean", 0]);
+});
