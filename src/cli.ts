@@ -61,7 +61,7 @@ import { approveFile, coverageMap, describeCoverage, type NeededFile, type Proje
   WEB_UI_STOP } from "./setup";
 import { withRepoHolds } from "./standins";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, notTestedRecord, PROVEN_BASELINE,
-  PROVEN_COPY, proofState, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
+  PROVEN_COPY, proofState, repoTypecheckGaps, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
 import { isoSeconds } from "./util";
 import { spend } from "./spend";
 import { installSkills, SKILL_DIRS, skillDirsShown, skillStates, userSkillRoot } from "./skill";
@@ -1036,6 +1036,7 @@ class Commands {
       // The review goes on: what was set up, and where the rest is written down.
       this.d.out(`✓ Test environment ready: ${result.runs.map((x) => x.name).join(", ")} · details: ` +
         `${APPROVAL_RECORD}`);
+      for (const line of repoTypecheckGaps(proposed, repo)) this.d.out(line);
       if (result.waiting?.length) {
         this.d.out(`Not set up yet, though ${result.waiting.length === 1 ? "it uses" : "they use"} what this change ` +
           `edits: ${result.waiting.join(", ")}. Their tests do not run in this review; \`arnx setup\` sets them up.`);
@@ -2299,4 +2300,4 @@ export function copyToClipboard(text: string): string | null {
 
 /** The warnings recorded with a proof (setupview.ts approvalWarnings), with the install lines that rewrite text no file holds. */
 const warningsOf = (repo: string, file: ReviewFile, proofs: ProjectProof[], untracked: boolean | undefined): string[] =>
-  withRepoHolds(repo, file, untracked, (holds) => approvalWarnings(file, proofs, holds));
+  withRepoHolds(repo, file, untracked, (holds) => [...approvalWarnings(file, proofs, holds), ...repoTypecheckGaps(file, repo)]);

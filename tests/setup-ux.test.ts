@@ -1,13 +1,13 @@
 // Setup as a developer sees it: what happens before it starts, progress while it runs, one line per project to
 // judge, the points worth checking, and what `arnx review` would test next.
 import { beforeEach, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TestResult } from "../src/adapters/types";
 import { parseReviewFile } from "../src/config";
 import { defaultSettings } from "../src/settings";
 import { approveFile, describeTool, runSetup, skipReasons, unexplainedFailing } from "../src/setup";
-import { approvalChecks, approvalScreen, nextStep, projectTable, setupPreview, worthALook } from "../src/setupview";
+import { approvalChecks, approvalScreen, nextStep, projectTable, setupPreview, typecheckGaps, worthALook } from "../src/setupview";
 import type { SessionFactory } from "../src/sandbox";
 import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo, initRepo } from "./helpers/gitutil";
@@ -240,4 +240,25 @@ test("the list names file and rule and never the value", async () => {
   for (const secret of [KEY, made]) {
     for (let i = 0; i + 4 <= secret.length; i++) expect(md).not.toContain(secret.slice(i, i + 4));
   }
+});
+
+test("a type-checkable project without a type check is worth a look", () => {
+  mkdirSync(join(repo, "web"), { recursive: true });
+  writeFileSync(join(repo, "web", "tsconfig.json"), "{}\n");
+  writeFileSync(join(repo, "package.json"), '{"devDependencies": {"typescript": "5.9.3"}}\n');
+  const yaml = (tc: string) => `version: 1
+projects:
+  web:
+    root: web
+    language: typescript
+    image: node:22
+    test_command: npx vitest run {targets}
+${tc}uncovered: []
+`;
+  const read = (rel: string) => { try { return readFileSync(join(repo, rel), "utf8"); } catch { return ""; } };
+  const bare = parseReviewFile(yaml(""));
+  expect(typecheckGaps(bare, read)).toEqual(["web: has a tsconfig but no type check, so reviews do not type check it"]);
+  expect(worthALook(bare, repo, {})).toContain("web: has a tsconfig but no type check, so reviews do not type check it");
+  const checked = parseReviewFile(yaml("    typecheck: npx tsc --noEmit -p tsconfig.json\n"));
+  expect(typecheckGaps(checked, read)).toEqual([]);
 });

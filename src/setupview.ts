@@ -6,7 +6,7 @@ import { describe, filesAt, git, leftOutUntracked, resolveChange, someNames, unt
 import { type Baseline, BASELINE_FILE, type BaselineTest, describeBaselineChanges, parseBaseline, readBaseline } from "./baseline";
 import { fileDigest, isProven, parseReviewFile, readSecretPins, type ReviewFile, sandboxOnlyOf, secretPinsOf }
   from "./config";
-import { detect } from "./detect";
+import { ciTypeChecker, detect, typeCheckable } from "./detect";
 import { ArnxError } from "./errors";
 import { refString, type Settings, untrackedSetting } from "./settings";
 import { BROWSER_TESTS, WEB_UI } from "./browser";
@@ -151,13 +151,36 @@ export function approvalScreen(file: ReviewFile, repo: string, o: { proofs?: Pro
   return lines.join("\n");
 }
 
+/** Projects whose type errors no review will see: a TypeScript project that could be type checked and has no
+ * `typecheck`, and a Python project whose CI runs a type checker (arnx does not check Python types yet). `read`
+ * gives a file's text (relative to `repo`), "" when there is none. */
+export function typecheckGaps(file: ReviewFile, read: (rel: string) => string, repo?: string): string[] {
+  const ci = repo ? ciTypeChecker(repo) : null;
+  const out: string[] = [];
+  for (const p of file.projects) {
+    if (p.typecheck) continue;
+    if (p.language === "typescript" && typeCheckable(read, p.workdir)) {
+      out.push(`${p.name}: has a tsconfig but no type check, so reviews do not type check it`);
+    } else if (p.language === "python" && ci) {
+      out.push(`${p.name}: CI type checks with ${ci.tool} (${ci.from}); arnx does not, so types are not checked`);
+    }
+  }
+  return out;
+}
+
+/** `typecheckGaps` reading the working tree of `repo`. */
+export function repoTypecheckGaps(file: ReviewFile, repo: string): string[] {
+  return typecheckGaps(file, (rel) => { try { return readFileSync(join(repo, rel), "utf8"); } catch { return ""; } }, repo);
+}
+
 /** The lines of "Worth a look" after a proof, only what applies: the warnings, then what no project tests (a change
  * there is reported as not tested), one line per kind (the whole list is in the approval record), and source files
  * no project mentions. */
 export function worthALook(file: ReviewFile, repo: string, o: { proofs?: ProjectProof[]; untracked?: boolean })
   : string[] {
   const base = currentBaseline(repo) ?? new Map();
-  const lines = [...environmentLines(file, base), ...baselineLines(file, base), ...approvalWarnings(file, o.proofs)];
+  const lines = [...environmentLines(file, base), ...baselineLines(file, base), ...approvalWarnings(file, o.proofs),
+    ...repoTypecheckGaps(file, repo)];
   if (!file.legacy) {
     const map = coverageMap(repo, file, !!o.untracked);
     lines.push(...notTestedLines(map, repo, !!o.untracked));

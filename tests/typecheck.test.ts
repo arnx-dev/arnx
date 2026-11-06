@@ -7,13 +7,14 @@ import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "n
 import { dirname, join, posix } from "node:path";
 import { typescript } from "../src/adapters/typescript";
 import { parseReviewConfig, parseReviewFile, reviewConfigPath, stamp, stampFile } from "../src/config";
-import { detect, typeCheckable } from "../src/detect";
+import { ciTypeChecker, detect, typeCheckable } from "../src/detect";
 import { EVENTS_FILE, type TraceEvent } from "../src/events";
 import { exitCode, load, render, summary } from "../src/report";
 import { runReview } from "../src/reviewer";
 import type { RunResult, Runner, SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { runSetup, runSuite } from "../src/setup";
+import { typecheckGaps } from "../src/setupview";
 import { describeTypecheck, markNew, parseTsc } from "../src/typecheck";
 import { FakeJson, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
@@ -466,4 +467,36 @@ test("a web UI app whose tests run is no lost cause: a type check that cannot ru
   expect(said(1)).toContain("the type check (typecheck) failed without reporting");
   expect(said(1)).not.toContain("web UI");
   expect(said(2)).toContain("the suite of ui runs");
+});
+
+describe("python type checks", () => {
+  const pyFile = () => parseReviewFile(`version: 1
+projects:
+  api:
+    root: .
+    language: python
+    image: python:3.12-slim
+    test_command: python -m pytest -q {targets}
+uncovered: []
+`);
+  const reader = (r: string) => (rel: string) => { try { return readFileSync(join(r, rel), "utf8"); } catch { return ""; } };
+
+  test("a Python project whose CI runs a type checker says types are not checked", () => {
+    const r = initRepo(join(tmp(), "py"));
+    mkdirSync(join(r, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(r, ".github", "workflows", "main.yml"), "jobs:\n  t:\n    steps:\n      - run: mypy src\n");
+    commit(r, "ci");
+    expect(ciTypeChecker(r)).toEqual({ tool: "mypy", from: "main.yml" });
+    expect(typecheckGaps(pyFile(), reader(r), r)).toEqual([
+      "api: CI type checks with mypy (main.yml); arnx does not, so types are not checked"]);
+  });
+
+  test("one whose CI runs none says nothing", () => {
+    const r = initRepo(join(tmp(), "py"));
+    mkdirSync(join(r, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(r, ".github", "workflows", "main.yml"), "jobs:\n  t:\n    steps:\n      - run: pytest\n");
+    commit(r, "ci");
+    expect(ciTypeChecker(r)).toBeNull();
+    expect(typecheckGaps(pyFile(), reader(r), r)).toEqual([]);
+  });
 });
