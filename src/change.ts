@@ -790,7 +790,7 @@ export function takeSnapshot(repo: string, head: string | null, dest: string, al
 
 /** The values of the `.env*` files at the top of `repo`, tracked or not, with their rules: they are read for this and
  * copied nowhere, so a value hard-coded from one into tracked code is known for what it is. */
-function rootEnvValues(repo: string, allow: readonly SecretPin[]): Map<string, string> {
+export function rootEnvValues(repo: string, allow: readonly SecretPin[] = []): Map<string, string> {
   const out = new Map<string, string>();
   for (const name of readdirSync(repo)) {
     if (!name.startsWith(".env")) continue;

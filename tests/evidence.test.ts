@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 
 import { dirname, join } from "node:path";
 import { changeMessage } from "../src/change";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
-import { EVIDENCE_LIMIT, gitTree, judgeEvidence, snapshotTree, type TreeReader } from "../src/evidence";
+import { EVIDENCE_LIMIT, evidencePacks, gitTree, judgeEvidence, snapshotTree, type TreeReader } from "../src/evidence";
 import { runReview } from "../src/reviewer";
 import { defaultSettings } from "../src/settings";
 import { AWS_KEY, PRIVATE_KEY_BLOCK } from "./helpers/fakekeys";
@@ -279,4 +279,143 @@ test("a review saves each second opinion's input with its evidence, masked, in s
     expect(saved).not.toContain(v);
     expect(round).not.toContain(v);
   }
+});
+
+// ---- names a plain search misses or takes for another
+
+/** A repository with `files` committed, then `edit` made to one of them: the diff of that edit. */
+function edited(root: string, files: Record<string, string>, [path, from, to]: [string, string, string]): { repo: string; diff: string } {
+  const repo = initRepo(root);
+  put(repo, files);
+  commit(repo, "first");
+  writeFileSync(join(repo, path), files[path]!.replace(from, to));
+  return { repo, diff: runGit(repo, "diff") };
+}
+const packOf = (repo: string, diff: string, testSource: string, func: string, testFile = GEN, writeDir = WRITE_DIR) =>
+  judgeEvidence({ tree: snapshotTree(repo), diff, testSource, testFile, func, commitMessage: "", writeDir });
+
+test("a change inside __init__ takes the class as its target", () => {
+  const { repo, diff } = edited(join(tmp(), "repo"), {
+    "app/shapes.py": "class Box:\n    def __init__(self, x):\n        self.x = x\n",
+    "app/use.py": "from app.shapes import Box\ndef make():\n    return Box(1)\n" },
+  ["app/shapes.py", "self.x = x", "self.x = x or 0"]);
+  const pack = packOf(repo, diff, "from app.shapes import Box\n\ndef test_box():\n    assert Box(None).x is None\n", "test_box");
+  expect(pack).toContain("`Box` (class, app/shapes.py:1)");
+  expect(pack).toContain("app/use.py:3 in `make`");
+});
+
+test("a TypeScript method whose signature runs over lines is a definition", () => {
+  const { repo, diff } = edited(join(tmp(), "repo"), {
+    "src/store.ts": "export class Store {\n  async serializeState(\n    state: string,\n  ): Promise<string> {\n" +
+      "    return state;\n  }\n\n  close() {\n    return 1;\n  }\n}\n",
+    "src/use.ts": "import { Store } from './store';\nexport async function save(store: Store) {\n" +
+      "  return await store.serializeState('a');\n}\n" },
+  ["src/store.ts", "return state;", "return state.trim();"]);
+  const src = "import { Store } from '../../src/store';\nit('keeps spaces', async () => {\n" +
+    "  expect(await new Store().serializeState(' a')).toBe(' a');\n  new Store().close();\n});\n";
+  const pack = packOf(repo, diff, src, "keeps spaces", "src/__tests__/arnx_generated/s.test.ts", "src/__tests__/arnx_generated");
+  expect(pack).toContain("`serializeState` (function, src/store.ts:2)");
+  expect(pack).toContain("src/use.ts:3 in `save`");
+  expect(pack).not.toContain("`close`");
+});
+
+test("a Rust crate's own tests are project tests, and its test module calls nothing", () => {
+  const { repo, diff } = edited(join(tmp(), "repo"), {
+    "src/lib.rs": "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n" +
+      "    #[test]\n    fn t() {\n        assert_eq!(add(1, 2), 3);\n    }\n}\n",
+    "tests/integration.rs": "use mycrate::add;\n#[test]\nfn it() {\n    assert_eq!(add(2, 2), 4);\n}\n",
+    "tests/arnx_generated_x.rs": "use mycrate::add;\n#[test]\nfn x() {\n    assert_eq!(add(1, 1), 2);\n}\n" },
+  ["src/lib.rs", "    a + b\n", "    a - b\n"]);
+  const pack = packOf(repo, diff, "use mycrate::add;\n#[test]\nfn x() {\n    assert_eq!(add(1, 1), 2);\n}\n", "x",
+    "tests/arnx_generated_x.rs", "tests");
+  expect(pack).toContain("tests/integration.rs:4");
+  expect(pack).toContain("src/lib.rs:10");
+  expect(pack).toMatch(/`add` \(src\/lib\.rs:1\): no caller found/);
+  expect(pack).not.toContain("arnx_generated_x");
+});
+
+test("code reached by a decorator, an export, a string or an entry point is said to be reached, not left without a caller", () => {
+  const { repo, diff } = edited(join(tmp(), "repo"), {
+    "app/api.py": "@app.get('/items')\ndef list_items(q):\n    return q\n\n\ndef do_export(x):\n    return x\n\n\n" +
+      "def handle_list(x):\n    return x\n",
+    "app/cli.py": "import app.api as api\ndef run(cmd):\n    return getattr(api, 'do_' + cmd)(1)\n",
+    "app/registry.py": "HANDLERS = {\"list\": \"handle_list\"}\n",
+    "pyproject.toml": "[project.scripts]\nexp = 'app.api:do_export'\n",
+    "web/route.ts": "export async function GET(req: Request) {\n  return new Response('a');\n}\n" },
+  ["app/api.py", "return q\n", "return q[:1]\n"]);
+  const touch = (path: string, from: string, to: string) => {
+    writeFileSync(join(repo, path), readFileSync(join(repo, path), "utf8").replace(from, to));
+  };
+  touch("app/api.py", "return x\n\n\ndef handle", "return x or 0\n\n\ndef handle");
+  touch("app/api.py", "def handle_list(x):\n    return x\n", "def handle_list(x):\n    return x or 1\n");
+  touch("web/route.ts", "'a'", "'b'");
+  const all = runGit(repo, "diff");
+  expect(all.length).toBeGreaterThan(diff.length);
+  const pack = packOf(repo, all, "from app.api import list_items, do_export, handle_list\n\ndef test_l():\n" +
+    "    assert list_items([1, 2]) == [1, 2]\n    assert do_export(0) == 0\n    assert handle_list(0) == 0\n", "test_l");
+  expect(pack).toContain("reached by its decorator `@app.get('/items')`");
+  expect(pack).toContain("pyproject.toml:2");
+  expect(pack).toContain("getattr");
+  expect(pack).toContain("app/registry.py:1");
+  expect(pack).not.toContain("no caller found");
+  const ts = packOf(repo, all, "import { GET } from '../../web/route';\nit('gets', async () => {\n" +
+    "  expect(await GET(new Request('http://x'))).toBeTruthy();\n});\n", "gets", "web/__tests__/arnx_generated/r.test.ts",
+  "web/__tests__/arnx_generated");
+  expect(ts).toContain("`GET` (function, web/route.ts:1, exported)");
+  expect(ts).toMatch(/`GET` \(web\/route\.ts:1\): no caller by name; exported/);
+  expect(ts).not.toContain("no caller found");
+});
+
+test("a method's callers through its class come first, and one of another class of the same name is marked", () => {
+  const { repo, diff } = edited(join(tmp(), "repo"), {
+    "app/a.py": "class A:\n    def save(self, x):\n        return x\n",
+    "app/b.py": "class B:\n    def save(self, x):\n        return 0\ndef keep(b):\n    return b.save(1)\n",
+    "app/use.py": "from app.a import A\ndef go():\n    return A().save(2)\n" },
+  ["app/a.py", "return x\n", "return x + 1\n"]);
+  const pack = packOf(repo, diff, "from app.a import A\n\ndef test_s():\n    assert A().save(1) == 1\n", "test_s");
+  const callers = pack.split("## Callers\n")[1]!.split("\n## ")[0]!;
+  expect(callers).toContain("app/use.py:3 in `go`");
+  expect(callers).toMatch(/app\/b\.py:5 in `keep` \(same name, may be another\)/);
+  expect(callers.indexOf("app/use.py:3")).toBeLessThan(callers.indexOf("app/b.py:5"));
+  expect(callers).not.toMatch(/app\/use\.py:3[^\n]*may be another/);
+});
+
+// ---- bounds
+
+test("a long line above a caller costs linear time", () => {
+  for (const size of [96_000, 390_000]) {
+    const { repo, diff } = changed(join(tmp(), `repo${size}`), {
+      // At the margin, so the search for the caller's function reads it; quadratic for a backtracking pattern.
+      "app/odd.py": `def f(y):\na${"):a".repeat(size / 3)}\n    return total(y)\n`,
+      "app/odd2.py": `x = '${"total(\\' ".repeat(size / 10)}'\n`,
+      "docs/odd.md": "```\n" + "`total` price_of(x) ".repeat(size / 20) + "\n```\n",
+    });
+    const t0 = performance.now();
+    const pack = judgeEvidence({ tree: snapshotTree(repo), diff, testSource: GEN_TOTAL, testFile: GEN, func: "test_negative",
+      commitMessage: "", writeDir: WRITE_DIR });
+    expect(pack).toContain("app/odd.py:3");
+    expect(performance.now() - t0).toBeLessThan(1500);
+  }
+});
+
+test("a round's packs share one time bound", () => {
+  const { repo, diff } = changed(join(tmp(), "repo"));
+  const base = { tree: snapshotTree(repo), diff, testFile: GEN, commitMessage: "", writeDir: WRITE_DIR };
+  const items = Array.from({ length: 5 }, (_, i) => ({ testSource: GEN_TOTAL, func: `test_negative${i}` }));
+  const packs = evidencePacks(base, items, { ms: 0 });
+  expect(packs).toHaveLength(5);
+  for (const p of packs) expect(p).toContain("stopped");
+  expect(judgeEvidence({ ...base, testSource: GEN_TOTAL, func: "test_negative", deadline: performance.now() - 1 }))
+    .toContain("stopped");
+});
+
+test("a caller that is itself only exported says so, not that nothing calls it", () => {
+  const { repo, diff } = edited(join(tmp(), "repo"), {
+    "web/fmt.ts": "export function fmt(x: number) {\n  return String(x);\n}\n",
+    "web/page.ts": "import { fmt } from './fmt';\nexport default function Page() {\n  return fmt(1);\n}\n" },
+  ["web/fmt.ts", "String(x)", "x.toFixed(2)"]);
+  const pack = packOf(repo, diff, "import { fmt } from '../../web/fmt';\nit('formats', () => {\n  expect(fmt(1)).toBe('1');\n});\n",
+    "formats", "web/__tests__/arnx_generated/f.test.ts", "web/__tests__/arnx_generated");
+  expect(pack).toContain("web/page.ts:3 in `Page`");
+  expect(pack).toContain("`Page`: no caller by name; exported");
 });

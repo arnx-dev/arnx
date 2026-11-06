@@ -2,7 +2,7 @@
 // files stay out of what the brain is sent (tool results, facts, the change, setup's tree and detection) unless the
 // owner opts in; and the fix proof runs in Docker here, so a cloud review proves a fix exactly as a local one does.
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CloudClient, writeCredentials } from "../src/cloud";
 import { Boundary } from "../src/boundary";
@@ -163,4 +163,13 @@ test("a cloud review proves a fix in Docker here, the same as the local brain", 
   expect(cloud.review.fixProof).toEqual(local.review.fixProof!);
   expect(cloudSnaps.length).toBe(localSnaps.length);
   expect(cloudSnaps.filter((s) => s.endsWith("/before"))).toHaveLength(1);
+});
+
+test("a cloud review builds no evidence pack and saves no second-opinion input", async () => {
+  const repo = untrackedRepo();
+  const { rdir } = await runReview(repo, { settings: SETTINGS, brain: brainFor(cloudOf(ROUND)),
+    sessionFactory: fakeFactory(runs) });
+  const round = JSON.parse(readFileSync(join(rdir, "round.json"), "utf8")) as { round: { evidence?: unknown } };
+  expect(round.round.evidence).toBeUndefined();
+  expect(existsSync(join(rdir, "second-opinion-input.jsonl"))).toBe(false);
 });

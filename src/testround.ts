@@ -31,7 +31,7 @@ import { describeTypecheck, runTypecheck, type TscError, type TypeCheck, type Ty
 import { databaseEnv, dbUntested, untestedFiles } from "./untested";
 import { clearReach, countable, type Reach, readReach, reachedSince } from "./reached";
 import { projectSource, shallowKind } from "./shallow";
-import { judgeEvidence, snapshotTree } from "./evidence";
+import { evidencePacks, snapshotTree } from "./evidence";
 import { parseReports } from "./report";
 
 export const TOOL_TIMEOUT = 300;
@@ -570,7 +570,9 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         ...(o.brain.boundary ? { boundary: o.brain.boundary } : {}) }));
     }
     // While the snapshot is here: what the second opinion is told about each failing test's code.
-    if (o.evidence) evidence = roundEvidence(snap, results, files, hunt, agent, o.writeDir, o.evidence, before, say);
+    if (o.evidence) {
+      evidence = roundEvidence(snap, results, files, hunt, agent, o.writeDir, o.evidence, before, o.brain.boundary, say);
+    }
     if (checked) {
       typecheck = await typecheckDone(repo, cfg, checked, { ...o.typecheck!, headSnap: snap, headKey, tmp,
         outDir: o.outDir, sessionFactory: o.sessionFactory ?? dockerSession, say, ...(baked ? {} : { swap }) });
@@ -604,11 +606,11 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   return { ...masked.value, ...(masked.shown ? { standInsShown: true } : {}), ...(hunt ? { hunt } : {}) };
 }
 
-/** The evidence pack of each test that failed in every run, read from the round's snapshot (evidence.ts). A test the
- * reviewer tied to a suspect gets the suspect's file as its own. */
+/** The evidence pack of each test that failed in every run, read from the round's snapshot (evidence.ts), all under
+ * one time bound. A test the reviewer tied to a suspect gets the suspect's file as its own. */
 function roundEvidence(snap: string, results: (TestResult[] | null)[], files: Record<string, string>,
   hunt: RoundHunt | undefined, agent: AgentResult, writeDir: string, o: { diff: string; message: string },
-  before: BeforeCheck | undefined, say: Say): Record<string, string> | undefined {
+  before: BeforeCheck | undefined, boundary: Boundary | undefined, say: Say): Record<string, string> | undefined {
   const failing = classify(results).findings;
   if (!failing.length) return undefined;
   const report = parseReports([...agent.earlierTexts ?? [], agent.finalText]);
@@ -618,23 +620,22 @@ function roundEvidence(snap: string, results: (TestResult[] | null)[], files: Re
     const { test, suspect } = t as Record<string, unknown>;
     if (typeof test === "string" && typeof suspect === "string") suspectOf.set(funcOfId(test), suspect.trim());
   }
-  const tree = snapshotTree(snap);
   const t0 = performance.now();
-  const out: Record<string, string> = {};
-  for (const t of failing) {
+  const items = failing.map((t) => {
     const file = ownerFile(t.fileAttr, Object.keys(files));
     const source = file ? files[file] ?? "" : "";
     const func = funcOf(t);
     const suspect = hunt?.suspects?.find((s) => s.id === suspectOf.get(func))?.file;
     const was = before?.tests[t.testId];
     const shallow = shallowKind(source || undefined, func);
-    out[t.testId] = judgeEvidence({ tree, diff: o.diff, testSource: source, func, commitMessage: o.message, writeDir,
-      ...(file ? { testFile: file } : {}), ...(suspect ? { suspectFile: suspect } : {}), ...(was ? { before: was } : {}),
-      ...(shallow ? { shallow } : {}) });
-  }
+    return { testSource: source, func, ...(file ? { testFile: file } : {}), ...(suspect ? { suspectFile: suspect } : {}),
+      ...(was ? { before: was } : {}), ...(shallow ? { shallow } : {}) };
+  });
+  const packs = evidencePacks({ tree: snapshotTree(snap), diff: o.diff, commitMessage: o.message, writeDir,
+    generated: Object.keys(files), ...(boundary ? { boundary } : {}) }, items);
   const secs = (performance.now() - t0) / 1000;
   if (secs >= 5) say(`evidence for the second opinion took ${Math.round(secs)}s`);
-  return out;
+  return Object.fromEntries(failing.map((t, i) => [t.testId, packs[i]!]));
 }
 
 const funcOfId = (test: string) => baseName(test.split("::").at(-1) ?? "").trim();

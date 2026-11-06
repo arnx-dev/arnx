@@ -36,7 +36,7 @@ import { dockerSteps, type SessionFactory } from "./sandbox";
 import type { TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
 import { route } from "./route";
-import { isSecretPath } from "./secrets";
+import { isSecretPath, suspects as secretValues } from "./secrets";
 import { cloudModels, modelRefs, refString, type Settings } from "./settings";
 import { collect, dockerSession, ownTestsInWriteDir, ownTestsProblem, type Round, testRound, typecheckRound,
   writeDirOf } from "./testround";
@@ -417,9 +417,9 @@ export async function runReview(repo: string, o: { settings: Settings;
     const sourceSet = new Set<string>();
     const declaredPaths = new Set(routing.declared.map((d) => d.path));
     const diffs: Record<string, string> = {};
-    // Each finding's evidence pack, by project and test id, built in its round; the change's commit message goes in each.
+    // Each finding's evidence pack, by project and test id, built in its round (not for arnx cloud, which builds its own
+    // prompts); the change's commit message goes in each.
     const evidence: Record<string, Record<string, string>> = {};
-    const message = changeMessage(repo, change);
     const suspects: SuspectOutcome[] = [];
     const local = (): LocalBrain => {
       if (!o.agentModel || !o.challenger) throw new Error("runReview: the local brain needs agentModel and challenger");
@@ -434,11 +434,13 @@ export async function runReview(repo: string, o: { settings: Settings;
     // Nothing has left yet: the filter knows the diff before the first request, and the tree before each round's. A
     // resumed review may have no round left to tell it, and it still judges.
     const boundary = brain.boundary;
+    const message = brain.label ? "" : changeMessage(repo, change);
     if (boundary) {
       log.filter = boundary;
       const pins = secretPinsOf(file.raw);
       boundary.addDiff(change.diff, pins);
       boundary.add(configSuspects(repo));
+      boundary.add(secretValues("", message, []));
       if (resumed) {
         boundary.add(treeSuspects(repo, change.head, pins, { untracked: !!change.withUntracked,
           sandbox: sandboxOnlyOf(file.raw) }));
@@ -535,7 +537,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       const reusedCost = !prior ? 0 : (prior.second?.costUsd ?? 0) + prior.extras.reduce((a, u) => a + u.costUsd, 0);
       const opts = { brain, budgetUsd: Math.max(0, projectBudget - (cutUse?.costUsd ?? 0) - reusedCost), writeDir, runs: s.runs, outDir,
         sessionFactory: o.sessionFactory ?? dockerSession, progress: o.progress, coverage: scope.owned,
-        untracked: !!change.withUntracked, recordEnvFailure: true, evidence: { diff, message },
+        untracked: !!change.withUntracked, recordEnvFailure: true, ...(brain.label ? {} : { evidence: { diff, message } }),
         // The code before the change: its base (HEAD for uncommitted work); a first commit has none, nor has a
         // repository with no commits yet. Without one, or for a change to tests or docs only, there is no fix proof.
         ...(s.beforeCheck ? { before: { base: change.base === EMPTY_TREE ? null : change.base, diff: change.diff,
@@ -791,7 +793,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     const j = await brain.judge(challenged, questions, diffs, { diff: change.diff, sources,
       suspectFile: (f) => suspects.find((x) => x.id === f.suspect && x.project === f.project)?.file,
       evidence: (f) => evidence[f.project]?.[f.testId],
-      sent: (f, input) => {
+      sent: brain.label ? undefined : (f, input) => {
         const line = { finding: f.id, project: f.project, test_id: f.testId, ...input };
         mkdirSync(rdir, { recursive: true });
         appendFileSync(inputs, JSON.stringify(boundary ? boundary.maskValue(line) : line) + "\n");
