@@ -13,9 +13,9 @@ import { exitCode, load, render, summary } from "../src/report";
 import { runReview } from "../src/reviewer";
 import { OutOfTime, type RunResult, type Runner, type SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
-import { runSetup, runSuite } from "../src/setup";
+import { runSetup, runSuite, typecheckNote } from "../src/setup";
 import { pythonTypeGap, typecheckGaps } from "../src/setupview";
-import { describeTypecheck, markNew, parseTsc } from "../src/typecheck";
+import { describeTypecheck, markNew, parseTsc, QUICK_TYPECHECK_TIMEOUT, TYPECHECK_TIMEOUT } from "../src/typecheck";
 import { FakeJson, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
@@ -362,6 +362,19 @@ ${typecheck ? `    typecheck: ${typecheck}\n` : ""}uncovered: []
       { sessionFactory: sandbox() });
     expect(slow).toBe(true);
     expect(why).toContain("timed out");
+  });
+
+  test("a quick setup's type check gets QUICK_TYPECHECK_TIMEOUT, a full one TYPECHECK_TIMEOUT", async () => {
+    const cfg = parseReviewFile(web(TSC)).projects[0]!;
+    const seen: number[] = [];
+    const runner = { run: (_c: string, t: number): RunResult => {
+      seen.push(t);
+      return { exitCode: 0, output: "", timedOut: false, seconds: 0 };
+    } };
+    await typecheckNote(runner, cfg, true);
+    await typecheckNote(runner, cfg, false);
+    expect(seen).toEqual([QUICK_TYPECHECK_TIMEOUT, TYPECHECK_TIMEOUT]);
+    expect(QUICK_TYPECHECK_TIMEOUT).toBe(180);
   });
 
   test("try_project tells the agent to add typecheck to a TypeScript project that can be type checked", async () => {

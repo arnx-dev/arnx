@@ -8,7 +8,7 @@ import { parseNextestList, rust } from "../src/adapters/rust";
 import { typescript } from "../src/adapters/typescript";
 import { parseReviewFile } from "../src/config";
 import { listTests, probeText, sampleOf } from "../src/precheck";
-import type { RunResult, Runner, SessionFactory } from "../src/sandbox";
+import { OUTPUT_LIMIT, type RunResult, type Runner, type SessionFactory, spawned } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { runSetup } from "../src/setup";
 import { ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -308,4 +308,16 @@ test("files that all fail to load are named, not called no tests", async () => {
 test("a runner that is not installed says so", async () => {
   const { model } = await setup(answers({ exit: 127, output: "sh: 1: python: not found" }), 1);
   expect(result(model, 1)).toContain("is not installed");
+});
+
+test("a listing whose last chunk crosses twice the output limit is cut, and not read", async () => {
+  // 2.05 x the limit in many chunks: the trim to exactly OUTPUT_LIMIT happens on the last one.
+  const total = 2 * OUTPUT_LIMIT + 10_000;
+  const r = await spawned("node", ["-e", `process.stdout.write("x".repeat(${total}))`], 60_000, () => {});
+  expect(r.stdout.length).toBe(OUTPUT_LIMIT);
+  expect(r.trimmed).toBe(true);
+  const small = await spawned("node", ["-e", `process.stdout.write("x".repeat(${OUTPUT_LIMIT}))`], 60_000, () => {});
+  expect(small.trimmed).toBe(false);
+  const cut = { exitCode: 0, output: r.stdout, timedOut: false, seconds: 0, truncated: r.trimmed };
+  expect(await listTests({ run: () => cut }, tmp(), parseReviewFile(YAML).projects[0]!, [])).toBeNull();
 });

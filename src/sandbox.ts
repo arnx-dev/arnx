@@ -116,8 +116,8 @@ export interface RunResult { exitCode: number | null; output: string; timedOut: 
   /** The output was longer than OUTPUT_LIMIT: only its end is here. */
   truncated?: boolean }
 /** The end of `text` that fits OUTPUT_LIMIT, and whether anything was cut. */
-const kept = (text: string): { output: string; truncated?: true } =>
-  text.length > OUTPUT_LIMIT ? { output: text.slice(-OUTPUT_LIMIT), truncated: true } : { output: text };
+const kept = (text: string, trimmed = false): { output: string; truncated?: true } =>
+  text.length > OUTPUT_LIMIT || trimmed ? { output: text.slice(-OUTPUT_LIMIT), truncated: true } : { output: text };
 export interface Runner {
   /** Sessions answer later, and a run then does not hold the process; only a test's fake answers at once. */
   run(command: string, timeout: number): RunResult | Promise<RunResult>;
@@ -822,11 +822,11 @@ export class Session implements Runner {
         // Still listed meanwhile: a signal now removes the container this kill may not reach.
         await onTimeout();
         if (this.closed) return await this.closedAnswer();
-        const cut = kept(r.stdout);
+        const cut = kept(r.stdout, r.trimmed);
         return { exitCode: null, output: cut.output + "\n[timed out]", timedOut: true, seconds,
           ...(cut.truncated ? { truncated: true } : {}) };
       }
-      return { exitCode: r.status, ...kept(r.stdout + r.stderr), timedOut: false, seconds };
+      return { exitCode: r.status, ...kept(r.stdout + r.stderr, r.trimmed), timedOut: false, seconds };
     } finally {
       this.running.delete(entry!);
     }
@@ -854,14 +854,19 @@ const EXITED_GRACE = 1000;
  *
  * After the process was blocked (another project's step), a timer fires before what happened meanwhile is seen. So the
  * limit is judged one turn later: a command that had exited by then is not timed out, and its output has been read. */
-function spawned(bin: string, args: string[], ms: number, started: (stop: () => void) => void)
-  : Promise<{ status: number | null; stdout: string; stderr: string; timedOut: boolean; stopped: boolean; notFound: boolean }> {
+export function spawned(bin: string, args: string[], ms: number, started: (stop: () => void) => void)
+  : Promise<{ status: number | null; stdout: string; stderr: string; timedOut: boolean; stopped: boolean; notFound: boolean;
+    trimmed: boolean }> {
   return new Promise((resolve) => {
     const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "", status: number | null = null, exited = false, cut = false, timedOut = false,
-      stopped = false, notFound = false, done = false;
+      stopped = false, notFound = false, done = false, trimmed = false;
     let grace: ReturnType<typeof setTimeout> | undefined;
-    const tail = (s: string) => (s.length > 2 * OUTPUT_LIMIT ? s.slice(-OUTPUT_LIMIT) : s);
+    const tail = (s: string) => {
+      if (s.length <= 2 * OUTPUT_LIMIT) return s;
+      trimmed = true;
+      return s.slice(-OUTPUT_LIMIT);
+    };
     child.stdout.setEncoding("utf8").on("data", (t: string) => { stdout = tail(stdout + t); });
     child.stderr.setEncoding("utf8").on("data", (t: string) => { stderr = tail(stderr + t); });
     const finish = () => {
@@ -869,7 +874,7 @@ function spawned(bin: string, args: string[], ms: number, started: (stop: () => 
       done = true;
       clearTimeout(timer);
       clearTimeout(grace);
-      resolve({ status, stdout, stderr, timedOut, stopped, notFound });
+      resolve({ status, stdout, stderr, timedOut, stopped, notFound, trimmed });
     };
     const kill = () => {
       cut = true;
