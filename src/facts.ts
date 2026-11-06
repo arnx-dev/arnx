@@ -80,11 +80,14 @@ export function manyServices(f: ProjectFacts): string[] | null {
   return f.root !== "." && f.services.length >= MANY_SERVICES ? f.services.map((s) => s.value) : null;
 }
 
+/** What every manyServicesReason says, whatever the services. */
+export const MANY_SERVICES_SAID = "setup does not start three or more services";
+
 /** Why such a project is under uncovered: "needs postgres, redis and minio; setup does not start three or more
  * services: set it up by hand, or with fewer". */
 export function manyServicesReason(names: string[]): string {
   const all = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names.join("");
-  return `needs ${all}; setup does not start three or more services: set it up by hand, or with fewer`;
+  return `needs ${all}; ${MANY_SERVICES_SAID}: set it up by hand, or with fewer`;
 }
 
 type Raw = Record<string, unknown>;

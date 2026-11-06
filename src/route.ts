@@ -6,9 +6,13 @@
 // entries, whose changed files are all owned by projects reviewed in this run, would review the same files a second
 // time: it gets its type check alone (`checkOnly`), no agent round. When any of those files has no owner under review
 // (no project owns it, or its owner is over max_projects), it is routed as before, so no changed file leaves the review.
+import { posix } from "node:path";
+import { BROWSER_TESTS, WEB_UI } from "./browser";
 import type { ReviewConfig, ReviewFile } from "./config";
+import { MANY_SERVICES_SAID } from "./facts";
 import { matcher } from "./ignore";
-import { sourceLanguageOf } from "./languages";
+import { otherLanguageOf, sourceLanguageOf } from "./languages";
+import { SOURCE } from "./untested";
 
 export interface Routed { project: ReviewConfig; owned: string[]; used: string[] }
 /** A project reached only through entries that hold other projects, its changed files reviewed by their owners. */
@@ -97,3 +101,49 @@ export function route(file: ReviewFile, changed: string[], maxProjects: number):
   };
 }
 
+
+
+/** Reasons arnx states itself for a group of source files no project owns or uses. */
+export const NO_TESTS = "no tests";
+export const SCRIPTS = "scripts";
+
+/** Whether an entry under uncovered is left out for a reason of arnx's own that a review's setup cannot change: browser
+ * tests, a web UI app, scripts, no tests, a project needing many services, a language arnx does not review. */
+export function keptOut(reason: string): boolean {
+  const r = reason.trim().toLowerCase();
+  return r.startsWith(BROWSER_TESTS) || r.startsWith(WEB_UI.toLowerCase()) || r === SCRIPTS || r === NO_TESTS ||
+    reason.includes(MANY_SERVICES_SAID) || /arnx does not review it yet$/.test(reason);
+}
+
+/** What a review sets up before it runs: the changed source files no project covers (`files`), and the parts they are
+ * in (`parts`: their entry under uncovered, or the folder of a file no entry lists). Left out: files in a language arnx
+ * does not review, entries kept out for arnx's own reason (keptOut; a "no tests" entry that holds tests counts),
+ * and parts a review's setup already failed on (`failed`). */
+export function setupParts(file: ReviewFile, changed: string[], failed: Set<string>,
+                           hasTests: (path: string) => boolean): { files: string[]; parts: string[] } {
+  const entries = file.uncovered.map((u) => ({ ...u, test: matcher(u.path) }));
+  const files: string[] = [];
+  const parts: string[] = [];
+  for (const u of route(file, changed.filter((f) => SOURCE.test(f)), Number.MAX_SAFE_INTEGER).uncovered) {
+    if (otherLanguageOf(u.path)) continue;
+    const entry = entries.find((e) => e.test(u.path));
+    if (entry && keptOut(entry.reason) && !(entry.reason.trim().toLowerCase() === NO_TESTS && hasTests(entry.path))) {
+      continue;
+    }
+    const dir = posix.dirname(u.path);
+    const part = entry?.path ?? (dir === "." ? `/${u.path}` : `/${dir}/`);
+    if (failed.has(part)) continue;
+    files.push(u.path);
+    if (!parts.includes(part)) parts.push(part);
+  }
+  return { files, parts };
+}
+
+/** Why a review of `changed` cannot run: no project covers any of it (each file with the reason it is uncovered).
+ * Null when a project reviews it. */
+export function uncoveredChange(file: ReviewFile, changed: string[], maxProjects: number): string | null {
+  const routing = route(file, changed, maxProjects);
+  if (routing.routed.length) return null;
+  const paths = routing.uncovered.map((u) => `${u.path} (${u.reason})`).join(", ");
+  return `no project covers this change: ${paths}. Run \`arnx setup --add\` to cover these paths`;
+}

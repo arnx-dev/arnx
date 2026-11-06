@@ -9,8 +9,12 @@ Commit `.arnx/config.toml` and `.arnx/review.yaml`: the next branch, a teammate'
 environment without running setup again.
 
 The first `arnx review` sets up only the projects the change touches, in a few minutes (it stops at 10), with a
-quick look as their proof: the test listing, arnx's one-line test and a few small test files. A later change in
-another project sets that one up then. `arnx setup` sets up the whole repository and runs every suite.
+quick look as their proof: the test listing, arnx's one-line test and a few small test files (a runner with no list
+form runs a few small test files all the same). A later change in another project, or in one setup left out (not set
+up yet, out of time, a file no project lists), sets that one up then, before any suite runs; one that fails is left
+to `arnx setup --add`. A first run that failed leaves its attempt in `.arnx/review.yaml`: the next review sets up
+from it, keeping its fixes, and after a second failure leaves it to `arnx setup`. A change no project covers is
+refused before anything runs. `arnx setup` sets up the whole repository and runs every suite.
 
 Lost? `arnx next` says where the repository is in this flow and the command to run now. `arnx doctor` says what is
 missing (keys, Docker, configuration); setup and review run the same checks first.
@@ -64,7 +68,8 @@ fresh clone, it says there is no copy to compare), stamp or not; a file whose st
 that copy's (a stamp recomputed by hand) counts as changed too. With `--json`, the command's object says so in
 `reproved`. Then the suites run and the file is stamped again, followed by what
 is worth a look; the changes go into `.arnx/setup/approval.md` too. When a suite fails there, the command stops and
-names the failing tests (exit 3). `arnx approve` runs the same proof on its own, saying the same.
+names the failing tests (exit 3). The suites get 10 minutes there: past that the command stops (exit 3) and names
+`arnx approve`, which runs the same proof on its own, without a limit, saying the same.
 
 ### The baseline
 

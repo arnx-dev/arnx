@@ -36,7 +36,7 @@ import { type AgentReport, type Checked, type Finding, type FixProof, hasReport,
 import { dockerSteps, type SessionFactory } from "./sandbox";
 import type { TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
-import { route } from "./route";
+import { route, uncoveredChange } from "./route";
 import { isSecretPath } from "./secrets";
 import { commitMessageValues } from "./evidence";
 import { cloudModels, modelRefs, refString, type Settings } from "./settings";
@@ -331,11 +331,9 @@ export async function runReview(repo: string, o: { settings: Settings;
   // Elsewhere (a fresh clone, CI) check trusts the committed pins: an edit of accepted tests shows only here.
   const acceptedEdited = changeEditsAccepted(repo, change);
   if (acceptedEdited.length) o.progress?.(`this change edits accepted tests: ${someNames(acceptedEdited, 5)}`);
+  const uncovered = uncoveredChange(file, change.files, s.maxProjects);
+  if (uncovered) throw new SetupRequired(uncovered);
   const routing = route(file, change.files, s.maxProjects);
-  if (!routing.routed.length) {
-    const paths = routing.uncovered.map((u) => `${u.path} (${u.reason})`).join(", ");
-    throw new SetupRequired(`no project covers this change: ${paths}. Run \`arnx setup --add\` to cover these paths`);
-  }
   // A round clears the writable files in tests_dir: one holding the project's own tests would drop them unseen.
   const tree = filesAt(repo, change.head, !!change.withUntracked);
   const crowded = routing.routed.flatMap(({ project: cfg }) => {

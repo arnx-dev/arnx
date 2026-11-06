@@ -23,7 +23,7 @@ import { configSuspects,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
 import { draftYaml, NOT_SET_UP, quickDraft, sourceFirst } from "./draft";
-import { route, usesBlocked } from "./route";
+import { NO_TESTS, route, SCRIPTS, usesBlocked } from "./route";
 import { MANY_SERVICES, manyServices, manyServicesReason } from "./facts";
 import { A_FAKED_FILE, classify, describeHints, diagnose, firstErrors, firstLine, type Hint, markUnproven, missingLeftOut, npxDownload, npxText,
   loadFailure, passingApart, unexplainedFiles } from "./diagnose";
@@ -308,7 +308,9 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     let listed = "";
     let listedFiles: string[] = [];
     if (precheck && !targets.length && (cfg.language === "rust" || hasOwnTests(cfg, snap))) {
-      const seen = await look(session, snap, cfg, acceptedTestsDir, baseline);
+      // A quick look whose runner has no list form takes a few small test files from the project's own.
+      const seen = await look(session, snap, cfg, acceptedTestsDir, baseline,
+        quick ? { files: () => testFilesUnder(cfg, snap, acceptedTestsDir) } : {});
       const early = seen.early;
       if (seen.placement) {
         const w = seen.placement;
@@ -319,7 +321,8 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
       if (quick && seen.sample) {
         sample = seen.sample;
         listedFiles = seen.listed;
-        listed = `quick look: ${plural(seen.tests, "test")} listed, ${plural(sample.files.length, "small file")} ran: `;
+        listed = `quick look: ${seen.found ? `${plural(seen.files, "test file")} found`
+          : `${plural(seen.tests, "test")} listed`}, ${plural(sample.files.length, "small file")} ran: `;
       }
     }
     // A whole-suite run carries a canary: one-line tests where arnx keeps accepted tests (.arnx/tests/), which the
@@ -703,9 +706,8 @@ export function coverageFiles(repo: string, untracked = false): { files: string[
 /** Source files outside every project, by folder, with the reason arnx lists them under uncovered with. */
 export interface SourceGroup { path: string; reason: string; files: number }
 
-/** Reasons arnx states itself for a group of source files no project owns or uses. */
-export const NO_TESTS = "no tests";
-export const SCRIPTS = "scripts";
+// Reasons arnx states itself for a group of source files no project owns or uses (defined beside routing).
+export { NO_TESTS, SCRIPTS };
 const SCRIPT_DIRS = new Set(["scripts", "script", "bin", "tools", "tool", "hack", "ci", ".github", ".husky", "devtools"]);
 
 /** Whether tests belong to `path` among `files`: a folder ("/dir/") holds a test file; a file is one, or sits in a
@@ -716,6 +718,12 @@ export function holdsTests(path: string, files: string[]): boolean {
   if (isTestPath(rel)) return true;
   const dir = posix.dirname(rel);
   return files.some((f) => isTestPath(f) && posix.dirname(f) === dir);
+}
+
+/** Whether an entry under uncovered holds tests among `files`: holdsTests, or a test file its pattern matches. */
+export function entryHoldsTests(path: string, files: string[]): boolean {
+  const under = matcher(path);
+  return holdsTests(path, files) || files.some((f) => isTestPath(f) && under(f));
 }
 
 /** `yaml` with the agent's own "no tests" entries under uncovered corrected the same way: a path that holds test
@@ -729,8 +737,7 @@ export function honestReasons(yaml: string, files: string[]): string {
     if (!isYamlMap(item)) continue;
     const [path, reason] = [item.get("path"), item.get("reason")];
     if (typeof path !== "string" || typeof reason !== "string" || reason.trim().toLowerCase() !== NO_TESTS) continue;
-    const under = matcher(path);
-    if (holdsTests(path, files) || files.some((f) => isTestPath(f) && under(f))) {
+    if (entryHoldsTests(path, files)) {
       item.set("reason", NOT_SET_UP);
       changed = true;
     }
@@ -1214,8 +1221,8 @@ type SetupOptions = { outDir: string; sessionFactory?: SessionFactory; project?:
   /** A quick setup, for a first review: only the projects that own one of these changed files are set up (the
    * others wait under uncovered, NOT_SET_UP), each proven by a quick look (runSuite `quick`). The draft is proposed
    * as it is first, with no model; only when it does not go through is the agent asked. With `add`, the projects
-   * join review.yaml as it is. */
-  quick?: { files: string[] } };
+   * join review.yaml as it is. `attempt`: setup's last unproven attempt, whose projects the draft starts from. */
+  quick?: { files: string[]; attempt?: string } };
 
 /** The allowed files of a review.yaml no setup has approved yet (a seed, or a failed setup's last attempt); none when
  * it does not read as YAML: secret-looking files then stay out. */
@@ -1977,7 +1984,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     let draft = o.project || o.add ? "" : draftYaml(detection);
     let drafted: AgentResult | null = null;
     if (o.quick) {
-      const q = quickDraft(detection, o.quick.files, current);
+      const q = quickDraft(detection, o.quick.files, current, o.quick.attempt);
       if (!q) {
         state.problem = "no project arnx can set up owns a file this change touches";
         emit("setup.completed", { ok: false, stop: NOTHING_TO_TEST, cost_usd: 0, attempts: 0, projects: [],

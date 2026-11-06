@@ -124,6 +124,8 @@ export interface Look { early: Early | null; tests: number; files: number;
   placement?: Placement;
   /** The test files the runner listed (relative to the project root). */
   listed: string[];
+  /** The runner listed nothing (it has no list form): `listed` holds the project's own test files, found by name. */
+  found?: true;
   sample: { files: string[]; run: RunResult; results: TestResult[] } | null }
 
 /** A place for arnx's tests the runner was seen to collect: tests_dir, and test_files when the files are named another
@@ -134,26 +136,37 @@ export interface Placement { testsDir: string; testFiles?: string }
  * in a proof, the tests recorded as failing today: a file recorded as not loading stays recorded, and nobody tries
  * again, so nothing says it. */
 export async function look(session: Runner, snap: string, cfg: ReviewConfig, acceptedTestsDir?: string,
-                           baseline: BaselineTest[] | "record" = "record"): Promise<Look> {
+                           baseline: BaselineTest[] | "record" = "record",
+                           { files }: { files?: () => string[] } = {}): Promise<Look> {
   const proof = baseline === "record" ? null : baseline;
   const again = proof ? "" : AGAIN;
   const known = (file: string) => !!proof && (proof.some((t) => t.load && t.file === file) ||
     cfg.knownFailing.some((k) => file.startsWith(k)));
   const none: Look = { early: null, tests: 0, files: 0, listed: [], sample: null };
   const listed = await listTests(session, snap, cfg, []);
-  if (!listed) return none;
-  const { listing, result } = listed;
-  const counts = { tests: listing.tests ?? listing.files.length, files: listing.files.length, listed: listing.files };
-  const why = listingProblem(listing, result.exitCode, known);
-  if (why) return { ...none, ...counts, early: { summary: why + again, output: result.output, hints: "", kind: "listing" } };
-  if (!listing.files.length) return { ...none, ...counts };
-  const probe = await probeListed(session, snap, cfg);
-  if (probe && !probe.seen) {
-    const placement = await placementFrom(session, snap, cfg, listing);
-    if (placement) return { ...none, ...counts, placement };
-    return { ...none, ...counts, early: { summary: probeText(cfg) + again, output: probe.output, hints: "", kind: "listing" } };
+  let counts: { tests: number; files: number; listed: string[]; found?: true };
+  let sample: string[];
+  if (listed) {
+    const { listing, result } = listed;
+    counts = { tests: listing.tests ?? listing.files.length, files: listing.files.length, listed: listing.files };
+    const why = listingProblem(listing, result.exitCode, known);
+    if (why) return { ...none, ...counts, early: { summary: why + again, output: result.output, hints: "", kind: "listing" } };
+    if (!listing.files.length) return { ...none, ...counts };
+    const probe = await probeListed(session, snap, cfg);
+    if (probe && !probe.seen) {
+      const placement = await placementFrom(session, snap, cfg, listing);
+      if (placement) return { ...none, ...counts, placement };
+      return { ...none, ...counts, early: { summary: probeText(cfg) + again, output: probe.output, hints: "", kind: "listing" } };
+    }
+    sample = sampleOf(listing, cfg, snap, acceptedTestsDir);
+  } else {
+    // No list form (or no listing to trust): with `files` (the project's test files, relative to the repository), a
+    // few small ones of them run all the same.
+    if (!files) return none;
+    const own = files().map((f) => posix.relative(cfg.workdir, f));
+    counts = { tests: 0, files: own.length, listed: own, found: true };
+    sample = sampleOf({ tests: null, files: own, broken: [], failed: false }, cfg, snap, acceptedTestsDir);
   }
-  const sample = sampleOf(listing, cfg, snap, acceptedTestsDir);
   if (!sample.length) return { ...none, ...counts };
   const [run, results] = await runTests(session, snap, cfg, sample, "sample.xml", SAMPLE_TIMEOUT);
   const stop = sampleProblem(sample, run, results);

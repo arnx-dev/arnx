@@ -6,6 +6,7 @@ import { posix } from "node:path";
 import { Document, isMap, isScalar, isSeq, type Node, parseDocument } from "yaml";
 import type { Candidate, Detection } from "./detect";
 import { manyServices, manyServicesReason, type ProjectFacts, type ServiceFact } from "./facts";
+import { keptOut } from "./route";
 import { SOURCE } from "./untested";
 
 type Raw = Record<string, unknown>;
@@ -155,13 +156,16 @@ export const sourceFirst = (changed: string[]): string[] => {
 /** A quick setup's draft, for a first review: the drafted projects that own one of the `changed` files, the other
  * drafted projects listed under uncovered as NOT_SET_UP (a root project left out is not listed: setup's coverage map
  * lists its files). With `existing` (review.yaml as it is), its projects stay as they are, each chosen project joins
- * them (a project whose root it already has is not drafted again), and the NOT_SET_UP entry of each chosen project
- * goes. A project joining a file that has one with the same language and install root takes that one's image, install
- * and deps_dir, said in a comment (its test_command is the draft's own). Projects come most changed
- * source files first. Null when no drafted project owns a changed file. */
-export function quickDraft(d: Detection, changed: string[], existing = ""): { yaml: string; names: string[] } | null {
+ * them (a project whose root it already has is not drafted again), and the entries under uncovered in each chosen
+ * project go, unless arnx keeps them out for its own reason (keptOut). A project joining a file that has one with the
+ * same language and install root takes that one's image, install and deps_dir, said in a comment (its test_command is
+ * the draft's own). With `attempt` (setup's last unproven attempt), its projects stand in for the drafted ones
+ * (fromAttempt). Projects come most changed source files first. Null when no drafted project owns a changed file. */
+export function quickDraft(d: Detection, changed: string[], existing = "", attempt = "")
+  : { yaml: string; names: string[] } | null {
   const draft = draftReview(d);
   if (!draft) return null;
+  if (attempt) fromAttempt(draft, attempt);
   const projects = (draft.doc.projects ?? {}) as Raw;
   const have = existing ? parseRoots(existing) : new Set<string>();
   for (const [name, p] of Object.entries(projects)) if (have.has(String((p as Raw).root))) delete projects[name];
@@ -223,16 +227,49 @@ export function quickDraft(d: Detection, changed: string[], existing = ""): { ya
     const had = ((doc.toJS() as { allow_env_names?: string[] } | null)?.allow_env_names ?? []);
     doc.set("allow_env_names", doc.createNode([...new Set([...had, ...allow])].sort()));
   }
-  const roots = new Set(chosen.map((n) => `/${String((projects[n] as Raw).root)}/`));
+  // A chosen project's entries under uncovered go (not set up yet, out of time, any reason a setup can answer); those
+  // for arnx's own reasons (browser tests, scripts) stay.
+  const roots = chosen.map((n) => String((projects[n] as Raw).root)).filter((r) => r !== ".").map((r) => `/${r}/`);
   const unc = doc.get("uncovered");
   if (isSeq(unc)) {
     unc.items = unc.items.filter((it) => {
       const u = isMap(it) ? it.toJSON() as Raw : null;
-      return !(u && u.reason === NOT_SET_UP && roots.has(String(u.path)));
+      return !(u && roots.some((r) => String(u.path).startsWith(r)) && !keptOut(String(u.reason)));
     });
     if (!unc.items.length) doc.delete("uncovered");
   }
   return { yaml: doc.toString({ lineWidth: 0 }), names };
+}
+
+/** A first setup's last attempt (review.yaml as setup left it, never proven) in place of the draft: each of its
+ * projects replaces the drafted one with its root (or joins), with the services it uses and its allowed env names, so
+ * what the attempt fixed (an install line, an image) is kept and its cached image layers serve again. */
+function fromAttempt(draft: { doc: Raw; marks: Mark[] }, attempt: string): void {
+  const plain = (v: unknown): v is Raw => typeof v === "object" && v !== null && !Array.isArray(v);
+  const doc = parseDocument(attempt);
+  if (doc.errors.length) return;
+  const tried = doc.toJS() as { projects?: unknown; services?: unknown; allow_env_names?: unknown } | null;
+  if (!plain(tried?.projects)) return;
+  const projects = (draft.doc.projects ??= {}) as Raw;
+  const services = plain(tried.services) ? tried.services : {};
+  for (const [name, p] of Object.entries(tried.projects)) {
+    if (!plain(p)) continue;
+    const root = String(p.root ?? ".");
+    const gone = Object.keys(projects).filter((n) => n === name || String((projects[n] as Raw).root) === root);
+    for (const n of gone) delete projects[n];
+    draft.marks = draft.marks.filter((m) => !(m.path[0] === "projects" && gone.includes(String(m.path[1]))));
+    projects[name] = { ...p };
+    for (const svc of Array.isArray(p.services) ? p.services : []) {
+      if (typeof svc === "string" && plain(services[svc])) {
+        draft.doc.services = { ...(draft.doc.services as Raw | undefined), [svc]: services[svc] };
+      }
+    }
+  }
+  if (Array.isArray(tried.allow_env_names)) {
+    const had = (draft.doc.allow_env_names ?? []) as string[];
+    const names = tried.allow_env_names.filter((x): x is string => typeof x === "string");
+    draft.doc.allow_env_names = [...new Set([...had, ...names])].sort();
+  }
 }
 
 /** Where a project's install runs: its install_root, or its own root. */

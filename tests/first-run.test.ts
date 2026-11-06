@@ -410,3 +410,46 @@ ${uncovered}`);
   expect(quickCoverageLine(f, ["svc/app.py", "README.md"])).toBeNull();
   expect(quickCoverageLine(f, ["README.md"])).toBeNull();
 });
+
+test("a runner with no list form still runs a few small files", async () => {
+  const { runSuite } = await import("../src/setup");
+  const r = gitRepo(tmp());
+  const specs = ["a", "b", "c", "d", "e"].map((n) => `web/tests/${n}.test.ts`);
+  mkdirSync(join(r, "web", "tests"), { recursive: true });
+  writeFileSync(join(r, "web", "package.json"), JSON.stringify({ name: "web", scripts: { test: "vitest" },
+    devDependencies: { vitest: "3.0.0" } }));
+  writeFileSync(join(r, "web", "a.ts"), "export const a = 1;\n");
+  specs.forEach((f, i) => writeFileSync(join(r, f), "import { test } from \"vitest\";\ntest(\"x\", () => {});\n" +
+    "// padding\n".repeat(i * 10)));
+  commit(r, "web");
+  // `vitest --run`, not `vitest run`: the runner's list form (`vitest list`) cannot be made from it.
+  const cfg = parseReviewFile("version: 1\nprojects:\n  web:\n    root: web\n    language: typescript\n" +
+    "    runner: vitest\n    image: node:22\n    install: [npm ci]\n    test_command: npx vitest --run {targets}\n")
+    .projects[0]!;
+  const snap = join(tmp(), "snap");
+  cpSync(r, snap, { recursive: true });
+  const commands: string[] = [];
+  const session = async <T>(_c: unknown, s: string, _l: string, body: (x: Runner) => Promise<T>) => body({
+    run(command: string): RunResult {
+      commands.push(command);
+      // arnx's one-line test, or the files named, or the whole suite.
+      const probe = /\S*arnx-probe\.test\.ts/.exec(command)?.[0];
+      const named = specs.filter((f) => command.includes(f.slice("web/".length)));
+      const ran = probe ? [`web/${probe}`] : named.length ? named : specs;
+      const m = /--outputFile=\/src\/(\S+)/.exec(command);
+      if (m) {
+        mkdirSync(dirname(join(s, m[1]!)), { recursive: true });
+        writeFileSync(join(s, m[1]!), passed(ran));
+      }
+      return { exitCode: 0, output: `${ran.length} passed`, timedOut: false, seconds: 0.1 };
+    } });
+  const [ok, summary] = await runSuite(cfg, snap, join(tmp(), "log"), { precheck: true, quick: true,
+    sessionFactory: session as SessionFactory });
+  expect(ok).toBe(true);
+  expect(summary).toStartWith("quick look: 5 test files found, 3 small files ran: 3 passed");
+  // The smallest three ran, then arnx's one-line test; the whole suite never did.
+  expect(commands).toHaveLength(2);
+  expect(commands[0]).toContain("tests/a.test.ts tests/b.test.ts tests/c.test.ts");
+  expect(commands[1]).toContain("arnx-probe");
+  expect(commands.some((c) => specs.slice(3).some((f) => c.includes(f.slice("web/".length))))).toBe(false);
+});
