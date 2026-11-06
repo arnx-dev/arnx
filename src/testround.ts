@@ -23,7 +23,7 @@ import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { EnvFailed } from "./errors";
 import { markUnproven } from "./diagnose";
 import { clip, emit, testMessage } from "./events";
-import { baseName, type Classified, classify, describeRun, funcOf, ownerFile, runBounded, runTests, type TestResult } from "./outcomes";
+import { baseName, type Classified, classify, describeRun, funcOf, ownerFile, runBounded, runTests, serialFlag, type TestResult } from "./outcomes";
 import { buildContextOf, DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
   type SessionFactory } from "./sandbox";
 import type { Say } from "./progress";
@@ -331,7 +331,8 @@ export function suffixReviewCopies(repo: string): number {
 
 /** Runs the adapter's one-line probe tests placed in `dir` (relative to the repository), then removes them. `seen`:
  * one was reported passing. Setup proves tests_dir with it; a round first proves the environment runs a test at all. */
-export async function probeRun(session: Runner, snap: string, cfg: ReviewConfig, dir: string, report: string, timeout: number)
+export async function probeRun(session: Runner, snap: string, cfg: ReviewConfig, dir: string, report: string, timeout: number,
+                               o: { serial?: boolean } = {})
   : Promise<{ seen: boolean; result: RunResult; results: TestResult[] | null; files: string[] }> {
   const files = adapterFor(cfg).probes(cfg.runner).map((p) => ({ ...p, rel: posix.join(dir, p.file) }));
   try {
@@ -340,7 +341,7 @@ export async function probeRun(session: Runner, snap: string, cfg: ReviewConfig,
       writeFileSync(join(snap, p.rel), p.source);
     }
     const [result, results] = await runTests(session, snap, cfg, files.map((p) => posix.relative(cfg.workdir, p.rel)),
-      report, timeout);
+      report, timeout, o);
     const seen = (results ?? []).some((t) => t.outcome === "passed" &&
       ownerFile(t.fileAttr, files.map((p) => p.rel)) !== null);
     return { seen, result, results, files: files.map((p) => p.rel) };
@@ -395,6 +396,8 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   // Once a round's files have run apart, every later run goes file by file; a file that did not finish alone is not
   // run again.
   let apart = false;
+  // Whether this session's runs ask the runner for one process (decided at the probe).
+  let serial = false;
   const hungLimits: Record<string, number> = {}, notRunSet = new Set<string>();
   let fixProof: FixCheck | undefined;
   let baked = false;
@@ -442,7 +445,15 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
       .map((rel) => [rel, readFileSync(join(snap, rel), "utf8")]));
     const body = async (session: Runner) => {
         say("checking that the environment runs a test");
-        const probe = await probeRun(session, snap, cfg, o.writeDir, "probe.xml", RUN_TIMEOUT);
+        // The runs of a few generated files use one process when the project configured workers; a runner that does not
+        // report the probe with that flag runs as configured, for the whole session.
+        serial = serialFlag(cfg, snap) !== null;
+        let probe = await probeRun(session, snap, cfg, o.writeDir, "probe.xml", RUN_TIMEOUT, { serial });
+        if (!probe.seen && serial && !probe.result.timedOut) {
+          serial = false;
+          say("the runner refused the single-process flag; running as configured");
+          probe = await probeRun(session, snap, cfg, o.writeDir, "probe.xml", RUN_TIMEOUT);
+        }
         if (!probe.seen) {
           const log = join(o.outDir, "probe.log");
           const said = { ...probe.result, output: filter ? filter.mask(probe.result.output) : probe.result.output };
@@ -463,7 +474,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const run = async (targets: string[]) => {
           const rel = expand(targets);
           if (!rel.length) return `no test files under ${o.writeDir}/ yet`;
-          const [result, results] = await runTests(session, snap, cfg, rel, `agent-${++counter}.xml`, TOOL_TIMEOUT);
+          const [result, results] = await runTests(session, snap, cfg, rel, `agent-${++counter}.xml`, TOOL_TIMEOUT, { serial });
           const own = generated();
           if (results?.some((t) => ownerFile(t.fileAttr, own) !== null)) saw = true;
           return describeRun(result, results, own);
@@ -523,7 +534,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
           say(failing ? `final run ${i + 1}/${o.runs} (${files.length} file${files.length === 1 ? "" : "s"} to run again)`
             : `final run ${i + 1}/${o.runs}`);
           const bounded = await runBounded(session, snap, cfg, files.length ? files : target, `final-${i + 1}.xml`,
-            { ...RUN_BOUNDS, apart, hung: hungLimits });
+            { ...RUN_BOUNDS, apart, hung: hungLimits, serial });
           const [run, parsed] = [bounded.run, bounded.results];
           apart = bounded.apart;
           Object.assign(hungLimits, bounded.hung);
@@ -599,7 +610,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
       .sort((a, b) => (a.testId < b.testId ? -1 : a.testId > b.testId ? 1 : 0)).slice(0, o.before.fixProofMax) : [];
     if (o.before && (failing.length || proofs.length)) {
       ({ before, fixProof } = await beforeStage(repo, cfg, { ...o.before, findings: failing, proofs, passed: [...(classes?.passed ?? [])].map((x) => x.testId), files,
-        writeDir: o.writeDir, runs: o.runs, apart, headSnap: snap, headKey, tmp, outDir: o.outDir, fallback: env?.state === "fallback",
+        writeDir: o.writeDir, runs: o.runs, apart, serial, headSnap: snap, headKey, tmp, outDir: o.outDir, fallback: env?.state === "fallback",
         sessionFactory: o.sessionFactory ?? dockerSession, say, ...(baked ? {} : { swap }),
         ...(o.brain.boundary ? { boundary: o.brain.boundary } : {}) }));
     }
@@ -788,7 +799,7 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
 async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | null; diff?: string; deadline?: number;
   findings: TestResult[]; proofs: TestResult[]; passed: string[]; files: Record<string, string>; writeDir: string; runs: number;
   headSnap: string; headKey: string; tmp: string; fallback?: boolean;
-  apart?: boolean; outDir: string; sessionFactory: SessionFactory; say: (m: string) => void; boundary?: Boundary; swap?: Swap })
+  apart?: boolean; serial?: boolean; outDir: string; sessionFactory: SessionFactory; say: (m: string) => void; boundary?: Boundary; swap?: Swap })
   : Promise<{ before?: BeforeCheck; fixProof?: FixCheck }> {
   const started = performance.now();
   const ms = (from: number) => Math.round(performance.now() - from);
@@ -882,7 +893,7 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
         }
         const t = performance.now();
         const bounded = await runBounded(session, snap, cfg, targets, `before-${i}.xml`,
-          { ...RUN_BOUNDS, apart: apartNow, hung: hungBefore });
+          { ...RUN_BOUNDS, apart: apartNow, hung: hungBefore, serial: o.serial });
         const [run, parsed] = [bounded.run, bounded.results];
         apartNow = bounded.apart;
         Object.assign(hungBefore, bounded.hung);
@@ -901,7 +912,7 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
         }
         const t = performance.now();
         const bounded = await runBounded(session, snap, cfg, proofTargets, `fix-proof-${i}.xml`,
-          { ...RUN_BOUNDS, apart: apartNow, hung: hungProof });
+          { ...RUN_BOUNDS, apart: apartNow, hung: hungProof, serial: o.serial });
         const [run, parsed] = [bounded.run, bounded.results];
         apartNow = bounded.apart;
         Object.assign(hungProof, bounded.hung);

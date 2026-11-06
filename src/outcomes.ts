@@ -106,17 +106,33 @@ export function describeRun(result: RunResult, results: TestResult[] | null, fil
 }
 const order = (o: string) => ["passed", "failed", "error", "skipped"].indexOf(o);
 
+/** The flag that keeps a run of a few generated files in one process (pytest `-n0`, jest `--runInBand`), when the
+ * project configures parallel workers and has not opted out with `parallel: keep`; else null. */
+export function serialFlag(cfg: ReviewConfig, snap: string): string | null {
+  if (cfg.keepParallel) return null;
+  const read = (rel: string) => {
+    try {
+      return readFileSync(join(snap, cfg.workdir, rel), "utf8");
+    } catch {
+      return null;
+    }
+  };
+  return adapterFor(cfg).serialFlag?.(cfg.testCommand, read, cfg.runner) ?? null;
+}
+
 /** Run the targets with the configured command; null results when the run timed out or wrote no readable report.
- * A report left by an earlier run never counts. */
+ * A report left by an earlier run never counts. `o.serial`: the one-process flag goes last, so it wins over the
+ * project's own setting; default off, so setup's suite and `check` run as the project configured them. */
 export async function runTests(session: Runner, snap: string, cfg: ReviewConfig, targets: string[], reportName: string,
-                               timeout: number): Promise<[RunResult, TestResult[] | null]> {
+                               timeout: number, o: { serial?: boolean } = {}): Promise<[RunResult, TestResult[] | null]> {
   const adapter = adapterFor(cfg);
   const report = join(snap, REPORT_DIR, reportName);
   rmSync(report, { force: true });
   mkdirSync(dirname(report), { recursive: true }); // pytest creates it; node:test and others do not
   adapter.reportSetup?.(snap, cfg.runner);
-  const result = await session.run(adapter.command(cfg.testCommand, targets, `/src/${REPORT_DIR}/${reportName}`, cfg.runner),
-    timeout);
+  const flag = o.serial ? serialFlag(cfg, snap) : null;
+  const command = adapter.command(cfg.testCommand, targets, `/src/${REPORT_DIR}/${reportName}`, cfg.runner);
+  const result = await session.run(flag ? `${command} ${flag}` : command, timeout);
   if (result.timedOut) return [result, null];
   const file = existsSync(report) ? report : reportElsewhere(adapter.reportSaid?.(result.output, cfg.runner), snap);
   if (!file || !existsSync(file)) return [result, null];
@@ -141,6 +157,8 @@ export interface Bounds {
   together: number;
   file: number;
   total: number;
+  /** Run each in one process (outcomes.ts serialFlag). */
+  serial?: boolean;
   /** Set when an earlier repeat already ran the files apart: they go file by file from the start. */
   apart?: boolean;
   /** Files that did not finish alone in an earlier repeat, with the seconds they had: not run again, each still one error. */
@@ -172,7 +190,7 @@ export async function runBounded(session: Runner, snap: string, cfg: ReviewConfi
   const live = targets.filter((t) => !(t in prior));
   const carried = targets.filter((t) => t in prior);
   if (!bounds.apart && !carried.length) {
-    const [run, results] = await runTests(session, snap, cfg, targets, report, bounds.together);
+    const [run, results] = await runTests(session, snap, cfg, targets, report, bounds.together, { serial: bounds.serial });
     if (!run.timedOut) return { results, run, hung: {}, notRun: [], apart: false };
     if (targets.length === 1) {
       return { results: [hungError(targets[0]!, bounds.together)], run: { ...run, timedOut: false },
@@ -201,7 +219,8 @@ async function apartRuns(session: Runner, snap: string, cfg: ReviewConfig, targe
       continue;
     }
     const limit = Math.min(bounds.file, left);
-    const [run, parsed] = await runTests(session, snap, cfg, [target], report.replace(/\.xml$/, `-${k + 1}.xml`), limit);
+    const [run, parsed] = await runTests(session, snap, cfg, [target], report.replace(/\.xml$/, `-${k + 1}.xml`), limit,
+      { serial: bounds.serial });
     used += run.timedOut ? limit : run.seconds;
     seconds += run.seconds;
     out.push(`== ${target} ==\n${run.output}`);

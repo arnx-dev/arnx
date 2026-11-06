@@ -40,7 +40,10 @@ function cli(facts: Facts[], log: Logged[]): RoundTools {
   };
 }
 
-const input = (over: Record<string, unknown> = {}) => ({ cfg: CFG, diff: "diff --git a/a.py b/a.py\n", scoped: false,
+/** A change that adds 20 code lines to b.py: enough for the coverage follow-up to ask about it. */
+const BIG_B = "diff --git a/a.py b/a.py\n" + "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -0,0 +1,20 @@\n" +
+  Array.from({ length: 20 }, (_, i) => `+value_${i} = compute(${i})\n`).join("");
+const input = (over: Record<string, unknown> = {}) => ({ cfg: CFG, diff: BIG_B, scoped: false,
   scope: { owned: ["a.py", "b.py"], used: [] }, envTests: [], maxQuestions: 3, dbNames: [], budgetUsd: 5,
   outDir: tmp(), ...over });
 

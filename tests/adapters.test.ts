@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { getAdapter, LANGUAGES } from "../src/adapters";
-import { digest, parseReviewConfig } from "../src/config";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { digest, parseReviewConfig, parseReviewFile } from "../src/config";
 import { GOOD } from "./helpers/yaml";
 
 test("the four languages are known; python is the one implemented", () => {
@@ -98,4 +101,70 @@ test("accept rewrites TypeScript paths built from the test's own folder, as it d
     'import { a } from "../../../../../tests/src/a";\nconst s = path.join(__dirname, "../../../../../schema.sql");\n' +
     'const f = path.resolve(__dirname, "../../../../../tests/arnx_generated/fixtures/x.json");\n' +
     'const u = new URL("../../../../../tests/data.json", import.meta.url);\n');
+});
+
+// A run of a few generated files must not start a worker per CPU: the runner's own setting for it is turned off for
+// arnx's runs, and only when the project set one.
+const reads = (files: Record<string, string>) => (rel: string) => files[rel] ?? null;
+const serialOf = (command: string, files: Record<string, string> = {}, runner = "pytest") =>
+  (getAdapter(runner === "jest" || runner === "vitest" ? "typescript" : "python")).serialFlag?.(command, reads(files), runner);
+
+test("a parallel setting in the project's config is turned off for arnx's runs", async () => {
+  const cmd = "python -m pytest {targets}";
+  expect(serialOf("python -m pytest -n 4 {targets}")).toBe("-n0");
+  expect(serialOf("python -m pytest -nauto {targets}")).toBe("-n0");
+  expect(serialOf("python -m pytest --numprocesses=auto {targets}")).toBe("-n0");
+  expect(serialOf(cmd, { "setup.cfg": "[tool:pytest]\naddopts = -ra -n auto\n" })).toBe("-n0");
+  expect(serialOf(cmd, { "pytest.ini": "[pytest]\naddopts =\n    --strict-markers\n    -n logical\n" })).toBe("-n0");
+  expect(serialOf(cmd, { "tox.ini": "[pytest]\naddopts = --numprocesses 4\n" })).toBe("-n0");
+  expect(serialOf(cmd, { "pyproject.toml": '[tool.pytest.ini_options]\naddopts = ["-ra", "-n", "auto"]\n' })).toBe("-n0");
+  expect(serialOf(cmd, { "pyproject.toml": '[tool.pytest.ini_options]\naddopts = [\n  "-ra",\n  "-n=2",\n]\n' })).toBe("-n0");
+  expect(serialOf("npx jest {targets}", {}, "jest")).toBe("--runInBand");
+  // The flag goes last, so it wins over the project's own.
+  const { runTests } = await import("../src/outcomes");
+  const seen: string[] = [];
+  const session = { run: (c: string) => { seen.push(c); return { exitCode: 0, output: "", timedOut: false, seconds: 0 }; } };
+  const dir = mkdtempSync(join(tmpdir(), "arnx-serial-"));
+  const cfg = parseReviewConfig(GOOD.replace("-q {targets}", "-n 4 {targets}"));
+  await runTests(session, dir, cfg, ["tests/x.py"], "r.xml", 10, { serial: true });
+  await runTests(session, dir, cfg, ["tests/x.py"], "r.xml", 10);
+  expect(seen[0]!.endsWith(" -n0")).toBe(true);
+  expect(seen[1]).not.toContain("-n0"); // setup's suite and check keep the project's setting
+});
+
+test("no flag when none is configured", async () => {
+  const cmd = "python -m pytest {targets}";
+  expect(serialOf(cmd)).toBeNull();
+  expect(serialOf("python -m pytest -q --no-header -m 'not slow' tests/some-n4 {targets}")).toBeNull();
+  expect(serialOf(cmd, { "setup.cfg": "[tool:pytest]\naddopts = -ra --no-cov\n[flake8]\nmax-line-length = 100\n" })).toBeNull();
+  expect(serialOf(cmd, { "pyproject.toml": '[tool.pytest.ini_options]\naddopts = ["-ra"]\n[tool.x]\nname = "-n"\n' })).toBeNull();
+  expect(serialOf("npx vitest run {targets}", {}, "vitest")).toBeNull();
+  const { runTests } = await import("../src/outcomes");
+  const seen: string[] = [];
+  const session = { run: (c: string) => { seen.push(c); return { exitCode: 0, output: "", timedOut: false, seconds: 0 }; } };
+  const dir = mkdtempSync(join(tmpdir(), "arnx-serial-"));
+  await runTests(session, dir, parseReviewConfig(GOOD), ["tests/x.py"], "r.xml", 10, { serial: true });
+  expect(seen[0]).not.toContain("-n0");
+});
+
+test("`parallel: keep` leaves it", async () => {
+  expect(parseReviewConfig(GOOD).keepParallel).toBeUndefined();
+  const keep = parseReviewConfig(GOOD.replace("-q {targets}", "-n 4 {targets}") + "parallel: keep\n");
+  expect(keep.keepParallel).toBe(true);
+  expect(keep.raw.parallel).toBe("keep");
+  expect("parallel" in parseReviewConfig(GOOD).raw).toBe(false);
+  expect(() => parseReviewConfig(GOOD + "parallel: off\n")).toThrow(/parallel/);
+  const { runTests } = await import("../src/outcomes");
+  const seen: string[] = [];
+  const session = { run: (c: string) => { seen.push(c); return { exitCode: 0, output: "", timedOut: false, seconds: 0 }; } };
+  const dir = mkdtempSync(join(tmpdir(), "arnx-serial-"));
+  await runTests(session, dir, keep, ["tests/x.py"], "r.xml", 10, { serial: true });
+  expect(seen[0]).not.toContain("-n0");
+  // Per project in a file of several.
+  const many = parseReviewFile(`version: 1
+projects:
+  a: {root: a, image: i, test_command: "pytest -n 2 {targets}", parallel: keep}
+  b: {root: b, image: i, test_command: "pytest -n 2 {targets}"}
+`);
+  expect(many.projects.map((p) => p.keepParallel)).toEqual([true, undefined]);
 });

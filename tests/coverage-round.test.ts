@@ -4,6 +4,10 @@ import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runAgent, Workspace } from "../src/agent";
+import { getAdapter } from "../src/adapters";
+import type { Facts, RoundTools } from "../src/brain";
+import { LocalBrain } from "../src/localbrain";
+import { filesToAsk } from "../src/untested";
 import { parseReviewConfig, parseReviewFile, reviewConfigPath, stamp } from "../src/config";
 import { snapshot } from "../src/change";
 import { PRICES } from "../src/llm";
@@ -13,7 +17,7 @@ import { ModelError } from "../src/errors";
 import type { Reply } from "../src/llm";
 import { envTests, runReview } from "../src/reviewer";
 import { defaultSettings } from "../src/settings";
-import { FakeJson, fakeFactory, ScriptedAgent, text } from "./helpers/fakes";
+import { FakeJson, fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo, runGit } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
@@ -142,4 +146,66 @@ test("a failure before the first report is not a follow-up cut short", async () 
   const report = await run('{"tests": [{"test": "a::b"}]}');
   expect([report.stop, report.finalText]).toEqual(["end_turn", '{"tests": [{"test": "a::b"}]}']);
   expect(report.cut).toContain("529");
+});
+
+// The coverage nudge is limited, not removed: few lines, test-named and generated files are not asked about; at most
+// three files; nothing past half the round's budget; and the follow-up has a spend limit of its own.
+const PY = getAdapter("python");
+/** A diff section adding `n` code lines to `path`. */
+const added = (path: string, n: number, line = (i: number) => `value_${i} = compute(${i})`) =>
+  `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -0,0 +1,${n} @@\n` +
+  Array.from({ length: n }, (_, i) => `+${line(i)}\n`).join("");
+const ASK = { minLines: 20, max: 3 };
+
+test("a file with few added lines gets no follow-up", () => {
+  const diff = added("small.py", 19) + added("big.py", 20);
+  expect(filesToAsk(["small.py", "big.py"], diff, PY, ASK)).toEqual(["big.py"]);
+  // Blank lines, comments and imports are not counted.
+  const padded = added("padded.py", 30, (i) => (i % 3 === 0 ? "" : i % 3 === 1 ? "# a note" : "import os"));
+  expect(filesToAsk(["padded.py"], padded, PY, ASK)).toEqual([]);
+  expect(filesToAsk(["gone.py"], "", PY, ASK)).toEqual([]);
+});
+
+test("at most three files, largest first", () => {
+  const diff = added("a.py", 25) + added("b.py", 60) + added("c.py", 40) + added("d.py", 30) + added("e.py", 21);
+  expect(filesToAsk(["a.py", "b.py", "c.py", "d.py", "e.py"], diff, PY, ASK)).toEqual(["b.py", "c.py", "d.py"]);
+});
+
+test("test-named and generated files are never asked about", () => {
+  const names = ["db_test.py", "FooterSpec.tsx", "WidgetTest.java", "api.generated.ts", "x_pb2.py", "__snapshots__/ui.ts", "real.py"];
+  const diff = names.map((n) => added(n, 50)).join("");
+  expect(filesToAsk(names, diff, PY, ASK)).toEqual(["real.py"]);
+});
+
+const REPORT = JSON.stringify({ tests: [{ test: "tests/arnx_generated/test_a.py::test_a", expects: "x" }],
+  suspected_defects: [], questions: [] });
+const FACTS: Facts = { untestedFiles: ["b.py"], dbUntested: [], generatedFiles: [] };
+const roundTools = (): RoundTools => ({ tools: () => new Workspace(tmp(), { writeDir: "tests/arnx_generated",
+  runTests: () => "" }).tools(), call: async () => "ok", facts: () => FACTS });
+const reviewInput = (budgetUsd: number) => ({ cfg: parseReviewConfig("version: 1\nimage: i\ntest_command: pytest {targets}\n"),
+  diff: added("b.py", 40), scoped: false, scope: { owned: ["b.py"], used: [] }, envTests: [], maxQuestions: 3,
+  dbNames: [], budgetUsd, outDir: tmp() });
+
+test("no follow-up past half the round's budget", async () => {
+  // One reply costs $0.004: of a $0.006 budget that is past half.
+  const spent = new ScriptedAgent([[text(REPORT)], [text(REPORT)]]);
+  await new LocalBrain({ agentModel: spent, prices: PRICES }).agentRound("review", reviewInput(0.006),
+    Promise.resolve(roundTools()));
+  expect(spent.calls).toHaveLength(1);
+  // The same round with room left still asks.
+  const room = new ScriptedAgent([[text(REPORT)], [text(REPORT)]]);
+  await new LocalBrain({ agentModel: room, prices: PRICES }).agentRound("review", reviewInput(0.05),
+    Promise.resolve(roundTools()));
+  expect(room.calls).toHaveLength(2);
+});
+
+test("a follow-up stops at its limit and the round keeps its report", async () => {
+  // Each reply costs $0.04; the follow-up may spend $0.10 more than the round had when it began.
+  const usage = { input: 20_000, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const read = () => [tool("read_file", { path: "b.py" })];
+  const model = new ScriptedAgent([[text(REPORT)], read(), read(), read(), read(), read(), [text(REPORT + " ")]], usage);
+  const r = await new LocalBrain({ agentModel: model, prices: PRICES }).agentRound("review", reviewInput(5),
+    Promise.resolve(roundTools()));
+  expect(model.calls).toHaveLength(4); // the report, then replies until $0.14 is reached
+  expect([r.agent.stop, r.agent.finalText, r.agent.cut]).toEqual(["end_turn", REPORT, "budget"]);
 });

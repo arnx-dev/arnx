@@ -186,6 +186,36 @@ export function parsePytestList(output: string, exitCode: number | null): Listin
   return (exitCode === 1 && broken.size) || (exitCode === 0 && files.size) ? listing : null;
 }
 
+/** pytest-xdist's worker count in options: `-n 4`, `-nauto`, `-n=2`, `--numprocesses auto`, `--numprocesses=4`. */
+const WORKERS = /(?<![\w-])(?:-n\s*=?\s*\w+|--numprocesses(?:\s*=\s*|\s+)\w+)/;
+/** pytest's `addopts` in an ini or toml file: the value on the key's line and what continues it (indented lines, or
+ * a toml list up to its `]`), quotes and commas read as spaces. */
+function addopts(text: string): string {
+  const lines = text.split("\n");
+  const at = lines.findIndex((l) => /^\s*addopts\s*[=:]/.test(l));
+  if (at < 0) return "";
+  const out = [lines[at]!.replace(/^\s*addopts\s*[=:]/, "")];
+  const list = out[0]!.includes("[") && !out[0]!.includes("]");
+  for (let i = at + 1; i < lines.length; i++) {
+    const l = lines[i]!;
+    if (list) {
+      out.push(l);
+      if (l.includes("]")) break;
+    } else if (/^\s+\S/.test(l) && !/^\s*[\w.-]+\s*[=:]/.test(l)) out.push(l);
+    else break;
+  }
+  return out.join("\n").replace(/["',[\]]/g, " ");
+}
+/** `-n0` when the project configures xdist workers, else null: with xdist off, nothing is added. */
+function pytestSerial(testCommand: string, read: (rel: string) => string | null): string | null {
+  if (WORKERS.test(testCommand)) return "-n0";
+  for (const file of ["pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml"]) {
+    const text = read(file);
+    if (text !== null && WORKERS.test(addopts(text))) return "-n0";
+  }
+  return null;
+}
+
 /** arnx's sitecustomize.py, in a folder of its own in the report folder, first on PYTHONPATH for test runs (see
  * reached.ts). Not a pytest plugin, on purpose: a plugin that fails to import stops the run, while a sitecustomize
  * that is not found only leaves no notes. It runs the project's own sitecustomize after it. */
@@ -300,6 +330,7 @@ export const python: Adapter = {
       ? [] : ["test_command: must run pytest and contain {targets}"],
   runs: () => /\bpytest\b/,
   reportSaid: (output) => [...output.matchAll(/generated xml file: (\S+)/g)].at(-1)?.[1] ?? null,
+  serialFlag: pytestSerial,
   // The project's PYTHONPATH (review.yaml's env, or the image's) stays, after the hook's folder.
   command: (testCommand, targets, reportPath) =>
     `export PYTHONPATH=${shQuote(posix.join(posix.dirname(reportPath), HOOK_DIR))}\${PYTHONPATH:+:\$PYTHONPATH}; ` +

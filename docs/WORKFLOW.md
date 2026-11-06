@@ -46,6 +46,8 @@ runs`). Reviews then run only the tests arnx writes. A `test_command` that delet
 
 arnx adds the runner's report options after `{targets}`, so `test_command` must call the runner itself with `{targets}` (`cd app && npx vitest run {targets}`); one wrapped in `sh -c '...'` or that hands `{targets}` to another command is refused before anything runs. A TypeScript project that installs outside `/src` (the code is mounted there and hides what install wrote) sets `deps_dir` (such as `/opt/deps`): before every run arnx links each `node_modules` under it into the same place under the install root. A project whose runner collects only some folders or file names (jest `roots` and `testRegex`, vitest `include`) gets `tests_dir` and, for TypeScript, `test_files` (such as `*Spec.tsx`) from setup, so arnx writes its tests where and how the runner collects them.
 
+A run of a few generated test files uses one process: where the project configures pytest-xdist workers (`-n` or `--numprocesses` in `test_command` or in `addopts` of `pytest.ini`, `tox.ini`, `setup.cfg` or `pyproject.toml`) arnx adds `-n0`, and for jest `--runInBand`, last, so it wins. Setup's suite run and `arnx check` keep the project's own setting. A runner that refuses the flag is run as configured. `parallel: keep` on a project (or at the top of a single-project file) leaves its parallel setting alone.
+
 Before it starts, setup says what it will do and gives a rough time and cost estimate. It stops at `setup_usd`
 (default $3.00) or `setup_minutes` (default 40, the proof included) under `[budget]` in `.arnx/config.toml`. Out of
 time with some projects proven, it keeps those (setup's own runs are their proof) and lists the others under

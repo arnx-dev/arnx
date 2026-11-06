@@ -142,7 +142,8 @@ test("the same question from two projects is asked once, and both findings wait 
 
 test("each project sees only its part of the change, and files no test names are listed, not called complete",
   async () => {
-    writeFileSync(join(repo, "services/pay/pay.py"), "X = 2\n");
+    // Enough added lines for the coverage follow-up to ask about it.
+    writeFileSync(join(repo, "services/pay/pay.py"), Array.from({ length: 25 }, (_, n) => `V${n} = ${n}\n`).join(""));
     writeFileSync(join(repo, "services/feed/feed.py"), "X = 3\n");
     const agent = new ScriptedAgent([
       [tool("write_file", { path: `services/feed/${GEN}`, content: "import feed\ndef test_ok(): pass\n" })],

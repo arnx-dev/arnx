@@ -4,6 +4,7 @@
 // hunter, the part hunters, the ranking) and judges findings (questions merged, second opinions, grouping).
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
+import { adapterFor } from "./adapters";
 import { runAgent, type ToolCall, ToolError } from "./agent";
 import { Boundary, boundaryOf, maskedAgent, maskedJson } from "./boundary";
 import type { AnswerInput, Billed, Brain, Facts, HuntRecord, Judged, JudgeOptions, ReviewInput, RoundHunt,
@@ -20,6 +21,7 @@ import { JUDGE_PROMPT, type JudgeVariant } from "./judgeprompt";
 import { standInsText } from "./standins";
 import { type Finding, parseReport, parseReports, questionTexts } from "./report";
 import type { Prices } from "./settings";
+import { filesToAsk } from "./untested";
 
 /** How long the tests wait for the second hunter after the reviewer's own hunt has replied. */
 export const SECOND_HUNT_WAIT_MS = 90_000;
@@ -37,6 +39,11 @@ function within<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
 const shown = (x: Suspect) => ({ file: clip(x.file, 500), line: x.line, claim: clip(x.claim, 500), by: x.by });
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const text = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v));
+/** The coverage follow-up: files with at least `minLines` added code lines, at most `max` of them, while the round
+ * has spent at most this share of its budget, and for at most this many dollars. */
+const NUDGE_FILES = { minLines: 20, max: 3 };
+const NUDGE_SHARE = 0.5;
+const NUDGE_USD = 0.1;
 const NO_FACTS: Facts = { untestedFiles: [], dbUntested: [], generatedFiles: [] };
 const CLOSED = "not yet: first reply with the suspects as JSON; then you can write and run tests";
 /** The tools closed while the hunt is open. */
@@ -133,8 +140,14 @@ export class LocalBrain implements Brain {
       }
       if (asked) return null;
       asked = true;
-      const { untestedFiles: missing, dbUntested: db } = facts;
+      const { dbUntested: db } = facts;
+      // The nudge is limited: a few large files, and only while the round has spent at most half its budget.
+      const spentAll = x.budgetUsd - opts.budgetUsd + opts.spent();
+      const missing = spentAll <= x.budgetUsd * NUDGE_SHARE
+        ? filesToAsk(facts.untestedFiles, x.diff, adapterFor(cfg), NUDGE_FILES) : [];
       if (!missing.length && !db.length) return null;
+      // Its own spend limit: a follow-up cut short at it keeps the report the round ended on.
+      opts.budgetUsd = Math.min(opts.budgetUsd, opts.spent() + NUDGE_USD);
       if (missing.length) {
         say(`no test yet for ${missing.map((m) => posix.basename(m)).join(", ")}; asking for one`);
       }
@@ -231,9 +244,11 @@ export class LocalBrain implements Brain {
                decide: (reply: string, turn: number) => Promise<string | null>,
                reaching: (calls: ToolCall[]) => ToolCall[] = (calls) => calls) {
     const replies: string[] = [];
-    let last = 0, unasked: { text: string; turn: number } | null = null;
+    let last = 0, spent = 0, unasked: { text: string; turn: number } | null = null;
     return { system, user, budgetUsd: x.budgetUsd, prices: this.m.prices, transcript: transcriptOf(x),
       unasked: () => unasked,
+      /** What this conversation's replies have cost so far (the agent's own count, as `budgetUsd` is compared with). */
+      spent: () => spent,
       // A follow-up cut short leaves a finished round only when the reply before it is a report, not the hunt's.
       isReport: (reply: string) => parseReport(reply).tests.length > 0,
       onFinal: (reply: string, turn: number) => { unasked = { text: reply, turn }; },
@@ -245,6 +260,7 @@ export class LocalBrain implements Brain {
       },
       onTurn: (turn: number, names: string[], cost: number, said: string, calls: ToolCall[]) => {
         last = turn;
+        spent = cost;
         t.onTurn?.(turn, names, cost, said);
         const sent = reaching(calls);
         if (sent.length) t.onStep?.({ type: "actions", turn, actions: sent, text: said });

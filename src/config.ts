@@ -17,7 +17,7 @@ import { purePosix, pyJson, pyStr, pyTruthy } from "./util";
 
 export const KEYS = new Set(["version", "image", "workdir", "install", "test_command", "services", "env", "notes",
   "known_failing", "tests_dir", "allow_env_names", "approved", "language", "allow_secret_looking", "typecheck",
-  "deps_dir", "sandbox_only", "test_files"]);
+  "deps_dir", "sandbox_only", "test_files", "parallel"]);
 export const SERVICE_KEYS = new Set(["image", "env", "ready"]);
 export const SERVICE_NAME = /^[a-z][a-z0-9-]{0,30}$/;
 
@@ -57,6 +57,9 @@ export interface ReviewConfig {
   /** The names of the test files the runner collects, when not the usual ones (TypeScript only): a star and a suffix,
    * such as "*Spec.tsx". arnx writes its generated tests with these names. Absent: the adapter's names. */
   testFiles?: string;
+  /** `parallel: keep`: the project's own parallel setting (pytest-xdist `-n`, jest workers) stays in arnx's runs. Absent:
+   * arnx runs the few files it generates in one process. */
+  keepParallel?: true;
 }
 
 type Raw = Record<string, unknown>;
@@ -264,7 +267,7 @@ export const secretPinsYaml = (pins: SecretPin[]) =>
 /** The sandbox-only files as YAML to append to a file that has none (setup adds them to the agent's file). */
 export const sandboxYaml = (paths: string[]) => toYaml({ [SANDBOX_KEY]: [...paths].sort() });
 export const PROJECT_KEYS = new Set(["root", "language", "runner", "image", "install", "test_command", "services", "env",
-  "owns", "uses", "notes", "known_failing", "tests_dir", "install_root", "typecheck", "deps_dir", "test_files"]);
+  "owns", "uses", "notes", "known_failing", "tests_dir", "install_root", "typecheck", "deps_dir", "test_files", "parallel"]);
 
 export interface Uncovered { path: string; reason: string }
 
@@ -367,6 +370,11 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
     } else if (adapter.id !== "typescript") problems.push(`${at}test_files: only for typescript projects`);
     else testFiles = spec.test_files as string;
   }
+  let keepParallel: true | undefined;
+  if ("parallel" in spec) {
+    if (spec.parallel !== "keep") problems.push(`${at}parallel: only \`keep\` is allowed (the project's own parallel setting stays)`);
+    else keepParallel = true;
+  }
   const env = strMap(spec.env, `${at}env`, problems);
   problems.push(...secretNames(env, `${at}env`, allow));
   let own: Service[];
@@ -386,7 +394,7 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
   return { raw: fileRaw, name, language: adapter.id, runner, image: image as string, workdir, install,
     testCommand: command, services: own, env, notes, knownFailing, testsDir, owns, uses, installRoot,
     ...(typecheck === undefined ? {} : { typecheck }), ...(depsDir === undefined ? {} : { depsDir }),
-    ...(testFiles === undefined ? {} : { testFiles }) };
+    ...(testFiles === undefined ? {} : { testFiles }), ...(keepParallel ? { keepParallel } : {}) };
 }
 
 export function parseReviewFile(text: string): ReviewFile {

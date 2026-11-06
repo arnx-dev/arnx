@@ -111,6 +111,12 @@ computes (`untested.ts`: changed files no test names, SQL no database test names
 `accept.ts` and `setup.ts` call no prompt function. `tests/brain.test.ts` holds a round to the step sequence a remote
 brain will speak (tool calls answered by id, a final report, the facts after it, the end).
 
+The "no test yet" follow-up is limited (`filesToAsk` in `untested.ts`, applied in `LocalBrain.review`): it asks about at
+most three files, largest first, each with at least 20 added code lines (blank lines, comments and imports do not
+count); test-named and generated files are never asked about. It fires only while the round has spent at most half its
+budget, and it may spend $0.10: a follow-up cut short at that limit keeps the report the round ended on. The database
+follow-up and the "Not tested" report lines are unchanged.
+
 LocalBrain also runs away from the CLI, behind a remote brain that bridges its tool calls, so it needs nothing only
 the CLI has: `facts()` may return a promise (awaited); a review's `hunt` can carry the
 second hunter's `changedDefinitions` and the part hunters' `parts` (`hunt.ts` `huntParts`, the same prompts as reading

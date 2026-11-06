@@ -68,6 +68,11 @@ export interface Adapter {
   reportSaid?(output: string, runner: string): string | null | undefined;
   /** Shell command that runs the targets and writes a report to reportPath (inside the container). */
   command(testCommand: string, targets: string[], reportPath: string, runner: string): string;
+  /** The flag that makes the runner use one process for arnx's runs of a few generated files, only when the project
+   * configured parallel workers (`test_command` or the runner's own config files, read through `read`: a path
+   * relative to the project's root, null when there is no such file); null: nothing to turn off. Appended last, so
+   * it wins over the project's own setting. */
+  serialFlag?(testCommand: string, read: (rel: string) => string | null, runner: string): string | null;
   /** Parse the report file the command wrote; null when it is unreadable. projectRoot is the project's directory
    * relative to the repository root; `exists` tells whether a path relative to it is a file in the snapshot (Rust
    * finds the source file of a test inside src/ by its module path). */

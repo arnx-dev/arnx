@@ -8,6 +8,7 @@ import type { Classified } from "./outcomes";
 import { ownerFile } from "./outcomes";
 import { codeText } from "./codetext";
 import { isTestPath } from "./detect";
+import { isGenerated } from "./ignore";
 
 /** Source files: the ones setup must place in a project, and the ones a review must cover. */
 export const SOURCE = /\.(py|[cm]?[jt]sx?|rs|cs|go|java|kt|rb|php|swift|c|h|cpp|hpp)$/;
@@ -206,4 +207,39 @@ export function dbUntested(owned: string[], read: (path: string) => string | nul
     if (body === null || !SQL.test(body)) return false;
     return !referredTo(p, withEnv);
   });
+}
+
+/** Names of test files by convention: `*_test.*`, `*.test.*`, `*.spec.*`, `*Spec.*`, `*Test.*`, `*Tests.*`, `test_*`. */
+const TEST_NAMED = /^test_|(?:[_.]test|[_.]spec|Spec|Tests?)\.[^./]+$/;
+const COMMENT_LINE = /^(?:#|\/\/|\/\*|\*|--|;)/;
+const IMPORT_LINE = /^(?:import\b|from\s+\S+\s+import\b|use\s|using\s|#include\b|package\b|(?:const|let|var)\b[^=]*=\s*require\()/;
+
+/** Lines the diff adds to each file: not blank, not a comment, not an import. */
+function addedLines(diff: string): Map<string, number> {
+  const out = new Map<string, number>();
+  let file: string | null = null;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      file = null;
+    } else if (line.startsWith("+++ ")) {
+      const m = /^\+\+\+ b\/(.+)$/.exec(line);
+      file = m ? m[1]!.replace(/\t.*$/, "") : null;
+    } else if (file !== null && line.startsWith("+")) {
+      const code = line.slice(1).trim();
+      if (code && !COMMENT_LINE.test(code) && !IMPORT_LINE.test(code)) out.set(file, (out.get(file) ?? 0) + 1);
+    }
+  }
+  return out;
+}
+
+/** The changed files worth one follow-up request for a test: of `missing` (changed sources no generated test names),
+ * those with at least `minLines` added code lines in `diff` (blank lines, comments and imports are not counted),
+ * largest first, at most `max`. Test-named files and generated files are never asked about. */
+export function filesToAsk(missing: string[], diff: string, adapter: Adapter, o: { minLines: number; max: number }): string[] {
+  const lines = addedLines(diff);
+  return missing
+    .filter((p) => !TEST_NAMED.test(posix.basename(p)) && !isGenerated(p) && !isTestPath(p) &&
+      !adapter.isTestFile(posix.basename(p)) && (lines.get(p) ?? 0) >= o.minLines)
+    .sort((a, b) => lines.get(b)! - lines.get(a)! || (a < b ? -1 : a > b ? 1 : 0))
+    .slice(0, o.max);
 }

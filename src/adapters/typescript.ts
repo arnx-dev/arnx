@@ -351,6 +351,8 @@ export const typescript: Adapter = {
     const said = SAYS[runner];
     return said ? [...output.matchAll(said)].at(-1)?.[1]?.trim() ?? null : undefined;
   },
+  // jest starts a worker per CPU; vitest runs of a few files are seconds, so it is left as it is.
+  serialFlag: (_command, _read, runner) => (runner === "jest" ? "--runInBand" : null),
   command: (testCommand, targets, reportPath, runner) => {
     const t = targets.map(shQuote).join(" ");
     const r = shQuote(reportPath);
