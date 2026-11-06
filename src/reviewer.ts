@@ -217,11 +217,12 @@ export function claimed(t: TestResult, named: { file: string; name: string }[] |
   const key = testKey(t.testId);
   const file = t.fileAttr ? posix.basename(t.fileAttr) : null;
   const classOf = (parts: string[]) => parts.length >= 2 ? parts.at(-2) : undefined;
-  const mine = classOf(t.testId.split("::").slice(1));
+  const head = (id: string) => id.split("[")[0]!; // a parameter may hold "::"
+  const mine = classOf(head(t.testId).split("::").slice(1));
   return !!named?.some((n) => {
-    if (testKey(n.name) !== key) return false;
+    if (testKey(`${n.file || "f"}::${n.name}`) !== key) return false;
     if (n.file && file !== null && posix.basename(n.file) !== file) return false;
-    const theirs = classOf(n.name.split("::"));
+    const theirs = classOf(head(n.name).split("::"));
     return !(mine && theirs && mine !== theirs);
   });
 }
