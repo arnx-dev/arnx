@@ -217,9 +217,13 @@ test("final runs: everything once, then only the files with a failing test", asy
       ...(command.includes("test_a.py") ? [["tests/arnx_generated/test_a.py", "test_a", "passed", ""]] : []),
       ["tests/arnx_generated/test_b.py", "test_b", "failed", "assert 0"]] as [string, string, string, string][]), "", false];
   };
+  const said: string[] = [];
   const r = await testRound(repo, null, PLAIN, {
     ...answerRound(model, PLAIN), writeDir: "tests/arnx_generated", budgetUsd: 1.0,
-    runs: 3, outDir: join(tmp(), "o"), sessionFactory: fakeFactory(scripted) });
+    runs: 3, outDir: join(tmp(), "o"), sessionFactory: fakeFactory(scripted), progress: (m: string) => said.push(m) });
+  // The count is of files run again, which is true before any claim: a failing test may still be a scratch probe.
+  expect(said.filter((m) => m.includes("final run"))).toEqual([
+    "main: final run 1/3", "main: final run 2/3 (1 file to run again)", "main: final run 3/3 (1 file to run again)"]);
   const finals = commands.filter((c) => c.includes("final-"));
   expect(finals).toHaveLength(3);
   expect(finals[0]).toContain("test_a.py");

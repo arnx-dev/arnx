@@ -465,7 +465,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
           }
           const files = failing ? target.filter((t) => failing.some((p) => p.endsWith(t) || t.endsWith(posix.basename(p))))
             : target;
-          say(failing ? `final run ${i + 1}/${o.runs} (${files.length} file${files.length === 1 ? "" : "s"} with failures)`
+          say(failing ? `final run ${i + 1}/${o.runs} (${files.length} file${files.length === 1 ? "" : "s"} to run again)`
             : `final run ${i + 1}/${o.runs}`);
           const bounded = await runBounded(session, snap, cfg, files.length ? files : target, `final-${i + 1}.xml`,
             { ...RUN_BOUNDS, apart, hung: hungLimits });
