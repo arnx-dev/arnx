@@ -413,11 +413,18 @@ export const typescript: Adapter = {
 /** The pattern test_files takes: a star and a suffix that ends in a JavaScript or TypeScript extension. */
 export const TEST_FILES = /^\*([\w.-]+\.(?:c|m)?[jt]sx?)$/;
 
+/** The suffix of a test_files pattern when it is valid: it ends in a JavaScript or TypeScript extension and names a
+ * test (test or spec, any case), so no source file can end the same way; else null. */
+export function testFilesSuffix(glob: unknown): string | null {
+  const suffix = typeof glob === "string" ? TEST_FILES.exec(glob)?.[1] : undefined;
+  return suffix && /test|spec/i.test(suffix) ? suffix : null;
+}
+
 /** `base` for a project whose runner collects the files named by `glob` (test_files, "*Spec.tsx") and not the usual
  * *.test.* and *.spec.*: the probes, the files a round writes and collects, the test files, the words for the model
  * and the name of a kept file follow the suffix. */
 export function withTestFiles(base: Adapter, glob: string): Adapter {
-  const suffix = TEST_FILES.exec(glob)?.[1];
+  const suffix = testFilesSuffix(glob);
   if (!suffix) return base;
   const ends = new RegExp(`${escapeRx(suffix)}$`);
   return {

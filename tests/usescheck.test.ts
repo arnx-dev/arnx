@@ -223,6 +223,6 @@ projects:
     "shared/types.py", "shared/index.ts"];
   const hints = mapHints(file, files);
   expect(hints.map((h) => [h.project, h.kind, h.entry])).toEqual([["engine", "other-language", "web/"]]);
-  expect(hints[0]!.text).toBe("engine: uses web/ matches only JavaScript/TypeScript files, and engine is Python; its " +
-    "tests cannot run them. Drop it, or list web/ under uncovered");
+  expect(hints[0]!.text).toBe("engine: uses web/ matches only JavaScript/TypeScript files, and engine is Python; if " +
+    "its tests do not reach them, drop it, or list web/ under uncovered");
 });

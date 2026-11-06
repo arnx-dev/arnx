@@ -6,6 +6,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { adapterFor } from "./adapters";
+import { testFilesSuffix } from "./adapters/typescript";
 import type { ReviewConfig } from "./config";
 
 /** A folder for arnx's tests (relative to the project's root), what in the configuration says it is collected, and the
@@ -19,7 +20,7 @@ const MOUNT = "/src";
 
 /** The endings of test file names among `own` (paths of the project's own test files), most frequent first, as
  * test_files writes them without the star: `FooterSpec.tsx` gives `Spec.tsx`, `a.test.ts` gives `.test.ts`, `a_test.ts`
- * gives `_test.ts`. A name with no ending to tell (all lower case, no separator) gives none. */
+ * gives `_test.ts`. An ending that does not name a test (test or spec) gives none. */
 export function namesFor(own: string[]): string[] {
   const counts = new Map<string, number>();
   for (const f of own) {
@@ -32,6 +33,7 @@ export function namesFor(own: string[]): string[] {
     }
     if (at < 0) continue;
     const name = stem.slice(at) + m[2];
+    if (!testFilesSuffix(`*${name}`)) continue;
     counts.set(name, (counts.get(name) ?? 0) + 1);
   }
   return [...counts].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([n]) => n);

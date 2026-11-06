@@ -92,3 +92,17 @@ test("setup writes the derived place into review.yaml and does not go back to th
   expect(told).toContain("runs: 5 passed");
   expect(told).toContain("tests_dir of app set to src/js/__tests__/arnx_generated and test_files to *Spec.tsx");
 });
+
+test("own tests that have no test or spec in their names give a folder and no test_files", async () => {
+  const r = gitRepo(tmp());
+  const own = ["NavBar", "HomePage", "Footer"].map((n) => `src/js/__tests__/${n}.tsx`);
+  const probe = "src/js/__tests__/arnx_generated/arnx-probe.test.js";
+  own.forEach((f) => { mkdirSync(dirname(join(r, f)), { recursive: true }); writeFileSync(join(r, f), "test('x', () => {});\n"); });
+  commit(r, "tests");
+  const session: Runner = { run(command: string): RunResult {
+    const names = !command.includes("arnx-probe") ? own : command.includes(probe) ? [probe] : [];
+    return { exitCode: 0, output: JSON.stringify(names.map((f) => `/src/${f}`)), timedOut: false, seconds: 0.1 };
+  } };
+  const seen = await look(session, r, parseReviewFile(YAML).projects[0]!);
+  expect(seen.placement).toEqual({ testsDir: "src/js/__tests__/arnx_generated" });
+});

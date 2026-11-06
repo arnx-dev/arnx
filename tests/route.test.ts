@@ -205,13 +205,17 @@ test("a project's own root beats a broad uncovered entry", () => {
   expect(r.declared).toEqual([{ path: "packages/db/index.ts", reason: "needs several services" }]);
 });
 
-test("an uncovered path wins over another project's uses", () => {
+test("an uncovered path wins over another project's uses only when it is in another language", () => {
   const f = parseReviewFile([
     "version: 1", "projects:", "  engine:", "    root: engine", "    language: python", "    image: i",
     "    test_command: python -m pytest {targets}", "    owns: [engine/]", "    uses: [web/]",
-    "uncovered:", "  - {path: /web/, reason: its tests are another language}", ""].join("\n"));
-  const r = route(f, ["web/src/App.tsx", "engine/a.py"], 4);
-  expect(r.routed.map((x) => [x.project.name, x.owned, x.used])).toEqual([["engine", ["engine/a.py"], []]]);
+    "  app:", "    root: app", "    language: typescript", "    image: i",
+    "    test_command: npx vitest run {targets}", "    owns: [app/]", "    uses: [lib/]",
+    "uncovered:", "  - {path: /web/, reason: its tests are another language}",
+    "  - {path: /lib/, reason: no tests}", ""].join("\n"));
+  const r = route(f, ["web/src/App.tsx", "engine/a.py", "lib/x.ts"], 4);
+  expect(r.routed.map((x) => [x.project.name, x.owned, x.used]).sort()).toEqual([["app", [], ["lib/x.ts"]],
+    ["engine", ["engine/a.py"], []]]);
   expect(r.uncovered).toEqual([{ path: "web/src/App.tsx", reason: "its tests are another language" }]);
   // A file the project owns is routed to it even when listed.
   const own = parseReviewFile([

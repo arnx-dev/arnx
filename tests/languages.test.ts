@@ -117,6 +117,26 @@ projects:
   expect(map.uncovered).toEqual([{ path: "Go files", reason: "Go: arnx does not review it yet", files: 2 }]);
 });
 
+test("the coverage map agrees with routing: an uncovered folder of another language is not used, same-language code is", () => {
+  const repo = initRepo(join(tmp(), "repo"));
+  put(repo, { "engine/a.py": "x = 1\n", "web/App.tsx": "export {}\n", "lib/x.py": "y = 2\n" });
+  commit(repo, "files");
+  const file = parseReviewFile(`version: 1
+projects:
+  engine:
+    root: engine
+    language: python
+    image: python:3.12
+    test_command: python -m pytest {targets}
+    uses: [web/, lib/]
+uncovered:
+  - {path: /web/, reason: another language}
+  - {path: /lib/, reason: no tests}
+`);
+  const map = coverageMap(repo, file);
+  expect(map.projects).toEqual([{ name: "engine", owned: 1, used: 1 }]);
+});
+
 test("an unknown language names only the languages arnx reviews", () => {
   expect(() => getAdapter("go")).toThrow('unknown language "go"; arnx reviews python, typescript, rust');
 });

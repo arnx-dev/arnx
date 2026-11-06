@@ -18,7 +18,7 @@ const FROZEN = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompt
 const CHANGED = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompts-0.1.7.json"), "utf8")) as Frozen;
 
 test("PROMPT_VERSION has 0.1.7's value: the setup task changed, no review prompt did", () => {
-  expect(PROMPT_VERSION).toBe("1624d507cd4f");
+  expect(PROMPT_VERSION).toBe("0d7957db1f83");
   expect(Object.keys(CHANGED)).toEqual(["setupTask", "setupTask/draft", "PROMPT_VERSION"]);
 });
 

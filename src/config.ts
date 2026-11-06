@@ -9,7 +9,7 @@ import type { ScalarTag, Tags } from "yaml";
 import { getAdapter } from "./adapters";
 import { baselineDigest } from "./baseline";
 import { python } from "./adapters/python";
-import { TEST_FILES } from "./adapters/typescript";
+import { testFilesSuffix } from "./adapters/typescript";
 import type { Adapter, AdapterId } from "./adapters/types";
 import { ArnxError, SetupRequired } from "./errors";
 import { GENERATED, isSecretEnvName, KEY_SHOWN, KEY_SHOWN_MEANS, type SecretPin, suspects } from "./secrets";
@@ -361,11 +361,11 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
   }
   let testFiles: string | undefined;
   if ("test_files" in spec) {
-    if (typeof spec.test_files !== "string" || !TEST_FILES.test(spec.test_files)) {
-      problems.push(`${at}test_files: must be a * and a test file suffix ending in a JavaScript or TypeScript extension, ` +
-        "such as *Spec.tsx");
+    if (testFilesSuffix(spec.test_files) === null) {
+      problems.push(`${at}test_files: must be a * and a test file suffix ending in a JavaScript or TypeScript extension ` +
+        "and naming a test (test or spec), such as *Spec.tsx");
     } else if (adapter.id !== "typescript") problems.push(`${at}test_files: only for typescript projects`);
-    else testFiles = spec.test_files;
+    else testFiles = spec.test_files as string;
   }
   const env = strMap(spec.env, `${at}env`, problems);
   problems.push(...secretNames(env, `${at}env`, allow));

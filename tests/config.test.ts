@@ -66,8 +66,9 @@ const TS_YAML = (extra: string, language = "typescript") =>
 test("test_files must be a star and a test file suffix", () => {
   expect(one(TS_YAML('test_files: "*Spec.tsx"\n')).testFiles).toBe("*Spec.tsx");
   expect(one(TS_YAML('test_files: "*.integration.test.ts"\n')).testFiles).toBe("*.integration.test.ts");
+  expect(one(TS_YAML('test_files: "*.spec.ts"\n')).testFiles).toBe("*.spec.ts");
   expect(one(TS_YAML("")).testFiles).toBeUndefined();
-  for (const bad of ["Spec.tsx", "*Spec", "*/Spec.tsx", "**Spec.ts", "*Spec.py", "*", "*Sp ec.ts", "*.ts"]) {
+  for (const bad of ["Spec.tsx", "*Spec", "*/Spec.tsx", "**Spec.ts", "*Spec.py", "*", "*Sp ec.ts", "*.ts", "*s.ts", "*x.ts", "*.d.ts", "*Bar.tsx"]) {
     expect(() => parseReviewFile(TS_YAML(`test_files: "${bad}"\n`))).toThrow(/test_files: must be a \* and a test file suffix/);
   }
   expect(() => parseReviewFile(TS_YAML('test_files: "*Spec.tsx"\n', "python")))
@@ -83,4 +84,11 @@ test("a review.yaml without test_files keeps its stamp", () => {
   // The key is part of what is approved: adding it voids the stamp.
   expect(isApproved(parseReviewFile(stamped.replace("    root: .", '    root: .\n    test_files: "*Spec.tsx"')).projects[0]!))
     .toBe(false);
+});
+
+test("with test_files set, a source file whose name ends the same way is still source", async () => {
+  const { adapterFor } = await import("../src/adapters");
+  const { changedSources } = await import("../src/untested");
+  const a = adapterFor({ language: "typescript", testFiles: "*Spec.tsx" });
+  expect(changedSources(["src/utils.ts", "src/SideBar.tsx", "src/FooSpec.tsx"], a)).toEqual(["src/utils.ts", "src/SideBar.tsx"]);
 });

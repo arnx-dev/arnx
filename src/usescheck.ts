@@ -127,7 +127,7 @@ export function mapHints(file: ReviewFile, files: string[]): UsesHint[] {
         const names = [...new Set(langs.map((l) => l.name))].sort();
         hints.push({ project: p.name, kind: "other-language", entry, text: `${p.name}: uses ${entry} matches only ` +
           `${names.join(" and ")} files, and ${p.name} is ${sourceLanguageOf(`x.${EXT[p.language] ?? "x"}`)?.name ?? p.language}; ` +
-          `its tests cannot run them. Drop it, or list ${entry} under uncovered` });
+          `if its tests do not reach them, drop it, or list ${entry} under uncovered` });
       }
       const whole = projects.filter((o) => o.p !== p && files.some((f) => o.owns(f)) &&
         files.every((f) => !o.owns(f) || m(f))).map((o) => o.p.name);

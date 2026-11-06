@@ -8,6 +8,7 @@
 // (no project owns it, or its owner is over max_projects), it is routed as before, so no changed file leaves the review.
 import type { ReviewConfig, ReviewFile } from "./config";
 import { matcher } from "./ignore";
+import { sourceLanguageOf } from "./languages";
 
 export interface Routed { project: ReviewConfig; owned: string[]; used: string[] }
 /** A project reached only through entries that hold other projects, its changed files reviewed by their owners. */
@@ -17,6 +18,14 @@ export interface Routing { routed: Routed[]; notReviewed: string[]; uncovered: {
    * the rest, but not tested, and reported so. `uncovered` keeps its meaning (no project covers it). */
   declared: { path: string; reason: string }[];
   checkOnly: CheckOnly[] }
+
+/** Whether a path review.yaml lists as uncovered keeps `project` from reaching it through `uses`: it is a source file in
+ * another language than the project's (its tests cannot run it). Shared code in the project's own language stays
+ * reviewed through the projects that use it. */
+export function usesBlocked(project: ReviewConfig, path: string, listed: boolean): boolean {
+  const lang = listed ? sourceLanguageOf(path) : null;
+  return !!lang && lang.id !== project.language;
+}
 
 export const NO_PROJECT = "no project covers it";
 
@@ -44,13 +53,13 @@ export function route(file: ReviewFile, changed: string[], maxProjects: number):
   const broad = (p: { project: ReviewConfig }) => p.project.owns.some((o) => bare(o) === "**");
   for (const path of changed) {
     let covered = false;
-    // A path review.yaml lists as uncovered is not reached through another project's `uses`: only an owner covers it.
+    // A path review.yaml lists as uncovered, in another language than a project's, is not reached through its `uses`.
     const isListed = reasons.some((r) => r.test(path));
     for (const p of projects) {
       if (p.owns(path)) {
         p.owned.push(path);
         covered = true;
-      } else if (!isListed && p.uses(path)) {
+      } else if (!usesBlocked(p.project, path, isListed) && p.uses(path)) {
         p.used.push(path);
         if (p.depends(path)) p.throughDeps = true;
         covered = true;

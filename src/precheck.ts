@@ -197,10 +197,11 @@ export async function placementFrom(session: Runner, snap: string, cfg: ReviewCo
   const folder = [...counts].sort((a, b) => b[1] - a[1] || a[0].split("/").length - b[0].split("/").length ||
     (a[0] < b[0] ? -1 : 1))[0]![0];
   const testsDir = posix.join(folder, "arnx_generated");
-  // The usual names stay when the runner's own tests have them; else the most common ending among the listed files.
-  const name = cfg.language === "typescript" && !cfg.testFiles ? namesFor(listing.files)[0] : undefined;
-  const usual = name !== undefined && getAdapter(cfg.language).isTestFile(`arnx-probe${name}`);
-  const testFiles = cfg.testFiles ?? (name !== undefined && !usual ? `*${name}` : undefined);
+  // The usual names first: a custom ending only when none of the listed files has them, and then only one that names a
+  // test (namesFor); else the folder keeps the usual names.
+  const usual = listing.files.some((f) => getAdapter(cfg.language).isTestFile(posix.basename(f)));
+  const name = cfg.language === "typescript" && !cfg.testFiles && !usual ? namesFor(listing.files)[0] : undefined;
+  const testFiles = cfg.testFiles ?? (name !== undefined ? `*${name}` : undefined);
   if (testsDir === cfg.testsDir && testFiles === cfg.testFiles) return null;
   const placed = { ...cfg, testsDir, ...(testFiles === undefined ? {} : { testFiles }) };
   const probe = await probeListed(session, snap, placed);
@@ -211,5 +212,6 @@ export async function placementFrom(session: Runner, snap: string, cfg: ReviewCo
 export function probeText(cfg: ReviewConfig): string {
   return `the runner does not list a one-line test placed in ${writeDirOf(cfg)}/ (the folder reviews write tests to): it ` +
     "leaves that folder out (jest roots, vitest include, testMatch) or does not collect tests named the usual way. Set " +
-    "tests_dir to a folder the runner includes, or fix test_command";
+    `tests_dir to a folder the runner includes${cfg.language === "typescript" ? " (and test_files when it collects only " +
+      "files named another way)" : ""}, or fix test_command`;
 }

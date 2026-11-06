@@ -23,7 +23,7 @@ import { configSuspects,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
 import { draftYaml, NOT_SET_UP, quickDraft, sourceFirst } from "./draft";
-import { route } from "./route";
+import { route, usesBlocked } from "./route";
 import { MANY_SERVICES, manyServices, manyServicesReason } from "./facts";
 import { A_FAKED_FILE, classify, describeHints, diagnose, firstErrors, firstLine, type Hint, markUnproven, missingLeftOut, npxDownload, npxText,
   loadFailure, passingApart, unexplainedFiles } from "./diagnose";
@@ -300,8 +300,11 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     if (precheck && !targets.length && (cfg.language === "rust" || hasOwnTests(cfg, snap))) {
       const seen = await look(session, snap, cfg, acceptedTestsDir, baseline);
       const early = seen.early;
-      if (seen.placement) return [false, "the runner lists arnx's one-line test elsewhere", "", [], [], "",
-        { ...none, placement: seen.placement }] as Out;
+      if (seen.placement) {
+        const w = seen.placement;
+        return [false, `the runner lists arnx's one-line test in ${w.testsDir}${w.testFiles ? ` as ${w.testFiles}` : ""}, ` +
+          "not where review.yaml says", "", [], [], "", { ...none, placement: w }] as Out;
+      }
       if (early) return [false, early.summary, tailOf(early.output), [], [], early.hints, none] as Out;
       if (quick && seen.sample) {
         sample = seen.sample;
@@ -781,7 +784,7 @@ export function coverageMap(repo: string, file: ReviewFile, untracked = false): 
   const tree = coverageFiles(repo, untracked);
   const files = tree.files;
   const claimed: string[] = [];
-  const projects = file.projects.map((p) => ({ name: p.name, owns: matcher(p.owns.join("\n")),
+  const projects = file.projects.map((p) => ({ name: p.name, config: p, owns: matcher(p.owns.join("\n")),
     uses: matcher(p.uses.join("\n")), owned: 0, used: 0, untracked: { owned: 0, used: 0 } }));
   const uncovered = file.uncovered.map((u) => ({ ...u, test: matcher(u.path), files: 0, untracked: 0 }));
   const unexplained: string[] = [];
@@ -791,7 +794,8 @@ export function coverageMap(repo: string, file: ReviewFile, untracked = false): 
   for (const f of files) {
     const fresh = tree.untracked.has(f);
     const owners = projects.filter((p) => p.owns(f));
-    const users = projects.filter((p) => !p.owns(f) && p.uses(f));
+    const isListed = uncovered.some((u) => u.test(f));
+    const users = projects.filter((p) => !p.owns(f) && !usesBlocked(p.config, f, isListed) && p.uses(f));
     owners.forEach((p) => { p.owned += 1; p.untracked.owned += fresh ? 1 : 0; });
     users.forEach((p) => { p.used += 1; p.untracked.used += fresh ? 1 : 0; });
     if (owners.length || users.length) claimed.push(f);
