@@ -332,6 +332,31 @@ test("a file named only by a test that could not load is not reached", async () 
   expect(review.untested![0]!.files.sort()).toEqual(["app.py", "other.py"]);
 });
 
+// A test file that cannot be collected may still import a changed module before it fails: the run notes the module as
+// loaded, which is no evidence a test reached it.
+test("a changed module only a test file that fails to collect imports stays listed, though the run loaded it", async () => {
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a + b\n");
+  runGit(repo, "add", "other.py");
+  runGit(repo, "commit", "-q", "-m", "other");
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a - b\n");
+  const go = async (broken: boolean) => {
+    const model = new ScriptedAgent([[
+      tool("write_file", { path: GEN2, content: "import other\nimport missing_module\n\ndef test_load():\n    pass\n" }),
+      tool("write_file", { path: GEN, content: "def test_add():\n    assert 1 == 1\n" })],
+      [text(reportFor(`${GEN}::test_add`))], [text(reportFor(`${GEN}::test_add`))]]); // and a follow-up, if asked
+    // Notes as an older Python leaves them: imports only.
+    const sess: SessionFactory = (cfg, snap, log, run) => fakeFactory((command) => {
+      if (command.includes("final-")) writeFileSync(join(snap, ".arnx-run", "reached-41.txt"), "loaded /src/other.py\n");
+      return [junitXml([[GEN2, "test_load", broken ? "error" : "passed", broken ? "ModuleNotFoundError: missing_module" : ""],
+        [GEN, "test_add", "passed", ""]]), "", false];
+    })(cfg, snap, log, run);
+    return (await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
+      sessionFactory: sess })).review;
+  };
+  expect((await go(true)).untested![0]!.files.sort()).toEqual(["app.py", "other.py"]);
+  expect((await go(false)).untested![0]!.files).toEqual(["app.py"]);
+});
+
 const suspectOf = (id: string) => ({ id, file: "a.py", line: 1, claim: "c", by: "x" });
 const result = (testId: string, outcome: string) => ({ testId, fileAttr: "", name: testId, outcome, message: "" });
 const roundWith = (c: Record<string, unknown>) => ({ classified: { findings: [], flaky: [], errors: [], passed: [], skipped: 0,

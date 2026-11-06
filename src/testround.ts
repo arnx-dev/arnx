@@ -29,7 +29,7 @@ import type { Say } from "./progress";
 import { describeTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
   typeCheckOf } from "./typecheck";
 import { databaseEnv, dbUntested, untestedFiles } from "./untested";
-import { clearReach, type Reach, readReach, reachedSince } from "./reached";
+import { clearReach, countable, type Reach, readReach, reachedSince } from "./reached";
 import { projectSource, shallowKind } from "./shallow";
 
 export const TOOL_TIMEOUT = 300;
@@ -458,8 +458,10 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         // and a flaky test is one that fails only sometimes. A file that passed is carried into the later runs as it
         // was. A run without a report repeats everything.
         const r: (TestResult[] | null)[] = [];
-        // The agent's runs are not the final ones.
+        // The agent's runs are not the final ones. Each final run's notes are read after it, with what it reported.
         clearReach(snap);
+        const reach: Reach = new Map();
+        let noted = false;
         const ran = (repeat: number, res: TestResult[], carried: boolean, secs?: number) => res.forEach((t) =>
           emit("test.run", { project: cfg.name, repeat, test_id: t.testId, func: funcOf(t), file: t.fileAttr,
             outcome: t.outcome, message: testMessage(t.message), carried,
@@ -491,6 +493,11 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
           // Masked before it is saved, as the probe's log is.
           if (run.output) writeFileSync(join(o.outDir, `final-${i + 1}.log`), filter ? filter.mask(run.output) : run.output);
           const got = ours(parsed), secs = Math.round(run.seconds * 10) / 10;
+          const notes = readReach(snap);
+          clearReach(snap);
+          noted ||= notes.size > 0;
+          const broken = !got || got.some((t) => t.outcome === "error") || nh > 0 || bounded.notRun.length > 0;
+          for (const [p, kind] of countable(notes, broken)) if (kind === "ran" || !reach.has(p)) reach.set(p, kind);
           if (!got || !failing || !first) {
             r.push(got);
             if (got) ran(i + 1, got, false, secs);
@@ -504,9 +511,8 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
             ran(i + 1, got, false, secs);
           }
         }
-        // Read before the type check, which clears the report folder.
-        const reach = readReach(snap);
-        if (o.coverage && reach.size) {
+        // Read run by run above, before the type check clears the report folder.
+        if (o.coverage && noted) {
           const own = new Set(o.coverage);
           reached = reachedSince(reach, probeReach).filter((p) => own.has(p));
         }

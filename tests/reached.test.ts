@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { python } from "../src/adapters/python";
-import { clearReach, readReach, reachedSince } from "../src/reached";
+import { clearReach, countable, readReach, reachedSince } from "../src/reached";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -53,4 +53,13 @@ test("the report setup writes the hook into the report folder, alone in its own 
   expect(existsSync(hook)).toBe(true);
   const text = readFileSync(hook, "utf8");
   for (const part of ["PY_START", "addaudithook", "reached-%d.txt"]) expect(text).toContain(part);
+});
+
+test("what a run's notes count for: ran only when the run noted ran (Python 3.12 and later), loaded only when no test file broke", () => {
+  const sysmon = new Map([["a.py", "ran"], ["b.py", "loaded"]] as const);
+  const older = new Map([["b.py", "loaded"], ["c.py", "loaded"]] as const);
+  expect([...countable(sysmon, false).keys()]).toEqual(["a.py"]);
+  expect([...countable(sysmon, true).keys()]).toEqual(["a.py"]);
+  expect([...countable(older, false).keys()]).toEqual(["b.py", "c.py"]);
+  expect([...countable(older, true).keys()]).toEqual([]);
 });

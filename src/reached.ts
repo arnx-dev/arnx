@@ -41,3 +41,12 @@ export function reachedSince(now: ReadonlyMap<string, "ran" | "loaded">, probe: 
   : string[] {
   return [...now].filter(([p, kind]) => kind === "ran" ? probe.get(p) !== "ran" : !probe.has(p)).map(([p]) => p).sort();
 }
+
+/** The notes of one run that count as a test reaching a file. Where the run noted code that ran (Python 3.12 and
+ * later), only that: a module that was only loaded ran no test's code. Before that, notes say loaded only, and they
+ * count only when no test file of the run errored or hung (`broken`): a test file that fails to collect may load a
+ * module before it fails, and a broken test is no evidence. */
+export function countable(notes: ReadonlyMap<string, "ran" | "loaded">, broken: boolean): Reach {
+  const ran = [...notes.values()].includes("ran");
+  return new Map([...notes].filter(([, kind]) => ran ? kind === "ran" : !broken));
+}

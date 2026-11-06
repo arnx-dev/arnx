@@ -337,3 +337,22 @@ test("a round whose runs left no notes says nothing of what they reached", async
     sessionFactory: fakeFactory(() => [junitXml([[GEN, "test_x", "passed", ""]]), "1 passed", false]) });
   expect(r.reached).toBeUndefined();
 });
+
+test("a final run whose test file errored or hung makes its loaded notes count for nothing, its ran notes still count", async () => {
+  const repo = gitRepo(tmp());
+  const GEN_B = "tests/arnx_generated/test_broken.py";
+  const model = new ScriptedAgent([[tool("write_file", { path: "app/" + GEN, content: "def test_x(): pass\n" }),
+    tool("write_file", { path: "app/" + GEN_B, content: "import nowhere\n" })], [text('{"tests": []}')]]);
+  let pid = 0;
+  const factory: SessionFactory = async (_cfg, snap, _log, body) => {
+    const fake = new FakeSession(snap, () => {
+      mkdirSync(join(snap, ".arnx-run"), { recursive: true });
+      writeFileSync(join(snap, ".arnx-run", `reached-${++pid}.txt`), "loaded /src/app/mod.py\n");
+      return [junitXml([[GEN, "test_x", "passed", ""], [GEN_B, "test_broken", "error", "ModuleNotFoundError"]]), "", false];
+    });
+    return body(fake);
+  };
+  const r = await testRound(repo, null, CFG, { ...answerRound(model, CFG), coverage: ["app/mod.py"],
+    writeDir: writeDirOf(CFG), budgetUsd: 1.0, runs: 2, outDir: join(tmp(), "out"), sessionFactory: factory });
+  expect(r.reached).toEqual([]);
+});
