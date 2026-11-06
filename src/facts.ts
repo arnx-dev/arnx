@@ -67,6 +67,8 @@ export interface ProjectFacts {
   deps: string[];
   /** JavaScript: the Prisma schema (relative to installRoot) when the project depends on Prisma and one exists. */
   prisma?: string;
+  /** The CLI that generates it: "prisma" as installed, or "prisma@X" pinned to the client's version. */
+  prismaCli?: string;
 }
 
 export interface Facts { projects: ProjectFacts[]; jobs: CiJob[]; services: ServiceFact[] }
@@ -261,10 +263,14 @@ export function readFacts(repo: string, paths: string[], candidates: Candidate[]
     const testText = [...(tests.get(c) ?? []).slice(0, 40), at(c.root, "conftest.py"), at(c.root, "tests/conftest.py")]
       .map(read).join("\n");
     if (c.language === "typescript" && deps.some((d) => d === "prisma" || d === "@prisma/client")) {
+      const cli = prismaCli(files.json(c.manifest), deps.includes("prisma"));
       const schemas = paths.filter((p) => posix.basename(p) === "schema.prisma" && (c.root === "." || p.startsWith(`${c.root}/`)))
         .sort((a, b) => a.length - b.length);
       const at0 = f.installRoot === "." ? "" : `${f.installRoot}/`;
-      if (schemas[0] && schemas[0].startsWith(at0)) f.prisma = schemas[0].slice(at0.length);
+      if (cli && schemas[0] && schemas[0].startsWith(at0)) {
+        f.prisma = schemas[0].slice(at0.length);
+        f.prismaCli = cli;
+      }
     }
     servicesOf(f, deps, testText, tied, compose.apps.filter((a) => a.dir === c.root), services);
     for (const name of [".env.example", ".env.sample", ".env.template", ".env.test", ".env.dist", "env.example"]) {
@@ -505,6 +511,17 @@ const globDir = (g: string) => new RegExp(`^${g.split("/").map((s) => s === "**"
   s.replace(/[.+^${}()|[\]\\]/g, "\\$&").replaceAll("*", "[^/]*").replaceAll("?", "[^/]")).join("/")}$`);
 
 /** Names the project depends on, for telling which services its tests use. */
+/** The CLI that generates Prisma's client: `prisma` when the project depends on it (its own version), else pinned to
+ * the declared `@prisma/client` version (an exact, caret or tilde one). Null when that version cannot be pinned. */
+function prismaCli(pkg: unknown, hasCli: boolean): string | null {
+  if (hasCli) return "prisma";
+  if (!isMap(pkg)) return null;
+  const v = [pkg.dependencies, pkg.devDependencies, pkg.optionalDependencies]
+    .map((d) => (isMap(d) ? d["@prisma/client"] : undefined)).find((x) => typeof x === "string") as string | undefined;
+  const exact = /^[\^~]?(\d+\.\d+\.\d+(?:-[\w.]+)?)$/.exec(v?.trim() ?? "");
+  return exact ? `prisma@${exact[1]}` : null;
+}
+
 function dependencyNames(f: ProjectFacts, c: Candidate, { read, json, toml }: Files): string[] {
   const out = new Set<string>();
   if (c.language === "typescript") {

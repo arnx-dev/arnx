@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -368,7 +368,7 @@ test("a project with a prisma schema generates its client in install", () => {
     ...extra });
   const withSchema = projects(detect(repoWith(files({ "packages/lib/prisma/schema.prisma": "generator client {}\n" }))));
   const lib = Object.values(withSchema).find((p) => p.root === "packages/lib")!;
-  expect(lib.install.join("\n")).toContain("pnpm install --frozen-lockfile && npx prisma generate " +
+  expect(lib.install.join("\n")).toContain("pnpm install --frozen-lockfile && npx prisma@5.0.0 generate " +
     "--schema=packages/lib/prisma/schema.prisma");
 });
 
@@ -407,7 +407,7 @@ test("a prisma schema path with a space and a $ is quoted: the right file is ins
   const r = runInstall(repo, line);
   expect(r.status).toBe(0);
   expect(readFileSync(join(r.deps, path), "utf8")).toBe("generator client {}\n");
-  expect(r.npx).toBe(`prisma\ngenerate\n--schema=${path}\n`);
+  expect(r.npx).toBe(`prisma@5.0.0\ngenerate\n--schema=${path}\n`);
 });
 
 test("a project outside a workspace copies its schema next to its manifests and generates there", () => {
@@ -420,4 +420,35 @@ test("a project outside a workspace copies its schema next to its manifests and 
   expect(r.status).toBe(0);
   expect(readFileSync(join(r.deps, "prisma/schema.prisma"), "utf8")).toBe("generator client {}\n");
   expect(r.npx).toBe("prisma\ngenerate\n--schema=prisma/schema.prisma\n");
+});
+
+describe("the prisma CLI that generates the client", () => {
+  const install = (deps: object) => {
+    const repo = repoWith({
+      "package.json": pkg({ packageManager: "pnpm@9.12.0", ...deps }),
+      "pnpm-lock.yaml": "", "src/a.test.ts": "", "prisma/schema.prisma": "generator client {}\n" });
+    return Object.values(projects(detect(repo)))[0]!.install.join("\n");
+  };
+  const vitest = { vitest: "3" };
+
+  test("a client without the CLI pins the CLI to the client's version", () => {
+    expect(install({ dependencies: { "@prisma/client": "^5.10.2" }, devDependencies: vitest }))
+      .toContain("npx prisma@5.10.2 generate --schema=prisma/schema.prisma");
+    expect(install({ dependencies: { "@prisma/client": "~5.10.2" }, devDependencies: vitest }))
+      .toContain("npx prisma@5.10.2 generate");
+    expect(install({ dependencies: { "@prisma/client": "5.10.2" }, devDependencies: vitest }))
+      .toContain("npx prisma@5.10.2 generate");
+  });
+
+  test("a version that cannot be pinned adds no step", () => {
+    for (const v of ["*", "latest", "workspace:*", "https://example.com/c.tgz", ">=5"]) {
+      expect(install({ dependencies: { "@prisma/client": v }, devDependencies: vitest })).not.toContain("prisma");
+    }
+  });
+
+  test("the CLI among the dependencies or devDependencies runs as installed", () => {
+    expect(install({ dependencies: { "@prisma/client": "^5.10.2" }, devDependencies: { ...vitest, prisma: "^5.10.2" } }))
+      .toContain("npx prisma generate --schema=prisma/schema.prisma");
+    expect(install({ dependencies: { prisma: "*" }, devDependencies: vitest })).toContain("npx prisma generate");
+  });
 });

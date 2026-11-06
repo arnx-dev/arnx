@@ -367,7 +367,7 @@ function jsProject(c: Candidate, f: ProjectFacts, d: Detection, mark: MarkFn): R
   // Dependencies install outside /src, which the code hides at run time; deps_dir links their node_modules back
   // before each run (depsLink in sandbox.ts). A workspace installs whole, so each package's node_modules is there.
   // A generated client is made where the network is: install runs while the image builds, test runs have none.
-  const generate = f.prisma ? ` && npx prisma generate --schema=${shellQuote(f.prisma)}` : "";
+  const generate = f.prisma ? ` && npx ${f.prismaCli} generate --schema=${shellQuote(f.prisma)}` : "";
   if (workspace) {
     if (f.installRoot !== c.root) p.install_root = f.installRoot;
     p.install = [`${corepack}mkdir -p /opt/ws && cp -a . /opt/ws/ && cd /opt/ws && ${ci}${generate}`];
