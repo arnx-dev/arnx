@@ -176,6 +176,8 @@ export interface Review {
   fakedKeys?: string[];
   /** Beside a fake: tests every run skipped, which may have skipped for it. */
   skippedTests?: number;
+  /** Failing tests the reviewer's last report does not name (scratch, or replaced by a newer file): not findings. */
+  unclaimed?: { project: string; testId: string; message: string }[];
   /** Files left out that the change touches. */
   leftOutTouched?: string[];
   /** Untracked files the review sent because the owner opted in (--untracked); absent when none. */
@@ -806,6 +808,9 @@ export function render(r: Review): string {
     `- Flaky or unconfirmed (failed in some runs only): ${ticks(r.flaky) || "none"}`,
     `- Errors (the test could not run): ${ticks(r.errors) || "none"}`,
     `- Runs without a report (timed out or crashed): ${r.missingRuns}`);
+  if (r.unclaimed?.length) {
+    out.push(`- Failing tests the reviewer did not report (scratch or replaced): ${ticks(r.unclaimed.map((u) => u.testId))}`);
+  }
   if (r.ignoredChanged?.length) out.push(`- Changed files left out by .arnxignore (not reviewed): ${ticks(r.ignoredChanged)}`);
   if (r.lockfilesChanged?.length) out.push(`- Changed lockfiles (in the sandbox, not reviewed): ${ticks(r.lockfilesChanged)}`);
   if (r.blankedLines?.length) {
@@ -1102,7 +1107,8 @@ export function summary(r: Review, reviewMd: string): string {
       : `no issue waits on ${optional === 1 ? "it" : "them"}`})`);
   const stats = r.projectStats ?? [];
   const where = (ps: ProjectStat[]) => multi(r) && ps.length ? ` (${ps.map((p) => p.name).join(", ")})` : "";
-  const trouble = [r.flaky.length ? `${r.flaky.length} flaky` : "", r.errors.length ? plural(r.errors.length, "error") : "",
+  const trouble = [r.unclaimed?.length ? plural(r.unclaimed.length, "unreported failing test") : "",
+    r.flaky.length ? `${r.flaky.length} flaky` : "", r.errors.length ? plural(r.errors.length, "error") : "",
     r.missingRuns ? `${plural(r.missingRuns, "run")} without a report${where(stats.filter((p) => p.missingRuns > 0))}`
       : ""].filter(Boolean);
   // With no issue row, one line says why. A status line above (Incomplete, Not tested), a provider's failure, trouble
@@ -1234,6 +1240,7 @@ export function save(r: Review, rdir: string, diff: string): void {
     ...(r.fixProof ? { fix_proof: r.fixProof.map((x) => rekey(x, snake)) } : {}),
     ...(r.typecheck ? { typecheck: r.typecheck.map((t) => rekey(t, snake)) } : {}),
     ...(r.providerFailures ? { provider_failures: r.providerFailures } : {}),
+    ...(r.unclaimed ? { unclaimed: r.unclaimed.map((u) => rekey(u, snake)) } : {}),
     exit_code: exitCode(r) };
   writeFileSync(join(rdir, "review.json"), JSON.stringify(json, null, 2) + "\n");
   writeFileSync(join(rdir, "review.md"), wrapMarkdown(render(r)));
@@ -1261,6 +1268,7 @@ export function load(rdir: string): Review {
   r.writeDirs ??= { [r.projects[0] ?? "main"]: r.writeDir };
   r.projectStats = ((data.project_stats ?? []) as object[]).map((p) => rekey(p, camel) as unknown as ProjectStat);
   r.usage = ((data.usage ?? []) as object[]).map((u) => rekey(u, camel) as unknown as ModelUse);
+  if (data.unclaimed) r.unclaimed = (data.unclaimed as object[]).map((u) => rekey(u, camel) as { project: string; testId: string; message: string });
   r.groups = (data.groups ?? []) as Group[];
   r.checked = (data.checked ?? []) as Checked[];
   // The count of changed source files is read from the diff, so old and new reviews count the same way.
@@ -1285,6 +1293,32 @@ export function parseReport(finalText: string): AgentReport {
   if (Array.isArray(data.not_tested)) out.not_tested = list("not_tested");
   if (Array.isArray(data.suspects_not_tested)) out.suspects_not_tested = list("suspects_not_tested");
   return out;
+}
+
+/** The tests named by the last of these replies that names any: `file` is the id's file part ("" when it has none),
+ * `name` the rest. Null when no reply names a test. */
+export function lastTests(texts: string[]): { file: string; name: string }[] | null {
+  for (const t of [...texts].reverse()) {
+    const tests = parseReport(t).tests;
+    if (tests.length) return tests.map(testRef);
+  }
+  return null;
+}
+
+const testRef = (x: unknown): { file: string; name: string } => {
+  const id = typeof x === "object" && x !== null && typeof (x as { test?: unknown }).test === "string"
+    ? (x as { test: string }).test : typeof x === "string" ? x : "";
+  const at = id.indexOf("::");
+  return at < 0 ? { file: "", name: id } : { file: id.slice(0, at), name: id.slice(at + 2) };
+};
+
+/** The tests these replies stand behind: those lastTests names, and those the last reply with suspected defects names
+ * as failing (a report may list a defect's test without listing its tests). Null when no reply names any. */
+export function reportedTests(texts: string[]): { file: string; name: string }[] | null {
+  const tests = lastTests(texts);
+  const defects = [...texts].reverse().map((t) => parseReport(t).suspected_defects).find((d) => d.length) ?? [];
+  const named = defects.map(testRef).filter((x) => x.name);
+  return tests || named.length ? [...tests ?? [], ...named] : null;
 }
 
 /** Whether any of these replies is a report: a JSON object with a `tests` list (an empty one still says so). */

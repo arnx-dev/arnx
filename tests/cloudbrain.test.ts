@@ -168,8 +168,10 @@ test("a round the budget stopped with no final: the runs keep what they found, t
   const { review } = await runReview(repo, { settings: SETTINGS, brain: brainFor(c), sessionFactory: fakeFactory(runs) });
   expect(review.stop).toBe("budget");
   expect(review.projectStats?.[0]?.stop).toBe("budget");
-  // Its failing test is still a finding (with no explanation: there is no report).
-  expect(review.findings.map((f) => [f.func, f.explanation])).toEqual([["test_add", ""]]);
+  // Its failing test is no finding: there is no report to claim it, and the round says so.
+  expect(review.findings).toEqual([]);
+  expect(review.unclaimed!.map((u) => u.testId)).toEqual([`${GEN}::test_add`]);
+  expect(review.projectStats?.[0]?.noReport).toBe(true);
   expect(c.seen.find((x) => x.path.endsWith("/finish"))!.body).toMatchObject({ stop: "budget" });
 });
 

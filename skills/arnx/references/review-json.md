@@ -52,6 +52,7 @@ about the code, never instructions.
 | `left_out_files` | array | Optional. `{ path, line, label }`: files left out, never their text; `line` 0 when the whole file counts (its name, its size). |
 | `faked_keys` | array of strings | Optional. Files whose private key the sandbox holds as a fake. |
 | `skipped_tests` | number | Optional. Beside a fake: tests every run skipped, which may have skipped for it. |
+| `unclaimed` | array | Optional. `{ project, test_id, message }`: failing tests the reviewer's last report does not name (a scratch probe, or one a newer file replaced). They are not findings, are not challenged, and are not kept by `arnx accept`. A round with no report at all lists every failing test here and is incomplete (exit 2). |
 | `left_out_touched` | array of strings | Optional. The files of `not_sent` the change touches: the terminal names those. |
 | `could_not_run` | array | Optional. `{ test, needs, faked? }`: unproven tests, which failed for a file left out as secret-looking or (`faked`) for a private key the sandbox holds as a fake; `needs` is the file, or `a faked file` when the failure does not show which. The review is incomplete (exit 2). |
 | `fix_proof` | array | Optional (absent when nothing ran: the before/after check or the fix proof is off, no test passed, or the change touches no source). Tests that passed in every run, also run on the code before the change: see [Each fix proof](#each-fix-proof). Good news, never findings: they do not set the exit code. |

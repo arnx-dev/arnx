@@ -513,7 +513,9 @@ export async function accept(repo: string, rdir: string, settings: Settings,
       add(keeps.findings[f.id] === "real" ? keep : skip, f.file, func);
       if (setAside[f.id]) reasons[`${f.file}::${func}`] = why(f.id);
     }
-    for (const testId of [...review.flaky, ...review.errors]) {
+    // A failing test the reviewer did not report is no finding: it is never kept, whatever else its file keeps.
+    const unreported = (review.unclaimed ?? []).filter((u) => u.project === p.name).map((u) => u.testId);
+    for (const testId of [...review.flaky, ...review.errors, ...unreported]) {
       const owner = ownerFile(testId.split("::")[0]!, Object.keys(p.files));
       if (owner) add(skip, owner, funcOfId(testId));
     }

@@ -23,13 +23,13 @@ import { addUsage, type AgentModel, allPrices, FallbackJson, type JsonModel, typ
 import { LocalBrain } from "./localbrain";
 import { changeEditsPrompts, PROMPTS_EDITED, promptsFor } from "./userprompts";
 import { changeEditsAccepted } from "./check";
-import { funcOf, ownerFile, testKey } from "./outcomes";
+import { funcOf, ownerFile, type TestResult, testKey } from "./outcomes";
 import { plainQuestion } from "./questions";
 import { type CallRecord, cloudFailure, type ProviderFailure, providerFailures, resumes, withCalls } from "./outage";
 import { CONTEXT_LIMIT, contextPack } from "./context";
 import { elsewhereNote, leftOutNote, PROMPT_VERSION, type Suspect } from "./prompts";
 import { changedSources, databaseEnv, framed, framesIn, isSourcePath, loadedTests, notReached, untestedFiles } from "./untested";
-import { type AgentReport, type Checked, type Finding, type FixProof, hasReport, parseReports, type ProjectStat, type Review,
+import { type AgentReport, type Checked, type Finding, type FixProof, hasReport, parseReports, reportedTests, type ProjectStat, type Review,
   save, type SuspectOutcome, type Untested, adjudicate, exitCode, firstLine, sameCause } from "./report";
 import { dockerSteps, type SessionFactory } from "./sandbox";
 import type { TypeCheck } from "./typecheck";
@@ -208,6 +208,15 @@ export function buildChecked(rnd: Round, report: AgentReport, project: string): 
   }
   return rnd.classified.passed.map((t) => ({ project, test: t.testId,
     expects: byId.get(t.testId) ?? byFunc.get(testKey(t.testId)) ?? "" }));
+}
+
+/** Whether the reviewer's last report names this failing test: the same file name and the same test key (a report
+ * entry without a file matches any file). With no report, none is named. */
+export function claimed(t: TestResult, named: { file: string; name: string }[] | null): boolean {
+  const file = posix.basename(t.fileAttr || t.testId.split("::")[0]!);
+  const key = testKey(t.testId);
+  return !!named?.some((n) => testKey(n.file ? `${n.file}::${n.name}` : n.name) === key &&
+    (!n.file || posix.basename(n.file) === file));
 }
 
 export function buildFindings(rnd: Round, report: AgentReport): Finding[] {
@@ -389,6 +398,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     const flaky: string[] = [], errors: string[] = [], notSent = new Set(change.withheld?.map((w) => w.path));
     const leftOutFiles = new Map((change.withheld ?? []).map((w) => [w.path, w]));
     const couldNotRun: { test: string; needs: string; faked?: boolean }[] = [];
+    const unclaimed: NonNullable<Review["unclaimed"]> = [];
     const fakedKeys = new Set<string>();
     let skippedTests = 0;
     const projectStats: ProjectStat[] = [];
@@ -618,7 +628,14 @@ export async function runReview(repo: string, o: { settings: Settings;
           hyp_id: t.suspect ? hypId(cfg.name, text(t.suspect).trim()) : null,
           expects: clip(text(t.expects ?? ""), 500) });
       }
-      const projectFindings = buildFindings(rnd, report).map((f) => {
+      // A failing test the reviewer's last report leaves out (a scratch probe, one a newer file replaced) is no finding.
+      const named = reportedTests([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]);
+      const failing = rnd.classified.findings;
+      const isClaimed = failing.filter((t) => claimed(t, named));
+      for (const t of failing) {
+        if (!isClaimed.includes(t)) unclaimed.push({ project: cfg.name, testId: t.testId, message: t.message });
+      }
+      const projectFindings = buildFindings({ ...rnd, classified: { ...rnd.classified, findings: isClaimed } }, report).map((f) => {
         const shallow = shallowKind(f.file ? rnd.files[f.file] : undefined, f.func);
         return { ...f, project: cfg.name, ...(shallow ? { shallow } : {}), ...(rnd.env?.state === "fallback" ? { fallback: true as const } : {}) };
       });
@@ -701,7 +718,8 @@ export async function runReview(repo: string, o: { settings: Settings;
         ...(rnd.env ? { env: { ...rnd.env, log: file.legacy ? rnd.env.log : `projects/${cfg.name}/${rnd.env.log}`,
           ...(atCheckedOut ? {} : { old: true as const }) } } : {}),
         // A round with no report and no test that ran is not a finished one (tests that ran speak for themselves).
-        ...(tests === 0 && !rnd.env && !hasReport([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]) ? { noReport: true } : {}) });
+        // Failing tests with no report to claim them are unreported as well.
+        ...((tests === 0 || c.findings.length > 0) && !rnd.env && !hasReport([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]) ? { noReport: true } : {}) });
       agentCost += rnd.agent.costUsd;
       Object.assign(agentUse, addUsage(agentUse, rnd.agent.usage));
       agentUse.calls += rnd.agent.calls;
@@ -840,6 +858,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       ...(change.lockfiles ? { lockfilesChanged: change.lockfiles } : {}),
       ...(change.blanked ? { blankedLines: change.blanked } : {}),
       ...(leftOutFiles.size ? { leftOutFiles: [...leftOutFiles.values()].sort((a, b) => a.path < b.path ? -1 : 1) } : {}),
+      ...(unclaimed.length ? { unclaimed } : {}),
       ...(couldNotRun.length ? { couldNotRun } : {}), ...(fakedKeys.size ? { fakedKeys: [...fakedKeys].sort(), ...(skippedTests ? { skippedTests } : {}) } : {}),
       ...(change.withheld?.length || change.namedOut?.length ? { leftOutTouched: [...change.withheld?.map((w) => w.path) ?? [], ...change.namedOut ?? []].sort() } : {}),
       ...(change.untrackedIncluded ? { untrackedIncluded: change.untrackedIncluded } : {}),

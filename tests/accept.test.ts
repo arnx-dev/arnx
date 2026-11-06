@@ -223,3 +223,24 @@ test("accept reports precision over the whole log, this review's lines included"
   const r = await accept(repo, rdir, SETTINGS);
   expect(r.precision).toEqual({ real: 1, chosen: 2, defaulted: 1, unknown: 1 });
 });
+
+test("an unclaimed test is not kept in an accepted file", async () => {
+  const repo = gitRepo(tmp());
+  const rdir = join(repo, ".arnx", "reviews", "20261011-a1b2c3");
+  save(sampleReview({ id: "20261011-a1b2c3", findings: [finding("F1", `${WD}/test_add.py::test_add`, "test_add",
+    `${WD}/test_add.py`, "assert -1 == 5", "add subtracts", "confirmed", "yes")], questions: [], flaky: [], errors: [],
+  unclaimed: [{ project: "main", testId: `${WD}/test_add.py::TestMore::test_neg`, message: "assert -2 == 0" },
+    { project: "main", testId: `${WD}/test_add.py::test_zero`, message: "assert 1 == 0" }],
+  passed: 0, testsWritten: 3, writeDir: WD }), rdir, "diff --git a/app.py b/app.py\n");
+  mkdirSync(join(rdir, "tests", WD), { recursive: true });
+  writeFileSync(join(rdir, "tests", WD, "test_add.py"), SRC);
+  writeFileSync(join(rdir, "review.md"), readFileSync(join(rdir, "review.md"), "utf8")
+    .replace("Mark: [ ] real", "Mark: [x] real"));
+  await accept(repo, rdir, SETTINGS);
+  const dest = join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3");
+  const kept = readFileSync(join(dest, "test_add_subtracts.py"), "utf8");
+  expect(kept).toContain("def test_add");
+  expect(kept).not.toContain("test_neg");
+  expect(kept).not.toContain("test_zero");
+  expect(JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")).unclaimed).toHaveLength(2);
+});

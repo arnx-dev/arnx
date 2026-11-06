@@ -37,7 +37,7 @@ beforeEach(() => {
 
 const steps = (p: string) => [
   [tool("write_file", { path: `services/${p}/${GEN}`, content: `import ${p}\ndef test_bad(): assert 0\n` })],
-  [text(JSON.stringify({ tests: [], suspected_defects: [], questions: [] }))]];
+  [text(JSON.stringify({ tests: [{ test: `${GEN}::test_bad`, expects: "x" }], suspected_defects: [], questions: [] }))]];
 const failing = (snap: string) => new FakeSession(snap, () => [junitXml([[GEN, "test_bad", "failed", "boom"]]),
   "1 failed", false]);
 

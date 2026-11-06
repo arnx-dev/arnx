@@ -170,7 +170,7 @@ test("second-model calls are logged in second-opinion.jsonl; after a timeout the
   const judge = new FakeJson([late, { groups: [] }]);
   const { review, rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent(), challenger: judge,
     sessionFactory: fakeFactory(runs) });
-  expect(judge.calls).toHaveLength(1); // no explain call after the timeout
+  expect(judge.calls.join("\n")).not.toContain("::test_scratch"); // no explain call after the timeout
   expect(review.groups).toEqual([]);
   const lines = readFileSync(join(rdir, "second-opinion.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   expect(lines.map((l) => [l.step, l.outcome])).toEqual([["challenge", "error"], ["explain", "skipped"]]);
@@ -182,7 +182,7 @@ test("an idle or attempt timeout (not worded 'no reply within') also skips the e
   const judge = new FakeJson([late, { groups: [] }]);
   const { rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent(), challenger: judge,
     sessionFactory: fakeFactory(runs) });
-  expect(judge.calls).toHaveLength(1);
+  expect(judge.calls.join("\n")).not.toContain("::test_scratch");
   const lines = readFileSync(join(rdir, "second-opinion.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   expect(lines.map((l) => [l.step, l.outcome])).toEqual([["challenge", "error"], ["explain", "skipped"]]);
 });
@@ -344,4 +344,45 @@ test("a suspect whose test was skipped says so", () => {
     reportOf([{ suspect: "S1", test: id }]), []);
   expect(out[0]!.outcome).toBe("not tested");
   expect(out[0]!.reason).toBe("its test was skipped");
+});
+
+const SCRATCH = "def test_add():\n    assert add(2, 3) == 5\n\ndef test_scratch():\n    assert add(1, 1) == 3\n";
+const failing = (...names: string[]) => (): [string | null, string, boolean] =>
+  [junitXml(names.map((n) => [GEN, n, "failed", `assert in ${n}`] as [string, string, string, string])), "", false];
+
+test("a failing test the last report leaves out is not a finding", async () => {
+  const model = new ScriptedAgent([[tool("write_file", { path: GEN, content: SCRATCH })],
+    [text(reportFor(`${GEN}::test_add`))], [text(reportFor(`${GEN}::test_add`))]]);
+  const judge = new FakeJson([{ verdict: "confirmed", reason: "r" }]);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: judge,
+    sessionFactory: fakeFactory(failing("test_add", "test_scratch")) });
+  expect(review.findings.map((f) => f.func)).toEqual(["test_add"]);
+  expect(judge.calls.join("\n")).not.toContain("::test_scratch");
+  expect(review.unclaimed).toEqual([{ project: "main", testId: `${GEN}::test_scratch`, message: "assert in test_scratch\ntrace" }]);
+  expect(review.projectStats[0]!.noReport).toBeUndefined();
+  expect(render(review)).toContain(`- Failing tests the reviewer did not report (scratch or replaced): \`${GEN}::test_scratch\``);
+  expect(summary(review, "review.md")).toContain("1 unreported failing test");
+});
+
+test("same name in a newer file: only the reported file counts", async () => {
+  const NEWER = "tests/arnx_generated/test_add_v2.py";
+  const body = "from app import add\n\ndef test_add():\n    assert add(2, 3) == 5\n";
+  const model = new ScriptedAgent([[tool("write_file", { path: GEN, content: body }),
+    tool("write_file", { path: NEWER, content: body })], [text(reportFor(`${NEWER}::test_add`))]]);
+  const both = (): [string | null, string, boolean] =>
+    [junitXml([[GEN, "test_add", "failed", "old"], [NEWER, "test_add", "failed", "new"]]), "", false];
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model,
+    challenger: new FakeJson([{ verdict: "confirmed", reason: "r" }]), sessionFactory: fakeFactory(both) });
+  expect(review.findings.map((f) => f.file)).toEqual([NEWER]);
+  expect(review.unclaimed!.map((u) => u.testId)).toEqual([`${GEN}::test_add`]);
+});
+
+test("a failing test with no report at all is unclaimed, and the round is incomplete", async () => {
+  const model = new ScriptedAgent([[tool("write_file", { path: GEN, content: SCRATCH })], [text("done")], [text("done")]]);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
+    sessionFactory: fakeFactory(failing("test_add")) });
+  expect(review.findings).toEqual([]);
+  expect(review.unclaimed!.map((u) => u.testId)).toEqual([`${GEN}::test_add`]);
+  expect(review.projectStats[0]!.noReport).toBe(true);
+  expect(exitCode(review)).toBe(2);
 });
