@@ -118,6 +118,7 @@ function sectionPath(part: string): string {
   return /^diff --git a\/(.+?) b\/(.+)$/m.exec(part)?.[2] ?? "";
 }
 
+const NOTES = /\n\n(?=This change also edits files not shown here|These files look like secrets and are left out)/;
 const DOC_FILE = /\.(md|mdx|rst|txt|adoc)$|(^|\/)(docs?|documentation)\//i;
 const TEST_FILE = /(^|\/)(tests?|__tests__|spec|specs)\/|(^|[._-])(test|tests|spec)(?=[._-]|$)|_test\.|\.test\.|\.spec\./i;
 
@@ -125,8 +126,11 @@ const TEST_FILE = /(^|\/)(tests?|__tests__|spec|specs)\/|(^|[._-])(test|tests|sp
  * one is put in the order of what the reader needs: the file `first` (the suspect's), the files the test names, other
  * source, tests, then docs; files that no longer fit are left out and named at the end. The first file is cut to fit
  * when it alone is longer than the limit. */
-export function orderDiff(diff: string, first = "", limit = 30_000, test = ""): string {
-  if (diff.length <= limit) return diff;
+export function orderDiff(whole: string, first = "", limit = 30_000, test = ""): string {
+  // The notes a round appends (other files, files left out) are not a file's text: they stay at the end, always.
+  const at = whole.search(NOTES);
+  const diff = at < 0 ? whole : whole.slice(0, at), notes = at < 0 ? "" : whole.slice(at + 2);
+  if (diff.length <= limit) return whole;
   const parts = diff.split(DIFF_SECTION).filter(Boolean).map((text) => ({ text, path: sectionPath(text) }));
   const names = (path: string) => {
     if (!path || !test) return false;
@@ -135,7 +139,7 @@ export function orderDiff(diff: string, first = "", limit = 30_000, test = ""): 
     return test.includes(path) || test.includes(stem.replaceAll("/", ".")) || test.includes(stem) ||
       (base.length >= 4 && new RegExp(`\\b${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(test));
   };
-  const rank = (path: string) => path === first ? 0 : names(path) ? 1 : DOC_FILE.test(path) ? 4
+  const rank = (path: string) => first && path === first ? 0 : names(path) ? 1 : DOC_FILE.test(path) ? 4
     : TEST_FILE.test(path) ? 3 : 2;
   const ordered = parts.map((p, i) => ({ ...p, i, r: rank(p.path) })).sort((a, b) => a.r - b.r || a.i - b.i);
   const out: string[] = [], left: string[] = [];
@@ -149,11 +153,12 @@ export function orderDiff(diff: string, first = "", limit = 30_000, test = ""): 
       used = limit;
     } else left.push(p.path || "(unnamed)");
   }
-  if (!left.length) return out.join("");
+  const end = notes ? `\n${notes}` : "";
+  if (!left.length) return !notes ? out.join("") : out.join("") + (out.join("").endsWith("\n") ? "" : "\n") + end;
   const shown = left.slice(0, 20).join(", ") + (left.length > 20 ? `, and ${left.length - 20} more` : "");
   const tail = `[${left.length} more file${left.length === 1 ? "" : "s"} changed: ${shown}; not shown]\n`;
   const body = out.join("");
-  return (body.endsWith("\n") ? body : body + "\n") + tail;
+  return (body.endsWith("\n") ? body : body + "\n") + tail + end;
 }
 
 const wordsOf = (cfg: ReviewConfig) => adapterFor(cfg).words(cfg.runner);
@@ -435,7 +440,7 @@ export function explainUser(diff: string, findings: { id: string; testId: string
   const list = findings.map((f) => `<finding id="${f.id}">\nTest: ${f.testId}\nFailure:\n${f.message.slice(0, 2000)}\n` +
     `Reviewer's explanation: ${f.explanation || "(none given)"}\n` +
     `Second opinion: ${f.verdict ?? "not given"}${f.reason ? `: ${f.reason}` : ""}\n</finding>`).join("\n");
-  return `The change:\n<diff>\n${clip(diff).slice(0, 30_000)}\n</diff>\n\nThe test files:\n${tests}\n\n` +
+  return `The change:\n<diff>\n${orderDiff(diff, "", 30_000, files.map((p) => sources[p] ?? "").join("\n"))}\n</diff>\n\nThe test files:\n${tests}\n\n` +
     `The findings:\n${list}\n\nPut every finding id in exactly one group.`;
 }
 

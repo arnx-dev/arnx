@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { challengeUser, orderDiff } from "../src/prompts";
+import { challengeUser, explainUser, orderDiff } from "../src/prompts";
 import { Boundary, maskedJson } from "../src/boundary";
 import { challenge, CONCURRENCY, inPool } from "../src/challenge";
 import { sameTest } from "../src/report";
@@ -200,4 +200,23 @@ test("a key that straddles the cut is masked before the diff is cut", async () =
   await challenge(findings, { model, diff, sources: {}, budgetUsd: 1, suspectFile: () => "src/k.py" });
   expect(inner.calls[0]).not.toContain(body.slice(0, 20));
   expect(inner.calls[0]).toContain("[private key]");
+});
+
+test("the note on files shown elsewhere stays at the end of a long diff, after the footer", () => {
+  const note = "This change also edits files not shown here (other projects): `x.py`. Their edits are not in the diff above: never conclude that something is missing.";
+  const diff = section("src/a.py", 16_000) + section("src/b.py", 16_000) + section("src/pay.py", 2000) + `\n${note}\n`;
+  const u = challengeUser(diff, "tests/t.py", "def test_x(): ...", "tests/t.py::test_x", "fail", "e", [], "src/pay.py");
+  expect(u).toContain("not shown]\n\n" + note);
+  const last = section("src/a.py", 16_000) + section("src/pay.py", 2000) + section("src/z.py", 16_000) + `\n${note}\n`;
+  const v = challengeUser(last, "tests/t.py", "", "t", "fail", "e", [], "src/pay.py");
+  expect(v).toContain("[1 more file changed: src/z.py; not shown]\n\n" + note);
+  expect(orderDiff(section("src/a.py", 10) + `\n${note}\n`)).toBe(section("src/a.py", 10) + `\n${note}\n`);
+});
+
+test("the grouping call sees the diff ordered, with the same footer", () => {
+  const diff = section("src/a.py", 20_000) + section("src/b.py", 20_000);
+  const u = explainUser(diff, [{ id: "F1", testId: "t", message: "m", explanation: "", reason: "", verdict: null, file: "t.py" }],
+    { "t.py": "from src.b import x" });
+  expect(u).toContain("# src/b.py");
+  expect(u).toContain("[1 more file changed: src/a.py; not shown]");
 });
