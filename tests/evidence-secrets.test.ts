@@ -242,3 +242,22 @@ test("a value only the base commit names is hidden in a pack built for a replay"
   expect(pack).toContain("app/legacy.py:4");
   expect(pack).not.toContain(base);
 });
+
+test("an example env file is shared text: its values stay readable, while a real env file's stay hidden", () => {
+  const url = "http://localhost:" + "3000";
+  const repo = initRepo(join(tmp(), "repo"));
+  put(repo, { "app/calc.py": CALC, ".env.example": `APP_URL=${url}\n`, "config/app.example.json": `{"v": "${url}/v1"}\n`,
+    "services/pay/.env.production": `PAY=${PAY}\n`,
+    "app/deploy.py": `from app.calc import total\ndef deploy(items):\n    a, b = "${url}", "${PAY}"\n    return total(items)\n` });
+  commit(repo, "first");
+  writeFileSync(join(repo, "app/calc.py"), CALC.replace("sum(items)", "sum(items) + 1"));
+  commit(repo, "second");
+  const head = runGit(repo, "rev-parse", "HEAD").trim();
+  const pack = commitEvidence(repo, head, runGit(repo, "show", "--format=", head))({ testSource: GEN_SRC, testFile: GEN,
+    func: "test_x", commitMessage: "second", writeDir: "tests/arnx_generated" });
+  expect(pack).toContain(`a, b = "${url}"`);
+  expect(pack).not.toContain(PAY);
+  const taken = takeSnapshot(repo, head, join(tmp(), "snap"));
+  expect(taken.suspects.has(PAY)).toBe(true);
+  expect([...taken.suspects].filter((v) => v.includes("localhost"))).toEqual([]);
+});

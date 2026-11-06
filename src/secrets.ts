@@ -9,6 +9,13 @@ export const SECRET_FILE_GLOBS: readonly string[] = [
   ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "*.jks", "id_rsa*", "id_ecdsa*",
   "id_ed25519*", "*.ppk", ".netrc", ".npmrc", ".pypirc", "credentials*.json", "service-account*.json", "*.session",
   "*.session-journal"];
+/** What names a secret file's shared template, as a part of its name (`.env.example`, `credentials.sample.json`): it
+ * is meant to be shared, so only the name-based rules read it, never "every value is a secret". */
+export const EXAMPLE_SUFFIXES: readonly string[] = ["example", "examples", "sample", "samples", "template", "templates",
+  "tmpl", "tpl", "dist"];
+/** Whether a file is named as an example of a secret file (EXAMPLE_SUFFIXES), at any depth. */
+export const isExampleFile = (rel: string): boolean =>
+  posix.basename(rel).toLowerCase().split(/[.-]/).slice(1).some((part) => EXAMPLE_SUFFIXES.includes(part));
 /** The names of those that hold a key and nothing else: one holding a key stays in, the key replaced. */
 const KEY_FILES = ["*.pem", "*.key", "id_rsa*", "id_ecdsa*", "id_ed25519*"];
 /** What follows BEGIN or END in a private key's armour (PEM, PGP's block, SSH2's four dashes), plain or URL-encoded, a label
@@ -881,11 +888,13 @@ export function suspects(path: string, text: string, pins: readonly string[], wh
   return [...out];
 }
 
-/** Every value a file secret by its name holds (secret file globs), under any key name: `KEY=v` and `key: v` lines,
- * and a JSON file's string values. Not a number, a boolean or a word with spaces, and 8 characters or more. These are
- * guesses: they hide text that leaves arnx, and no code that tests run is rewritten for them. */
+/** Every value a file secret by its name holds (secret file globs; an example of one holds none, isExampleFile), under
+ * any key name: `KEY=v` and `key: v` lines, and a JSON file's string values. Not a number, a boolean or a word with
+ * spaces, and 8 characters or more. These are guesses: they hide text that leaves arnx, and no code that tests run is
+ * rewritten for them. */
 export function secretFileValues(path: string, text: string): string[] {
   const out = new Set<string>();
+  if (isExampleFile(path)) return [];
   const take = (raw: string) => {
     const v = raw.trim().replace(/^(["'`])(.*)\1$/, "$2");
     if (v.length >= 8 && v.length <= 4096 && !/\s/.test(v) && !/^(?:true|false|null|none|yes|no|on|off)$/i.test(v) &&
