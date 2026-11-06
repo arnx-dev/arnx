@@ -392,11 +392,16 @@ ${uncovered}`);
     "(web UI (React) tests; jest suite did not run in the sandbox).");
   // some: tests, docs and covered files do not count
   expect(quickCoverageLine(f, ["svc/app.py", "svc/tests/test_a.py", "README.md", "web/a.ts"]))
-    .toBe("Not tested in this review: 1 of 2 changed source files (needs several services (redis, postgres, mysql); " +
+    .toBe("Not tested in this review: at least 1 of 2 changed source files (needs several services (redis, postgres, mysql); " +
       "not set up).");
   // a project not set up yet reads "not set up"
   expect(quickCoverageLine(file(`  - {path: /web/, reason: "${NOT_SET_UP}"}\n`), ["web/a.ts", "svc/b.py"]))
-    .toBe("Not tested in this review: 1 of 2 changed source files (not set up yet).");
+    .toBe("Not tested in this review: at least 1 of 2 changed source files (not set up yet).");
+  // the "Not set up yet, though" line already names those files: this line leaves them out
+  expect(quickCoverageLine(file(`  - {path: /web/, reason: "${NOT_SET_UP}"}\n`), ["web/a.ts", "svc/b.py"], true)).toBeNull();
+  expect(quickCoverageLine(f, ["web/a.ts", "ui/b.ts", "svc/c.py"], true))
+    .toBe("Not tested in this review: at least 2 of 3 changed source files (needs several services (redis, postgres, mysql); not set up; " +
+      "web UI (React) tests; jest suite did not run in the sandbox).");
   // none: no line
   expect(quickCoverageLine(f, ["svc/app.py", "README.md"])).toBeNull();
   expect(quickCoverageLine(f, ["README.md"])).toBeNull();

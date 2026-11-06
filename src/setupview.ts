@@ -189,18 +189,20 @@ export function repoTypecheckGaps(file: ReviewFile, repo: string): string[] {
 }
 
 /** Before a first review spends money: the changed source files its tests will not reach (no project covers them, or
- * review.yaml says their tests do not run), with the reasons. Null when every changed source file is covered. */
-export function quickCoverageLine(file: ReviewFile, changed: string[]): string | null {
+ * review.yaml says their tests do not run), with the reasons. Null when every changed source file is covered. The
+ * count is a floor ("at least") when not all: files whose tests never reach them are only known after the review.
+ * `waiting`: a "Not set up yet, though" line names the projects not set up, so those files are left out here. */
+export function quickCoverageLine(file: ReviewFile, changed: string[], waiting = false): string | null {
   const sources = changed.filter(isSourcePath);
   if (!sources.length) return null;
   const r = route(file, sources, Infinity);
-  const left = [...r.uncovered, ...r.declared];
+  const left = [...r.uncovered, ...r.declared].filter((x) => !(waiting && x.reason === NOT_SET_UP));
   const paths = new Set(left.map((x) => x.path));
   if (!paths.size) return null;
   const reasons = [...new Set(left.map((x) => (x.reason === NOT_SET_UP ? "not set up yet" : x.reason).trim()))];
   const n = sources.length;
   const what = paths.size === n ? `all ${n} changed source file${n === 1 ? "" : "s"}`
-    : `${paths.size} of ${n} changed source file${n === 1 ? "" : "s"}`;
+    : `at least ${paths.size} of ${n} changed source file${n === 1 ? "" : "s"}`;
   return `Not tested in this review: ${what} (${reasons.slice(0, 2).join("; ")}).`;
 }
 

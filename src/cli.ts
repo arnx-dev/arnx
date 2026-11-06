@@ -1036,7 +1036,7 @@ class Commands {
       // The review goes on: what was set up, and where the rest is written down.
       this.d.out(`✓ Test environment ready: ${result.runs.map((x) => x.name).join(", ")} · details: ` +
         `${APPROVAL_RECORD}`);
-      const left = quickCoverageLine(proposed, quick.files);
+      const left = quickCoverageLine(proposed, quick.files, !!result.waiting?.length);
       if (left) this.d.out(left);
       for (const line of repoTypecheckGaps(proposed, repo)) this.d.out(line);
       if (result.waiting?.length) {
