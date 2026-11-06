@@ -208,3 +208,50 @@ test("approve checks every project and names each one that fails, with both poss
   expect(detail).toContain("set tests_dir");
   expect(detail).toContain("test_command");
 });
+
+const FEED = `  feed:
+    root: services/feed
+    language: python
+    image: python:3.12-slim
+    test_command: python -m pytest -q {targets}
+    services: [db, mq]
+    uses: [services/shared/]
+`;
+const HEAD = PROJECTS.slice(0, PROJECTS.indexOf("projects:"));
+const WITHOUT_PAY = `${HEAD}projects:\n${FEED}uncovered:
+  - {path: /app.py, reason: "legacy script, no tests"}
+  - {path: /services/pay/, reason: "not needed"}
+`;
+
+test("a project proven in this setup stays when the proposal leaves it out", async () => {
+  const m = new ScriptedAgent([
+    [tool("try_project", { yaml: COVERED, project: "pay" })],
+    [tool("propose", { yaml: WITHOUT_PAY })],
+    [text("done")],
+  ]);
+  const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: passing });
+  expect(result(m, 2)).toContain("accepted");
+  const f = parseReviewFile(r.yamlText!);
+  expect(f.projects.map((p) => p.name).sort()).toEqual(["feed", "pay"]);
+  expect(f.uncovered.map((u) => u.path)).toEqual(["/app.py"]);
+  expect(ran).toEqual(["pay", "feed"]); // pay's suite does not run again
+});
+
+test("a proposal that gives its root to another project does not get it back", async () => {
+  const PAYMENTS = `  payments:
+    root: services/pay
+    language: python
+    image: python:3.12-slim
+    install: [pip install pytest]
+    test_command: python -m pytest -q {targets}
+    services: [db]
+`;
+  const renamed = `${HEAD}projects:\n${PAYMENTS}${FEED}uncovered:\n  - {path: /app.py, reason: "legacy script, no tests"}\n`;
+  const m = new ScriptedAgent([
+    [tool("try_project", { yaml: COVERED, project: "pay" })],
+    [tool("propose", { yaml: renamed })],
+    [text("done")],
+  ]);
+  const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: passing });
+  expect(parseReviewFile(r.yamlText!).projects.map((p) => p.name).sort()).toEqual(["feed", "payments"]);
+});

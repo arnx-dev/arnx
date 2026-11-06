@@ -337,3 +337,27 @@ test("a run that passes at the limit is kept, its doubt said", async () => {
   expect(r.projects[0]!.gap).toBe("25 of 26 files that look like tests never ran (tests/slow 25)");
   expect(r.yamlText).toContain("test_command");
 });
+
+test("a project proven earlier survives the time limit when the last file leaves it out", async () => {
+  const clock = { ms: 0 };
+  const repo = twoProjects();
+  const webOnly = `version: 1
+projects:
+  web:
+    root: web
+    language: python
+    image: python:3.12-slim
+    install: [pip install pytest]
+    test_command: python -m pytest -q {targets}
+uncovered:
+  - {path: /api/, reason: "not needed"}
+`;
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("try_project", { yaml: webOnly, project: "web" })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"),
+    sessionFactory: apiThenSlowWeb(clock), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+  expect([r.ok, r.stop, r.setAside]).toEqual([true, "time", ["web"]]);
+  const f = parseReviewFile(r.yamlText!);
+  expect(f.projects.map((p) => p.name)).toEqual(["api"]);
+  expect(f.uncovered).toEqual([{ path: "/web/", reason: TIME_LEFT_OUT }]);
+});

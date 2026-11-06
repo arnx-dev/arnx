@@ -942,6 +942,65 @@ export function withUncovered(text: string, add: { path: string; reason: string 
   return changed ? doc.toString({ flowCollectionPadding: false, lineWidth: 0 }) : text;
 }
 
+/** A project proven in this setup: its settings, the services it lists, and the file's allowed env names. */
+export interface ProvenBlock { spec: unknown; services: Record<string, unknown>; allow: string[] }
+
+const slashes = (p: string) => p.replace(/^\/+|\/+$/g, "");
+const sameOrNested = (a: string, b: string) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+
+/** `yaml` with each project in `blocks` that it leaves out put back, with its services, and its `/<root>/` entry
+ * under uncovered taken out. A project is not put back when another project in the file has its root or a root
+ * inside or around it (the agent restructured), or when the file defines a service of that name differently. */
+export function restoreProven(yaml: string, blocks: Map<string, ProvenBlock>): { yaml: string; restored: string[] } {
+  const doc = parseDocument(yaml);
+  if (doc.errors.length || !blocks.size) return { yaml, restored: [] };
+  const js = doc.toJS() as { projects?: Record<string, { root?: unknown }>; services?: Record<string, unknown>;
+    uncovered?: { path?: unknown }[]; allow_env_names?: string[] } | null;
+  if (!js || !js.projects || typeof js.projects !== "object") return { yaml, restored: [] };
+  const roots = (): string[] => Object.values(js.projects!).map((p) => slashes(String(p?.root ?? ""))).filter(Boolean);
+  const restored: string[] = [];
+  for (const [name, b] of blocks) {
+    if (name in js.projects) continue;
+    const root = slashes(String((b.spec as { root?: unknown } | null)?.root ?? ""));
+    if (!root || roots().some((r) => sameOrNested(r, root))) continue;
+    const clash = Object.entries(b.services).some(([k, v]) => js.services?.[k] !== undefined &&
+      JSON.stringify(js.services[k]) !== JSON.stringify(v));
+    if (clash) continue;
+    doc.setIn(["projects", name], doc.createNode(b.spec));
+    js.projects[name] = b.spec as { root?: unknown };
+    for (const [k, v] of Object.entries(b.services)) {
+      if (js.services?.[k] !== undefined) continue;
+      doc.setIn(["services", k], doc.createNode(v));
+      (js.services ??= {})[k] = v;
+    }
+    const names = b.allow.filter((n) => !(js.allow_env_names ?? []).includes(n));
+    for (const n of names) {
+      if (!doc.has("allow_env_names")) doc.set("allow_env_names", doc.createNode([]));
+      doc.addIn(["allow_env_names"], n);
+      (js.allow_env_names ??= []).push(n);
+    }
+    const list = doc.get("uncovered");
+    if (isSeq(list)) {
+      for (let i = list.items.length - 1; i >= 0; i--) {
+        const u = (list.items[i] as { toJSON?: () => unknown }).toJSON?.() as { path?: unknown } | undefined;
+        if (typeof u?.path === "string" && slashes(u.path) === root && /\/$/.test(u.path)) list.items.splice(i, 1);
+      }
+    }
+    restored.push(name);
+  }
+  return restored.length ? { yaml: doc.toString({ flowCollectionPadding: false, lineWidth: 0 }), restored } : { yaml, restored };
+}
+
+/** What restoreProven needs to put project `name` back: its settings, its services and the allowed env names. */
+function provenBlock(f: ReviewFile, name: string): ProvenBlock {
+  const project = f.projects.find((p) => p.name === name)!;
+  const services = f.raw.services && typeof f.raw.services === "object"
+    ? Object.fromEntries(Object.entries(f.raw.services as Record<string, unknown>)
+      .filter(([k]) => project.services.some((s) => s.name === k))) : {};
+  const allow = Array.isArray(f.raw.allow_env_names) ? f.raw.allow_env_names.map(String) : [];
+  return { spec: structuredClone((f.raw.projects as Record<string, unknown>)[name]), services: structuredClone(services), allow };
+}
+
 function hasAlias(doc: ReturnType<typeof parseDocument>): boolean {
   let found = false;
   visit(doc, { Alias: () => { found = true; return visit.BREAK; } });
@@ -1141,7 +1200,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
   const keep = new Map(existing ? existing.projects.filter((p) => p.name !== o.project)
     .map((p) => [p.name, projectDigest(existing, p.name)] as const) : []);
   const state = { accepted: null as string | null, lastTried: null as string | null, summary: "no project tried",
-    proven: new Map<string, string>(), attempts: 0, tries: new Map<string, number>(), proofs: new Map<string, ProjectProof>(),
+    proven: new Map<string, string>(), provenBlocks: new Map<string, ProvenBlock>(), attempts: 0, tries: new Map<string, number>(), proofs: new Map<string, ProjectProof>(),
     final: null as ReviewFile | null, lastFailing: new Map<string, { env: string; files: string[] }>(),
     failing: [] as string[], failingProject: null as string | null, problem: "", needed: null as NeededFile[] | null,
     usesChecked: false, pathsChecked: false, pathHints: [] as UsesHint[],
@@ -1568,6 +1627,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         "fixed yet) do not count; leave those tests as they are." : "";
       if (red) say(stillRed(counts.acceptedFailing));
       state.proven.set(name, projectDigest(f, name));
+      if (!f.legacy) state.provenBlocks.set(name, provenBlock(f, name));
       // A run that proves a project ran the whole suite (a rerun of failing files that passes is followed by one).
       const [, counted] = suiteOk(counts.all, cfg, trusted, accepted, "record");
       state.runs.set(name, { name, digest: ranWith, env, snapshot: withSandbox(code, sandbox), untracked, summary,
@@ -1591,6 +1651,21 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const derivedOf = (f: ReviewFile, drop: string[]) => [
       ...browser.map((b) => ({ path: b.path, reason: `${BROWSER_TESTS} (${b.tool})` })),
       ...drop.flatMap((name) => webUiPaths(f, name, mapFiles).map((path) => ({ path, reason: WEB_UI })))];
+    // A project proven in this setup that the agent's file leaves out is put back (restoreProven), and the agent told.
+    const putBack = (text: string): string => {
+      const blocks = new Map([...state.provenBlocks].filter(([n]) => !keep.has(n) && !state.webUi.has(n)));
+      const r = restoreProven(text, blocks);
+      if (!r.restored.length) return text;
+      try {
+        parseReviewFile(withOurs(r.yaml));
+      } catch (e) {
+        if (!(e instanceof ArnxError)) throw e;
+        return text;
+      }
+      state.notice += `(${r.restored.join(", ")} already ran in this setup and stays in the file as it ran: ` +
+        "arnx put it back.)\n";
+      return r.yaml;
+    };
     // At the time limit with no file accepted: the projects of the last whole file proven as they stand there are
     // kept, the others listed under uncovered (TIME_LEFT_OUT), and that file is accepted. Approved projects must be
     // as approved. Returns the projects set aside; null (nothing accepted) when no project of this setup is proven or
@@ -1598,8 +1673,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const keepProven = (): string[] | null => {
       if (!state.lastFile) return null;
       let f: ReviewFile;
+      let last = state.lastFile;
       try {
-        f = parseReviewFile(withOurs(state.lastFile));
+        last = putBack(last);
+        f = parseReviewFile(withOurs(last));
       } catch (e) {
         if (!(e instanceof ArnxError)) throw e;
         return null;
@@ -1613,7 +1690,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const aside = fresh.filter((name) => !proven.includes(name) && !web.includes(name));
       const reason = (name: string) => state.tooMany.has(name) ? manyServicesReason(state.tooMany.get(name)!)
         : TIME_LEFT_OUT;
-      let yaml = withUncovered(state.lastFile, [...derivedOf(f, web), ...aside.flatMap((name) =>
+      let yaml = withUncovered(last, [...derivedOf(f, web), ...aside.flatMap((name) =>
         webUiPaths(f, name, mapFiles).map((path) => ({ path, reason: reason(name) })))], [...web, ...aside]);
       let map: Coverage;
       try {
@@ -1635,8 +1712,14 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     };
     const propose = async (args: Record<string, unknown>): Promise<string> => {
       if (state.needed) throw stopped();
-      const parsed = parse(args);
+      let parsed = parse(args);
       if (typeof parsed === "string") return parsed;
+      const back = putBack(parsed.yaml);
+      if (back !== parsed.yaml) {
+        state.lastFile = back;
+        state.lastTried = withOurs(back);
+        parsed = { yaml: back, text: withOurs(back), f: parseReviewFile(withOurs(back)) };
+      }
       // arnx's part of the map: browser suites under uncovered, and the web UI apps whose one try failed there instead
       // of in the file. Done on the agent's file; arnx's own keys (withOurs) are added again to check it.
       const drop = [...state.webUi].filter((name) => parsed.f.projects.some((p) => p.name === name));
@@ -1719,8 +1802,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       }
       if (failed.length) {
         // The suite's own failure (state.problem, state.failing) stays what a failed setup reports.
+        const ran = f.projects.filter((p) => !keep.has(p.name) && state.proven.get(p.name) === projectDigest(f, p.name))
+          .map((p) => `${p.name} (${state.proofs.get(p.name)?.summary ?? "ran"})`);
         return `refused: propose ran the projects changed since they were proven, and these do not run:\n` +
-          failed.join("\n\n");
+          failed.join("\n\n") + (ran.length ? `\nThese already run; keep them: ${ran.join(", ")}.` : "");
       }
       // With a code index (`context = "precise"`), the map is checked once against what each project's code refers
       // to: what it finds goes back as hints, and the same file proposed again is accepted.
