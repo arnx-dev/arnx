@@ -106,6 +106,10 @@ function tsc(snap: string, workdir: string): [string, number] {
             lines.push(`${posix.relative(join(snap, workdir), p)}(${i + 1},7): error TS2307: Cannot find module ` +
               "'@prisma/client' or its corresponding type declarations.");
           }
+          if (l.includes("MISSING-ERROR")) {
+            lines.push(`${posix.relative(join(snap, workdir), p)}(${i + 1},7): error TS2307: Cannot find module ` +
+              "'ghost-mod' or its corresponding type declarations.");
+          }
           if (l.includes("TYPE-ERROR")) {
             lines.push(`${posix.relative(join(snap, workdir), p)}(${i + 1},7): error TS2322: Type 'string' is not ` +
               "assignable to type 'number'.");
@@ -249,6 +253,29 @@ describe("a review", () => {
         "(3 errors); these errors say nothing about the change");
       expect((load(rdir).typecheck![0] as { gaps?: unknown }).gaps).toEqual(r.typecheck![0]!.gaps);
     });
+
+  test("three imports of a missing module that the change adds are the change's errors, not a gap", async () => {
+    writeFileSync(join(repo, "src", "calc.ts"), "export const add = (a: number, b: number) => a + b;\n" +
+      "// MISSING-ERROR\n// MISSING-ERROR\n// MISSING-ERROR\n");
+    const { review: r, rdir } = await review();
+    expect(r.typecheck![0]!.gaps).toBeUndefined();
+    expect(r.typecheck![0]!.new).toBe(3);
+    expect(readFileSync(join(rdir, "review.md"), "utf8")).not.toContain("say nothing about the change");
+  });
+
+  test("the same errors already in the code before the change are a gap", async () => {
+    writeFileSync(join(repo, "src", "old.ts"), "// MISSING-ERROR\n// MISSING-ERROR\n// MISSING-ERROR\n");
+    commit(repo, "missing module already there");
+    // A review is of the last commit and what is not committed: the module was missing before both.
+    writeFileSync(join(repo, "src", "extra.ts"), "export const e = 1;\n");
+    commit(repo, "another change");
+    writeFileSync(join(repo, "src", "calc.ts"), "export const add = (a: number, b: number) => a + b;\n" +
+      "export const label: number = 'sum'; // TYPE-ERROR\n");
+    const { review: r, rdir } = await review();
+    expect(r.typecheck![0]!.gaps).toEqual([{ kind: "missing", module: "ghost-mod", errors: 3 }]);
+    expect(readFileSync(join(rdir, "review.md"), "utf8")).toContain("the type check cannot see ghost-mod (3 errors); " +
+      "these errors say nothing about the change");
+  });
 
   test("an error only in a generated test is left out: no type errors", async () => {
     writeFileSync(join(repo, "src", "calc.ts"), "export const add = (a: number, b: number) => a + b;\n");

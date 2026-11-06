@@ -124,9 +124,16 @@ export function markNew(after: TscError[], before: TscError[]): boolean[] {
  * before the change, with its errors when it ran (absent: not compared). */
 export function typeCheckOf(cfg: ReviewConfig, run: TypeCheckRun, changed: Iterable<string>, secs: number,
                             before?: { status: TypeCheckBefore; errors?: TscError[] }, workspace: string[] = []): TypeCheck {
-  const gaps = typeGaps(run.errors, workspace);
   const touched = new Set(changed);
   const fresh = before?.errors ? markNew(run.errors, before.errors) : null;
+  // A module no package or generator explains (`missing`) is a gap only when most of its errors were there before the
+  // change (not new; with no comparison, not in a changed file): if the change brings them, they are its errors.
+  const bringing = (e: TscError, i: number) => (fresh ? fresh[i]! : touched.has(e.file));
+  const gaps = typeGaps(run.errors, workspace).filter((g) => {
+    if (g.kind !== "missing") return true;
+    const own = run.errors.map((e, i) => [e, i] as const).filter(([e]) => missingModule(e) === g.module);
+    return own.filter(([e, i]) => bringing(e, i)).length * 2 <= own.length;
+  });
   const all: Diagnostic[] = run.errors.map((e, i) => ({ ...e, changed: touched.has(e.file),
     ...(fresh ? { new: fresh[i]! } : {}) }));
   const rank = (d: Diagnostic) => (d.new ? 0 : 2) + (d.changed ? 0 : 1);
@@ -181,15 +188,20 @@ export interface TypeGap { kind: "generated" | "sibling" | "missing"; module: st
 export const GAP_ERRORS = 3;
 const GENERATED = /^(@prisma|\.prisma)\/client(\/|$)/;
 
+/** The module a "cannot find module" or "no exported member" error names. */
+export function missingModule(e: TscError): string | undefined {
+  const m = e.code === "TS2307" ? /^Cannot find module '([^']+)'/.exec(e.message)
+    : e.code === "TS2305" ? /^Module '"([^"]+)"' has no exported member/.exec(e.message) : null;
+  return m?.[1];
+}
+
 /** The modules the type check cannot find (TS2307 "Cannot find module", TS2305 "has no exported member") that three
  * or more errors name: a generated client or an unbuilt package, not a mistake of the change. `workspace`: the
  * package names of the workspace. Relative imports are the project's own. */
 export function typeGaps(errors: TscError[], workspace: string[]): TypeGap[] {
   const count = new Map<string, number>();
   for (const e of errors) {
-    const m = e.code === "TS2307" ? /^Cannot find module '([^']+)'/.exec(e.message)
-      : e.code === "TS2305" ? /^Module '"([^"]+)"' has no exported member/.exec(e.message) : null;
-    const name = m?.[1];
+    const name = missingModule(e);
     if (!name || name.startsWith(".") && !name.startsWith(".prisma/") || name.startsWith("/")) continue;
     count.set(name, (count.get(name) ?? 0) + 1);
   }
