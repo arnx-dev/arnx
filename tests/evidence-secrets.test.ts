@@ -4,10 +4,10 @@ import { expect, test } from "bun:test";
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Boundary } from "../src/boundary";
-import { changeMessage } from "../src/change";
+import { changeMessage, takeSnapshot } from "../src/change";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { ArnxError } from "../src/errors";
-import { gitTree, GIT_TREE_LIMITS, judgeEvidence } from "../src/evidence";
+import { commitEvidence, gitTree, GIT_TREE_LIMITS, judgeEvidence, snapshotTree } from "../src/evidence";
 import { runReview } from "../src/reviewer";
 import { defaultSettings } from "../src/settings";
 import { AWS_KEY_2, PRIVATE_KEY_BLOCK } from "./helpers/fakekeys";
@@ -135,3 +135,110 @@ test("a review keeps no value of its commit message or tree in round.json, secon
   for (const f of walk(rdir)) expect([f, leaks(readFileSync(f, "utf8"))]).toEqual([f, []]);
   expect(leaks(JSON.stringify(judge.calls))).toEqual([]);
 }, 60_000);
+
+// ---- values in files secret by their name, the commit message's pairs, cut lines
+
+const PAY = "Su8e" + "nVq1Lm7Zx3";
+const CRED = "Cr3d" + "Wq8Lm1Zx5Rv";
+const LONG = "L0ngPw4Rx" + "9QmZ2Lk7Vt";
+const MSG_PW = "M5g" + "Pw81LmZq3Rx";
+const MSG_TOKEN = "Tq7v" + "Lm20ZxWp4Rs";
+const NAMED_FILES: Record<string, string> = {
+  "app/calc.py": CALC,
+  "services/pay/.env.production": `PAY=${PAY}\n`,
+  "config/sub/credentials.json": `{"v": "${CRED}"}\n`,
+  ".env": `LONG_PW=${LONG}\n`,
+  // Quoted bare, under no name that says what they are.
+  "app/deploy.py": `from app.calc import total\ndef deploy(items):\n    a, b, c = "${PAY}", "${CRED}", "${LONG}"\n` +
+    "    return total(items)\n",
+};
+const NAMED = [PAY, CRED, LONG, MSG_PW, MSG_TOKEN];
+const MESSAGE_PAIRS = `Rotate the keys\n\npassword: ${MSG_PW}\nThen set token=${MSG_TOKEN} in production.`;
+
+function namedProject(): { repo: string; head: string } {
+  const repo = initRepo(join(tmp(), "repo"));
+  put(repo, NAMED_FILES);
+  mkdirSync(dirname(reviewConfigPath(repo)), { recursive: true });
+  writeFileSync(reviewConfigPath(repo), stamp(parseReviewConfig("version: 1\nimage: python:3.12-slim\n" +
+    "test_command: python -m pytest -q {targets}\n"), "Dev", "2026-10-11"));
+  commit(repo, "first");
+  writeFileSync(join(repo, "app/calc.py"), CALC.replace("sum(items)", "sum(items) + 1"));
+  commit(repo, MESSAGE_PAIRS);
+  return { repo, head: runGit(repo, "rev-parse", "HEAD").trim() };
+}
+
+test("every value of a file secret by its name is hidden where code quotes it, at any depth and under any key", () => {
+  const { repo, head } = namedProject();
+  const pack = commitEvidence(repo, head, runGit(repo, "show", "--format=", head))({ testSource: GEN_SRC, testFile: GEN,
+    func: "test_x", commitMessage: changeMessage(repo, { kind: "commit", base: `${head}~1`, head }),
+    writeDir: "tests/arnx_generated" });
+  expect(pack).toContain("a, b, c = ");
+  expect(pack).toContain("Rotate the keys");
+  expect(NAMED.filter((v) => pack.includes(v))).toEqual([]);
+  // The snapshot knows them too, and tests still run on the real code: a guess hides text, it rewrites no code.
+  const taken = takeSnapshot(repo, head, join(tmp(), "snap"));
+  for (const v of [PAY, CRED, LONG]) expect(taken.suspects.has(v)).toBe(true);
+  const code = readFileSync(join(tmp(), "snap", "app/deploy.py"), "utf8");
+  for (const v of [PAY, CRED, LONG]) expect(code).toContain(v);
+});
+
+test("a review hides the values of files secret by their name and the commit message's pairs in all it writes", async () => {
+  const { repo } = namedProject();
+  const agent = new ScriptedAgent([
+    [tool("write_file", { path: GEN, content: GEN_SRC })],
+    [text(JSON.stringify({ tests: [{ test: `${GEN}::test_x`, expects: "sums" }],
+      suspected_defects: [{ test: `${GEN}::test_x`, explanation: "off by one." }], questions: [] }))],
+  ]);
+  const runs = (): [string | null, string, boolean] => [junitXml([[GEN, "test_x", "failed", "assert 4 == 3"]]), "", false];
+  const judge = new FakeJson([{ verdict: "confirmed", reason: "x" }, { groups: [] }]);
+  const settings = { ...defaultSettings(), beforeCheck: false, consentAt: "2026-10-11T00:00:00Z" };
+  const { rdir } = await runReview(repo, { settings, agentModel: agent, challenger: judge,
+    sessionFactory: fakeFactory(runs), range: "HEAD~1..HEAD" });
+  const round = readFileSync(join(rdir, "round.json"), "utf8");
+  expect(round).toContain("a, b, c = ");
+  expect(round).toContain("Rotate the keys");
+  for (const f of walk(rdir)) {
+    const body = readFileSync(f, "utf8");
+    expect([f, NAMED.filter((v) => body.includes(v))]).toEqual([f, []]);
+  }
+}, 60_000);
+
+test("a pack is not built without the filter", () => {
+  const { repo, head } = namedProject();
+  expect(() => judgeEvidence({ tree: gitTree(repo, head), diff: "", testSource: GEN_SRC, func: "test_x", commitMessage: "m",
+    writeDir: "tests/arnx_generated" } as unknown as Parameters<typeof judgeEvidence>[0])).toThrow(/filter/);
+});
+
+test("a line is masked before it is cut, so a cut leaves no piece of a value", () => {
+  const value = "Wd7Kq2Lm9" + "Zx4Rv8Tp3Nb";
+  const repo = initRepo(join(tmp(), "repo"));
+  // Cut at 160 characters with 7 of the value's left before the cut, too few for the filter to know it as a piece.
+  const lead = '    conn = connect(host="';
+  const wide = lead + "h".repeat(160 - 1 - 7 - lead.length - '", password="'.length) + `", password="${value}")`;
+  const doc = "See `total(items)` " + "w".repeat(200 - 1 - 7 - "See `total(items)` ".length) + value + " end";
+  put(repo, { "app/calc.py": CALC, "app/wide.py": `from app.calc import total\ndef wide(items):\n${wide}\n    return total(items)\n`,
+    "docs/use.md": `${doc}\n` });
+  commit(repo, "first");
+  writeFileSync(join(repo, "app/calc.py"), CALC.replace("sum(items)", "sum(items) + 1"));
+  const boundary = new Boundary([value]);
+  const pack = judgeEvidence({ tree: snapshotTree(repo), diff: runGit(repo, "diff"), testSource: GEN_SRC, testFile: GEN,
+    func: "test_x", commitMessage: "", writeDir: "tests/arnx_generated", boundary });
+  expect(pack).toContain('conn = connect(host="');
+  expect(pack).toContain("docs/use.md:1");
+  expect(pack).not.toContain(value.slice(0, 7));
+});
+
+test("a value only the base commit names is hidden in a pack built for a replay", () => {
+  const base = "Bz5Rm0" + "Qx2Wv8Ln4Tp";
+  const repo = initRepo(join(tmp(), "repo"));
+  put(repo, { "app/calc.py": `API_KEY = "${base}"\n\n${CALC}`,
+    "app/legacy.py": `from app.calc import total\ndef legacy(items):\n    k = "${base}"\n    return total(items)\n` });
+  commit(repo, "first");
+  writeFileSync(join(repo, "app/calc.py"), CALC.replace("sum(items)", "sum(items) + 1"));
+  commit(repo, "second");
+  const head = runGit(repo, "rev-parse", "HEAD").trim();
+  const pack = commitEvidence(repo, head, runGit(repo, "show", "--format=", head))({ testSource: GEN_SRC, testFile: GEN,
+    func: "test_x", commitMessage: "second", writeDir: "tests/arnx_generated" });
+  expect(pack).toContain("app/legacy.py:4");
+  expect(pack).not.toContain(base);
+});

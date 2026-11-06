@@ -18,7 +18,7 @@ import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
 import { BIG_KEYS_MOST, excludePathspecs, fakeKeys, filePin, holdsOnlyPublicPem, holdsPrivateKey, isCertainRule, isCodePath, isKeyFileName, isSecretPath,
   type KeyScan, keyTokens, MAY_HOLD_KEY, mayShowPrivateKey, privateKeyIn, scanKeys, type SecretPin, standInsFor, suspects, usedAsName,
-  WORD_RULE } from "./secrets";
+  secretFileValues, WORD_RULE } from "./secrets";
 import { buildContextDir, manifestRule, REPORT_DIR, type Runner } from "./sandbox";
 import { standInsSetting } from "./settings";
 import { DIFF_SECTION, splitLines } from "./util";
@@ -788,6 +788,9 @@ export function takeSnapshot(repo: string, head: string | null, dest: string, al
     manifest: manifestRule(repo), rootEnv: rootEnvValues(repo, allow) });
 }
 
+/** The rule of a value a file secret by its name holds under a name that says nothing (secrets.ts secretFileValues). */
+const SECRET_FILE_RULE = "secret-file";
+
 /** The values of the `.env*` files at the top of `repo`, tracked or not, with their rules: they are read for this and
  * copied nowhere, so a value hard-coded from one into tracked code is known for what it is. */
 export function rootEnvValues(repo: string, allow: readonly SecretPin[] = []): Map<string, string> {
@@ -801,6 +804,8 @@ export function rootEnvValues(repo: string, allow: readonly SecretPin[] = []): M
     const why = new Map<string, string>();
     suspects(name, read.text, allow.find((a) => a.path === name)?.matches ?? [], why);
     for (const [v, rule] of why) if (!out.has(v)) out.set(v, rule);
+    // Every value of the file, under any key name: a guess, as a name beside it would make it.
+    for (const v of secretFileValues(name, read.text)) if (!out.has(v)) out.set(v, SECRET_FILE_RULE);
   }
   return out;
 }
@@ -1078,7 +1083,9 @@ function scrub(root: string, ignored: (rel: string) => boolean, allow: readonly 
   const leaving = (p: string, rel: string) => {
     const read = scrubText(p, changeLimits.maxScanBytes);
     if (!read || read.binary) return;
-    for (const v of suspects(rel, read.text, pinsOf(rel))) {
+    // A file secret by its name: every value it holds, under any key name, is one.
+    const named = isSecretPath(rel) ? secretFileValues(rel, read.text) : [];
+    for (const v of [...suspects(rel, read.text, pinsOf(rel)), ...named]) {
       seen.add(v);
       if (o.standIns) guesses.add(v);
     }

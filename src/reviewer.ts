@@ -36,7 +36,8 @@ import { dockerSteps, type SessionFactory } from "./sandbox";
 import type { TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
 import { route } from "./route";
-import { isSecretPath, suspects as secretValues } from "./secrets";
+import { isSecretPath } from "./secrets";
+import { commitMessageValues } from "./evidence";
 import { cloudModels, modelRefs, refString, type Settings } from "./settings";
 import { collect, dockerSession, ownTestsInWriteDir, ownTestsProblem, type Round, testRound, typecheckRound,
   writeDirOf } from "./testround";
@@ -440,7 +441,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       const pins = secretPinsOf(file.raw);
       boundary.addDiff(change.diff, pins);
       boundary.add(configSuspects(repo));
-      boundary.add(secretValues("", message, []));
+      boundary.add(commitMessageValues(message));
       if (resumed) {
         boundary.add(treeSuspects(repo, change.head, pins, { untracked: !!change.withUntracked,
           sandbox: sandboxOnlyOf(file.raw) }));

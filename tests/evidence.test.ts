@@ -4,6 +4,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { Boundary } from "../src/boundary";
 import { changeMessage } from "../src/change";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { EVIDENCE_LIMIT, evidencePacks, gitTree, judgeEvidence, snapshotTree, type TreeReader } from "../src/evidence";
@@ -55,7 +56,7 @@ test("evidence names callers, project tests and docs of the changed definition",
   const { repo, diff } = changed(join(tmp(), "repo"));
   // The generated test sits in the tree too, as in a round's snapshot: it is no project test.
   put(repo, { [GEN]: GEN_TOTAL });
-  const pack = judgeEvidence({ tree: snapshotTree(repo), diff, testSource: GEN_TOTAL, testFile: GEN,
+  const pack = judgeEvidence({ boundary: new Boundary(), tree: snapshotTree(repo), diff, testSource: GEN_TOTAL, testFile: GEN,
     func: "test_negative", commitMessage: "Skip items with no price", writeDir: WRITE_DIR });
   expect(pack).toContain("Skip items with no price");
   expect(pack).toContain("`total`");
@@ -81,7 +82,7 @@ test("evidence names callers, project tests and docs of the changed definition",
 test("evidence says when no caller exists", () => {
   const { repo, diff } = changed(join(tmp(), "repo"));
   const source = "from app.calc import helper\n\n\ndef test_helper():\n    assert helper(1) == 1\n";
-  const pack = judgeEvidence({ tree: snapshotTree(repo), diff, testSource: source, testFile: GEN, func: "test_helper",
+  const pack = judgeEvidence({ boundary: new Boundary(), tree: snapshotTree(repo), diff, testSource: source, testFile: GEN, func: "test_helper",
     commitMessage: "", writeDir: WRITE_DIR });
   expect(pack).toContain("`helper`");
   expect(pack).toMatch(/`helper`[^\n]*\n?[^\n]*no caller found/);
@@ -101,13 +102,13 @@ test("evidence finds a class the change edits outside a method, and a name it ne
   writeFileSync(join(repo, "lib/index.ts"), "export { parse } from './parse.js';\nexport { LIMITS } from './defaults.js';\n");
   const diff = runGit(repo, "diff");
   const py = "from pkg.grammar import SelectSegment\n\n\ndef test_top():\n    assert SelectSegment.match\n";
-  const one = judgeEvidence({ tree: snapshotTree(repo), diff, testSource: py, testFile: GEN, func: "test_top",
+  const one = judgeEvidence({ boundary: new Boundary(), tree: snapshotTree(repo), diff, testSource: py, testFile: GEN, func: "test_top",
     commitMessage: "", writeDir: WRITE_DIR });
   expect(one).toContain("`SelectSegment` (class, pkg/grammar.py:1)");
   expect(one).toContain("pkg/dialect.py:4");
   expect(one).not.toContain("pkg/grammar.py:1 in");
   const ts = "import { LIMITS } from '../lib/index.js';\nit('is frozen', () => {\n  expect(Object.isFrozen(LIMITS)).toBe(true);\n});\n";
-  const two = judgeEvidence({ tree: snapshotTree(repo), diff, testSource: ts, testFile: "tests/arnx_generated/x.test.ts",
+  const two = judgeEvidence({ boundary: new Boundary(), tree: snapshotTree(repo), diff, testSource: ts, testFile: "tests/arnx_generated/x.test.ts",
     func: "is frozen", commitMessage: "", writeDir: WRITE_DIR });
   expect(two).toContain("`LIMITS` (name, lib/index.ts:2)");
   expect(two).toContain("lib/env.ts:3");
@@ -119,7 +120,7 @@ test("a caller is named by the function that holds it, not by a nested one that 
     "app/server.py": "def make_app():\n    def on_clear():\n        return 1\n\n    query = '''\nSELECT 1\n'''\n" +
       "    return total(query)\n\n\nmake_app()\n",
   });
-  const pack = judgeEvidence({ tree: snapshotTree(repo), diff, testSource: GEN_TOTAL, testFile: GEN, func: "test_negative",
+  const pack = judgeEvidence({ boundary: new Boundary(), tree: snapshotTree(repo), diff, testSource: GEN_TOTAL, testFile: GEN, func: "test_negative",
     commitMessage: "", writeDir: WRITE_DIR });
   expect(pack).toContain("app/server.py:8 in `make_app`");
   expect(pack).toContain("`make_app` is used at app/server.py:11");
@@ -129,7 +130,7 @@ test("evidence gives how the test ran before the change and what kind of test it
   const { repo, diff } = changed(join(tmp(), "repo"));
   const source = "from app import calc\n\n\ndef test_negative(monkeypatch):\n    monkeypatch.setattr(calc, 'load', list)\n" +
     "    assert calc._round(calc.total([])) == 0  # type: ignore\n";
-  const pack = judgeEvidence({ tree: snapshotTree(repo), diff, testSource: source, testFile: GEN, func: "test_negative",
+  const pack = judgeEvidence({ boundary: new Boundary(), tree: snapshotTree(repo), diff, testSource: source, testFile: GEN, func: "test_negative",
     commitMessage: "", writeDir: WRITE_DIR,
     before: { status: "regression", detail: "", runs: ["passed", "passed"], message: "first line\nsecond line" },
     shallow: "source-text" });
@@ -161,7 +162,7 @@ test("evidence read from git objects holds no key and no secret-named value, and
   const cli = tree.read("app/cli.py")!;
   expect(cli).toContain("print(total(load(api_token)))");
   for (const v of [TOKEN, AWS_KEY]) expect(cli).not.toContain(v);
-  const pack = judgeEvidence({ tree, diff, testSource: GEN_TOTAL, testFile: GEN, func: "test_negative",
+  const pack = judgeEvidence({ boundary: new Boundary(), tree, diff, testSource: GEN_TOTAL, testFile: GEN, func: "test_negative",
     commitMessage: changeMessage(repo, { kind: "commit", base: `${head}~1`, head }), writeDir: WRITE_DIR });
   expect(pack).toContain("Skip items with no price");
   expect(pack).toContain("app/cli.py:4");
@@ -199,11 +200,11 @@ test("evidence stays within its limit", () => {
   put(repo, many);
   const o = { tree: snapshotTree(repo), diff, testSource: GEN_TOTAL, testFile: GEN, func: "test_negative",
     commitMessage: "m".repeat(5000), writeDir: WRITE_DIR };
-  const pack = judgeEvidence(o);
+  const pack = judgeEvidence({ boundary: new Boundary(), ...o });
   expect(pack.length).toBeLessThanOrEqual(EVIDENCE_LIMIT);
   expect(pack).toContain("app/use0.py:3");
   expect(pack).not.toContain("m".repeat(1600));
-  expect(judgeEvidence({ ...o, limit: 2000 }).length).toBeLessThanOrEqual(2000);
+  expect(judgeEvidence({ boundary: new Boundary(), ...o, limit: 2000 }).length).toBeLessThanOrEqual(2000);
 });
 
 test("evidence on a large tree stops searching at its bound and says so", () => {
@@ -216,10 +217,10 @@ test("evidence on a large tree stops searching at its bound and says so", () => 
   const o = { tree: huge, diff, testSource: GEN_TOTAL, testFile: GEN, func: "test_negative", commitMessage: "",
     writeDir: WRITE_DIR };
   const t0 = performance.now();
-  const pack = judgeEvidence({ ...o, scan: { files: 2000 } });
+  const pack = judgeEvidence({ boundary: new Boundary(), ...o, scan: { files: 2000 } });
   expect(pack).toContain("stopped");
   expect(pack).toContain("app/cli.py:5"); // the change's neighbours are searched first
-  expect(judgeEvidence({ ...o, scan: { ms: 0 } })).toContain("stopped");
+  expect(judgeEvidence({ boundary: new Boundary(), ...o, scan: { ms: 0 } })).toContain("stopped");
   expect(performance.now() - t0).toBeLessThan(10_000);
 });
 
@@ -292,7 +293,7 @@ function edited(root: string, files: Record<string, string>, [path, from, to]: [
   return { repo, diff: runGit(repo, "diff") };
 }
 const packOf = (repo: string, diff: string, testSource: string, func: string, testFile = GEN, writeDir = WRITE_DIR) =>
-  judgeEvidence({ tree: snapshotTree(repo), diff, testSource, testFile, func, commitMessage: "", writeDir });
+  judgeEvidence({ boundary: new Boundary(), tree: snapshotTree(repo), diff, testSource, testFile, func, commitMessage: "", writeDir });
 
 test("a change inside __init__ takes the class as its target", () => {
   const { repo, diff } = edited(join(tmp(), "repo"), {
@@ -391,7 +392,7 @@ test("a long line above a caller costs linear time", () => {
       "docs/odd.md": "```\n" + "`total` price_of(x) ".repeat(size / 20) + "\n```\n",
     });
     const t0 = performance.now();
-    const pack = judgeEvidence({ tree: snapshotTree(repo), diff, testSource: GEN_TOTAL, testFile: GEN, func: "test_negative",
+    const pack = judgeEvidence({ boundary: new Boundary(), tree: snapshotTree(repo), diff, testSource: GEN_TOTAL, testFile: GEN, func: "test_negative",
       commitMessage: "", writeDir: WRITE_DIR });
     expect(pack).toContain("app/odd.py:3");
     expect(performance.now() - t0).toBeLessThan(1500);
@@ -400,7 +401,7 @@ test("a long line above a caller costs linear time", () => {
 
 test("a round's packs share one time bound", () => {
   const { repo, diff } = changed(join(tmp(), "repo"));
-  const base = { tree: snapshotTree(repo), diff, testFile: GEN, commitMessage: "", writeDir: WRITE_DIR };
+  const base = { tree: snapshotTree(repo), diff, testFile: GEN, commitMessage: "", writeDir: WRITE_DIR, boundary: new Boundary() };
   const items = Array.from({ length: 5 }, (_, i) => ({ testSource: GEN_TOTAL, func: `test_negative${i}` }));
   const packs = evidencePacks(base, items, { ms: 0 });
   expect(packs).toHaveLength(5);
@@ -419,3 +420,23 @@ test("a caller that is itself only exported says so, not that nothing calls it",
   expect(pack).toContain("web/page.ts:3 in `Page`");
   expect(pack).toContain("`Page`: no caller by name; exported");
 });
+
+test("lines shaped to make a pattern backtrack cost linear time", () => {
+  for (const size of [96_000, 390_000]) {
+    const shapes: Record<string, string> = {
+      // An import rule: `const`, then spaces a pattern could split two ways.
+      "app/imp.js": `const${" ".repeat(size)}total\n`,
+      // A doc line with one backtick and the name many times after it.
+      "docs/a.md": "`" + " total".repeat(size / 6) + "\n",
+      // A definition rule tried on one line that holds `=>`.
+      "app/arr.ts": `  a(${" ".repeat(size)}=> total(1)\n`,
+    };
+    for (const [path, body] of Object.entries(shapes)) {
+      const { repo, diff } = changed(join(tmp(), `r${size}${path.replace(/\W/g, "")}`), { [path]: body });
+      const t0 = performance.now();
+      judgeEvidence({ boundary: new Boundary(), tree: snapshotTree(repo), diff, testSource: GEN_TOTAL, testFile: GEN,
+        func: "test_negative", commitMessage: "", writeDir: WRITE_DIR });
+      expect([path, size, performance.now() - t0 < 400]).toEqual([path, size, true]);
+    }
+  }
+}, 600_000);

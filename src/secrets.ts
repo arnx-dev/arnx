@@ -881,6 +881,40 @@ export function suspects(path: string, text: string, pins: readonly string[], wh
   return [...out];
 }
 
+/** Every value a file secret by its name holds (secret file globs), under any key name: `KEY=v` and `key: v` lines,
+ * and a JSON file's string values. Not a number, a boolean or a word with spaces, and 8 characters or more. These are
+ * guesses: they hide text that leaves arnx, and no code that tests run is rewritten for them. */
+export function secretFileValues(path: string, text: string): string[] {
+  const out = new Set<string>();
+  const take = (raw: string) => {
+    const v = raw.trim().replace(/^(["'`])(.*)\1$/, "$2");
+    if (v.length >= 8 && v.length <= 4096 && !/\s/.test(v) && !/^(?:true|false|null|none|yes|no|on|off)$/i.test(v) &&
+      !/^[-+]?\d+(?:\.\d+)?$/.test(v)) out.add(v);
+  };
+  if (/\.json$/i.test(path)) {
+    const walk = (x: unknown, depth: number): void => {
+      if (out.size > 10_000 || depth > 32) return;
+      if (typeof x === "string") take(x);
+      else if (Array.isArray(x)) x.forEach((y) => walk(y, depth + 1));
+      else if (x && typeof x === "object") Object.values(x).forEach((y) => walk(y, depth + 1));
+    };
+    try {
+      walk(JSON.parse(text), 0);
+    } catch {
+      for (const m of text.matchAll(/:\s*"([^"\\\n]{1,4096})"/g)) take(m[1]!);
+    }
+  }
+  for (const line of text.split("\n")) {
+    if (line.length > 4200) continue;
+    const m = /^[ \t]*(?:export[ \t]+)?[A-Za-z_][\w.-]*[ \t]*[:=][ \t]*(.*)$/.exec(line);
+    if (!m) continue;
+    const value = m[1]!.trim();
+    // A quoted value is whole; an unquoted one ends at a comment.
+    take(/^["'`]/.test(value) ? value : value.replace(/[ \t]+#.*$/, ""));
+  }
+  return [...out];
+}
+
 const MANY_VALUES = 64;
 
 /** Whether `v` stands whole at `at` in `text`, by the rule of matcherOf: no word character, `+` or `/` before it, and none after

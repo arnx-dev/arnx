@@ -18,7 +18,7 @@ import { changedLines, type Def, enclosing } from "./context";
 import { isTestPath } from "./detect";
 import { ArnxError } from "./errors";
 import { isLockfile, loadIgnore } from "./ignore";
-import { isSecretPath, suspects } from "./secrets";
+import { isSecretPath, secretFileValues, suspects } from "./secrets";
 import { type Shallow, testText } from "./shallow";
 import { SOURCE } from "./untested";
 
@@ -190,6 +190,8 @@ export function gitTree(repo: string, commit: string, boundary = new Boundary())
         const text = body.toString("utf8");
         for (const b of byOid.get(head[0]!) ?? []) {
           for (const v of suspects(b.path, text, [])) values.add(v);
+          // A file secret by its name: every value it holds, under any key.
+          if (isSecretPath(b.path)) for (const v of secretFileValues(b.path, text)) values.add(v);
           if (keep.has(b.path)) texts.set(b.path, text);
         }
       }
@@ -235,8 +237,9 @@ export interface EvidenceInput {
   scan?: Partial<Scan>;
   /** When the search stops (performance.now() ms), whatever `scan.ms` says: a round's packs share one. */
   deadline?: number;
-  /** What leaves arnx is masked by (boundary.ts): the commit message's values are added to it, and the pack is masked. */
-  boundary?: Boundary;
+  /** What leaves arnx is masked by (boundary.ts): the commit message's values are added to it, each line is masked
+   * before it is cut, and the pack is masked. A pack is never built without it. */
+  boundary: Boundary;
 }
 
 /** The packs of a round's findings, under one time bound for all of them. */
@@ -263,6 +266,16 @@ function generatedRule(writeDir: string, generated: readonly string[] = []): (pa
   return (p) => named.has(p) || (inDir(p, writeDir) && (!shared || /^arnx[_-]/.test(posix.basename(p))));
 }
 const IMPORT = /^\s*(?:import\b|from\s+\S+\s+import\b|export\s*\{|export\s+\*|(?:const|let|var)\s+[^=]*=\s*require\s*\(|use\s)/;
+/** Lines longer than this are no import and no definition: the patterns that read those are tried on shorter lines
+ * only, so no line makes them slow. */
+const LONG_LINE = 1_000;
+const isImport = (l: string) => l.length <= LONG_LINE && IMPORT.test(l);
+/** The part of a long line around the first `name` in it, for a pattern to read in bounded time. */
+const windowOf = (l: string, name: string) => {
+  if (l.length <= LONG_LINE) return l;
+  const at = l.indexOf(name);
+  return l.slice(Math.max(0, at - 300), at + name.length + 300);
+};
 /** A name looked for in prose as a plain word; a short plain one (`add`, `total`) counts there only as code. */
 const distinctive = (name: string) => /[_$\d]|[a-z][A-Z]/.test(name) || name.length >= 12;
 
@@ -276,8 +289,14 @@ class Reading {
   stopped: "files" | "bytes" | "time" | null = null;
   private rust = new Map<string, Set<number>>();
   private readonly until: number;
-  constructor(readonly tree: TreeReader, readonly order: string[], private readonly scan: Scan, deadline = Infinity) {
+  constructor(readonly tree: TreeReader, readonly order: string[], private readonly scan: Scan, deadline = Infinity,
+    private readonly boundary?: Boundary) {
     this.until = Math.min(performance.now() + scan.ms, deadline);
+  }
+
+  /** Text as the pack shows it: masked whole, then cut, so a cut never leaves a piece of a value. */
+  show(text: string, n: number): string {
+    return cut(this.boundary ? this.boundary.mask(text) : text, n);
   }
 
   /** The lines of a Rust file's `#[cfg(test)]` modules: test code, though in a source file. */
@@ -368,7 +387,7 @@ function uses(r: Reading, name: string, kinds: Set<Kind>, skip: (h: Hit) => bool
     if (!lines || !lines.some((l) => l.includes(name))) continue;
     const code = r.codeOf(file)!;
     for (let i = 0; i < code.length; i++) {
-      if (!code[i]!.includes(name) || !rx.test(code[i]!) || IMPORT.test(lines[i]!)) continue;
+      if (!code[i]!.includes(name) || !rx.test(code[i]!) || isImport(lines[i]!)) continue;
       const hit = { file, line: i + 1 };
       if (!kinds.has(r.lineKind(file, i + 1)!) || skip(hit)) continue;
       // A definition of the same name is no use of it.
@@ -380,12 +399,12 @@ function uses(r: Reading, name: string, kinds: Set<Kind>, skip: (h: Hit) => bool
   return out;
 }
 
-const around = (lines: string[], at: number, n: number) => {
+const around = (r: Reading, lines: string[], at: number, n: number) => {
   const out: string[] = [];
   // A file's last newline ends its last line: no empty line after it.
   const last = lines.length - (lines.at(-1) === "" ? 1 : 0);
   for (let i = Math.max(1, at - n); i <= Math.min(last, at + n); i++) {
-    out.push(`    ${i} | ${cut(lines[i - 1]!, LINE_CAP)}`);
+    out.push(`    ${i} | ${r.show(lines[i - 1]!, LINE_CAP)}`);
   }
   return out.join("\n");
 };
@@ -394,7 +413,7 @@ const around = (lines: string[], at: number, n: number) => {
 const namesIn = (source: string, path: string) => new Set(codeText(source, path).match(/[A-Za-z_$][\w$]*/g) ?? []);
 
 const CLASS = /^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:pub(?:\([^)]*\))?\s+)?(?:class|struct|enum|impl)\s+([A-Za-z_$][\w$]*)/;
-const classAt = (line: string) => CLASS.exec(line)?.[1] ?? null;
+const classAt = (line: string) => (line.length <= LONG_LINE ? CLASS.exec(line)?.[1] ?? null : null);
 const indent = (s: string) => s.length - s.trimStart().length;
 
 /** A line that may define a function, for defAt to say: tested in linear time on any line. */
@@ -425,7 +444,7 @@ function signatureAt(lines: string[], i: number): Def | null {
 /** The function line `i` (0-based) defines, on one line or as a signature over several. */
 function defAt(lines: string[], i: number): Def | null {
   const l = lines[i]!;
-  if (!mayDefine(l)) return null;
+  if (l.length > LONG_LINE || !mayDefine(l)) return null;
   const one = enclosing([l], 1);
   if (one && one.kind === "function") return { ...one, line: i + 1 };
   return signatureAt(lines, i);
@@ -514,7 +533,7 @@ function changedDefs(r: Reading, diff: string, ours: (path: string) => boolean):
       const notes: string[] = [];
       if (/^\s*export\b/.test(lines[d.line - 1]!)) notes.push("exported");
       const decorators: string[] = [];
-      for (let i = d.line - 2; i >= 0 && /^\s*@/.test(lines[i]!); i--) decorators.unshift(cut(lines[i]!.trim(), 60));
+      for (let i = d.line - 2; i >= 0 && /^\s*@/.test(lines[i]!); i--) decorators.unshift(r.show(lines[i]!.trim(), 60));
       if (decorators.length) notes.push(`decorated ${decorators.map((x) => `\`${x}\``).join(", ")}`);
       out.push({ ...d, file, notes });
     }
@@ -547,7 +566,7 @@ function targetsOf(defs: Target[], names: Target[], o: EvidenceInput): { targets
 function ownDoc(lines: string[], d: Target): { line: number; text: string } | null {
   let sig = d.line;
   // A signature may run over lines.
-  while (sig < lines.length && sig < d.line + 6 && !/[:{]\s*(?:#.*)?$/.test(lines[sig - 1]!)) sig++;
+  while (sig < lines.length && sig < d.line + 6 && !/[:{]\s*(?:#.*)?$/.test(lines[sig - 1]!.slice(-LONG_LINE))) sig++;
   const first = lines[sig]?.trim() ?? "";
   const q = /^[rubf]*("""|''')/i.exec(first)?.[1];
   if (q) {
@@ -600,6 +619,7 @@ interface Section { title: string; body: string[]; fixed?: true }
 
 /** The evidence pack for one finding: plain text, at most `limit` characters, the same for the same tree and input. */
 export function judgeEvidence(o: EvidenceInput): string {
+  if (!(o.boundary instanceof Boundary)) throw new ArnxError("an evidence pack is built only through the outgoing filter");
   const limit = o.limit ?? EVIDENCE_LIMIT;
   const changed = [...changedLines(o.diff).keys()];
   const near = new Set(changed.map((p) => posix.dirname(p)));
@@ -608,12 +628,12 @@ export function judgeEvidence(o: EvidenceInput): string {
   const ours = generatedRule(o.writeDir, o.generated);
   const order = o.tree.files().filter((p) => !ours(p) && kindOf(p)).map((p, i) => [rank(p), i, p] as const)
     .sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]);
-  const r = new Reading(o.tree, order, { ...EVIDENCE_SCAN, ...o.scan }, o.deadline);
+  const r = new Reading(o.tree, order, { ...EVIDENCE_SCAN, ...o.scan }, o.deadline, o.boundary);
 
   const sections: Section[] = [];
   // Its values are known before any of it is cut, so a cut never leaves a piece of one.
-  o.boundary?.add(suspects("", o.commitMessage, []));
-  const message = (o.boundary ? o.boundary.mask(o.commitMessage) : o.commitMessage).trim();
+  o.boundary.add(commitMessageValues(o.commitMessage));
+  const message = o.boundary.mask(o.commitMessage).trim();
   sections.push({ title: "Commit message", fixed: true,
     body: [message ? cut(message, MESSAGE_CAP) : "(none: the change is not committed)"] });
   if (o.before) {
@@ -654,12 +674,12 @@ export function judgeEvidence(o: EvidenceInput): string {
         const lines = r.linesOf(h.file)!;
         const d = holder(lines, r.codeOf(h.file)!, h.line);
         const entry = [`- ${h.file}:${h.line}${d ? ` in \`${d.name}\`` : ""}${sure(h) ? "" : " (same name, may be another)"}`,
-          around(lines, h.line, 1)];
+          around(r, lines, h.line, 1)];
         // Second level: where the calling definition is used, by place only.
         if (d && d.name !== t.name && !/^__\w+__$/.test(d.name) && !upDone.has(`${h.file}:${d.name}`)) {
           upDone.add(`${h.file}:${d.name}`);
           const up = uses(r, d.name, sourceKinds, (x) => x.file === h.file && x.line === d.line, SECOND_LEVEL_MOST);
-          const upFacts = factsAt(lines, d.line);
+          const upFacts = factsAt(r, lines, d.line);
           entry.push(!up.length ? `  \`${d.name}\`: ${upFacts.length ? `no caller by name; ${upFacts.join("; ")}` : "no caller found"}`
             : up.length > SECOND_LEVEL_MOST ? `  \`${d.name}\` is used in more than ${SECOND_LEVEL_MOST} places`
               : `  \`${d.name}\` is used at ${up.slice(0, SECOND_LEVEL_SHOWN).map((x) => `${x.file}:${x.line}`).join(", ")}` +
@@ -681,13 +701,13 @@ export function judgeEvidence(o: EvidenceInput): string {
         perFile.set(h.file, n + 1);
         return n < TESTS_PER_FILE;
       }).slice(0, TESTS_PER_NAME);
-      for (const h of picked) tests.push(`- ${h.file}:${h.line}\n${around(r.linesOf(h.file)!, h.line, 3)}`);
+      for (const h of picked) tests.push(`- ${h.file}:${h.line}\n${around(r, r.linesOf(h.file)!, h.line, 3)}`);
     }
   }
   // Docs: each target's own docstring or comment, then the project's docs, changed ones first.
   for (const t of targets) {
     const own = t.kind === "name" ? null : ownDoc(r.linesOf(t.file) ?? [], t);
-    if (own && docs.length < DOC_HITS) docs.push(`- ${t.file}:${own.line} (on \`${t.name}\`): ${cut(own.text, 400)}`);
+    if (own && docs.length < DOC_HITS) docs.push(`- ${t.file}:${own.line} (on \`${t.name}\`): ${r.show(own.text, 400)}`);
   }
   if (targets.length && docs.length < DOC_HITS) {
     const looks = targets.map((t) => {
@@ -695,8 +715,11 @@ export function judgeEvidence(o: EvidenceInput): string {
       const word = wordRx(t.name), quoted = new RegExp(`\`[^\`]*(?<![\\w$])${n}(?![\\w$])[^\`]*\``),
         called = new RegExp(`(?<![\\w$])${n}\\s*\\(|\\.${n}(?![\\w$])`);
       const plain = distinctive(t.name);
-      return (l: string, fenced: boolean) => l.includes(t.name) && word.test(l) && (plain || fenced || quoted.test(l) ||
-        called.test(l));
+      return (l: string, fenced: boolean) => {
+        if (!l.includes(t.name) || !word.test(l)) return false;
+        const part = windowOf(l, t.name);
+        return plain || fenced || quoted.test(part) || called.test(part);
+      };
     });
     const docFiles = [...r.each()].filter((p) => r.kind(p) === "doc");
     for (const file of changedFirst(docFiles.map((f) => ({ file: f, line: 0 }))).map((h) => h.file)) {
@@ -706,7 +729,7 @@ export function judgeEvidence(o: EvidenceInput): string {
       for (let i = 0; i < lines.length && docs.length < DOC_HITS; i++) {
         const l = lines[i]!;
         if (/^\s*(?:```|~~~)/.test(l)) fenced = !fenced;
-        if (looks.some((look) => look(l, fenced))) docs.push(`- ${file}:${i + 1}: ${cut(l.trim(), 200)}`);
+        if (looks.some((look) => look(l, fenced))) docs.push(`- ${file}:${i + 1}: ${r.show(l.trim(), 200)}`);
       }
       if (docs.length >= DOC_HITS) break;
     }
@@ -720,8 +743,15 @@ export function judgeEvidence(o: EvidenceInput): string {
   if (shape.length) sections.push({ title: "Test shape", fixed: true, body: shape.map((s) => `- ${s}`) });
   const stop = r.stopped ? `(the search stopped at its ${{ time: "time", bytes: "size", files: "file" }[r.stopped]} ` +
     `limit after ${r.read} files: callers, tests and docs farther from the change may be missing)` : "";
-  const text = fit(sections, stop, limit);
-  return o.boundary ? o.boundary.mask(text) : text;
+  return o.boundary.mask(fit(sections, stop, limit));
+}
+
+/** The values a commit message may hold: what reads as a secret in its text, and each `name: value` or `name=value` in
+ * it read by the rules of a config file, wherever on a line it stands. */
+export function commitMessageValues(message: string): string[] {
+  const pairs = [...message.matchAll(/([A-Za-z_][\w.-]{0,63})[ \t]*[:=][ \t]*(["']?)([^\s"',;]{1,4096})\2/g)]
+    .map((m) => `${m[1]}=${m[3]}`).join("\n");
+  return [...new Set([...suspects("", message, []), ...suspects("commit-message.env", pairs, [])])];
 }
 
 const NOT_REGISTERING = /^@(?:staticmethod|classmethod|property|abstractmethod|override|cached_property|functools\b|wraps|dataclass|overload|typing\b|pytest\b|[\w.]*\.setter\b|[\w.]*\.deleter\b)/;
@@ -729,7 +759,7 @@ const NOT_REGISTERING = /^@(?:staticmethod|classmethod|property|abstractmethod|o
 /** How a definition may be reached with no call by its name: its decorator, its export, a string that names it, a
  * `getattr` that builds its name, an entry in a config file. Facts first (no "- "), then places. */
 function reachOf(r: Reading, t: Target): string[] {
-  const out = t.kind === "name" ? [] : factsAt(r.linesOf(t.file) ?? [], t.line);
+  const out = t.kind === "name" ? [] : factsAt(r, r.linesOf(t.file) ?? [], t.line);
   const places: string[] = [];
   const rx = wordRx(t.name);
   const quoted = new RegExp(`(['"\`])[^'"\`\n]*(?<![\\w$])${esc(t.name)}(?![\\w$])[^'"\`\n]*\\1`);
@@ -743,7 +773,7 @@ function reachOf(r: Reading, t: Target): string[] {
     for (let i = 0; i < raw.length && places.length < 4; i++) {
       const l = raw[i]!;
       if (l.length > 2000 || (file === t.file && i + 1 === t.line)) continue;
-      const at = `${file}:${i + 1}: ${cut(l.trim(), 160)}`;
+      const at = `${file}:${i + 1}: ${r.show(l.trim(), 160)}`;
       if (kind === "config") {
         if (l.includes(t.name) && rx.test(l)) places.push(`- named in ${at}`);
       } else if (l.includes(t.name) && rx.test(l) && !rx.test(code[i] ?? "") && quoted.test(l)) {
@@ -758,12 +788,12 @@ function reachOf(r: Reading, t: Target): string[] {
 }
 
 /** What a definition's own lines say of how it is reached: a decorator that may register it, an export. */
-function factsAt(lines: string[], line: number): string[] {
+function factsAt(r: Reading, lines: string[], line: number): string[] {
   const out: string[] = [];
   for (let i = line - 2; i >= 0 && /^\s*@/.test(lines[i]!); i--) {
     const d = lines[i]!.trim();
     if (!NOT_REGISTERING.test(d)) {
-      out.push(`reached by its decorator \`${cut(d, 60)}\``);
+      out.push(`reached by its decorator \`${r.show(d, 60)}\``);
       break;
     }
   }
@@ -816,4 +846,14 @@ function fit(sections: Section[], stop: string, limit: number): string {
     text = text.slice(0, Math.max(0, text.lastIndexOf("\n"))) + mark;
   }
   return text;
+}
+
+/** The packs of findings at `commit`, for a replay of a stored review: its tree read from git objects, and a filter
+ * seeded first with the values of both sides of `diff` (the whole change), so a value only the base names is hidden. */
+export function commitEvidence(repo: string, commit: string, diff: string):
+  (o: Omit<EvidenceInput, "tree" | "boundary" | "diff"> & { diff?: string }) => string {
+  const boundary = new Boundary();
+  boundary.addDiff(diff);
+  const tree = gitTree(repo, commit, boundary);
+  return (o) => judgeEvidence({ ...o, diff: o.diff ?? diff, tree, boundary });
 }

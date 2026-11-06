@@ -612,7 +612,8 @@ function roundEvidence(snap: string, results: (TestResult[] | null)[], files: Re
   hunt: RoundHunt | undefined, agent: AgentResult, writeDir: string, o: { diff: string; message: string },
   before: BeforeCheck | undefined, boundary: Boundary | undefined, say: Say): Record<string, string> | undefined {
   const failing = classify(results).findings;
-  if (!failing.length) return undefined;
+  // A pack is built only through the outgoing filter.
+  if (!failing.length || !boundary) return undefined;
   const report = parseReports([...agent.earlierTexts ?? [], agent.finalText]);
   const suspectOf = new Map<string, string>();
   for (const t of report.tests) {
@@ -632,7 +633,7 @@ function roundEvidence(snap: string, results: (TestResult[] | null)[], files: Re
       ...(was ? { before: was } : {}), ...(shallow ? { shallow } : {}) };
   });
   const packs = evidencePacks({ tree: snapshotTree(snap), diff: o.diff, commitMessage: o.message, writeDir,
-    generated: Object.keys(files), ...(boundary ? { boundary } : {}) }, items);
+    generated: Object.keys(files), boundary }, items);
   const secs = (performance.now() - t0) / 1000;
   if (secs >= 5) say(`evidence for the second opinion took ${Math.round(secs)}s`);
   return Object.fromEntries(failing.map((t, i) => [t.testId, packs[i]!]));
