@@ -301,7 +301,9 @@ class Commands {
 
   /** With --json, the error that stopped the command: result "error", its message and exit code. */
   fail(message: string, exitCode: number): void {
-    this.emit("error", exitCode, { error: message });
+    // Documentation alone is nothing to test, not an error.
+    if (exitCode === 0) this.emit("clean", 0, { status: "docs-only", message });
+    else this.emit("error", exitCode, { error: message });
   }
 
   /** With --json, an object written whole (a command with its own schema); without it, nothing. */

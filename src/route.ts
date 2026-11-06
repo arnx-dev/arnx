@@ -37,38 +37,42 @@ export function usesBlocked(project: ReviewConfig, path: string, listed: boolean
 
 const DOC_EXT = new Set([".md", ".mdx", ".rst", ".adoc", ".txt"]);
 const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp"]);
-const DOC_NAME = /^(README|LICENSE|LICENCE|NOTICE|CHANGELOG|CHANGES|AUTHORS|CONTRIBUTORS|CONTRIBUTING|CODE_OF_CONDUCT|SECURITY)([-._].*)?$/i;
-const DOC_DIR = /(^|\/)(docs?|documentation|\.github|\.changeset)\//;
+const TOP_DOC = /^(README|LICENSE|LICENCE|CHANGELOG|CONTRIBUTING|AUTHORS)([-._].*)?$/i;
+const DOCS_DIR = /(^|\/)(docs?|documentation)\//;
 const DATA_DIR = /(^|\/)(tests?|__tests__|fixtures?|testdata|spec|specs)\//;
 const CODE_TXT = /^(requirements|constraints)[^/]*\.txt$|^CMakeLists\.txt$/i;
 
-/** Whether a changed path is documentation by its name alone: a text file of prose (.md .mdx .rst .adoc), a changeset,
- * README, LICENSE, NOTICE, CHANGELOG or AUTHORS files, a .txt or an image under a docs folder. Code is never
+/** Whether a changed path is documentation by where it sits: in a docs/, doc/ or documentation/ folder at any depth
+ * (prose, text or an image), a top-level README, LICENSE, CHANGELOG, CONTRIBUTING or AUTHORS file, markdown under
+ * .github/, or a changeset. Every other .md or .rst (a prompt, a template) is reviewed, and code never is
  * documentation, wherever it sits (a docstring lives in a .py file), nor is anything under a tests folder or a
- * dependency list. Whether a test reads the file is docsFilter's to tell. */
+ * dependency list. Whether another file names it is docsFilter's to tell. */
 export function isDocFile(path: string): boolean {
   const base = posix.basename(path);
   const ext = extname(base).toLowerCase();
   if (isTestPath(path) || DATA_DIR.test(path) || CODE_TXT.test(base)) return false;
   if (path.startsWith(".changeset/")) return true;
-  if (DOC_NAME.test(base) && (ext === "" || DOC_EXT.has(ext))) return true;
-  if ([".md", ".mdx", ".rst", ".adoc"].includes(ext)) return true;
-  return (ext === ".txt" || IMAGE_EXT.has(ext)) && DOC_DIR.test(path);
+  if (path.startsWith(".github/")) return ext === ".md" || ext === ".mdx";
+  if (DOCS_DIR.test(path)) return DOC_EXT.has(ext) || IMAGE_EXT.has(ext);
+  return !path.includes("/") && TOP_DOC.test(base) && (ext === "" || DOC_EXT.has(ext));
 }
 
-/** Which changed paths count as documentation in one review: isDocFile, except a file some source or test file of the
- * repository names (a test that reads its text, a loader of a template) is data for code, and `--docs` (`all`) makes
- * none. `head`: the reviewed commit; null reads the working tree, untracked files too. */
+/** Which changed paths count as documentation in one review: isDocFile, except a file some tracked file names (a test,
+ * a loader, a Dockerfile COPY, a script, CI) by its path or, unless it is README.md or index.md, its name is data
+ * for something and is reviewed as before. `all` (--docs) makes none. `head`: the reviewed commit; null reads the
+ * working tree, untracked files too. A search that fails means the file is not documentation. */
 export function docsFilter(repo: string, head: string | null, all: boolean): (path: string) => boolean {
   if (all) return () => false;
   const memo = new Map<string, boolean>();
   const isRead = (path: string): boolean => {
-    const args = ["-C", repo, "grep", "-l", "-F", ...(head ? [] : ["--untracked"]), "-e", posix.basename(path),
-      ...(head ? [head] : [])];
+    const base = posix.basename(path);
+    const needles = [path, ...(base === "README.md" || base === "index.md" ? [] : [base])];
+    const args = ["-C", repo, "grep", "-I", "-l", "-F", ...(head ? [] : ["--untracked"]),
+      ...needles.flatMap((n) => ["-e", n]), ...(head ? [head] : [])];
     const r = spawnSync("git", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
     if (r.error || (r.status !== 0 && r.status !== 1)) return true; // unknown: reviewed
     return r.stdout.split("\n").map((l) => (head && l.startsWith(`${head}:`) ? l.slice(head.length + 1) : l))
-      .some((p) => p && p !== path && !isDocFile(p) && (SOURCE.test(p) || isTestPath(p)));
+      .some((p) => p && p !== path && !isDocFile(p));
   };
   return (path) => {
     if (!isDocFile(path)) return false;

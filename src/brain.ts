@@ -149,6 +149,8 @@ export interface RoundHunt {
   late: (() => Promise<ModelUse>) | null;
   /** Every hunter's list, once the reviewer replied to the hunt (`second_late` added when a late hunter returns). */
   record?: HuntRecord;
+  /** The hunt answered with an empty list, no hunter failed, and the round ended there: nothing was suspected. */
+  ended?: true;
 }
 
 export interface RoundResult { agent: AgentResult; hunt?: RoundHunt }

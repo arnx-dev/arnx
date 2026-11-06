@@ -289,7 +289,8 @@ export class LocalBrain implements Brain {
       ...(h.parts ? { parts: h.parts } : {}) })
       : null;
     const afterHunt = async (reply: string) => {
-      const mine = parseSuspects(parseJsonObject(reply), m.agentModel.model);
+      const data = parseJsonObject(reply);
+      const mine = parseSuspects(data, m.agentModel.model);
       // The second hunter gets SECOND_HUNT_WAIT after the reviewer's own hunt; if it is still out (a slow model, a
       // dropped connection) the tests start without it, and its cost is counted when it returns.
       const [early, split] = await Promise.all([other ? within(other, m.secondHuntWaitMs ?? SECOND_HUNT_WAIT_MS)
@@ -333,10 +334,14 @@ export class LocalBrain implements Brain {
         tested: hunted };
       state.record = record;
       if (x.outDir) writeFileSync(join(x.outDir, "hunt.json"), JSON.stringify(record, null, 2) + "\n");
-      if (hunted.length) {
+      // Nothing suspected is a hunt that answered with an empty list and had no hunter fail or run out of time; a hunt
+      // that failed somewhere goes on to the tests as before.
+      const clean = Array.isArray(data?.suspects) && early !== TIMED_OUT && !theirs?.failed && !split?.failed;
+      if (!hunted.length && clean) state.ended = true;
+      if (hunted.length || !clean) {
         x.progress?.(`${cfg.name}: checking ${hunted.length} thing${hunted.length === 1 ? "" : "s"} in this change`);
       }
-      return { message: hunted.length ? prompts.proveTask(cfg, hunted, x.maxQuestions) : null,
+      return { message: hunted.length || !clean ? prompts.proveTask(cfg, hunted, x.maxQuestions) : null,
         spent: (theirs?.use.costUsd ?? 0) + (split?.use.costUsd ?? 0) + rankUse.costUsd };
     };
     const afterTests = (reply: string) => this.untestedAsk(x, state.suspects ?? [], reply);

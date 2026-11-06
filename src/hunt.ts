@@ -55,7 +55,7 @@ export function mergeSuspects(first: Suspect[], second: Suspect[]): Suspect[] {
  * are logged to hunt-second.jsonl in `o.outDir`, when given. */
 export async function secondHunt(root: string | null, cfg: ReviewConfig, o: { model: JsonModel; diff: string;
   context: string; scope: Scope; outDir?: string; progress?: Say; changedDefinitions?: string; prompts?: Prompts })
-  : Promise<{ suspects: Suspect[]; use: ModelUse }> {
+  : Promise<{ suspects: Suspect[]; use: ModelUse; failed?: true }> {
   const say = (m: string) => o.progress?.(`${cfg.name}: ${m}`);
   const use = newUse(o.model.ref);
   if (o.outDir) {
@@ -76,7 +76,7 @@ export async function secondHunt(root: string | null, cfg: ReviewConfig, o: { mo
     if (e.costUsd > 0 || e.usage) tally(use, e.costUsd, e.usage, e.unknownCalls);
     else use.unknownCalls += e.unknownCalls;
     say(`second hunter failed: ${e.message.slice(0, 300)}`);
-    return { suspects: [], use };
+    return { suspects: [], use, failed: true };
   } finally {
     if (o.outDir) o.model.trace = undefined;
   }
@@ -126,8 +126,9 @@ export function huntParts(root: string, cfg: ReviewConfig, diff: string, owned: 
 export async function partHunts(root: string | null, cfg: ReviewConfig, o: { model: JsonModel; diff: string;
   owned: string[]; searchDirs: string[]; scope: Scope; outDir?: string; progress?: Say; parts?: HuntPart[];
   prompts?: Prompts })
-  : Promise<{ lists: Suspect[][]; use: ModelUse }> {
+  : Promise<{ lists: Suspect[][]; use: ModelUse; failed?: true }> {
   const use = newUse(o.model.ref);
+  let failed = false;
   const parts = o.parts ?? (root === null ? [] : huntParts(root, cfg, o.diff, o.owned, o.searchDirs));
   if (!parts.length) return { lists: [], use };
   o.progress?.(`${cfg.name}: hunting the change in ${parts.length} parts`);
@@ -147,9 +148,10 @@ export async function partHunts(root: string | null, cfg: ReviewConfig, o: { mod
       if (e.costUsd > 0 || e.usage) tally(use, e.costUsd, e.usage, e.unknownCalls);
       else use.unknownCalls += e.unknownCalls;
       o.progress?.(`${cfg.name}: a part hunter failed: ${e.message.slice(0, 200)}`);
+      failed = true;
     }
   });
-  return { lists, use };
+  return { lists, use, ...(failed ? { failed: true as const } : {}) };
 }
 
 /** Lists merged in turn (the first of each list, then the second of each, …), the same claim at the same place kept

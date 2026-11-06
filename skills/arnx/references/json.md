@@ -26,7 +26,7 @@ to the baseline) is the user's to judge: pass `changes` on to them.
 | `schema_version` | number | 1. |
 | `command` | string | The command, as typed: `init`, `doctor`, `review`, … |
 | `result` | string | One word: `ok`, `fail`, or the command's own (below). |
-| `exit_code` | number | The process exit code: 0 fine (a confirmed finding does not fail a `review`); 1 a finding not checked (`review`) or failing tests (`check`); 2 could not finish or a usage error; 3 setup needed; 4 accepted tests edited (`check`). |
+| `exit_code` | number | The process exit code: 0 fine (a confirmed finding does not fail a `review`; a change of documentation only is not reviewed: `result` `clean`, `status` `docs-only`, `--docs` reviews it); 1 a finding not checked (`review`) or failing tests (`check`); 2 could not finish or a usage error; 3 setup needed; 4 accepted tests edited (`check`). |
 
 Every other field is the command's own, in snake_case. Paths are relative to the repository root, times are ISO
 8601, money is a number of US dollars in a field ending `_usd`.

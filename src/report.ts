@@ -528,6 +528,8 @@ function statusLines(r: Review): string[] {
       `${u.files.map((f) => `\`${f}\`${why(f)}`).join(", ")}.`);
   }
   for (const n of notes) out.push(`Note: ${n}.`);
+  const docs = new Set((r.docsOnly ?? []).flatMap((d) => d.files)).size;
+  if (docs) out.push(`${plural(docs, "documentation file")} not reviewed; \`arnx review --docs\` includes ${docs === 1 ? "it" : "them"}.`);
   for (const t of r.typecheck ?? []) {
     out.push(`Type check${multi(r) ? ` in \`${t.project}\`` : ""}: ${describeTypecheck(t)}${t.status === "clean" ? ""
       : " (see Type check below)"}.`);

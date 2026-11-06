@@ -32,9 +32,10 @@ export class NoChange extends ArnxError {
   override name = "NoChange";
 }
 
-/** The change holds documentation only (exit code 2, like an empty change): nothing to test unless `--docs` asks. */
+/** The change holds documentation only: nothing to test unless `--docs` asks. Not a failure: exit code 0. */
 export class OnlyDocs extends NoChange {
   override name = "OnlyDocs";
+  override exitCode = 0;
   constructor(files: readonly string[]) {
     const shown = files.slice(0, 3).join(", ") + (files.length > 3 ? `, +${files.length - 3} more` : "");
     super(`nothing to test: only documentation changed (${shown}). \`arnx review --docs\` reviews it anyway.`);
