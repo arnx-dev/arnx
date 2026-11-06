@@ -46,6 +46,8 @@ export interface ProjectFacts {
   groups: string[];
   /** Python: root itself installs (a build system or setup.py). */
   installable: boolean;
+  /** Python: the project builds compiled extensions (.pyx files, or ext_modules or cythonize in its setup.py). */
+  nativeBuild: boolean;
   /** JavaScript: install scripts or patches that need more than package.json and the lockfile. */
   needsTree: boolean;
   /** JavaScript: package manager settings next to the lockfile that install needs too. */
@@ -252,7 +254,7 @@ export function readFacts(repo: string, paths: string[], candidates: Candidate[]
     const above = testsFirst(jobs.filter((j) => fits(j) && !tied.includes(j) && j.dirs.some((d) => ups.includes(d))));
     const f: ProjectFacts = { root: c.root, language: c.language,
       versions: versionsOf(ups, [...tied, ...above], jobs, docker.get(c.root) ?? [], files), manager: null,
-      installRoot: c.root, lockfile: null, requirements: [], extras: [], groups: [], installable: false,
+      installRoot: c.root, lockfile: null, requirements: [], extras: [], groups: [], installable: false, nativeBuild: false,
       needsTree: false, copy: [], jobs: tied.map((j) => j.id), services: [], maybeServices: [], env: {}, envNames: [],
       apt: [...new Set(tied.flatMap((j) => j.apt))], lockApt: [], deps: [] };
     if (c.language === "typescript") jsFacts(f, ups, paths, files);
@@ -472,6 +474,8 @@ function pythonFacts(f: ProjectFacts, ups: string[], paths: string[], { set, tom
   f.groups = groups.filter((g) => TEST_EXTRA.test(g));
   f.installable = (!!py && (isMap(py["build-system"]) || isMap(tool.poetry))) || set.has(at(f.root, "setup.py")) ||
     (set.has(at(f.root, "setup.cfg")) && /\[metadata\]/.test(read(at(f.root, "setup.cfg"))));
+  f.nativeBuild = paths.some((p) => p.endsWith(".pyx") && (f.root === "." || p.startsWith(`${f.root}/`))) ||
+    /\b(ext_modules|cythonize)\b/.test(read(at(f.root, "setup.py")));
   const reqs = paths.filter((p) => dirOf(p) === f.root || dirOf(p) === at(f.root, "requirements"))
     .map((p) => (f.root === "." ? p : p.slice(f.root.length + 1)))
     .filter((p) => /^(requirements\/)?[^/]*requirements[^/]*\.txt$|^requirements\/[^/]+\.txt$/.test(p))

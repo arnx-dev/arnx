@@ -332,7 +332,10 @@ export const python: Adapter = {
   testStem: (fileName) => fileName.replace(/^test_/, "").replace(/\.py$/, ""),
   relocate: relocatePaths,
   setupHints: "- Install pytest (and hypothesis if it installs cleanly) even if the project does not list them.\n" +
-    "- Prefer `python -m pytest` so the working directory is importable.",
+    "- Prefer `python -m pytest` so the working directory is importable.\n" +
+    "- The code is mounted over /src at run time, so files install builds there (compiled .so extensions) are hidden: " +
+    "build them in install, save them outside /src (tar czf /opt/ext.tgz), and restore them at the start of " +
+    "test_command (tar xzf /opt/ext.tgz && ...); test runs have no network and no compiler.",
   manifests: ["requirements*.txt", "pyproject.toml", "setup.py", "setup.cfg", "poetry.lock", "uv.lock", "Pipfile",
     "Pipfile.lock"],
   buildEnv: ["PYTHONDONTWRITEBYTECODE=1", "PIP_DISABLE_PIP_VERSION_CHECK=1", "PIP_ROOT_USER_ACTION=ignore"],

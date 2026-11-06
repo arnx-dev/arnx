@@ -409,10 +409,18 @@ function pythonProject(f: ProjectFacts, mark: MarkFn): Raw {
     install.push(`pip install ${[reqs, f.installable ? `-e '.${extras}'` : ""].filter(Boolean).join(" ")}`);
   } else mark("install", "no requirements found");
   install.push(`pip install ${PYTEST}`);
+  if (f.nativeBuild) {
+    // The mount over /src hides what install built there: the files are saved outside it, and test runs (no network,
+    // no compiler) only copy them back.
+    const into = posix.relative(f.installRoot, f.root);
+    install.push(`${into ? `cd ${shellQuote(into)} && ` : ""}python setup.py build_ext --inplace && ` +
+      "find . -name '*.so' | tar czf /opt/ext.tgz -T -");
+    mark(["install", install.length - 1], "a .pyx change is not rebuilt: the compiled files come from the image");
+  }
   if (f.apt.length) mark(["install", 0], `system packages ${f.jobs[0] ?? "CI"} installs`);
   if (f.installRoot !== f.root) p.install_root = f.installRoot;
   p.install = install;
-  p.test_command = "python -m pytest {targets}";
+  p.test_command = `${f.nativeBuild ? "tar xzf /opt/ext.tgz && " : ""}python -m pytest {targets}`;
   return p;
 }
 

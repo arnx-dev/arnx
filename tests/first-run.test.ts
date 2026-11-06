@@ -453,3 +453,22 @@ test("a runner with no list form still runs a few small files", async () => {
   expect(commands[1]).toContain("arnx-probe");
   expect(commands.some((c) => specs.slice(3).some((f) => c.includes(f.slice("web/".length))))).toBe(false);
 });
+
+test("a quick setup tried again unchanged runs a few small files, never the whole suite", async () => {
+  const repo = twoProjects();
+  const draft = quickDraft(detected(repo), ["svc/app.py"])!.yaml;
+  // One test file does not load: the listing says so, every time.
+  const answer = runner("svc", { exit: 1, output: TESTS.map((f) => `${f}::test_x`).join("\n") +
+    "\nERROR tests/test_e.py\n\n4 tests collected, 1 error in 0.01s" });
+  const sessions: Session[] = [];
+  const model = new ScriptedAgent([[tool("propose", { yaml: draft })], [tool("propose", { yaml: draft })],
+    [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(answer, sessions), quick: { files: ["svc/app.py"] } });
+  const runs = sessions.flatMap((s) => s.commands).filter((c) => !c.includes("--collect-only"));
+  // The second try (the same file) is not refused for the file it names, and no run lacks its files.
+  expect(runs.every((c) => c.includes("test_arnx_probe") || TESTS.slice(0, 4).some((f) => c.includes(f)))).toBe(true);
+  expect(runs.some((c) => c.includes("test_e.py"))).toBe(false);
+  expect(r.ok).toBe(true);
+  expect(r.runs[0]!.summary).toStartWith("quick look:");
+});

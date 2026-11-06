@@ -452,3 +452,33 @@ describe("the prisma CLI that generates the client", () => {
     expect(install({ dependencies: { prisma: "*" }, devDependencies: vitest })).toContain("npx prisma generate");
   });
 });
+
+test("a project with compiled extensions brings them back at run", () => {
+  const files = (extra: Record<string, string>) => ({
+    "pkg/setup.py": "from setuptools import setup\nsetup(name='pkg')\n",
+    "pkg/requirements.txt": "cython\n",
+    "pkg/tests/test_a.py": "def test_a():\n    pass\n", ...extra });
+  let n = 0;
+  const repoOf = (extra: Record<string, string>) => {
+    const repo = initRepo(join(tmp(), `r${n++}`));
+    for (const [p, body] of Object.entries(files(extra))) {
+      mkdirSync(dirname(join(repo, p)), { recursive: true });
+      writeFileSync(join(repo, p), body);
+    }
+    commit(repo, "files");
+    return repo;
+  };
+  const native = (extra: Record<string, string>) => Object.values(projects(detect(repoOf(extra))))[0]!;
+  // .pyx files, or ext_modules in setup.py, mean the install builds them and test runs have no compiler or network.
+  for (const extra of <Record<string, string>[]>[{ "pkg/fast.pyx": "def f(): pass\n" },
+    { "pkg/setup.py": "from setuptools import setup, Extension\nsetup(name='pkg', ext_modules=[Extension('a', ['a.c'])])\n" }]) {
+    const p = native(extra);
+    expect(p.install.join("\n")).toContain("python setup.py build_ext --inplace && find . -name '*.so' | tar czf /opt/ext.tgz -T -");
+    expect(p.test_command).toBe("tar xzf /opt/ext.tgz && python -m pytest {targets}");
+  }
+  const plain = native({});
+  expect(plain.install.join("\n")).not.toContain("build_ext");
+  expect(plain.test_command).toBe("python -m pytest {targets}");
+  const d = detect(repoOf({ "pkg/fast.pyx": "def f(): pass\n" }));
+  expect(unsure(d).join("\n")).toContain("a .pyx change is not rebuilt");
+});

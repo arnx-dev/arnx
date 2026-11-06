@@ -124,6 +124,8 @@ export interface Look { early: Early | null; tests: number; files: number;
   placement?: Placement;
   /** The test files the runner listed (relative to the project root). */
   listed: string[];
+  /** `tolerate`: the files that do not load, as the failures a whole run would have reported for them. */
+  loadErrors?: TestResult[];
   /** The runner listed nothing (it has no list form): `listed` holds the project's own test files, found by name. */
   found?: true;
   sample: { files: string[]; run: RunResult; results: TestResult[] } | null }
@@ -137,15 +139,19 @@ export interface Placement { testsDir: string; testFiles?: string }
  * again, so nothing says it. */
 export async function look(session: Runner, snap: string, cfg: ReviewConfig, acceptedTestsDir?: string,
                            baseline: BaselineTest[] | "record" = "record",
-                           { files }: { files?: () => string[] } = {}): Promise<Look> {
+                           { files, tolerate = false }: { files?: () => string[]; tolerate?: boolean } = {}): Promise<Look> {
   const proof = baseline === "record" ? null : baseline;
-  const again = proof ? "" : AGAIN;
-  const known = (file: string) => !!proof && (proof.some((t) => t.load && t.file === file) ||
+  // A quick setup never runs the whole suite, so tried again unchanged it does not.
+  const again = proof || files ? "" : AGAIN;
+  // `tolerate` (a quick setup tried again unchanged): files that do not load stop nothing; the files the sample
+  // leaves out are the coverage gap's to say.
+  const known = (file: string) => tolerate || !!proof && (proof.some((t) => t.load && t.file === file) ||
     cfg.knownFailing.some((k) => file.startsWith(k)));
   const none: Look = { early: null, tests: 0, files: 0, listed: [], sample: null };
   const listed = await listTests(session, snap, cfg, []);
   let counts: { tests: number; files: number; listed: string[]; found?: true };
   let sample: string[];
+  let loadErrors: TestResult[] | undefined;
   if (listed) {
     const { listing, result } = listed;
     counts = { tests: listing.tests ?? listing.files.length, files: listing.files.length, listed: listing.files };
@@ -159,6 +165,11 @@ export async function look(session: Runner, snap: string, cfg: ReviewConfig, acc
       return { ...none, ...counts, early: { summary: probeText(cfg) + again, output: probe.output, hints: "", kind: "listing" } };
     }
     sample = sampleOf(listing, cfg, snap, acceptedTestsDir);
+    if (tolerate && listing.broken.length) {
+      const said = result.output.split("\n");
+      loadErrors = listing.broken.map((f) => ({ testId: `${f}::${f}`, fileAttr: f, name: f, outcome: "error",
+        message: `collection failure\nE   ${said.find((l) => l.includes(f) && /^ERROR /.test(l))?.replace(/^ERROR \S+( - )?/, "") || "the file does not load"}` }));
+    }
   } else {
     // No list form (or no listing to trust): with `files` (the project's test files, relative to the repository), a
     // few small ones of them run all the same.
@@ -170,7 +181,7 @@ export async function look(session: Runner, snap: string, cfg: ReviewConfig, acc
   if (!sample.length) return { ...none, ...counts };
   const [run, results] = await runTests(session, snap, cfg, sample, "sample.xml", SAMPLE_TIMEOUT);
   const stop = sampleProblem(sample, run, results);
-  if (!stop) return { ...none, ...counts, sample: { files: sample, run, results: results ?? [] } };
+  if (!stop) return { ...none, ...counts, ...loadErrors ? { loadErrors } : {}, sample: { files: sample, run, results: results ?? [] } };
   return { ...none, ...counts, early: { summary: stop + again, output: run.output, kind: "sample",
     hints: [describeHints(diagnose(results, cfg, snap), cfg), firstErrors(results, cfg)].filter(Boolean).join("\n") } };
 }

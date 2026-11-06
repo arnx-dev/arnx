@@ -279,11 +279,11 @@ const APART_MAX = 20;
 export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string,
                                { sessionFactory = dockerSession, targets = [], failureModel, key, acceptedTestsDir,
                                  accepted, outputLog, leftOut, baseline = [], rerun = false, passedBefore = false,
-                                 precheck = false, quick = false, boundary, swap }: {
+                                 precheck = false, quick = false, tolerate = false, boundary, swap }: {
                                  sessionFactory?: SessionFactory; targets?: string[]; failureModel?: FailureModel;
                                  key?: string; acceptedTestsDir?: string; accepted?: AcceptedPins;
                                  outputLog?: string; leftOut?: LeftOut; baseline?: BaselineTest[] | "record";
-                                 rerun?: boolean; passedBefore?: boolean; precheck?: boolean; quick?: boolean;
+                                 rerun?: boolean; passedBefore?: boolean; precheck?: boolean; quick?: boolean; tolerate?: boolean;
                                  boundary?: Boundary; swap?: Swap } = {})
   : Promise<[boolean, string, string, string[], string[], string, SuiteCounts]> {
   const none = noCounts();
@@ -312,7 +312,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     if (precheck && !targets.length && (cfg.language === "rust" || hasOwnTests(cfg, snap))) {
       // A quick look whose runner has no list form takes a few small test files from the project's own.
       const seen = await look(session, snap, cfg, acceptedTestsDir, baseline,
-        quick ? { files: () => testFilesUnder(cfg, snap, acceptedTestsDir) } : {});
+        quick ? { files: () => testFilesUnder(cfg, snap, acceptedTestsDir), tolerate } : {});
       const early = seen.early;
       if (seen.placement) {
         const w = seen.placement;
@@ -321,7 +321,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
       }
       if (early) return [false, early.summary, tailOf(early.output), [], [], early.hints, { ...none, stoppedAt: early.kind }] as Out;
       if (quick && seen.sample) {
-        sample = seen.sample;
+        sample = seen.loadErrors ? { ...seen.sample, results: [...seen.sample.results, ...seen.loadErrors] } : seen.sample;
         listedFiles = seen.listed;
         listed = `quick look: ${seen.found ? `${plural(seen.files, "test file")} found`
           : `${plural(seen.tests, "test")} listed`}, ${plural(sample.files.length, "small file")} ran: `;
@@ -1596,7 +1596,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           const look = state.looked.get(name) !== env;
           [ok, summary, tail, skips, failing, hints, counts] = await runSuite(cfg, snap, log, { sessionFactory: factory,
             failureModel: o.failureModel, key: keyOf(cfg), acceptedTestsDir: accepted,
-            accepted: trusted, leftOut, baseline: "record", precheck: look, quick: !!o.quick, boundary, swap });
+            accepted: trusted, leftOut, baseline: "record", precheck: look || !!o.quick, quick: !!o.quick, tolerate: !look, boundary, swap });
           state.looked.set(name, env);
         }
         if (ok) state.lastFailing.delete(name);
