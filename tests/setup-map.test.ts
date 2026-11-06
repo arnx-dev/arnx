@@ -63,7 +63,7 @@ const bothEnv = (n: number) => BOTH.replace("npx vitest run {targets}", `npx vit
 /** A session whose vitest run writes `xml` where --outputFile says, like the real runner. */
 class VitestSession extends FakeSession {
   constructor(snap: string, private readonly xml: string) { super(snap, () => [null, "out", false]); }
-  run(command: string) {
+  override run(command: string) {
     const r = super.run(command);
     const m = /--outputFile=\/src\/(\S+)/.exec(command);
     if (m) {

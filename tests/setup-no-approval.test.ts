@@ -9,6 +9,7 @@ import { save } from "../src/report";
 import { loadSettings, writeSettings } from "../src/settings";
 import { type Runner, sandboxOptions, type SessionFactory } from "../src/sandbox";
 import { approvalChecks } from "../src/setupview";
+import { ArnxError } from "../src/errors";
 import { Cli } from "./helpers/cli";
 import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
@@ -33,6 +34,9 @@ const suites = (cases: Case[], runs: string[] = [], seen: boolean[] = []): Sessi
     return body(new FakeSession(snap, () => [junitXml(cases), "out", false]));
   };
 
+/** The review itself stands in: reached after the proof, it stops (no model is called). */
+const STOP = { runReview: async () => { throw new ArnxError("review reached"); } };
+
 /** A small Python repository, initialized, its first send already done (where the code goes said once). */
 async function shop(): Promise<string> {
   const repo = initRepo(join(tmp(), "shop"));
@@ -41,6 +45,8 @@ async function shop(): Promise<string> {
   mkdirSync(join(repo, "tests"), { recursive: true });
   writeFileSync(join(repo, "tests", "test_pricing.py"), "def test_total():\n    assert True\n");
   commit(repo, "shop");
+  writeFileSync(join(repo, "pricing.py"), "def total(xs):\n    return sum(xs, 0)\n");
+  commit(repo, "a change to review");
   const cli = new Cli({ cwd: repo, env: ENV });
   expect(await cli.run("init")).toBe(0);
   writeSettings(repo, { ...loadSettings(repo), consentAt: "2026-10-20T00:00:00+00:00" });
@@ -78,7 +84,7 @@ test("setup at a terminal asks nothing: proves, stamps, ends with Next", async (
   expect(asked).toEqual([]);
   expect(cli.stdout).not.toContain("Approve");
   expect(cli.stdout).not.toContain("Worth a look");
-  expect(cli.stdout).toMatch(/\n✓ Environment proven\nNext: arnx review \(the last commit: [0-9a-f]+ shop\)$/);
+  expect(cli.stdout).toMatch(/\n✓ Environment proven\nNext: arnx review \(the last commit: [0-9a-f]+ a change to review\)$/);
   expect(proven(repo)).toBe(true);
   expect(approvalStamp(repo)).toMatchObject({ by: "Dev", current: true });
   expect(readFileSync(join(repo, ".arnx", "setup", "approval.md"), "utf8"))
@@ -148,10 +154,10 @@ test("review proves a changed review.yaml again first and goes on; without a cop
   async () => {
   const repo = await changed();
   const runs: string[] = [];
-  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS], runs), ask: async () => {
+  const cli = new Cli({ cwd: repo, env: ENV, ...STOP, approveSessions: suites([PASS], runs), ask: async () => {
     throw new Error("asked");
   } });
-  await cli.run("review", "--range", "HEAD..HEAD", "--quiet");
+  await cli.run("review", "--quiet");
   expect(cli.out).toEqual([".arnx/review.yaml changed since its proof (no copy of the proven file to compare): running its suites again"]);
   expect(runs).toEqual(["shop"]);
   expect(proven(repo)).toBe(true);
@@ -185,15 +191,15 @@ test("a weakened test_command and a file added to known_failing are named before
   async () => {
   const repo = await shop();
   writeFileSync(reviewConfigPath(repo), GOOD);
-  const first = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]) });
-  await first.run("review", "--range", "HEAD..HEAD", "--quiet"); // proves it, and keeps a copy of what it proved
+  const first = new Cli({ cwd: repo, env: ENV, ...STOP, approveSessions: suites([PASS]) });
+  await first.run("review", "--quiet"); // proves it, and keeps a copy of what it proved
   expect(first.out).toEqual([".arnx/review.yaml is not proven yet: running its suites"]);
   expect(existsSync(join(repo, ".arnx", "setup", "proven-review.yaml"))).toBe(true);
   writeFileSync(reviewConfigPath(repo), readFileSync(reviewConfigPath(repo), "utf8")
     .replace("python -m pytest -q {targets}", "python -m pytest -q -k 'not pricing' {targets}")
     .replace("    test_command:", "    known_failing: [tests/test_pricing.py]\n    test_command:"));
-  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]) });
-  await cli.run("review", "--range", "HEAD..HEAD", "--quiet");
+  const cli = new Cli({ cwd: repo, env: ENV, ...STOP, approveSessions: suites([PASS]) });
+  await cli.run("review", "--quiet");
   const changes = [
     "  shop: test_command `python -m pytest -q {targets}` → `python -m pytest -q -k 'not pricing' {targets}`",
     "  shop: known_failing added tests/test_pricing.py",
@@ -205,8 +211,8 @@ test("a weakened test_command and a file added to known_failing are named before
   expect(readFileSync(join(repo, ".arnx", "setup", "approval.md"), "utf8"))
     .toContain(["", "Changed since the last proof:", ...changes.map((c) => `- ${c.trim()}`), ""].join("\n"));
   // Proven again: the next run says nothing, and the copy is the new proof.
-  const again = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]) });
-  await again.run("review", "--range", "HEAD..HEAD", "--quiet");
+  const again = new Cli({ cwd: repo, env: ENV, ...STOP, approveSessions: suites([PASS]) });
+  await again.run("review", "--quiet");
   expect(again.out).toEqual([]);
   expect(readFileSync(join(repo, ".arnx", "setup", "proven-review.yaml"), "utf8"))
     .toBe(readFileSync(reviewConfigPath(repo), "utf8"));
@@ -252,8 +258,8 @@ test("next and doctor send a changed review.yaml to review, not to approve", asy
 async function provenShop(): Promise<string> {
   const repo = await shop();
   writeFileSync(reviewConfigPath(repo), GOOD);
-  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]) });
-  await cli.run("review", "--range", "HEAD..HEAD", "--quiet");
+  const cli = new Cli({ cwd: repo, env: ENV, ...STOP, approveSessions: suites([PASS]) });
+  await cli.run("review", "--quiet");
   expect(proven(repo)).toBe(true);
   return repo;
 }
@@ -264,8 +270,8 @@ const WEAKENED = "  shop: test_command `python -m pytest -q {targets}` → `pyth
 test("an unstamped file over a proven one is compared with the proven copy", async () => {
   const repo = await provenShop();
   writeFileSync(reviewConfigPath(repo), WEAK(GOOD)); // a saved attempt copied over it, an old checkout: no stamp
-  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]) });
-  await cli.run("review", "--range", "HEAD..HEAD", "--quiet");
+  const cli = new Cli({ cwd: repo, env: ENV, ...STOP, approveSessions: suites([PASS]) });
+  await cli.run("review", "--quiet");
   expect(cli.out[0]).toBe([".arnx/review.yaml changed since its proof:", WEAKENED, "Running its suites again."].join("\n"));
 });
 
@@ -274,8 +280,8 @@ test("a stamp recomputed by hand over changed content is proven again, the chang
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(WEAK(GOOD)), "Dev", "2026-10-26T00:00:00+00:00"));
   expect(proven(repo)).toBe(true); // the stamp holds; the content is not what this machine proved
   const runs: string[] = [];
-  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS], runs) });
-  await cli.run("review", "--range", "HEAD..HEAD", "--quiet");
+  const cli = new Cli({ cwd: repo, env: ENV, ...STOP, approveSessions: suites([PASS], runs) });
+  await cli.run("review", "--quiet");
   expect(cli.out[0]).toBe([".arnx/review.yaml changed since its proof:", WEAKENED, "Running its suites again."].join("\n"));
   expect(runs).toEqual(["shop"]);
   const doctor = new Cli({ cwd: repo, env: ENV });
@@ -286,8 +292,8 @@ test("a stamp recomputed by hand over changed content is proven again, the chang
 test("--json: review and check carry the re-proof and its changes", async () => {
   const repo = await provenShop();
   writeFileSync(reviewConfigPath(repo), WEAK(readFileSync(reviewConfigPath(repo), "utf8")));
-  const review = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]) });
-  await review.run("review", "--range", "HEAD..HEAD", "--json", "--quiet");
+  const review = new Cli({ cwd: repo, env: ENV, ...STOP, approveSessions: suites([PASS]) });
+  await review.run("review", "--json", "--quiet");
   expect(JSON.parse(review.stdout)).toMatchObject({ command: "review", result: "error",
     reproved: { changes: [WEAKENED.trim()], no_copy: false } });
   writeFileSync(reviewConfigPath(repo), readFileSync(reviewConfigPath(repo), "utf8").replace("python:3.12", "python:3.13"));
@@ -305,8 +311,8 @@ test("the automatic proof reads untracked files when the review does", async () 
   const repo = await changed();
   writeFileSync(join(repo, "notes.md"), "scratch\n");
   const seen: boolean[] = [];
-  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS], [], seen) });
-  await cli.run("review", "--untracked", "--range", "HEAD..HEAD", "--quiet");
+  const cli = new Cli({ cwd: repo, env: ENV, ...STOP, approveSessions: suites([PASS], [], seen) });
+  await cli.run("review", "--untracked", "--quiet");
   expect(seen).toEqual([true]);
 });
 

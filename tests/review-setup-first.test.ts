@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { baselinePath, writeBaseline } from "../src/baseline";
 import { approvalStamp, parseReviewFile, reviewConfigPath } from "../src/config";
 import { NOT_SET_UP } from "../src/draft";
-import { SetupRequired } from "../src/errors";
+import { EnvFailed, SetupRequired } from "../src/errors";
 import { manyServicesReason } from "../src/facts";
 import { setupParts } from "../src/route";
 import type { ReviewConfig } from "../src/config";
@@ -220,11 +220,89 @@ test("a hand-edited unproven file is proven within the limit, then names arnx ap
   const cli = new Cli({ cwd: repo, env: ENV, now: () => clock.ms, setupModel: new ScriptedAgent([]),
     setupSessions: suites([]), approveSessions: suites(proofRuns, () => true, clock), runReview: reviewStub(reached) });
   expect(await cli.run("review")).toBe(3);
-  expect(cli.stderr).toContain("did not finish in 10 min; `arnx approve` runs it without a limit");
-  expect(cli.stderr).toContain("Next: arnx approve");
+  expect(cli.stderr).toContain(".arnx/review.yaml changed since its proof: its suites did not finish in 10 min.\n" +
+    "Next: arnx approve (runs it without a limit)");
+  expect(cli.stderr.split("arnx approve")).toHaveLength(2); // named once
   expect(reached).toEqual([]);
   expect(proofRuns.length).toBeGreaterThan(0);
   expect(approvalStamp(repo)?.current).toBe(false);
+});
+
+/** A hand-edited install, proven again: its image build takes eleven minutes and Docker cuts it. */
+async function slowBuild(): Promise<{ repo: string; clock: { ms: number }; builds: SessionFactory }> {
+  const repo = await twoProjects();
+  await proven(repo, file([block("api"), block("web")]));
+  writeFileSync(reviewConfigPath(repo), readFileSync(reviewConfigPath(repo), "utf8")
+    .replace("pip install pytest", "pip install pytest requests"));
+  commit(repo, "hand edit");
+  change(repo, "api/api.py");
+  const clock = { ms: 0 };
+  const builds: SessionFactory = async () => {
+    clock.ms += 11 * MIN;
+    throw new EnvFailed("docker build did not finish in 600s; see .arnx/run/approve-build-api.log", "build",
+      "approve-build-api.log");
+  };
+  return { repo, clock, builds };
+}
+
+test("a proof before a review whose image build runs out of time says so", async () => {
+  const { repo, clock, builds } = await slowBuild();
+  const reached: string[] = [];
+  const cli = new Cli({ cwd: repo, env: ENV, now: () => clock.ms, setupModel: new ScriptedAgent([]),
+    setupSessions: suites([]), approveSessions: builds, runReview: reviewStub(reached) });
+  expect(await cli.run("review")).toBe(3);
+  expect(cli.stderr).toContain(".arnx/review.yaml changed since its proof: the image build did not finish in 10 min.\n" +
+    "Next: arnx approve (runs it without a limit)");
+  expect(reached).toEqual([]);
+});
+
+test("the 10-minute limit is the review's: arnx check proves a changed file as before", async () => {
+  const repo = await twoProjects();
+  await proven(repo, file([block("api"), block("web")]));
+  writeFileSync(reviewConfigPath(repo), readFileSync(reviewConfigPath(repo), "utf8")
+    .replace("pip install pytest", "pip install pytest requests"));
+  const clock = { ms: 0, minutes: 11 };
+  const cli = new Cli({ cwd: repo, env: ENV, now: () => clock.ms, approveSessions: suites([], () => true, clock) });
+  expect(await cli.run("check")).toBe(3);
+  expect(cli.stderr).not.toContain("did not finish in 10 min");
+  expect(cli.stderr).toContain(".arnx/review.yaml changed since its proof, and its suites fail:");
+  expect(cli.stderr).toContain("Next: fix the ✗ above, then arnx check");
+});
+
+test("a change that cannot be reviewed is said before the proof runs", async () => {
+  const repo = await twoProjects();
+  await proven(repo, file([block("api"), block("web")]));
+  writeFileSync(reviewConfigPath(repo), readFileSync(reviewConfigPath(repo), "utf8")
+    .replace("pip install pytest", "pip install pytest requests"));
+  commit(repo, "hand edit");
+  const [proofRuns, reached]: [Ran[], string[]] = [[], []];
+  const cli = new Cli({ cwd: repo, env: ENV, setupModel: new ScriptedAgent([]), setupSessions: suites([]),
+    approveSessions: suites(proofRuns), runReview: reviewStub(reached) });
+  expect(await cli.run("review", "--range", "HEAD..HEAD")).not.toBe(0);
+  expect(cli.stderr).toContain("nothing to review");
+  expect([proofRuns.length, reached.length]).toEqual([0, 0]);
+});
+
+test("a folder no project can be drafted for is tried once, then refused at once", async () => {
+  const repo = await twoProjects();
+  await proven(repo, file([block("api"), block("web")]));
+  mkdirSync(join(repo, "misc"), { recursive: true });
+  writeFileSync(join(repo, "misc", "thing.py"), "X = 1\n");
+  commit(repo, "misc");
+  const review = () => new Cli({ cwd: repo, env: ENV, setupModel: new ScriptedAgent([]), setupSessions: suites([]),
+    approveSessions: suites([]), runReview: reviewStub([]) });
+  const first = review();
+  expect(await first.run("review")).toBe(3);
+  expect(first.stdout).toContain("Nothing here arnx can test: no project it can set up owns a file /misc/ touches.");
+  // One next step, the refusal's, at the end.
+  expect(first.stdout).not.toContain("Next:");
+  expect(first.stdout).not.toContain("Reviewing the rest");
+  expect(first.stderr).toContain("no project covers this change: misc/thing.py (no project covers it)");
+  const again = review();
+  expect(await again.run("review")).toBe(3);
+  expect(again.stdout).not.toContain("Setting up");
+  expect(again.stdout).not.toContain("Nothing here arnx can test");
+  expect(again.stderr).toContain("no project covers this change: misc/thing.py (no project covers it)");
 });
 
 test("a part that failed is not tried again by the next review", async () => {
@@ -239,7 +317,8 @@ test("a part that failed is not tried again by the next review", async () => {
     runReview: reviewStub([]) });
   expect(await first.run("review")).toBe(3);
   expect(setupRuns.map((r) => r.project)).toContain("web");
-  expect(first.stdout).toContain("Reviewing the rest; /web/ stays not set up (arnx setup --add tries again).");
+  // Nothing else in the change is covered: no "reviewing the rest", only the refusal.
+  expect(first.stdout).not.toContain("Reviewing the rest");
   expect(first.stderr).toContain("no project covers this change: web/web.py (setup reached its time limit)");
   expect(readFileSync(reviewConfigPath(repo), "utf8")).toBe(before);
   // The next review of the same part: refused at once, nothing set up, nothing asked.

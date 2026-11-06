@@ -31,9 +31,10 @@ import { branchBase, changeLimits, describe, describeBlanked, fakedKeysText, git
 import { route, setupParts, uncoveredChange } from "./route";
 import { SOURCE } from "./untested";
 import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, readSecretPins, type ReviewFile,
-  projectDigest, restDigest, reviewConfigPath, stampedBaseline, stampedQuick, withoutSecretPins, withSecretPins } from "./config";
+  projectDigest, restDigest, reviewConfigPath, secretPinsOf, stampedBaseline, stampedQuick, withoutSecretPins,
+  withSecretPins } from "./config";
 import { getAdapter } from "./adapters";
-import { ArnxError, internalError, SetupRequired } from "./errors";
+import { ArnxError, EnvFailed, internalError, SetupRequired } from "./errors";
 import { type Baseline, baselinePath, parseBaseline, readBaseline, writeBaseline } from "./baseline";
 import { FILE as IGNORE_FILE, initialIgnore } from "./ignore";
 import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter, unpricedModels,
@@ -957,6 +958,8 @@ class Commands {
     if (!result.ok && result.stop === NOTHING_TO_TEST) {
       this.d.out(`Nothing here arnx can test: no project it can set up owns a file ${quick?.what ?? "this change"} ` +
         "touches.");
+      // Inside a review, a try that failed like any other: the review says the one next step at its end.
+      if (quick && add) return finish(2, false);
       this.d.out("Next: arnx setup (sets up the whole repository)");
       report("ok", 0, setupJson({ file: null, result, approved: false, auto: false, files: null, warnings: [],
         reviewYaml: null, record: null, seconds: seconds(), failure: null, next: ["arnx setup"] }));
@@ -1121,8 +1124,8 @@ class Commands {
 
   /** A review.yaml changed since its proof (or never proven) is proven again before a review, a check or accept uses
    * its sandbox: one line, the suites, the stamp. A failing proof stops the command (exit 3); `command` is the one to
-   * run again once the file is fixed. */
-  private async reprove(repo: string, a: Args, command: string, untracked?: boolean): Promise<void> {
+   * run again once the file is fixed. `limited` (a review): the proof stops at QUICK_MINUTES, naming `arnx approve`. */
+  private async reprove(repo: string, a: Args, command: string, untracked?: boolean, limited = false): Promise<void> {
     if (!existsSync(reviewConfigPath(repo)) || isSeedFile(repo)) return; // the command itself says to run setup
     const file = loadReviewFile(repo, { requireApproved: false });
     const st = proofState(repo, file);
@@ -1132,15 +1135,24 @@ class Commands {
     this.reproved = { changes: st.changes, no_copy: st.changes === null };
     const why = changes === null ? "is not proven yet" : "changed since its proof";
     const last = lastProof(repo);
-    // Nobody waits long for it: past QUICK_MINUTES it stops, and `arnx approve` proves the file without a limit.
+    // A review does not wait long for it (`limited`): past QUICK_MINUTES it stops, and `arnx approve` proves the file
+    // without a limit.
     const now = () => this.clock();
-    const limit: TimeLimit = { at: now() + QUICK_MINUTES * 60_000, now, minutes: QUICK_MINUTES };
-    const r = await this.approveRun(repo, a, undefined, untracked, { warnings: warningsOf(repo, file, [], untracked), changes,
-      quick: last?.quick ?? [], limit, ...(last ? { unchanged: last } : {}) });
-    if (r.outOfTime) {
-      throw new SetupRequired(`${REVIEW_FILE} ${why}: its suites did not finish in ${QUICK_MINUTES} min; \`arnx ` +
-        "approve` runs it without a limit\nNext: arnx approve");
+    const limit: TimeLimit | undefined = limited
+      ? { at: now() + QUICK_MINUTES * 60_000, now, minutes: QUICK_MINUTES } : undefined;
+    const late = (what: string) => new SetupRequired(`${REVIEW_FILE} ${why}: ${what} did not finish in ` +
+      `${QUICK_MINUTES} min.\nNext: arnx approve (runs it without a limit)`);
+    let r;
+    try {
+      r = await this.approveRun(repo, a, undefined, untracked, { warnings: warningsOf(repo, file, [], untracked),
+        changes, quick: last?.quick ?? [], ...(limit ? { limit } : {}), ...(last ? { unchanged: last } : {}) });
+    } catch (e) {
+      // A build Docker cut at the limit.
+      if (limit && e instanceof EnvFailed && e.kind === "build" && timeIsUp(limit)) throw late("the image build");
+      throw e;
     }
+    // Cut during a suite, or with too little time left to start the next step.
+    if (r.outOfTime) throw late(r.projects.length ? "its suites" : "its proof");
     if (r.code !== 0) {
       throw new SetupRequired(`${REVIEW_FILE} ${why}, and its suites fail:\n${r.detail}\nNext: fix the ✗ above, then ${command}`);
     }
@@ -1492,7 +1504,7 @@ class Commands {
     if (first !== null) return first;
     // A change no project covers is refused before any suite runs.
     this.refuseUncovered(repo, a, s, untracked ?? s.untracked);
-    await this.reprove(repo, a, "arnx review", untracked);
+    await this.reprove(repo, a, "arnx review", untracked, true);
     const cloud = await this.cloudBrain(repo, s, mode);
     if (cloud) {
       this.cloudPrompts(repo);
@@ -1581,25 +1593,29 @@ class Commands {
       }
       // Not tried again by later reviews (unless what stopped it was not this setup's): `arnx setup --add` does.
       if (code === 2) quickFailed(repo, parts);
-      this.d.out(`Reviewing the rest; ${parts.join(", ")} stays not set up (arnx setup --add tries again).`);
+      // Said only when a project reviews the rest; otherwise the refusal that follows says the next step.
+      if (!uncoveredChange(file, change.files, Number.MAX_SAFE_INTEGER)) {
+        this.d.out(`Reviewing the rest; ${parts.join(", ")} stays not set up (arnx setup --add tries again).`);
+      }
     }
     return null;
   }
 
-  /** Refuses a review whose change no project covers (uncoveredChange), before anything runs. What stops the change
-   * itself, or a file that does not read, is the review's to say. */
+  /** Refuses a review whose change no project covers (uncoveredChange), or that cannot be reviewed at all, before
+   * anything runs. A file that does not read is the review's to say. */
   private refuseUncovered(repo: string, a: Args, s: Settings, untracked: boolean): void {
     if (!existsSync(reviewConfigPath(repo)) || isSeedFile(repo)) return;
-    let why: string | null;
+    let file: ReviewFile;
     try {
-      const file = loadReviewFile(repo, { requireApproved: false });
-      const change = resolveChange(repo, (a.values.range as string | undefined) ?? null, readSecretPins(repo),
-        { untracked });
-      why = uncoveredChange(file, change.files, s.maxProjects);
+      file = loadReviewFile(repo, { requireApproved: false });
     } catch (e) {
       if (e instanceof ArnxError) return;
       throw e;
     }
+    // What stops the change (nothing to review, too large, a secret) is said now, before any proof runs.
+    const change = resolveChange(repo, (a.values.range as string | undefined) ?? null, secretPinsOf(file.raw),
+      { untracked });
+    const why = uncoveredChange(file, change.files, s.maxProjects);
     if (why) throw new SetupRequired(why);
   }
 

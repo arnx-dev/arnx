@@ -68,8 +68,9 @@ fresh clone, it says there is no copy to compare), stamp or not; a file whose st
 that copy's (a stamp recomputed by hand) counts as changed too. With `--json`, the command's object says so in
 `reproved`. Then the suites run and the file is stamped again, followed by what
 is worth a look; the changes go into `.arnx/setup/approval.md` too. When a suite fails there, the command stops and
-names the failing tests (exit 3). The suites get 10 minutes there: past that the command stops (exit 3) and names
-`arnx approve`, which runs the same proof on its own, without a limit, saying the same.
+names the failing tests (exit 3). Before a review the proof gets 10 minutes: past that the review stops (exit 3) and
+says what ran out (the image build or the suites). `arnx approve` runs the same proof on its own, without a limit,
+saying the same.
 
 ### The baseline
 
