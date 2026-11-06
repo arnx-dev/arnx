@@ -175,6 +175,8 @@ export interface Review {
   ignoredChanged?: string[];
   /** Changed lockfiles: in the sandbox, their text not sent. */
   lockfilesChanged?: string[];
+  /** Changed generated files: in the sandbox, their text not sent. */
+  generatedChanged?: string[];
   /** Changed source files whose diff lines held key-shaped text in comments: those lines were blanked. */
   blankedLines?: Blanked[];
   /** Changed files left out as secret-looking: what they hold and where, never the text. */
@@ -840,6 +842,7 @@ export function render(r: Review): string {
     out.push(`- Failing tests the reviewer did not report (scratch or replaced): ${ticks(r.unclaimed.map((u) => u.testId))}`);
   }
   if (r.ignoredChanged?.length) out.push(`- Changed files left out by .arnxignore (not reviewed): ${ticks(r.ignoredChanged)}`);
+  if (r.generatedChanged?.length) out.push(`- Changed generated files (in the sandbox, not reviewed): ${ticks(r.generatedChanged)}`);
   if (r.lockfilesChanged?.length) out.push(`- Changed lockfiles (in the sandbox, not reviewed): ${ticks(r.lockfilesChanged)}`);
   if (r.blankedLines?.length) {
     out.push(`- Comment lines blanked as secret-looking (not sent): ${describeBlanked(r.blankedLines)}`);

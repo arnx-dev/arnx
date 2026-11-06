@@ -18,6 +18,8 @@ import type { Prices } from "./settings";
 import { splitLines } from "./util";
 
 export const READ_LIMIT = 400;
+/** The most characters of one line read_file gives: a bundle on one line is not sent whole. */
+export const READ_LINE_LIMIT = 2000;
 export const GREP_LIMIT = 100;
 export const GREP_PATTERN_LIMIT = 500;
 export const GREP_FILE_LIMIT = 2_000_000;
@@ -380,7 +382,9 @@ export class Workspace {
     if (!Number.isFinite(n)) throw new ToolError("start_line: a number is required");
     const start = Math.max(1, Math.trunc(n));
     const chunk = lines.slice(start - 1, start - 1 + READ_LIMIT);
-    const body = chunk.map((line, i) => `${start + i}\t${line}`).join("\n");
+    const cut = (line: string) => line.length > READ_LINE_LIMIT
+      ? `${line.slice(0, READ_LINE_LIMIT)} ... ${line.length - READ_LINE_LIMIT} more characters` : line;
+    const body = chunk.map((line, i) => `${start + i}\t${cut(line)}`).join("\n");
     const more = lines.length - (start - 1 + chunk.length);
     return body + (more > 0 ? `\n... ${more} more lines (start_line=${start + chunk.length})` : "");
   }

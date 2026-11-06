@@ -17,7 +17,7 @@ import { CODE_LANGUAGES, codeText, inTestFolder } from "./codetext";
 import { changedLines, type Def, enclosing } from "./context";
 import { isTestPath } from "./detect";
 import { ArnxError } from "./errors";
-import { isLockfile, loadIgnore } from "./ignore";
+import { isGenerated, isLockfile, loadIgnore, hasGeneratedMarker } from "./ignore";
 import { isSecretPath, secretFileValues, suspects } from "./secrets";
 import { type Shallow, testText } from "./shallow";
 import { SOURCE } from "./untested";
@@ -54,6 +54,7 @@ const CONFIG = /\.(?:toml|json|ya?ml|cfg|ini)$/i;
 type Kind = "source" | "test" | "doc" | "template" | "config";
 
 function kindOf(path: string): Kind | null {
+  if (isGenerated(path)) return null;
   if (DOC.test(path)) return "doc";
   const code = SOURCE.test(path);
   if (code && (isTestPath(path) || inTestFolder(path) || TEST_FILE.test(path))) return "test";
@@ -339,8 +340,11 @@ class Reading {
 
   linesOf(path: string): string[] | null {
     if (!this.lines.has(path)) {
-      const text = this.tree.read(path);
-      this.lines.set(path, text === null ? null : text.split("\n"));
+      const raw = this.tree.read(path);
+      const lines = raw === null ? null : raw.split("\n");
+      // A file marked as machine-made is no evidence (its lines are cut short in a pack anyway): it is read, never given out.
+      const text = lines && hasGeneratedMarker(lines) ? null : raw;
+      this.lines.set(path, text === null ? null : lines);
       this.read++;
       this.bytes += text?.length ?? 0;
     }

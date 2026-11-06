@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve, sep } from "node:path";
 import { configSuspects, loadReviewFile, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "./errors";
-import { isLockfile, loadIgnore } from "./ignore";
+import { isGenerated, isLockfile, loadIgnore, looksGenerated } from "./ignore";
 import { BIG_KEYS_MOST, excludePathspecs, fakeKeys, filePin, holdsOnlyPublicPem, holdsPrivateKey, isCertainRule, isCodePath, isKeyFileName, isSecretPath,
   type KeyScan, keyTokens, MAY_HOLD_KEY, mayShowPrivateKey, privateKeyIn, scanKeys, type SecretPin, standInsFor, suspects, usedAsName,
   secretFileValues, WORD_RULE } from "./secrets";
@@ -56,6 +56,9 @@ export interface Change {
   ignored?: string[];
   /** Changed lockfiles: kept in the snapshot (installs need them), their text not sent (it is generated). */
   lockfiles?: string[];
+  /** Changed generated files (a bundle, a snapshot, protocol output, linguist-generated, or long machine-made lines): kept
+   * in the snapshot, not counted, not sent. */
+  generated?: string[];
   /** The working-tree snapshot copies untracked files too: opted in, or no commits yet (absent: tracked only). */
   withUntracked?: true;
   /** Opted in (a repository with commits): the untracked files the change holds, sent like the rest. */
@@ -271,9 +274,26 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
   if (!withUntracked && kind !== "range" && head !== null) {
     notSent.push(...leftOutUntracked(repo));
   }
+  // Generated files stay in the snapshot but are not counted and never go to a model.
+  const marked = markedGenerated(repo, files);
+  const genOut = new Set<string>();
+  diff = diff.split(DIFF_SECTION).filter((section) => {
+    const { old, now } = sectionPaths(section);
+    const path = now ?? old;
+    if (path === null || !section.startsWith("diff --git ") ||
+      !(isGenerated(path) || marked.has(path) || looksGenerated(section))) return true;
+    genOut.add(path);
+    return false;
+  }).join("");
+  if (genOut.size) {
+    files = files.filter((f) => !genOut.has(f));
+    included.splice(0, included.length, ...included.filter((f) => !genOut.has(f)));
+  }
   if (!diff.trim()) {
+    const only = [lockOut.size ? `lockfiles changed: ${someNames([...lockOut].sort(), 3)}` : "",
+      genOut.size ? `generated files changed: ${someNames([...genOut].sort(), 3)}` : ""].filter(Boolean);
     throw new NoChange("nothing to review: the change is empty" +
-      (lockOut.size ? ` (only lockfiles changed: ${someNames([...lockOut].sort(), 3)})` : "") +
+      (only.length ? ` (only ${only.join("; ")})` : "") +
       (notSent.length ? `; ${leftOutText(notSent.length)}` : ""));
   }
   const notTooLarge = (text: string) => {
@@ -289,7 +309,8 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
           : kind === "no-commits" ? "With no commits yet --range has nothing to name: commit part of the files first " +
             "(data, vendored or generated code), and `arnx review` then reviews the rest; or leave data files out with " +
             ".arnxignore"
-          : "Narrow it with --range"), root);
+          : "Narrow it with --range") + (root || kind === "no-commits" ? "" :
+        "; or leave the largest out with .arnxignore (add the file to sandbox_only if tests need it)"), root);
     }
   };
   // What is left out does not count, but reading every file of a huge change only to refuse it would take minutes.
@@ -310,11 +331,23 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
   return { kind, base, head, diff, files: [...new Set(files)].filter((f) => !left.has(f)).sort(), ...(branch ? { branch } : {}),
     ...(leftOut.length ? { leftOut } : {}), ...(ignoredOut.size ? { ignored: [...ignoredOut].sort() } : {}),
     ...(lockOut.size ? { lockfiles: [...lockOut].sort() } : {}),
+    ...(genOut.size ? { generated: [...genOut].sort() } : {}),
     ...(withUntracked && head === null ? { withUntracked: true as const } : {}),
     ...(born && included.length ? { untrackedIncluded: included.sort() } : {}),
     ...(notSent.length ? { untrackedLeftOut: notSent.sort() } : {}),
     ...(sealed.files.length ? { blanked: sealed.files } : {}),
     ...(sealed.withheld.length ? { withheld: sealed.withheld } : {}), ...(namedOut.size ? { namedOut: [...namedOut].sort() } : {}) };
+}
+
+/** The files git attributes mark `linguist-generated`. */
+function markedGenerated(repo: string, files: readonly string[]): Set<string> {
+  const out = new Set<string>();
+  if (!files.length) return out;
+  const r = spawnSync("git", ["-C", repo, "check-attr", "-z", "--stdin", "linguist-generated"],
+    { encoding: "utf8", input: files.join("\0") + "\0", maxBuffer: MAX_BUFFER });
+  const f = (r.stdout ?? "").split("\0");
+  for (let i = 0; i + 2 < f.length; i += 3) if (f[i + 2] === "set" || f[i + 2] === "true") out.add(f[i]!);
+  return out;
 }
 
 /** What a change refuses to send, and the way out. `allow-secret` takes a file as it stands, at HEAD, before the last commit

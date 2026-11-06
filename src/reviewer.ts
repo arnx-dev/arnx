@@ -317,6 +317,9 @@ export async function runReview(repo: string, o: { settings: Settings;
   if (change.lockfiles) {
     o.progress?.(`lockfile changes not sent (the sandbox keeps them): ${someNames(change.lockfiles, 5)}`);
   }
+  if (change.generated) {
+    o.progress?.(`generated files not sent (the sandbox keeps them): ${someNames(change.generated, 5)}`);
+  }
   if (change.leftOut) {
     o.progress?.(`left out ${change.leftOut.length} accepted test file(s) not committed yet`);
   }
@@ -895,6 +898,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       flaky, errors, passed, testsWritten: written, missingRuns, notSent: [...notSent].sort(),
       ...(change.ignored ? { ignoredChanged: change.ignored } : {}),
       ...(change.lockfiles ? { lockfilesChanged: change.lockfiles } : {}),
+      ...(change.generated ? { generatedChanged: change.generated } : {}),
       ...(change.blanked ? { blankedLines: change.blanked } : {}),
       ...(leftOutFiles.size ? { leftOutFiles: [...leftOutFiles.values()].sort((a, b) => a.path < b.path ? -1 : 1) } : {}),
       ...(unclaimed.length ? { unclaimed } : {}),

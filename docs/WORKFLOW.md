@@ -126,7 +126,7 @@ once: a `uses` folder with no leading `/` that matches in several places (`api/`
 one that takes in two or more other projects whole (a catch-all `services/`), would have those changes reviewed
 twice, so it goes back to the setup agent as a hint too.
 
-What a review sends, and what it leaves out (untracked files, `.arnxignore`, secrets):
+What a review sends, and what it leaves out (untracked files, `.arnxignore`, secrets, generated files):
 [SAFETY.md](SAFETY.md#what-a-review-sends). A changed file holding a private key is reviewed with a fake in the sandbox and
 `[private key]` for models; a test that needs the real key reads as unproven until `arnx allow-secret PATH`.
 

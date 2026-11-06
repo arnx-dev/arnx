@@ -18,6 +18,16 @@ beforeEach(() => {
   mkdirSync(join(root, "tests", "gen"), { recursive: true });
 });
 
+test("a very long line is cut when read", async () => {
+  writeFileSync(join(root, "bundle.txt"), "a".repeat(50_000) + "\nshort\n");
+  const page = await new Workspace(root).call("read_file", { path: "bundle.txt" });
+  expect(page.length).toBeLessThan(3_000);
+  expect(page).toContain("1\t" + "a".repeat(2000));
+  expect(page).not.toContain("a".repeat(2001));
+  expect(page).toContain("48000 more characters");
+  expect(page).toContain("2\tshort");
+});
+
 test("test_read_pages_and_binary", async () => {
   const ws = new Workspace(root);
   const page = await ws.call("read_file", { path: "pkg/mod.py" });

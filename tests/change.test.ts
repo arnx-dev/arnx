@@ -366,6 +366,61 @@ test("a changed lockfile stays in the snapshot but its text is not sent; only a 
   expect(() => resolveChange(repo)).toThrow("only lockfiles changed: package-lock.json");
 });
 
+test("a minified bundle stays in the snapshot, is not sent and does not count toward the limit", () => {
+  const repo = gitRepo(tmp());
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a - b\n");
+  writeFileSync(join(repo, "app.min.js"), "var a=" + "x+".repeat(150_000) + "1;\n");
+  writeFileSync(join(repo, "api.pb.go"), "package api\n".repeat(30_000));
+  commit(repo, "code and a bundle");
+  const c = resolveChange(repo);
+  expect([c.files, c.generated]).toEqual([["app.py"], ["api.pb.go", "app.min.js"]]);
+  expect(c.diff).not.toContain("x+x+");
+  expect(c.diff).not.toContain("package api");
+  const dest = join(tmp(), "snap");
+  snapshot(repo, null, dest);
+  expect(existsSync(join(dest, "app.min.js"))).toBe(true);
+  writeFileSync(join(repo, "app.min.js"), "var a=" + "y+".repeat(150_000) + "1;\n");
+  commit(repo, "only generated");
+  expect(() => resolveChange(repo)).toThrow(NoChange);
+  expect(() => resolveChange(repo)).toThrow("only generated files changed: app.min.js");
+});
+
+test("a long-line file with another name is not sent", () => {
+  const repo = gitRepo(tmp());
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a - b\n");
+  writeFileSync(join(repo, "table.js"), ("var t=[" + "1234567890,".repeat(80) + "];\n").repeat(30));
+  writeFileSync(join(repo, "stub.js"), "// @generated\nexport const a = 1;\n");
+  commit(repo, "a table");
+  const c = resolveChange(repo);
+  expect([c.files, c.generated]).toEqual([["app.py"], ["stub.js", "table.js"]]);
+  expect(c.diff).not.toContain("1234567890");
+  expect(c.diff).not.toContain("export const a");
+});
+
+test("a file marked generated is not sent", () => {
+  const repo = gitRepo(tmp());
+  writeFileSync(join(repo, ".gitattributes"), "gen/** linguist-generated\n");
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a - b\n");
+  mkdirSync(join(repo, "gen"));
+  writeFileSync(join(repo, "gen", "schema.txt"), "table one\n");
+  commit(repo, "marked");
+  const c = resolveChange(repo);
+  expect([c.files, c.generated]).toEqual([[".gitattributes", "app.py"], ["gen/schema.txt"]]);
+  expect(c.diff).not.toContain("table one");
+});
+
+test("a large hand-written file still refuses and names the way out", () => {
+  const repo = initRepo(join(tmp(), "repo"));
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a + b\n");
+  commit(repo, "first");
+  writeFileSync(join(repo, "big.py"), "X = 1\n".repeat(50_000));
+  commit(repo, "big");
+  const err = (() => { try { resolveChange(repo); } catch (e) { return e; } })();
+  expect(err).toBeInstanceOf(ChangeTooLarge);
+  expect((err as Error).message).toContain("leave the largest out with .arnxignore (add the file to sandbox_only if tests need it)");
+  expect(() => resolveChange(repo, `${runGit(repo, "rev-parse", "HEAD~1").trim()}..HEAD`)).toThrow("sandbox_only");
+});
+
 test("a first commit over the limit names its largest files and says --range cannot split it", () => {
   const repo = initRepo(join(tmp(), "repo"));
   writeFileSync(join(repo, "big.py"), "X = 1\n".repeat(50_000));
