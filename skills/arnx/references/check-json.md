@@ -42,6 +42,7 @@ the path each test runs from; `files` are where they are kept.
 | `failed` | array | Tests that failed: see [Each failed test](#each-failed-test). |
 | `skipped` | number | Tests skipped: one accept could not cut out of a kept file, or (accepted by an arnx before 0.1.2) not confirmed, marked intended or noise, or set aside. |
 | `could_not_run`, `left_out`, `faked_keys` | array | Optional. `{ test_id, needs, faked_key? }`: unproven tests, which failed for a file left out as secret-looking or (`faked_key`) for a private key the sandbox holds as a fake: no failure of the code (exit 2). `needs` is the file, or `a faked file` when the failure does not show which. `{ path, line, label }`: the files left out; `line` 0 when the whole file counts (its name, its size). `faked_keys`: paths of the files holding a fake. |
+| `not_run` | array of strings | Optional. Kept test files the runner reported nothing for (its configuration leaves their name or folder out), as the paths they run from. The text says so too; the files stay in `files`. |
 
 ## Each failed test
 

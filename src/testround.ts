@@ -203,8 +203,16 @@ export const DOME = ".arnx/tests";
 export const runPath = (p: string): string => p.startsWith(`${DOME}/`) ? p.slice(DOME.length + 1) : p;
 
 /** The test files `arnx accept` kept for this project that exist, relative to the repository (under DOME). */
-export function keptTestFiles(repo: string, cfg: ReviewConfig, acceptedTestsDir?: string): string[] {
-  return keptIn(join(repo, DOME), cfg, acceptedTestsDir).map((p) => `${DOME}/${p}`);
+export function keptTestFiles(repo: string, cfg: ReviewConfig, acceptedTestsDir?: string,
+                              projects: readonly ReviewConfig[] = [cfg]): string[] {
+  return keptIn(join(repo, DOME), cfg, acceptedTestsDir, false, projects).map((p) => `${DOME}/${p}`);
+}
+
+/** The project among `projects` whose folder holds `path` (repository-relative), the deepest one. */
+export function deepestHolder<T extends ReviewConfig>(projects: readonly T[], path: string): T | undefined {
+  const holds = (c: ReviewConfig) => posix.normalize(c.workdir) === "." || path.startsWith(`${posix.normalize(c.workdir)}/`);
+  return [...projects].sort((a, b) => posix.normalize(a.workdir).length - posix.normalize(b.workdir).length)
+    .filter(holds).at(-1);
 }
 
 /** Files an arnx before the DOME kept inside the project, where its own test run collects them: every file in its
@@ -217,7 +225,8 @@ export function legacyKeptFiles(repo: string, cfg: ReviewConfig, acceptedTestsDi
  * file kept before test_files was set, or under another ending, is never dropped by a change of names), and from any
  * accepted folder they sit in: the configured and default ones, and every `arnx/r<review>` folder under the project
  * (where an earlier tests_dir had them kept). */
-function keptIn(root: string, cfg: ReviewConfig, acceptedTestsDir?: string, all = false): string[] {
+function keptIn(root: string, cfg: ReviewConfig, acceptedTestsDir?: string, all = false,
+                projects: readonly ReviewConfig[] = [cfg]): string[] {
   const adapter = adapterFor(cfg);
   const base = getAdapter(cfg.language);
   const writable = (n: string) => adapter.writable.test(n) || base.writable.test(n);
@@ -225,8 +234,8 @@ function keptIn(root: string, cfg: ReviewConfig, acceptedTestsDir?: string, all 
   const inRoots = acceptedRoots(cfg, acceptedTestsDir).filter((d) => existsSync(join(root, d)))
     .flatMap((d) => collect(root, d, /./).filter((p) => all || writable(posix.basename(p))))
     .filter((p) => all || isTest(posix.basename(p)));
-  const sat = !all && cfg.language === "typescript" && existsSync(join(root, cfg.workdir))
-    ? collect(root, cfg.workdir === "." ? "" : cfg.workdir, /./).filter((p) => KEPT_FOLDER.test(p) &&
+  const sat = !all && existsSync(join(root, cfg.workdir))
+    ? collect(root, cfg.workdir === "." ? "" : cfg.workdir, /./).filter((p) => KEPT_FOLDER.test(p) && deepestHolder(projects, p)?.name === cfg.name &&
       (all || writable(posix.basename(p))) && (all || isTest(posix.basename(p)))) : [];
   const own = (adapter.kept?.dirs ?? []).map((d) => posix.normalize(posix.join(cfg.workdir, d)).replace(/\/$/, ""))
     .filter((d) => existsSync(join(root, d)))

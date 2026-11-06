@@ -134,7 +134,7 @@ test("review-json.md names each fix-proof status review.json can write", () => {
 
 // --- check --json -----------------------------------------------------------------------------------------------------
 
-const project: ProjectCheck = { project: "svc", files: ["svc/tests/arnx/r1/test_x.py"], passed: ["a"], skipped: 1,
+const project: ProjectCheck = { project: "svc", files: ["svc/tests/arnx/r1/test_x.py"], passed: ["a"], skipped: 1, notRun: [".arnx/tests/svc/tests/arnx/r1/test_y.py"],
   noReport: false, failed: [{ testId: "t::b", fileAttr: "", name: "b", outcome: "failed", message: "assert 0" }] };
 const changed: ChangedTest[] = [{ path: "tests/arnx/r1/test_x.py", review: "r1", change: "modified" }];
 const contradiction: MayContradict = { answer: "Q1", accepted: "F3", review: "r1", accepted_review: "r1",

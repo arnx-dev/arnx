@@ -73,3 +73,29 @@ test("kept tests are still collected after test_files or tests_dir change", () =
     ".arnx/tests/lib/__tests__/arnx/r20261002_bbbbbb/older.spec.ts",
     ".arnx/tests/src/js/__tests__/arnx/r20261003_cccccc/new_wrongSpec.tsx"]);
 });
+
+test("a root project and a nested one each keep only their own kept files", () => {
+  const repo = gitRepo(tmp());
+  const put = (p: string) => { mkdirSync(join(repo, ".arnx", "tests", p, ".."), { recursive: true }); writeFileSync(join(repo, ".arnx", "tests", p), "x\n"); };
+  put("__tests__/arnx/r20261001_aaaaaa/root.test.ts");
+  put("web/__tests__/arnx/r20261002_bbbbbb/web.test.ts");
+  const file = parseReviewFile(`version: 1
+projects:
+  top:
+    root: .
+    language: typescript
+    image: node:22
+    runner: jest
+    test_command: npx jest {targets}
+    owns: [/src/]
+  web:
+    root: web
+    language: typescript
+    image: node:22
+    runner: jest
+    test_command: npx jest {targets}
+`);
+  const [top, web] = file.projects;
+  expect(keptTestFiles(repo, top!, undefined, file.projects)).toEqual([".arnx/tests/__tests__/arnx/r20261001_aaaaaa/root.test.ts"]);
+  expect(keptTestFiles(repo, web!, undefined, file.projects)).toEqual([".arnx/tests/web/__tests__/arnx/r20261002_bbbbbb/web.test.ts"]);
+});

@@ -41,7 +41,7 @@ Every other field is the command's own, in snake_case. Paths are relative to the
 
 ## Each command
 
-### init `not_run`: array, optional: kept test files the runner reported nothing for (its configuration leaves their name or folder out), as paths they run from. Named in the text too.
+### init
 
 | Field | Type | Meaning |
 |---|---|---|

@@ -18,7 +18,7 @@ import { load, type Review } from "./report";
 import type { Say } from "./progress";
 import { sayingDocker, type SessionFactory } from "./sandbox";
 import type { Env, Settings } from "./settings";
-import { collect, DOME, dockerSession, keptTestFiles, legacyKeptFiles, runPath, swapFiles, swapIn } from "./testround";
+import { collect, deepestHolder, DOME, dockerSession, keptTestFiles, legacyKeptFiles, runPath, swapFiles, swapIn } from "./testround";
 
 export const CHECK_TIMEOUT = 900;
 
@@ -127,11 +127,9 @@ export function legacyAccepted(repo: string, settings: Settings): Map<string, Re
   const projects = [...file.projects].sort((a, b) => posix.normalize(a.workdir).length - posix.normalize(b.workdir).length);
   const out = new Map<string, ReviewConfig>();
   for (const cfg of projects) for (const p of legacyKeptFiles(repo, cfg, settings.acceptedTestsDir)) out.set(p, cfg);
-  const holds = (cfg: ReviewConfig, p: string) => posix.normalize(cfg.workdir) === "." ||
-    p.startsWith(`${posix.normalize(cfg.workdir)}/`);
   for (const p of Object.keys(readRecord(repo).files)) {
     if (p.startsWith(`${DOME}/`) || out.has(p) || !existsSync(join(repo, p))) continue;
-    const cfg = projects.filter((c) => holds(c, p)).at(-1);
+    const cfg = deepestHolder(projects, p);
     if (cfg) out.set(p, cfg);
   }
   return new Map([...out].sort(([a], [b]) => (a < b ? -1 : 1)));
@@ -191,7 +189,7 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
   const out: ProjectCheck[] = [];
   let known: AcceptedIds | undefined;
   for (const cfg of file.projects) {
-    const files = keptTestFiles(repo, cfg, settings.acceptedTestsDir);
+    const files = keptTestFiles(repo, cfg, settings.acceptedTestsDir, file.projects);
     if (!files.length) continue;
     o.progress?.(`${cfg.name}: running ${o.what ?? "the accepted tests"}`);
     const tmp = mkdtempSync(join(tmpdir(), "arnx-check-"));
