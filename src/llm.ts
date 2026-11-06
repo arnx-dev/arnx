@@ -27,10 +27,12 @@ export const PRICES: Prices = {
   // River (docs.river.ai, 2026-10-14): no cache-write charge.
   "zai-org/GLM-5.3-Flash": [0.12, 0.40, 0.024, 0.0],
   "deepseek-ai/DeepSeek-V4.1-Flash": [0.12, 0.48, 0.0024, 0.0],
-  // The other providers arnx knows (settings.ts KNOWN_PROVIDERS), from their docs, 2026-10-21. DeepSeek: peak rates
+  // The other providers arnx knows (settings.ts KNOWN_PROVIDERS), from their docs, 2026-10-21 DeepSeek: peak rates
   // (off-peak is half); OpenRouter: as Z.ai's own price for the model.
   "deepseek-flash": [0.3, 1.2, 0.006, 0.0],
-  "kimi-k3": [3.0, 15.0, 0.3, 0.0],
+  // Kimi, 2026-11-05: K3 bills a cache write; K3.1 Pro is cheaper than K3.
+  "kimi-k3": [3.0, 15.0, 0.3, 3.0],
+  "kimi-k3.1-pro": [2.0, 10.0, 0.2, 2.0],
   "z-ai/glm-5.3": [1.4, 4.4, 0.26, 0.0],
   "glm-5.3-flash": [0.15, 0.5, 0.03, 0.0],
   // 2026-10-13: prompts over 100K tokens are billed at five times the rate.

@@ -16,7 +16,10 @@ import { baseName } from "../src/outcomes";
 import { CHALLENGE_SCHEMA, DEFAULT_PROMPTS, elsewhereNote } from "../src/prompts";
 import { confirmed, type Finding, load, notChecked, parseReports, type Review } from "../src/report";
 import { route } from "../src/route";
-import { defaultSettings, type Env, loadSettings, parseModelRef, settingsPath } from "../src/settings";
+import { defaultSettings, type Env, KNOWN_PROVIDERS, loadSettings, parseModelRef, settingsPath } from "../src/settings";
+
+/** The known providers' tables, so a ref like kimi:<model> resolves without a config file. */
+const KNOWN_TABLES = Object.fromEntries(KNOWN_PROVIDERS.map((k) => [k.name, k.table]));
 
 const USAGE = `usage: bun scripts/replay-judge.ts --grades FILE --root DIR --model REF --out DIR [options]
        bun scripts/replay-judge.ts --grades FILE --root DIR --dump-prompts DIR
@@ -442,7 +445,7 @@ function printAgreement(name: string, ready: Ready[], rows: Map<string, Row>[], 
  * the model has no price. */
 function promptCostOf(ref: string, env: Env): (chars: number) => number | null {
   try {
-    const { model } = parseModelRef(ref);
+    const { model } = parseModelRef(ref, KNOWN_TABLES);
     const s = defaultSettings(env), prices = allPrices(s);
     const tiered = `${model}@${s.openaiTier}`;
     const name = s.openaiTier && prices[tiered] ? tiered : model;
@@ -455,7 +458,7 @@ function promptCostOf(ref: string, env: Env): (chars: number) => number | null {
 /** The model, through arnx's own factory: shipped timeouts and prices, the named model alone. */
 export function defaultModel(ref: string, env: Env): JsonModel {
   const { challengerFallback: _none, ...s } = defaultSettings(env);
-  const settings = { ...s, challenger: parseModelRef(ref) };
+  const settings = { ...s, providers: KNOWN_TABLES, challenger: parseModelRef(ref, KNOWN_TABLES) };
   const unpriced = unpricedModels(settings, [settings.challenger]);
   if (unpriced.length) throw new ArnxError(`no price for ${unpriced[0]!.name}: its cost and --max-usd would be wrong`);
   return makeChallenger(settings, env, new Boundary());

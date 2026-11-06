@@ -455,6 +455,12 @@ test("the real factory gives the named model alone, with no fallback behind it",
   for (const ref of ["anthropic:claude-sonnet-5-5", "openai:gpt-6.1-sol"]) expect(defaultModel(ref, keys).ref).toBe(ref);
 });
 
+test("a model of a known provider is parsed and priced without a config file", () => {
+  const model = defaultModel("kimi:kimi-k3.1-pro", { MOONSHOT_API_KEY: "k" });
+  expect(model.ref).toBe("kimi:kimi-k3.1-pro");
+  expect(() => defaultModel("kimi:kimi-k3.1-pro", {})).toThrow(SetupRequired);
+});
+
 test("a project set up after the review does not change what the review's projects were given", async () => {
   const f = fixture();
   writeFileSync(join(f.repo, ".arnx", "review.yaml"), `${YAML}  later:
