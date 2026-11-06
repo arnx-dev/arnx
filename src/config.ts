@@ -363,7 +363,7 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
   if ("test_files" in spec) {
     if (testFilesSuffix(spec.test_files) === null) {
       problems.push(`${at}test_files: must be a * and a test file suffix ending in a JavaScript or TypeScript extension ` +
-        "and naming a test (test or spec), such as *Spec.tsx");
+        "and naming a test (.test, _spec, a capital Spec, and the like), such as *Spec.tsx");
     } else if (adapter.id !== "typescript") problems.push(`${at}test_files: only for typescript projects`);
     else testFiles = spec.test_files as string;
   }

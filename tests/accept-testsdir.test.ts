@@ -59,3 +59,17 @@ test("a kept test of a project with its own tests folder stays where the runner 
   expect(acceptedRoots(cfg, "custom/kept")).toContain("custom/kept");
   expect(acceptedRoots(cfg, "custom/kept")).not.toContain("src/js/__tests__/arnx");
 });
+
+test("kept tests are still collected after test_files or tests_dir change", () => {
+  const repo = gitRepo(tmp());
+  const put = (p: string) => { mkdirSync(join(repo, ".arnx", "tests", p, ".."), { recursive: true }); writeFileSync(join(repo, ".arnx", "tests", p), "x\n"); };
+  // Kept before test_files existed (usual names, default folder), and kept beside an earlier tests_dir.
+  put("__tests__/arnx/r20261001_aaaaaa/old.test.ts");
+  put("lib/__tests__/arnx/r20261002_bbbbbb/older.spec.ts");
+  put("src/js/__tests__/arnx/r20261003_cccccc/new_wrongSpec.tsx");
+  const cfg = parseReviewFile(YAML).projects[0]!;
+  expect(keptTestFiles(repo, cfg)).toEqual([
+    ".arnx/tests/__tests__/arnx/r20261001_aaaaaa/old.test.ts",
+    ".arnx/tests/lib/__tests__/arnx/r20261002_bbbbbb/older.spec.ts",
+    ".arnx/tests/src/js/__tests__/arnx/r20261003_cccccc/new_wrongSpec.tsx"]);
+});

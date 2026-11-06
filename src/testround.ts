@@ -7,7 +7,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import { type AgentResult, Workspace } from "./agent";
-import { adapterFor } from "./adapters";
+import { adapterFor, getAdapter } from "./adapters";
 import { DEFAULT_ACCEPTED_DIR } from "./adapters/types";
 import { absentFromSnapshot, bakedError, bakedIn, imageFiles, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
   from "./baked";
@@ -213,17 +213,30 @@ export function legacyKeptFiles(repo: string, cfg: ReviewConfig, acceptedTestsDi
   return keptIn(repo, cfg, acceptedTestsDir, true);
 }
 
+/** Kept files are collected under either name rule: the project's test_files names, or the adapter's usual ones (a
+ * file kept before test_files was set, or under another ending, is never dropped by a change of names), and from any
+ * accepted folder they sit in: the configured and default ones, and every `arnx/r<review>` folder under the project
+ * (where an earlier tests_dir had them kept). */
 function keptIn(root: string, cfg: ReviewConfig, acceptedTestsDir?: string, all = false): string[] {
   const adapter = adapterFor(cfg);
+  const base = getAdapter(cfg.language);
+  const writable = (n: string) => adapter.writable.test(n) || base.writable.test(n);
+  const isTest = (n: string) => adapter.isTestFile(n) || base.isTestFile(n);
   const inRoots = acceptedRoots(cfg, acceptedTestsDir).filter((d) => existsSync(join(root, d)))
-    .flatMap((d) => collect(root, d, all ? /./ : adapter.writable))
-    .filter((p) => all || adapter.isTestFile(posix.basename(p)));
+    .flatMap((d) => collect(root, d, /./).filter((p) => all || writable(posix.basename(p))))
+    .filter((p) => all || isTest(posix.basename(p)));
+  const sat = !all && cfg.language === "typescript" && existsSync(join(root, cfg.workdir))
+    ? collect(root, cfg.workdir === "." ? "" : cfg.workdir, /./).filter((p) => KEPT_FOLDER.test(p) &&
+      (all || writable(posix.basename(p))) && (all || isTest(posix.basename(p)))) : [];
   const own = (adapter.kept?.dirs ?? []).map((d) => posix.normalize(posix.join(cfg.workdir, d)).replace(/\/$/, ""))
     .filter((d) => existsSync(join(root, d)))
     .flatMap((d) => readdirSync(join(root, d)).filter((n) => adapter.kept!.name.test(n) &&
       lstatSync(join(root, d, n)).isFile()).map((n) => posix.join(d, n)));
-  return [...new Set([...inRoots, ...own])].sort();
+  return [...new Set([...inRoots, ...sat, ...own])].sort();
 }
+
+/** A kept file's folder: `<anywhere>/arnx/r<review id>/`, as accept lays them out. */
+const KEPT_FOLDER = /(?:^|\/)arnx\/r\d+_[0-9a-f]+\//;
 
 /** The project's own files among `paths` (relative to the repository) that a round would clear from its tests
  * directory as its own: the adapter's writable names, outside the folders `arnx accept` keeps tests in. Rust's

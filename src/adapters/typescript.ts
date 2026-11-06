@@ -414,10 +414,10 @@ export const typescript: Adapter = {
 export const TEST_FILES = /^\*([\w.-]+\.(?:c|m)?[jt]sx?)$/;
 
 /** The suffix of a test_files pattern when it is valid: it ends in a JavaScript or TypeScript extension and names a
- * test (test or spec, any case), so no source file can end the same way; else null. */
+ * test at a word edge (.test, _spec, -test in any case, or a capital Test or Spec), so no source file can end the same way; else null. */
 export function testFilesSuffix(glob: unknown): string | null {
   const suffix = typeof glob === "string" ? TEST_FILES.exec(glob)?.[1] : undefined;
-  return suffix && /test|spec/i.test(suffix) ? suffix : null;
+  return suffix && (/[._-](?:test|spec)/i.test(suffix) || /Test|Spec/.test(suffix)) ? suffix : null;
 }
 
 /** `base` for a project whose runner collects the files named by `glob` (test_files, "*Spec.tsx") and not the usual

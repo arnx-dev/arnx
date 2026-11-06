@@ -13,7 +13,7 @@ import { filesAt, git, hasCommits, takeSnapshot, type Withheld } from "./change"
 import { configSuspects, loadReviewFile, type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
 import { placed } from "./fixprompt";
-import { baseName, runTests, type TestResult } from "./outcomes";
+import { baseName, ownerFile, runTests, type TestResult } from "./outcomes";
 import { load, type Review } from "./report";
 import type { Say } from "./progress";
 import { sayingDocker, type SessionFactory } from "./sandbox";
@@ -32,7 +32,9 @@ export interface ProjectCheck { /** Something in it was masked. */ standInsShown
   leftOut?: Withheld[]; fakedKeys?: string[]; couldNotRun?: { testId: string; needs: string; faked?: boolean }[]; project: string; files: string[];
   passed: string[]; failed: TestResult[];
   skipped: number; noReport: boolean; accepted?: string[]; reason?: string; log?: string | null;
-  reviews?: Record<string, string>; workdir?: string }
+  reviews?: Record<string, string>; workdir?: string;
+  /** Kept test files the runner reported nothing for (its configuration leaves that name or folder out). */
+  notRun?: string[] }
 
 /** The accepted tests, as `file::test` (repository-relative, parameters dropped): those accept recorded per file in
  * ACCEPTED_RECORD, else (a record by an older arnx) from each accepted review's marks. `files`: the kept files the
@@ -238,6 +240,8 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
         mkdirSync(dirname(join(repo, log)), { recursive: true });
         writeFileSync(join(repo, log), boundary.mask(missing.map(([, r]) => r.output).join("\n")));
       }
+      // A kept file the runner reported no test for was left out by its configuration: named, never silently dropped.
+      const notRun = missing.length ? [] : files.filter((f) => !results.some((t) => ownerFile(t.fileAttr, [target(f)]) !== null));
       known ??= acceptedIds(repo);
       const ran = results.filter((t) => t.outcome !== "skipped");
       const couldNotRun = ran.filter((t) => t.needs).map((t) => ({ testId: t.testId, needs: t.needs!, ...(t.fakedKey ? { faked: true } : {}) }));
@@ -250,6 +254,7 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
         accepted: ran.filter((t) => !t.needs && isAccepted(known!, cfg.workdir, t.testId)).map((t) => t.testId),
         ...(taken.withheld.length ? { leftOut: taken.withheld } : {}), ...(taken.fakedKeys.length ? { fakedKeys: taken.fakedKeys } : {}),
         ...(couldNotRun.length ? { couldNotRun } : {}),
+        ...(notRun.length ? { notRun } : {}),
         ...(reason ? { reason, log } : { log: null }) } as ProjectCheck);
       out.push(said.shown ? { ...said.value, standInsShown: true } : said.value);
     } finally {
@@ -455,6 +460,11 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
     const needs = [...new Set(blocked.map((x) => x.needs))];
     lines.push(`✗ ${count(blocked.length, "test")} ${unprovenText(blocked.length, blocked, (p) => p.slice(0, 5).join(", "))}. ` +
       `If it is a test fixture: ${allowFile(needs)}, then \`arnx check\` again.`);
+  }
+  const notRun = results.flatMap((r) => r.notRun ?? []);
+  if (notRun.length) {
+    lines.push(`✗ ${count(notRun.length, "accepted test file")} did not run, the runner leaves ${notRun.length === 1 ? "it" : "them"} ` +
+      `out: ${notRun.slice(0, 5).map(runPath).join(", ")}${notRun.length > 5 ? ", …" : ""}`);
   }
   const leftOut = [...new Set(results.flatMap((r) => (r.leftOut ?? []).map((w) => w.path)))];
   if (leftOut.length && !blocked.length && (missing.length || failed.length)) {
@@ -815,6 +825,7 @@ export function checkJson(results: ProjectCheck[], code: number, changed: Change
         failed: r.failed.map((t) => ({ test_id: t.testId, outcome: t.outcome, message: t.message,
           accepted: acc(t.testId) })),
         skipped: r.skipped,
+        ...(r.notRun ? { not_run: r.notRun.map(runPath) } : {}),
         ...(r.leftOut ? { left_out: r.leftOut } : {}),
         ...(r.fakedKeys ? { faked_keys: r.fakedKeys } : {}),
         ...(r.couldNotRun ? { could_not_run: r.couldNotRun.map((x) => ({ test_id: x.testId, needs: x.needs, ...(x.faked ? { faked_key: true } : {}) })) } : {}) };

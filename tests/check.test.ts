@@ -85,3 +85,15 @@ projects:
   const [text, code] = checkSummary(await check(repo, SETTINGS, { sessionFactory: async () => { throw new Error("no"); } }));
   expect([text, code]).toEqual(["No accepted tests yet: arnx accept keeps them after a review.", 3]);
 });
+
+test("a kept file the runner reports nothing for is named as not run, and stays in the file count", async () => {
+  const repo = repoWithAccepted();
+  writeFileSync(join(repo, ".arnx/tests/svc/tests/arnx/r1/test_other.py"), "def test_o(): pass\n");
+  const quiet: SessionFactory = async (_c, snap, _l, body) => body(new FakeSession(snap,
+    () => [junitXml([["tests/arnx/r1/test_r1_calc.py", "test_ok", "passed", ""]]), "1 passed", false]));
+  const results = await check(repo, SETTINGS, { sessionFactory: quiet });
+  expect(results[0]!.files.length).toBe(2);
+  expect(results[0]!.notRun).toEqual([".arnx/tests/svc/tests/arnx/r1/test_other.py"]);
+  expect(checkSummary(results)[0]).toContain("✗ 1 accepted test file did not run, the runner leaves it out: " +
+    "svc/tests/arnx/r1/test_other.py");
+});
