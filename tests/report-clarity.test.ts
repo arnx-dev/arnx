@@ -21,7 +21,7 @@ test("the report opens with a status: complete when every project was tested and
   expect(md).toContain("## Status\n\nComplete: 2 projects tested (`api`, `web`); every run reported its tests.");
   expect(md.indexOf("## Status")).toBeLessThan(md.indexOf("## Findings"));
   // complete: no status line, the count then the findings first
-  expect(summary(r, "review.md").split("\n").slice(1, 3)).toEqual(["1 issue confirmed, 1 disputed (2 findings).",
+  expect(summary(r, "review.md").split("\n").slice(1, 3)).toEqual(["1 issue worth a look, 1 disputed (2 findings).",
     "  ✗ 1  Any member can invite.  F1 (main)"]);
 });
 
@@ -82,7 +82,7 @@ test("findings that share one cause are grouped and explained as input, actual, 
   expect(parseMarks(blankMarks(md), ["F1", "F2", "F3"]).findings).toEqual({ F1: null, F2: null, F3: null });
   expect(md.indexOf("### Issue 1")).toBeLessThan(md.indexOf("### F1"));
   expect(md.indexOf("### F2")).toBeLessThan(md.indexOf("### Issue 2"));
-  expect(exitCode(r)).toBe(1); // exit code still counts findings, not issues
+  expect(exitCode(r, true)).toBe(1); // exit code still counts findings, not issues
   const s = summary(r, "review.md");
   expect(s).toContain("  ✗ 1  mount() strips the wrong number of characters when the path has a parameter  F1, F2");
   expect(s).toContain("  · 2  wildcard in the middle of a mount path                                       F3 disputed");
@@ -311,7 +311,7 @@ test("the minor heading does not describe what its issues are", () => {
       { findings: ["F2"], title: "odd name", input: "", actual: "", expected: "", consequence: "", severity: "low" }],
   });
   const md = render(r);
-  expect(md).toContain("## Also found (minor)\n\nLower severity: worth a look, not urgent.");
+  expect(md).toContain("## Also found (minor)\n\nLower severity, not urgent.");
   expect(md).not.toContain("Leftover debug output");
 });
 

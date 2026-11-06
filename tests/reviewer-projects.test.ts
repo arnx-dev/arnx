@@ -58,7 +58,7 @@ test("a change to a shared path reviews each project that uses it", async () => 
   expect(review.questionProjects).toEqual(["feed", "pay"]);
   expect(review.writeDirs).toEqual({ feed: "services/feed/tests/arnx_generated", pay: "services/pay/tests/arnx_generated" });
   expect([review.passed, review.testsWritten]).toEqual([2, 4]);
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review)).toBe(0);
   for (const p of ["feed", "pay"]) {
     expect(existsSync(join(rdir, "projects", p, "transcript.jsonl"))).toBe(true);
     expect(existsSync(join(rdir, "projects", p, "tests", "services", p, GEN + COPY_SUFFIX))).toBe(true);

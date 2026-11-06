@@ -6,7 +6,7 @@ description: Test a finished code change with arnx before handing it back. Use w
 # arnx: test the change before you hand it back
 
 arnx writes tests for a code change, runs each one 3 times in a Docker sandbox, and has a second model judge every
-failure. A **confirmed** finding is a test that failed in all 3 runs and was not disputed. The flow, in this order:
+failure. A **confirmed** finding is a test that failed in all 3 runs and was not disputed; it is worth a look and does not fail the run. The flow, in this order:
 
     review → triage → accept → check → prompt → fix → check → full suites → commit/push
 
@@ -139,8 +139,8 @@ this change`) or lists paths in `uncovered` or `untested`:
 
 | Code | `arnx review` | `arnx check` |
 |---|---|---|
-| 0 | no `confirmed` or `not-checked` finding (also when `status` is `partly-covered` or `not-tested`) | all accepted tests pass |
-| 1 | a `confirmed` or `not-checked` finding | some accepted tests fail |
+| 0 | no `not-checked` finding; `confirmed` findings do not fail the run (also when `status` is `partly-covered` or `not-tested`) | all accepted tests pass |
+| 1 | a `not-checked` finding | some accepted tests fail |
 | 2 | incomplete (or failed: the message says why) | some tests did not report |
 | 3 | setup needed (config, consent, keys, Docker, environment) | nothing accepted yet |
 | 4 | | an accepted test changed since accept |

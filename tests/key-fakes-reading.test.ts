@@ -125,7 +125,7 @@ const FIX = "Fix the code; if this test needs a real key: `arnx allow-secret PAT
 test("a finding beside a fake says fix the code, and how to run it with the real key", async () => {
   const repo = project({ "tests/data/server.pem": pem });
   const { review: r } = await review(repo, "E   assert 1 == 2");
-  expect(exitCode(r)).toBe(1);
+  expect(exitCode(r)).toBe(0);
   expect(summary(r, "review.md")).toContain(FIX);
   expect(render(r).replace(/\s+/g, " ")).toContain(FIX);
   put(repo, ".arnx/tests/tests/arnx/r1/test_kept.py", SOURCE);

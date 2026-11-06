@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { clip } from "./events";
 import { repoLanguages } from "./detect";
 import { unsupportedText } from "./languages";
-// arnx command line. Exit codes: 0 no confirmed findings, 1 confirmed findings, 2 incomplete or failed, 3 setup
+// arnx command line. Exit codes: 0 fine (confirmed findings are worth a look, not a failure), 1 a finding no second opinion saw, 2 incomplete or failed, 3 setup
 // required, 4 (check only) accepted tests changed since accept, 130 interrupted.
 import BANNER_ANSI from "../assets/banner.ans" with { type: "text" };
 import BANNER_TEXT from "../assets/banner.txt" with { type: "text" };
@@ -38,7 +38,7 @@ import { type Baseline, baselinePath, parseBaseline, readBaseline, writeBaseline
 import { FILE as IGNORE_FILE, initialIgnore } from "./ignore";
 import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter, unpricedModels,
   unpricedNote } from "./llm";
-import { exitCode, failureLine, findingStatus, groupsOf, load, neededQuestions, nextSteps, parseMarks, type Review,
+import { confirmed, exitCode, failureLine, findingStatus, groupsOf, load, neededQuestions, nextSteps, parseMarks, type Review,
   summary, summaryRows, summaryStatus, wrapMarkdown, yourCall } from "./report";
 import { acceptData, checkData, reportTelemetry, reviewData, type Sender, setupData,
   TELEMETRY_OPEN, telemetryLine, telemetryStatus }
@@ -2101,7 +2101,9 @@ export function reviewJson(r: Review, reviewMd: string, reviewJsonPath: string)
     : st.none ? [`no test was seen reaching any of ${st.of} changed source file${st.of === 1 ? "" : "s"}, so finding nothing says nothing`]
     : st.untested ? [`no test was seen reaching ${st.untested} of ${st.of} changed source file${st.of === 1 ? "" : "s"}, so finding nothing ` +
       "there says nothing about them"] : [];
-  return [code === 1 ? "findings" : code === 2 ? "incomplete" : "clean", code, {
+  // A confirmed finding that does not fail the run is still a finding: the result never reads "clean" over it.
+  const found = code === 1 || (code === 0 && confirmed(r).length > 0);
+  return [found ? "findings" : code === 2 ? "incomplete" : "clean", code, {
     review_id: r.id, review_md: reviewMd, review_json: reviewJsonPath, change: r.change, files_changed: r.filesChanged,
     added: r.added, removed: r.removed,
     status: st.problems.length ? "incomplete" : st.none ? "not-tested" : st.untested ? "partly-covered" : "complete",

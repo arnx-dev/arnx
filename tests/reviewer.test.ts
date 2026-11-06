@@ -48,7 +48,7 @@ test("test_review_produces_a_challenged_finding", async () => {
   const judge = new FakeJson([{ verdict: "confirmed", reason: "add subtracts." }]);
   const { review, rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent(), challenger: judge,
     sessionFactory: fakeFactory(runs) });
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review)).toBe(0);
   expect(review.stop).toBe("end_turn");
   expect(review.findings).toHaveLength(1);
   const f = review.findings[0]!;
@@ -159,7 +159,7 @@ test("after the challenge, the second model groups the findings for the report",
   expect(review.groups).toEqual([{ findings: ["F1"], title: "add subtracts", input: "add(2, 3)", actual: "-1",
     expected: "5", consequence: "every sum is wrong" }]);
   expect(review.findings[0]!.verdict).toBe("confirmed");
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review)).toBe(0);
   expect(review.usage[1]!.calls).toBe(2);
   expect(readFileSync(join(rdir, "review.md"), "utf8")).toContain("### Issue 1 · add subtracts");
 });

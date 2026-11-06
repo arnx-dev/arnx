@@ -435,7 +435,7 @@ for (const [name, message, unproven] of [
     const { review: r } = await runReview(repo, { settings: SETTINGS, agentModel: new RecordingAgent(WRITE(), REPORT), challenger: new RecordingJson(),
       progress: () => {}, sessionFactory: fakeFactory(() => [junitXml([[GEN, "test_add", "failed", message]]), "1 failed\n", false]) });
     expect(r.findings.length).toBe(unproven ? 0 : 1);
-    expect(exitCode(r)).toBe(unproven ? 2 : 1);
+    expect(exitCode(r)).toBe(unproven ? 2 : 0);
   });
 }
 
@@ -444,7 +444,7 @@ test("no faked key, a failure about a key is a finding", async () => {
   const { review: r } = await runReview(repo, { settings: SETTINGS, agentModel: new RecordingAgent(WRITE(), REPORT), challenger: new RecordingJson(),
     progress: () => {}, sessionFactory: fakeFactory(() => [junitXml([[GEN, "test_add", "failed", "ValueError: Could not deserialize key data"]]), "1 failed\n", false]) });
   expect(r.findings.length).toBe(1);
-  expect(exitCode(r)).toBe(1);
+  expect(exitCode(r)).toBe(0);
 });
 
 // --- rule 7: what still leaves -----------------------------------------------------------------------------------------------------

@@ -343,7 +343,7 @@ test("the second opinion can move a same-message failure to this change", async 
   expect([moved.before!.status, kept.before!.status, added.before!.status]).toEqual(["changed", "pre-existing", "new-code"]);
   expect(moved.before!.detail).toContain("fails with the same message there");
   expect(moved.before!.detail).not.toContain("did not cause");
-  expect(exitCode(sampleReview({ findings: [moved] }))).toBe(1);
+  expect(exitCode(sampleReview({ findings: [moved] }), true)).toBe(1);
   expect(exitCode(sampleReview({ findings: [kept] }))).toBe(0);
 });
 

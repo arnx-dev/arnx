@@ -94,7 +94,7 @@ test("the second opinion is told what was left out, as a finding beside it may r
     sessionFactory: fakeFactory(() => [junitXml([[GEN, "test_add", "failed", LAZY], [OTHER, "test_other", "failed", "assert 1 == 2"]]), "2 failed\n", false]) });
   expect(r.findings.map((f) => f.testId)).toEqual([`${OTHER}::test_other`]);
   expect(judge.bodies.join("\n")).toContain("`lib.py` (a private key)");
-  expect(exitCode(r)).toBe(1);
+  expect(exitCode(r)).toBe(2);
   expect(summary(r, "review.md")).toContain("lib.py");
 });
 

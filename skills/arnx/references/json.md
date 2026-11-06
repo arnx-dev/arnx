@@ -26,7 +26,7 @@ to the baseline) is the user's to judge: pass `changes` on to them.
 | `schema_version` | number | 1. |
 | `command` | string | The command, as typed: `init`, `doctor`, `review`, … |
 | `result` | string | One word: `ok`, `fail`, or the command's own (below). |
-| `exit_code` | number | The process exit code: 0 fine; 1 confirmed findings (`review`) or failing tests (`check`); 2 could not finish or a usage error; 3 setup needed; 4 accepted tests edited (`check`). |
+| `exit_code` | number | The process exit code: 0 fine (a confirmed finding does not fail a `review`); 1 a finding not checked (`review`) or failing tests (`check`); 2 could not finish or a usage error; 3 setup needed; 4 accepted tests edited (`check`). |
 
 Every other field is the command's own, in snake_case. Paths are relative to the repository root, times are ISO
 8601, money is a number of US dollars in a field ending `_usd`.
@@ -225,7 +225,7 @@ A summary of the review, as the terminal shows it. The whole review is `review_j
 | `source_files` | number | Optional. Unique changed source files in the change; absent in older reviews. |
 | `issues` | number | Entries in `findings`: the summary's numbered rows. |
 | `finding_count` | number | The findings in all those rows (the `ids` added up), as the summary and review.md count them. Unreported failing tests are not findings. |
-| `findings` | array | One entry per issue the change may have caused, as the summary groups and orders them (most severe first): `{ ids, state, confirmed, regression, projects, title, severity }`. `ids`: the findings (`F1`) with this cause; `state`: their verdicts in words (`confirmed`, `disputed`, `not challenged`, `depends on Q1`, or counts such as `1 confirmed, 1 disputed`); `confirmed`: one of them is confirmed (exit 1); `regression`: one passed before the change; `title`: the problem in a few words; `severity`: `high`, `medium`, `low` or `null` (the grouping model's estimate). |
+| `findings` | array | One entry per issue the change may have caused, as the summary groups and orders them (most severe first): `{ ids, state, confirmed, regression, projects, title, severity }`. `ids`: the findings (`F1`) with this cause; `state`: their verdicts in words (`confirmed`, `disputed`, `not challenged`, `depends on Q1`, or counts such as `1 confirmed, 1 disputed`); `confirmed`: one of them is confirmed (worth a look, exit stays 0); `regression`: one passed before the change; `title`: the problem in a few words; `severity`: `high`, `medium`, `low` or `null` (the grouping model's estimate). |
 | `pre_existing` | array of strings | Findings that fail with the same message before the change; never the exit code. |
 | `questions` | array | `{ id, question, project, optional }`: `Q1` first. Only the user answers them. `optional`: no issue waits on it (a test another finding proves already settles the issue); an answer still lets `arnx accept` write a test. |
 | `tests_written` | number | Tests the reviewer wrote. |
@@ -240,9 +240,9 @@ A summary of the review, as the terminal shows it. The whole review is `review_j
 
 | `result` | Exit | When |
 |---|---|---|
-| `findings` | 1 | At least one confirmed finding. |
-| `incomplete` | 2 | No confirmed finding, and the review did not finish (`problems` says why). |
-| `clean` | 0 | No confirmed finding, and the review finished. |
+| `findings` | 0 or 1 | A confirmed finding (exit 0) or a not-checked one (exit 1). |
+| `incomplete` | 2 | No finding, and the review did not finish (`problems` says why). |
+| `clean` | 0 | No finding, and the review finished. |
 
 `not-ready` (doctor's checks failed) and `error` (no consent, no environment set up, …) are as above.
 

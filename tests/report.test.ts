@@ -9,7 +9,7 @@ import { useTmp } from "./helpers/tmp";
 const tmp = useTmp();
 
 test("test_exit_codes", () => {
-  expect(exitCode(sampleReview())).toBe(1);
+  expect(exitCode(sampleReview(), true)).toBe(1);
   expect(exitCode(sampleReview({ findings: [] }))).toBe(0);
   expect(exitCode(sampleReview({ findings: [], stop: "budget" }))).toBe(2);
   expect(exitCode(sampleReview({ findings: sampleReview().findings.slice(1) }))).toBe(0);
@@ -53,7 +53,7 @@ test("test_save_load", () => {
 
 test("test_summary", () => {
   const s = summary(sampleReview(), ".arnx/reviews/x/review.md");
-  for (const part of ["1 issue confirmed, 1 disputed", "  F1\n", "F2 disputed", "Q1", "$0.34", "arnx accept"]) expect(s).toContain(part);
+  for (const part of ["1 issue worth a look, 1 disputed", "  F1\n", "F2 disputed", "Q1", "$0.34", "arnx accept"]) expect(s).toContain(part);
 });
 
 test("test_parse_report", () => {

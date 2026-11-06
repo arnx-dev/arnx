@@ -105,8 +105,8 @@ dollars (our own reviews: $0.17 to $3.19) and stops writing tests at your cap, `
 - **Regression evidence:** the same test passes on the code before the change. Other outcomes are reported as they
   are: failing with the same message before, new code (nothing to compare), changed, or not checked.
 - **Second opinion:** another model reads the test, the failure and the diff, and confirms or disputes it. That is a
-  model's judgement. A finding it could not judge (budget, API error) counts as confirmed for the exit code, so a
-  review never passes because the check did not run.
+  model's judgement. Its confirmed findings are worth a look and do not fail the run. A finding it could not judge
+  (budget, API error) exits 1, so a review never passes because the check did not run.
 - **Your decision:** you mark each issue real, intended, noise, or rewrite (the bug is real, the test is wrong).
   Issues backed by a confirmed test come pre-marked real; change what you disagree with.
 - **`arnx check`:** the tests you accepted pass on your working tree, in the sandbox. It shows the behaviour those

@@ -105,7 +105,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     const toolOutput = (agent.calls[2]!.messages.at(-1)!.content as Record<string, unknown>[])[0]!.content;
     expect(String(toolOutput)).toContain("1 failed, 1 passed");
     expect(String(agent.calls[3]!.messages.at(-1)!.content)).toContain("hold database code");
-    expect(exitCode(review)).toBe(1);
+    expect(exitCode(review)).toBe(0);
     // invite() is what the change adds: on the code before it the test cannot find it
     expect(review.findings[0]!.before!.status).toBe("new-code");
     console.log(`before/after check with Postgres: ${review.timings!.beforeCheckSecs} s of a ${review.seconds} s review`);
@@ -166,7 +166,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     expect(review.findings.map((f) => [f.func, f.before!.status])).toEqual([["test_add", "regression"],
       ["test_mul", "pre-existing"], ["test_neg", "new-code"]]);
     expect(review.findings.map((f) => f.verdict)).toEqual(["confirmed", null, "confirmed"]);
-    expect(exitCode(review)).toBe(1);
+    expect(exitCode(review)).toBe(0);
     expect(said.some((m) => m.endsWith("running 3 failing tests on the code before the change"))).toBe(true);
     expect(said.some((m) => /before the change: 1 failing test passes there, fails with the change; 1 fails with the same message /
       .test(m) && /there; 1 cannot run there \(what it tests is new\) \([\d.]+ s\)$/.test(m)))
@@ -244,7 +244,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     expect(review.missingRuns).toBe(0);
     expect(review.findings.map((f) => [f.func, f.before!.status])).toEqual([["test_add", "unknown"]]);
     expect(review.beforeBaseEmpty).toBe("first-commit");
-    expect(exitCode(review)).toBe(1);
+    expect(exitCode(review)).toBe(0);
     const md = blankMarks(readFileSync(join(rdir, "review.md"), "utf8")).replace("Mark: [ ] real", "Mark: [x] real");
     writeFileSync(join(rdir, "review.md"), md);
     const result = await accept(repo, rdir, settings);

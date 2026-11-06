@@ -182,7 +182,7 @@ test("a regression is marked; a pre-existing failure is reported apart, not chal
   // only the regression went to the second model (the second call is the grouping step)
   expect(judge.calls.filter((c) => c.includes("The failing test:"))).toHaveLength(1);
   expect(judge.calls[0]).toContain("test_add");
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review, true)).toBe(1);
   // the check ran in a second session on the base, in the change's image, the failing file only, `runs` times
   expect(seen).toHaveLength(2);
   expect(seen[1]!.envFrom).toBe(seen[0]!.snap);
@@ -230,7 +230,7 @@ test("before_check = false: one session, no before fields, no timings", async ()
   expect(raw).not.toContain("before");
   expect(raw).not.toContain("timings");
   expect(events(rdir).some((e) => e.type.startsWith("before."))).toBe(false);
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review, true)).toBe(1);
 });
 
 test("the setting is written with a comment and read back", () => {
@@ -258,7 +258,7 @@ test("a change with no earlier commit is not checked, and says why", async () =>
     detail: "not checked: the change has no earlier commit to compare with", runs: [] })));
   const done = events(rdir).find((e) => e.type === "before.done")!;
   expect(done.data.skipped_reason).toBe("no-base");
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review, true)).toBe(1);
   // said once, above the findings, instead of on each one
   expect(review.beforeBaseEmpty).toBe("first-commit");
   expect(JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")).before_base_empty).toBe("first-commit");
@@ -282,7 +282,7 @@ test("a base that holds none of the changed files: said once above the findings,
     challenger: new FakeJson([{ verdict: "confirmed", reason: "a" }, { verdict: "confirmed", reason: "b" }]),
     sessionFactory: sessions(before) });
   expect(review.findings.map((f) => f.before!.status)).toEqual(["new-code", "new-code"]);
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review, true)).toBe(1);
   expect(review.beforeBaseEmpty).toBe("new-files");
   expect(load(rdir).beforeBaseEmpty).toBe("new-files");
   const md = readFileSync(join(rdir, "review.md"), "utf8");

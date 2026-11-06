@@ -16,7 +16,7 @@ test("a finding with no verdict is not confirmed: its own mark and count, and th
     { title: "b", findings: ["F2"], input: "", actual: "", expected: "", consequence: "" }] as never });
   expect(summaryRows(r).map((row) => row.mark)).toEqual(["✗", "!"]);
   const text = summary(r, "review.md");
-  expect(text).toContain("1 issue confirmed, 1 not checked (2 findings)");
+  expect(text).toContain("1 issue worth a look, 1 not checked (2 findings)");
   expect(text).toContain("1 finding was not checked by the second opinion: review budget reached.");
   expect(yourCall(r)).toBe("Your call: issue 2 (not checked).");
   expect(nextSteps(r)).toEqual(["arnx triage", "arnx accept"]);
@@ -91,7 +91,7 @@ test("a disputed finding with a question is disputed in status, row and summary 
   expect(findingStatus(r.findings[0]!)).toBe("disputed");
   expect(summaryRows(r).map((row) => row.mark)).toEqual(["·", "✗"]);
   expect(summaryRows(r)[0]!.said).not.toContain("depends on");
-  expect(summary(r, "review.md")).toContain("1 issue confirmed");
+  expect(summary(r, "review.md")).toContain("1 issue worth a look");
   expect(summary(r, "review.md")).not.toContain("waits on a question");
   const sus: SuspectOutcome[] = [{ id: "S1", project: "main", outcome: "failed" } as never];
   adjudicate(sus, [{ ...r.findings[0]!, suspect: "S1" }]);
@@ -141,17 +141,25 @@ test("an unproven pass has no regression prefix", () => {
   expect(render(r)).not.toContain("regression ·");
 });
 
-test("the fallback switch: confirmed findings fail the run today, and read worth a look with exit 0 when it is on", () => {
+test("by default a confirmed finding is worth a look and exits 0; with the switch on it fails the run", () => {
   const r = sampleReview({ findings: [f("F1", "test_a", "confirmed", "real")], questions: [], questionProjects: [] });
-  expect(CONFIRMED_FAILS).toBe(true);
-  expect(exitCode(r)).toBe(1);
-  expect(summary(r, "review.md")).toContain("1 issue confirmed (1 finding)");
-  expect(exitCode(r, false)).toBe(0);
-  const text = summary(r, "review.md", false);
+  expect(CONFIRMED_FAILS).toBe(false);
+  expect(exitCode(r)).toBe(0);
+  const text = summary(r, "review.md");
   expect(text).toContain("1 issue worth a look (1 finding)");
   expect(text).not.toContain("confirmed");
-  // A finding no second opinion saw still fails the run.
+  expect(exitCode(r, true)).toBe(1);
+  expect(summary(r, "review.md", true)).toContain("1 issue confirmed (1 finding)");
+  // A finding no second opinion saw still fails the run, either way.
   const unseen = sampleReview({ findings: [f("F1", "test_a", "confirmed", "real"), f("F2", "test_b", null, CUT)], questions: [],
     questionProjects: [] });
+  expect(exitCode(unseen)).toBe(1);
   expect(exitCode(unseen, false)).toBe(1);
+});
+
+test("review --json: a confirmed finding that does not fail the run is still result findings, exit_code 0", async () => {
+  const { reviewJson } = await import("../src/cli");
+  const r = sampleReview({ findings: [f("F1", "test_a", "confirmed", "real")], questions: [], questionProjects: [] });
+  const [result, code] = reviewJson(r, "m", "j");
+  expect([result, code]).toEqual(["findings", 0]);
 });

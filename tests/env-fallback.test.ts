@@ -232,7 +232,7 @@ test("findings from a fallback image are shown, labelled, and do not fail the ru
   expect(md).not.toContain("Complete:");
   // another project's findings still fail it
   const other = sampleReview({ projectStats: [{ ...r.projectStats[0]!, name: "other" }] });
-  expect(exitCode(other)).toBe(1);
+  expect(exitCode(other, true)).toBe(1);
 });
 
 test("a build that does not finish is a failed environment with its log, not an abort", async () => {

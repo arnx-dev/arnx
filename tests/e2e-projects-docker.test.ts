@@ -188,7 +188,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: projects", () => {
     expect(review.findings.map((f) => [f.project, f.func, f.file])).toEqual([
       ["pay", "charges cents exactly", gen("pay")]]);
     expect(review.passed).toBe(2);
-    expect(exitCode(review)).toBe(1);
+    expect(exitCode(review)).toBe(0);
     expect(review.findings[0]!.before!.status).toBe("regression"); // Math.round charged 29 cents before the change
 
     markReal(rdir);

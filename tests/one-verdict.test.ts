@@ -74,7 +74,7 @@ test("data cases of one test keep their own verdict, reason and judge", async ()
   expect(review.findings.map((f) => f.reason).join(" ")).not.toContain("another case");
   expect(review.findings.map((f) => f.judge)).toEqual([undefined, "other:fallback-judge"]);
   expect(render(review)).toContain("Second opinion (other:fallback-judge): a real defect");
-  expect(lines.filter((l) => l.startsWith("✓ proven"))).toHaveLength(1);
+  expect(lines.filter((l) => l.startsWith("worth a look"))).toHaveLength(1);
 });
 
 test("cases that differ only by a fixture outside the test get one call and one verdict", async () => {

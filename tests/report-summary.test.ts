@@ -22,7 +22,7 @@ const shop = (over: Partial<Parameters<typeof sampleReview>[0]> = {}) => sampleR
 test("the owner's example: a count line, numbered issues, the findings at the right", () => {
   expect(summary(shop(), ".arnx/reviews/20261021-54347c/review.md")).toBe([
     "arnx review 20261021-54347c · uncommitted (base 5ba663e) · 1 file, +14 −0",
-    "2 issues confirmed (4 findings); both in new code.",
+    "2 issues worth a look (4 findings); both in new code.",
     `  ✗ 1  ${DISCOUNT.padEnd(BULK.length)}  F1, F2`,
     // F4 assumed an answer to Q1, but F3 proves the issue: its mark covers F4 and Q1 is optional.
     `  ✗ 2  ${BULK}  F3, F4`,
@@ -41,7 +41,7 @@ test("rows not confirmed are counted apart and their findings carry their state"
   groups: [{ findings: ["F1", "F2"], title: DISCOUNT, input: "", actual: "", expected: "", consequence: "" },
     { findings: ["F3", "F4"], title: BULK, input: "", actual: "", expected: "", consequence: "" }] }), "m");
   expect(s.split("\n").slice(1, 5)).toEqual([
-    "1 issue confirmed, their tests pass before the change; 1 waiting on a question, 1 disputed (5 findings).",
+    "1 issue worth a look, their tests pass before the change; 1 waiting on a question, 1 disputed (5 findings).",
     `  ✗ 1  regression: ${DISCOUNT}  F1, F2`,
     `  ? 2  ${BULK.padEnd(DISCOUNT.length + 12)}  F3 disputed; F4 depends on Q1`,
     `  · 3  ${"assert 0".padEnd(DISCOUNT.length + 12)}  F5 disputed`,
@@ -98,7 +98,7 @@ test("a disputed finding that names a question counts as disputed", () => {
   const r = shop({ findings: [f("F1"), f("F2", { verdict: "disputed", dependsOn: "Q1" })],
     groups: [{ findings: ["F1"], title: DISCOUNT, input: "", actual: "", expected: "", consequence: "" },
       { findings: ["F2"], title: BULK, input: "", actual: "", expected: "", consequence: "" }] });
-  expect(summary(r, "m").split("\n")[1]).toBe("1 issue confirmed, in new code; 1 disputed (2 findings).");
+  expect(summary(r, "m").split("\n")[1]).toBe("1 issue worth a look, in new code; 1 disputed (2 findings).");
 });
 
 test("the before-change note belongs to the confirmed count", () => {
@@ -106,7 +106,7 @@ test("the before-change note belongs to the confirmed count", () => {
     groups: [{ findings: ["F1"], title: DISCOUNT, input: "", actual: "", expected: "", consequence: "" },
       { findings: ["F2"], title: BULK, input: "", actual: "", expected: "", consequence: "" }] });
   const line = summary(r, "m").split("\n")[1]!;
-  expect(line).toBe("1 issue confirmed, in new code; 1 disputed (2 findings).");
+  expect(line).toBe("1 issue worth a look, in new code; 1 disputed (2 findings).");
 });
 
 test("terminal line, review.md and --json give the same issue and finding counts", () => {
@@ -115,7 +115,7 @@ test("terminal line, review.md and --json give the same issue and finding counts
     groups: [{ findings: ["F1", "F2"], title: DISCOUNT, input: "", actual: "", expected: "", consequence: "" },
       { findings: ["F3"], title: BULK, input: "", actual: "", expected: "", consequence: "" }], questions: [],
     unclaimed: [{ project: "main", testId: "t.py::scratch", message: "boom" }] });
-  expect(summary(r, "m").split("\n")[1]).toBe("1 issue confirmed, in new code; 1 disputed (3 findings).");
+  expect(summary(r, "m").split("\n")[1]).toBe("1 issue worth a look, in new code; 1 disputed (3 findings).");
   expect(render(r)).toContain("2 issues from 3 findings, most severe first.");
   const [, , json] = reviewJson(r, "m", "j");
   expect([json.issues, json.finding_count]).toEqual([2, 3]);
@@ -129,7 +129,7 @@ test("the header's issue count equals the issues listed, when a group leaves out
   const listed = (md.match(/^### Issue \d+ /gm) ?? []).length;
   const header = /^(\d+) issues? from (\d+) findings?/m.exec(md)!;
   expect([listed, +header[1]!, +header[2]!]).toEqual([2, 2, 3]);
-  expect(summary(r, "m")).toContain("2 issues confirmed (3 findings)");
+  expect(summary(r, "m")).toContain("2 issues worth a look (3 findings)");
   const [, , json] = reviewJson(r, "m", "j");
   expect([json.issues, json.finding_count]).toEqual([2, 3]);
   expect(md.match(/^Mark:/gm)).toHaveLength(2);

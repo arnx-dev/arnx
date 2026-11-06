@@ -97,7 +97,7 @@ test("review --json: the summary's findings, questions, status and next, from th
   save(r, rdir, "diff");
   const back = load(rdir);
   const [result, code, fields] = reviewJson(back, ".arnx/reviews/x/review.md", ".arnx/reviews/x/review.json");
-  expect([result, code]).toEqual(["findings", 1]);
+  expect([result, code]).toEqual(["findings", 0]);
   expect(fields).toEqual({
     review_id: RID, review_md: ".arnx/reviews/x/review.md", review_json: ".arnx/reviews/x/review.json",
     change: "uncommitted (base 1a2b3c4)", files_changed: 4, added: 140, removed: 3, status: "complete",

@@ -230,14 +230,15 @@ test("the skill's exit table and status words match exitCode", () => {
   const unjudged = finding("F1", "t.py::a", "a", "t.py", "boom", "x", null);
   const confirmedF = finding("F1", "t.py::a", "a", "t.py", "boom", "x", "confirmed");
   const disputedF = finding("F1", "t.py::a", "a", "t.py", "boom", "x", "disputed");
-  // Exit 1: a confirmed or an unjudged (not-checked) finding; both named in the skill and in review-json.md.
-  expect(exitCode(sampleReview({ ...base, findings: [confirmedF] }))).toBe(1);
+  // Exit 1: an unjudged (not-checked) finding. A confirmed finding is worth a look and exits 0; both are named in the
+  // skill and in review-json.md.
+  expect(exitCode(sampleReview({ ...base, findings: [confirmedF] }))).toBe(0);
   expect(exitCode(sampleReview({ ...base, findings: [unjudged] }))).toBe(1);
   expect(findingStatus(unjudged)).toBe("not-checked");
   for (const text of [row("1"), row("0")]) expect(text).toContain("`not-checked`");
-  expect(row("1")).toContain("`confirmed`");
-  expect(refs).toMatch(/1 when a finding is `confirmed` or `not-checked`/);
-  expect(refs).toMatch(/1 a `confirmed` or `not-checked` finding/);
+  expect(row("0")).toContain("`confirmed`");
+  expect(refs).toMatch(/1 when a finding is `not-checked`/);
+  expect(refs).toMatch(/1 a `not-checked` finding/);
   // Exit 0: a disputed finding, and a change nothing was seen reaching (status not-tested, partly-covered).
   expect(exitCode(sampleReview({ ...base, findings: [disputedF] }))).toBe(0);
   const notTested = sampleReview({ ...base, passed: 0, sourceFiles: 1, untested: [{ project: "main", files: ["a.py"], of: 1 }] });

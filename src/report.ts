@@ -294,7 +294,7 @@ export const incomplete = (r: Review) => r.stop !== "end_turn" || r.missingRuns 
 const counts = (r: Review) => (f: Finding) => !(r.projectStats ?? []).some((p) => p.name === f.project && p.env);
 /** Whether a confirmed finding fails the run. False is the agreed fallback for a second opinion that misses its
  * release gates: a confirmed finding then reads "worth a look" and the run exits 0 on it. */
-export const CONFIRMED_FAILS = true;
+export const CONFIRMED_FAILS = false;
 /** What a confirmed issue is called in the summary. */
 export const confirmedWord = (fails = CONFIRMED_FAILS) => fails ? "confirmed" : "worth a look";
 export const exitCode = (r: Review, confirmedFails = CONFIRMED_FAILS) =>
@@ -747,7 +747,7 @@ export function render(r: Review): string {
     if (parts.length) out.push(`${plural(rows.length, "issue")} from ${plural(rows.reduce((a, row) => a + row.ids.length, 0), "finding")}, most severe first.`, "");
     const minor = parts.findIndex(({ group }) => group?.severity === "low");
     parts.forEach(({ group, findings }, i) => {
-      if (i === minor && minor > 0) out.push("## Also found (minor)", "", "Lower severity: worth a look, not urgent.", "");
+      if (i === minor && minor > 0) out.push("## Also found (minor)", "", "Lower severity, not urgent.", "");
       const g = group ?? { findings: [], title: "", input: "", actual: "", expected: "", consequence: "" };
       const title = g.title || findings[0]!.explanation.split("\n")[0] || firstLine(findings[0]!.message);
       out.push(`### Issue ${i + 1} · ${title}`, "");
