@@ -69,3 +69,6 @@ export function uiFramework(packageJson: string): string | null {
     return null;
   }
 }
+
+/** How many counted runs a web UI app gets before it is listed as web UI. */
+export const UI_RUNS = 2;

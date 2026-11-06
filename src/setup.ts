@@ -46,7 +46,7 @@ import { EXEC, SetupExec, type TriedEnv } from "./setupexec";
 import { loadSettings, refString, type Settings, settingsPath, setupRef } from "./settings";
 import { QUICK_TYPECHECK_TIMEOUT, runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
 import { SOURCE } from "./untested";
-import { BROWSER_TESTS, type BrowserSuite, browserSuites, uiFramework, WEB_UI } from "./browser";
+import { BROWSER_TESTS, UI_RUNS, type BrowserSuite, browserSuites, uiFramework, WEB_UI } from "./browser";
 import { otherLanguageOf } from "./languages";
 import { fileReferences, mapHints, type UsesHint, usesHints } from "./usescheck";
 import { agentUse, logUsage } from "./usage";
@@ -78,7 +78,16 @@ export interface SuiteCounts { acceptedFailing: number; unexpected: string[]; ba
   /** A quick look's run: the test files the runner listed, all of which the whole suite would run. */
   listed?: string[];
   /** The look saw where the runner collects arnx's one-line test, and it is not where review.yaml says: nothing ran. */
-  placement?: Placement }
+  placement?: Placement;
+  /** The look stopped the try before the whole suite ran, here. */
+  stoppedAt?: "listing" | "placement" | "sample" }
+
+/** Whether a failed try spends one of a web UI app's runs: its tests were listed or sampled and failed, or its suite
+ * ran and passed nothing. A build failure (no counts), a placement and a passing run never do. */
+export function countsAsUiRun(c: SuiteCounts, ok: boolean): boolean {
+  if (ok || c.placement || c.stoppedAt === "placement") return false;
+  return c.stoppedAt === "listing" || c.stoppedAt === "sample" || c.passed === 0;
+}
 
 const noCounts = (): SuiteCounts => ({ acceptedFailing: 0, unexpected: [], baselineFailing: 0, left: [], flaky: [],
   failed: [], passed: 0, all: [] });
@@ -305,7 +314,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
         return [false, `the runner lists arnx's one-line test in ${w.testsDir}${w.testFiles ? ` as ${w.testFiles}` : ""}, ` +
           "not where review.yaml says", "", [], [], "", { ...none, placement: w }] as Out;
       }
-      if (early) return [false, early.summary, tailOf(early.output), [], [], early.hints, none] as Out;
+      if (early) return [false, early.summary, tailOf(early.output), [], [], early.hints, { ...none, stoppedAt: early.kind }] as Out;
       if (quick && seen.sample) {
         sample = seen.sample;
         listedFiles = seen.listed;
@@ -548,7 +557,7 @@ export interface SetupRun { name: string; digest: string; env: string; snapshot:
 /** The reason under uncovered of a project setup had not proven when it reached its time limit. */
 export const TIME_LEFT_OUT = "setup reached its time limit";
 
-/** Why setup stops when its only projects are web UI apps whose one try failed (SetupResult stop WEB_UI_STOP). */
+/** Why setup stops when its only projects are web UI apps whose runs failed (SetupResult stop WEB_UI_STOP). */
 export const ONLY_WEB_UI = "only web UI here, which arnx does not set up";
 export const WEB_UI_STOP = "web-ui";
 /** A quick setup's stop when no project arnx can set up owns a changed file. */
@@ -758,7 +767,7 @@ export function sourceGroups(unexplained: string[], claimed: string[], all: stri
 }
 
 
-/** Where the web UI app `name`, whose one try failed, goes under uncovered: the folders and files of its source (of
+/** Where the web UI app `name`, whose runs failed, goes under uncovered: the folders and files of its source (of
  * any file when it has none) that no other project in `f` owns or uses, each folder the shallowest that holds none of
  * theirs. An app at the repository root next to other projects lists its own paths, never `**`. */
 export function webUiPaths(f: ReviewFile, name: string, files: string[]): string[] {
@@ -1270,8 +1279,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     notice: "",
     // Source files outside every project went back to the agent once (by folder); the rest arnx lists itself.
     placesAsked: false,
-    // Projects tried at least once, and the web UI apps whose one try failed (listed as web UI: webUiPaths).
-    tried: new Set<string>(), webUi: new Set<string>(),
+    // The runs of each web UI app that counted (countsAsUiRun), and the apps listed as web UI (webUiPaths).
+    uiRuns: new Map<string, number>(), webUi: new Set<string>(),
     // Projects try_project refused for the services they need (MANY_SERVICES).
     tooMany: new Map<string, string[]>(),
     waiting: [] as string[],
@@ -1483,19 +1492,24 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         return `refused: ${name} ${manyServicesReason(many)}. Do not try it: keep it under uncovered (path ` +
           `/${cfg.workdir}/, this reason) and go on with the other projects.`;
       }
-      // --- web UI rule (0.1.5): a UI app gets one try; when it fails, setup lists it under uncovered as web UI. ---
+      // --- web UI rule: a UI app gets UI_RUNS counted runs; then setup lists it under uncovered as web UI. ---
       if (state.webUi.has(name)) {
         return `${name} is listed under uncovered as ${WEB_UI}: do not try it again; go on with the other projects ` +
           "(propose leaves it out of the file).";
       }
-      const uiApp = !state.tried.has(name) && !keep.has(name) && cfg.language === "typescript"
+      const uiApp = !keep.has(name) && cfg.language === "typescript"
         ? uiFramework(readSnap(join(cfg.workdir, "package.json"))) : null;
-      const webUi = (why: string): string => {
+      // The answer when this failed try is a counted run: null until the app has had UI_RUNS of them.
+      const webUi = (why: string, c: SuiteCounts): string | null => {
+        if (!countsAsUiRun(c, false)) return null;
+        const runs = (state.uiRuns.get(name) ?? 0) + 1;
+        state.uiRuns.set(name, runs);
+        if (runs < UI_RUNS) return null;
         state.webUi.add(name);
-        say(`${name}: a web UI app (${uiApp}); its first try failed, so it is listed as ${WEB_UI}`);
+        say(`${name}: a web UI app (${uiApp}); its tests failed ${runs} times, so it is listed as ${WEB_UI}`);
         return `the suite of ${name} does not run: ${why}\n${name} is a web UI app (${uiApp} among its dependencies), ` +
-          `which gets one try: arnx lists it under uncovered as ${WEB_UI} and propose leaves it out of the file. Do not ` +
-          "try it again; go on with the other projects.";
+          `which gets two runs of its tests: arnx lists it under uncovered as ${WEB_UI} and propose leaves it out of the ` +
+          "file. Do not try it again; go on with the other projects.";
       };
       // --- end of the web UI rule ---
       const t0 = performance.now();
@@ -1513,7 +1527,6 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         return `the suite of ${name} runs: ${proof.summary} (unchanged since it last ran, so not run again). When ` +
           "every project runs, submit the file with propose.";
       }
-      state.tried.add(name);
       state.current = name;
       // exec's container sits idle while the suite runs: it goes now (memory), and the next exec starts it again.
       exec?.close();
@@ -1596,8 +1609,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
             emit("setup.sandbox_only", { project: name, files: r.sandboxed });
             attempt({ ok: false, reused: false, summary: "", failing: 0, skips: 0, hints: "",
               error: clip(`sandbox: ${r.sandboxed.join(", ")}`, 500) });
-            // The same try again, with the files: a web UI app's one try is still to come.
-            state.tried.delete(name);
+            // The same try again, with the files.
             return tryProject(input);
           }
         }
@@ -1616,7 +1628,6 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         state.problem = `${name}: ${gist(e.message)}`;
         attempt({ ok: false, reused: false, summary: "", failing: 0, skips: 0, hints: "",
           error: clip(e.message, 500) });
-        if (uiApp) return webUi(gist(e.message)); // web UI rule
         return `failed: ${e.message}\n${existsSync(log) ? readFileSync(log, "utf8").slice(-OUTPUT_TAIL) : ""}`;
       }
       // The runner's own listing showed where it collects arnx's tests: review.yaml says so, and the project runs again.
@@ -1634,7 +1645,6 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         say(`${name}: tests_dir set to ${where.testsDir}${where.testFiles ? `, test_files to ${where.testFiles}` : ""}`);
         attempt({ ok: false, reused: false, summary: "", failing: 0, skips: 0, hints: "",
           error: clip(`placement: ${where.testsDir}`, 500) });
-        state.tried.delete(name);
         return tryProject({ yaml: doc.toString({ flowCollectionPadding: false, lineWidth: 0 }), project: name });
       }
       announce = null;
@@ -1686,8 +1696,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         "for (a service and env) unless it needs the internet." : "";
       if (!ok) {
         say(`${name}: ✗ does not run yet: ${gist(summary)}`);
-        // A UI app's one try is for a suite that will not run in a sandbox: one whose tests pass goes on like any other.
-        if (uiApp && !counts.passed) return webUi(gist(summary)); // web UI rule
+        // A UI app's runs are for a suite that will not run in a sandbox: one whose tests pass goes on like any other.
+        const ui = uiApp ? webUi(gist(summary), counts) : null; // web UI rule
+        if (ui) return ui;
         return `the suite of ${name} does not run yet: ${summary}${skipped}${hints ? `\n${hints}` : ""}\n${tail}`;
       }
       say(`${name}: ✓ ${summary}${counts.failed.length ? ` · ${counts.failed.length} failing today, recorded` : ""}` +
@@ -1793,13 +1804,13 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         state.lastTried = withOurs(back);
         parsed = { yaml: back, text: withOurs(back), f: parseReviewFile(withOurs(back)) };
       }
-      // arnx's part of the map: browser suites under uncovered, and the web UI apps whose one try failed there instead
+      // arnx's part of the map: browser suites under uncovered, and the web UI apps whose runs failed there instead
       // of in the file. Done on the agent's file; arnx's own keys (withOurs) are added again to check it.
       const drop = [...state.webUi].filter((name) => parsed.f.projects.some((p) => p.name === name));
       if (drop.length && drop.length === parsed.f.projects.length) {
         state.problem = ONLY_WEB_UI;
-        throw new StopRound(`stopped: ${ONLY_WEB_UI}: ${drop.join(", ")} did not run on ${drop.length === 1 ? "its" :
-          "their"} one try, and there is no other project. Setup ends here.`);
+        throw new StopRound(`stopped: ${ONLY_WEB_UI}: ${drop.join(", ")} did not run in ${UI_RUNS} tries, and there ` +
+          "is no other project. Setup ends here.");
       }
       // A quick setup leaves for later the projects no changed file reaches.
       const later = untouched(parsed.f).filter((p) => !drop.includes(p.name));
@@ -2000,7 +2011,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const aside = late && state.accepted === null && !state.needed ? keepProven() : null;
     const projects = (state.final?.projects ?? []).map((p) => state.proofs.get(p.name) ??
       { name: p.name, summary: keep.has(p.name) ? "approved earlier" : "not run", skips: [] });
-    // Every project of the last file a web UI app whose one try failed: nothing here arnx sets up.
+    // Every project of the last file a web UI app whose runs failed: nothing here arnx sets up.
     let last: string[] = [];
     try {
       last = state.lastFile ? parseReviewFile(state.lastFile).projects.map((p) => p.name) : [];

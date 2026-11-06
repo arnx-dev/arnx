@@ -22,8 +22,8 @@ export const SAMPLE_TIMEOUT = 600;
 export const SAMPLE_FILES = 3;
 
 /** What stopped the try before the whole suite ran: why, in a sentence, the runner's output, and what the failures
- * of the sample point to. */
-export interface Early { summary: string; output: string; hints: string }
+ * of the sample point to. `kind`: what stopped it (a probe that is not seen counts as the listing). */
+export interface Early { summary: string; output: string; hints: string; kind: "listing" | "placement" | "sample" }
 
 /** Said with every early stop: the agent may know better, and the whole suite settles it. */
 const AGAIN = " (Tried again unchanged, the project runs its whole suite.)";
@@ -145,20 +145,20 @@ export async function look(session: Runner, snap: string, cfg: ReviewConfig, acc
   const { listing, result } = listed;
   const counts = { tests: listing.tests ?? listing.files.length, files: listing.files.length, listed: listing.files };
   const why = listingProblem(listing, result.exitCode, known);
-  if (why) return { ...none, ...counts, early: { summary: why + again, output: result.output, hints: "" } };
+  if (why) return { ...none, ...counts, early: { summary: why + again, output: result.output, hints: "", kind: "listing" } };
   if (!listing.files.length) return { ...none, ...counts };
   const probe = await probeListed(session, snap, cfg);
   if (probe && !probe.seen) {
     const placement = await placementFrom(session, snap, cfg, listing);
     if (placement) return { ...none, ...counts, placement };
-    return { ...none, ...counts, early: { summary: probeText(cfg) + again, output: probe.output, hints: "" } };
+    return { ...none, ...counts, early: { summary: probeText(cfg) + again, output: probe.output, hints: "", kind: "listing" } };
   }
   const sample = sampleOf(listing, cfg, snap, acceptedTestsDir);
   if (!sample.length) return { ...none, ...counts };
   const [run, results] = await runTests(session, snap, cfg, sample, "sample.xml", SAMPLE_TIMEOUT);
   const stop = sampleProblem(sample, run, results);
   if (!stop) return { ...none, ...counts, sample: { files: sample, run, results: results ?? [] } };
-  return { ...none, ...counts, early: { summary: stop + again, output: run.output,
+  return { ...none, ...counts, early: { summary: stop + again, output: run.output, kind: "sample",
     hints: [describeHints(diagnose(results, cfg, snap), cfg), firstErrors(results, cfg)].filter(Boolean).join("\n") } };
 }
 

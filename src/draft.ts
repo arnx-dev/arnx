@@ -298,6 +298,12 @@ function image(f: ProjectFacts, tool: "node" | "python" | "rust" | "bun", mark: 
 const aptLine = (pkgs: string[]) =>
   `apt-get update && apt-get install -y --no-install-recommends ${pkgs.join(" ")} && rm -rf /var/lib/apt/lists/*`;
 
+/** Node 25 and later images ship without corepack: it is installed before it is enabled. */
+export function corepackStep(image: string): string {
+  const major = Number(/^node:(\d+)/.exec(image)?.[1] ?? 0);
+  return `${major >= 25 ? "npm install -g corepack && " : ""}corepack enable && `;
+}
+
 function jsProject(c: Candidate, f: ProjectFacts, d: Detection, mark: MarkFn): Raw {
   const manager = f.manager?.value ?? "npm";
   let runner = c.runner && ["vitest", "jest", "node", "bun"].includes(c.runner) ? c.runner : null;
@@ -313,7 +319,7 @@ function jsProject(c: Candidate, f: ProjectFacts, d: Detection, mark: MarkFn): R
     : manager === "yarn" ? "yarn install --frozen-lockfile"
     : manager === "yarn-berry" ? "yarn install --immutable"
     : manager === "bun" ? "bun install --frozen-lockfile" : "npm ci";
-  const corepack = !bun && (manager === "pnpm" || manager === "yarn-berry") ? "corepack enable && " : "";
+  const corepack = !bun && (manager === "pnpm" || manager === "yarn-berry") ? corepackStep(p.image as string) : "";
   if (!f.lockfile) mark("install", "no lockfile found");
   const workspace = f.installRoot !== c.root || d.workspaces.includes(c.root);
   // Dependencies install outside /src, which the code hides at run time; deps_dir links their node_modules back

@@ -3,7 +3,7 @@
 // tests, a web UI app gets one try, and the end screen groups what no project tests by reason.
 import { beforeEach, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { browserSuites, uiFramework } from "../src/browser";
 import { parseReviewFile } from "../src/config";
 import { ArnxError } from "../src/errors";
@@ -58,11 +58,40 @@ const WEB = `  web:
 `;
 const BOTH = `version: 1\nprojects:\n${API}${WEB}`;
 
+/** A session whose vitest run writes `xml` where --outputFile says, like the real runner. */
+class VitestSession extends FakeSession {
+  constructor(snap: string, private readonly xml: string) { super(snap, () => [null, "out", false]); }
+  run(command: string) {
+    const r = super.run(command);
+    const m = /--outputFile=\/src\/(\S+)/.exec(command);
+    if (m) {
+      mkdirSync(dirname(join(this.snap, m[1]!)), { recursive: true });
+      // The one-line test arnx places, when it is the target: it passes whenever the runner runs it.
+      const probe = /(\S*arnx-probe\.test\.\w+)/.exec(command)?.[1]?.replace(/^'|'$/g, "").replace(/^\/?src\/web\//, "");
+      writeFileSync(join(this.snap, m[1]!), probe ? junitXml([[probe, "arnx probe", "passed", ""]]) : this.xml);
+    }
+    return r;
+  }
+}
+const apiSession = (snap: string) => new FakeSession(snap, () => [API_PASSES, "1 passed", false]);
+
+/** web's suite runs and fails; api's passes. */
+const webFails = (): SessionFactory => async (cfg, snap, _log, body) =>
+  body(cfg.name === "web" ? new VitestSession(snap, WEB_FAILS) : apiSession(snap));
+
 /** api's suite runs; web's environment does not build. */
 const sessions: SessionFactory = async (cfg, snap, _log, body) => {
   if (cfg.name === "web") throw new ArnxError("npm ci failed: no lockfile");
   return body(new FakeSession(snap, () => [junitXml([["tests/test_app.py", "test_a", "passed", ""]]), "1 passed", false]));
 };
+/** web has a test file of its own, and its suite fails (a counted run) or passes. */
+const addWebTest = () => {
+  writeFileSync(join(repo, "web", "src", "app.test.tsx"), "test('a', () => {});\n");
+  commit(repo, "web test");
+};
+const WEB_FAILS = junitXml([["src/app.test.tsx", "renders", "failed", "boom"]]);
+const WEB_PASSES = junitXml([["src/app.test.tsx", "renders", "passed", ""]]);
+const API_PASSES = junitXml([["tests/test_app.py", "test_a", "passed", ""]]);
 const result = (m: ScriptedAgent, call: number) =>
   (m.calls[call]!.messages.at(-1)!.content as Record<string, unknown>[]).map((r) => String(r.content)).join("\n");
 
@@ -85,8 +114,10 @@ test("source files outside every project are grouped by the shallowest folder no
   ]);
 });
 
-test("a web UI app gets one try; propose asks once about the rest, then lists it under uncovered itself", async () => {
+test("a web UI app gets two runs; propose asks once about the rest, then lists it under uncovered itself", async () => {
+  addWebTest();
   const m = new ScriptedAgent([
+    [tool("try_project", { yaml: BOTH, project: "web" })],
     [tool("try_project", { yaml: BOTH, project: "web" })],
     [tool("try_project", { yaml: BOTH, project: "web" })],
     [tool("try_project", { yaml: BOTH, project: "api" })],
@@ -94,14 +125,14 @@ test("a web UI app gets one try; propose asks once about the rest, then lists it
     [tool("propose", { yaml: BOTH })],
     [text("api only.")],
   ]);
-  const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: sessions });
-  expect(result(m, 1)).toContain("web is a web UI app (react-dom among its dependencies), which gets one try");
-  expect(result(m, 2)).toContain("web is listed under uncovered as web UI: do not try it again");
+  const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: webFails() });
+  expect(result(m, 2)).toContain("web is a web UI app (react-dom among its dependencies), which gets two runs");
+  expect(result(m, 3)).toContain("web is listed under uncovered as web UI: do not try it again");
   // Once, by folder: web/ is arnx's own entry by now, .arnx/ never counts.
-  expect(result(m, 4)).toBe("refused:\nsource files outside every project, by folder (with the reason arnx lists " +
+  expect(result(m, 5)).toBe("refused:\nsource files outside every project, by folder (with the reason arnx lists " +
     "them under uncovered with):\n- /legacy/ (1 file): no tests\n- /tools/ (1 file): scripts\nPut those a project " +
     "tests under its owns or uses; propose again and arnx lists the rest under uncovered itself.");
-  expect(result(m, 5)).toContain("accepted");
+  expect(result(m, 6)).toContain("accepted");
   expect(r.ok).toBe(true);
   const f = parseReviewFile(r.yamlText!);
   expect(f.projects.map((p) => p.name)).toEqual(["api"]);
@@ -115,22 +146,70 @@ test("a web UI app gets one try; propose asks once about the rest, then lists it
   // The end screen: one line per kind of reason.
   expect(worthALook(f, repo, {})).toEqual([
     "not tested (browser tests): /web/e2e/, /web/playwright.config.ts (2 files)",
-    "not tested (web UI): /web/ (4 files)",
+    "not tested (web UI): /web/ (5 files)",
     "not tested (no tests): /legacy/ (1 file)",
     "not tested (scripts): /tools/ (1 file)",
   ]);
 });
 
-test("a web UI app whose try first needs a file .arnxignore leaves out still gets its one try after it", async () => {
+test("a web UI app whose image build fails may be tried again", async () => {
+  addWebTest();
+  let builds = 0;
+  const flaky: SessionFactory = async (cfg, snap, _log, body) => {
+    if (cfg.name === "web" && ++builds === 1) throw new ArnxError("npm ci failed: network");
+    return body(cfg.name === "web" ? new VitestSession(snap, WEB_PASSES) : apiSession(snap));
+  };
+  const m = new ScriptedAgent([
+    [tool("try_project", { yaml: BOTH, project: "web" })],
+    [tool("try_project", { yaml: BOTH, project: "web" })],
+    [tool("try_project", { yaml: BOTH, project: "api" })],
+    [tool("propose", { yaml: BOTH })],
+    [tool("propose", { yaml: BOTH })],
+    [text("both.")],
+  ]);
+  const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: flaky });
+  expect(result(m, 1)).toContain("failed: npm ci failed");
+  expect(result(m, 1)).not.toContain("web UI");
+  expect(result(m, 2)).toContain("the suite of web runs");
+  expect(r.ok).toBe(true);
+  const f = parseReviewFile(r.yamlText!);
+  expect(f.projects.map((p) => p.name)).toEqual(["api", "web"]);
+  expect(f.uncovered.some((u) => u.reason === "web UI")).toBe(false);
+});
+
+test("a web UI app gets two runs of its tests", async () => {
+  addWebTest();
+  const failing = webFails();
+  const m = new ScriptedAgent([
+    [tool("try_project", { yaml: BOTH, project: "web" })],
+    [tool("try_project", { yaml: BOTH, project: "web" })],
+    [tool("try_project", { yaml: BOTH, project: "web" })],
+    [tool("try_project", { yaml: BOTH, project: "api" })],
+    [tool("propose", { yaml: BOTH })],
+    [tool("propose", { yaml: BOTH })],
+    [text("api only.")],
+  ]);
+  const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: failing });
+  expect(result(m, 1)).not.toContain("web UI");
+  expect(result(m, 2)).toContain("web is a web UI app (react-dom among its dependencies), which gets two runs");
+  expect(result(m, 3)).toContain("web is listed under uncovered as web UI: do not try it again");
+  expect(r.ok).toBe(true);
+  expect(parseReviewFile(r.yamlText!).uncovered).toContainEqual({ path: "/web/", reason: "web UI" });
+});
+
+test("a web UI app whose try first needs a file .arnxignore leaves out is not charged a run for it", async () => {
+  addWebTest();
   writeFileSync(join(repo, "web", "fixture.json"), "{}\n");
   writeFileSync(join(repo, ".arnxignore"), "web/fixture.json\n");
   commit(repo, "fixture");
   const missing = "Error: ENOENT: no such file or directory, open '/src/web/fixture.json'";
   const web: SessionFactory = async (cfg, snap, _log, body) => body(new FakeSession(snap, () =>
     [junitXml([["web/src/app.test.tsx", "renders", "error", missing]]), missing, false]));
-  const m = new ScriptedAgent([[tool("try_project", { yaml: BOTH, project: "web" })], [text("stop")]]);
+  const m = new ScriptedAgent([[tool("try_project", { yaml: BOTH, project: "web" })],
+    [tool("try_project", { yaml: BOTH, project: "web" })], [text("stop")]]);
   await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: web });
-  expect(result(m, 1)).toContain("web is a web UI app (react-dom among its dependencies), which gets one try");
+  expect(result(m, 1)).not.toContain("web UI app");
+  expect(result(m, 2)).toContain("web is a web UI app (react-dom among its dependencies), which gets two runs");
 });
 
 test("a web UI app at the repository root lists only its own paths, not **", () => {
@@ -143,14 +222,16 @@ test("a web UI app at the repository root lists only its own paths, not **", () 
   expect(webUiPaths(parseReviewFile(BOTH), "web", Object.keys(FILES))).toEqual(["/web/"]);
 });
 
-test("a web UI app that is the only project ends setup after its one try", async () => {
+test("a web UI app that is the only project ends setup after its two runs", async () => {
+  addWebTest();
   const only = `version: 1\nprojects:\n${WEB}`;
   const m = new ScriptedAgent([
+    [tool("try_project", { yaml: only })],
     [tool("try_project", { yaml: only })],
     [tool("propose", { yaml: only })],
     [text("unreachable")],
   ]);
-  const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: sessions });
+  const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: webFails() });
   expect(r.ok).toBe(false);
   expect([r.stop, r.problem]).toEqual(["web-ui", "only web UI here, which arnx does not set up"]);
 });

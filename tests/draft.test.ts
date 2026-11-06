@@ -338,3 +338,21 @@ test("a new project takes the install of its neighbour", () => {
   expect(ext!.testCommand).toBe("npx vitest run {targets}");
   expect(next.yaml).toContain("# unsure: image and install copied from core");
 });
+
+test("an image without corepack installs it first", () => {
+  const install = (nvmrc: string, dir: string) => {
+    const repo = initRepo(join(tmp(), dir));
+    const files: Record<string, string> = {
+      "package.json": pkg({ packageManager: "pnpm@9.12.0", devDependencies: { vitest: "2" } }),
+      "pnpm-lock.yaml": "", ".nvmrc": nvmrc, "src/a.test.ts": "import { test } from 'vitest'\n" };
+    for (const [p, body] of Object.entries(files)) {
+      mkdirSync(dirname(join(repo, p)), { recursive: true });
+      writeFileSync(join(repo, p), body);
+    }
+    commit(repo, "files");
+    return (Object.values(projects(detect(repo)))[0] as any).install[0] as string;
+  };
+  expect(install("26\n", "n26")).toStartWith("npm install -g corepack && corepack enable && ");
+  expect(install("22\n", "n22")).toStartWith("corepack enable && ");
+  expect(install("22\n", "n22b")).not.toContain("npm install -g corepack");
+});
