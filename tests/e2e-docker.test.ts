@@ -147,12 +147,16 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
       "\n\ndef neg(x):\n    return x\n");
     commit(repo, "subtract, neg");
     const gen = "tests/arnx_generated/test_calc.py";
+    // As a real reviewer replies: its report names every test it wrote, the failing ones included.
+    const report = text(JSON.stringify({ tests: [
+      { test: `${gen}::test_add`, expects: "add sums" }, { test: `${gen}::test_mul`, expects: "mul multiplies" },
+      { test: `${gen}::test_neg`, expects: "neg negates" }], suspected_defects: [], questions: [] }));
     const agent = new ScriptedAgent([
       [tool("write_file", { path: gen, content: "from calc import add, mul\n\n\ndef test_add():\n    assert add(2, 3) " +
         "== 5\n\n\ndef test_mul():\n    assert mul(2, 3) == 6\n\n\ndef test_neg():\n    from calc import neg\n" +
         "    assert neg(2) == -2\n" })],
-      [text('{"tests": [], "suspected_defects": [], "questions": []}')],
-      [text('{"tests": [], "suspected_defects": [], "questions": []}')], // a coverage follow-up, if asked
+      [report],
+      [report], // a coverage follow-up, if asked
     ]);
     const said: string[] = [];
     const settings = { ...defaultSettings(), consentAt: "2026-10-17T00:00:00Z" };
@@ -226,10 +230,12 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     const [ok] = await approveConfig(repo, { by: "Dev", at: "2026-10-20" });
     expect(ok).toBe(true);
     const gen = "tests/arnx_generated/test_calc.py";
+    // The report names the failing test it wrote, as a real reviewer's does; it gives no expects, so no explanation.
+    const report = text(JSON.stringify({ tests: [{ test: `${gen}::test_add` }], suspected_defects: [], questions: [] }));
     const agent = new ScriptedAgent([
       [tool("write_file", { path: gen, content: "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n" })],
-      [text('{"tests": [], "suspected_defects": [], "questions": []}')],
-      [text('{"tests": [], "suspected_defects": [], "questions": []}')], // a coverage follow-up, if asked
+      [report],
+      [report], // a coverage follow-up, if asked
     ]);
     const settings = { ...defaultSettings(), consentAt: "2026-10-20T00:00:00Z" };
     const { review, rdir } = await runReview(repo, { settings, agentModel: agent,
