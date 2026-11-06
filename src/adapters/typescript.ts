@@ -409,3 +409,32 @@ export const typescript: Adapter = {
   downloadCache: ["npm_config_cache=/arnx-cache/npm"],
   runEnv: ["CI=1"],
 };
+
+/** The pattern test_files takes: a star and a suffix that ends in a JavaScript or TypeScript extension. */
+export const TEST_FILES = /^\*([\w.-]+\.(?:c|m)?[jt]sx?)$/;
+
+/** `base` for a project whose runner collects the files named by `glob` (test_files, "*Spec.tsx") and not the usual
+ * *.test.* and *.spec.*: the probes, the files a round writes and collects, the test files, the words for the model
+ * and the name of a kept file follow the suffix. */
+export function withTestFiles(base: Adapter, glob: string): Adapter {
+  const suffix = TEST_FILES.exec(glob)?.[1];
+  if (!suffix) return base;
+  const ends = new RegExp(`${escapeRx(suffix)}$`);
+  return {
+    ...base,
+    words: (runner) => ({ ...base.words(runner), testFiles: `*${suffix}`, writableFiles: `*${suffix} or arnx-helpers.<ext>` }),
+    writable: new RegExp(`^(?:.+${escapeRx(suffix)}|arnx-helpers\\.(?:c|m)?[jt]sx?)$`),
+    probes: (runner) => {
+      const [first] = base.probes(runner);
+      return [{ file: `arnx-probe${suffix}`, source: first!.source }];
+    },
+    isTestFile: (name) => base.isTestFile(name) || ends.test(name),
+    testStem: (fileName) => ends.test(fileName) ? fileName.slice(0, -suffix.length) : base.testStem(fileName),
+    acceptedPath: (original, tag, acceptedDir, name) => {
+      const own = posix.basename(original);
+      if (!ends.test(own)) return base.acceptedPath(original, tag, acceptedDir, name);
+      const dir = acceptedDir === DEFAULT_ACCEPTED_DIR ? TS_ACCEPTED_DIR : acceptedDir;
+      return posix.join(dir, `r${tag}`, posix.dirname(original), `${name}${suffix}`);
+    },
+  };
+}

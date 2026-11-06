@@ -49,6 +49,18 @@ export function otherLanguageOf(path: string): string | null {
   return OTHER_EXT[extOf(path)] ?? null;
 }
 
+const SUPPORTED_NAME: Record<string, string> = { python: "Python", typescript: "JavaScript/TypeScript", rust: "Rust" };
+
+/** The language of a source file: `id` is arnx's adapter id for a language it reviews (python, typescript, rust) and the
+ * display name for another; null for a file that is no source (or lies in a vendored or build folder). */
+export function sourceLanguageOf(path: string): { id: string; name: string } | null {
+  if (skipped(path)) return null;
+  const supported = SUPPORTED_EXT[extOf(path)];
+  if (supported) return { id: supported, name: SUPPORTED_NAME[supported]! };
+  const other = OTHER_EXT[extOf(path)];
+  return other ? { id: other, name: other } : null;
+}
+
 /** `files`: paths relative to the repository (tracked, and untracked ones git does not ignore, minus .arnxignore). */
 export function surveyLanguages(files: string[]): LanguageSurvey {
   const supported: Record<string, number> = {};

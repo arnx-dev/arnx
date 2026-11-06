@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import { type AgentResult, Workspace } from "./agent";
 import { adapterFor } from "./adapters";
+import { DEFAULT_ACCEPTED_DIR } from "./adapters/types";
 import { absentFromSnapshot, bakedError, bakedIn, imageFiles, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
   from "./baked";
 import { asFallbackBefore, asFallbackFix, BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
@@ -167,10 +168,21 @@ export function writeDirOf(cfg: ReviewConfig, sub = ""): string {
   return posix.normalize(posix.join(cfg.workdir, cfg.testsDir, sub)).replace(/\/$/, "");
 }
 
+/** The folder `arnx accept` keeps a project's tests in (relative to its root): `acceptedTestsDir`, the configured one.
+ * While that is the default, a TypeScript project whose tests_dir is not the default one (its runner's roots or
+ * testRegex lead arnx's tests elsewhere) keeps them beside it, in a folder named arnx next to arnx_generated, where
+ * the runner `arnx check` starts collects them too. */
+export function acceptedDirFor(cfg: ReviewConfig, acceptedTestsDir = DEFAULT_ACCEPTED_DIR): string {
+  const parent = posix.dirname(posix.normalize(cfg.testsDir));
+  if (cfg.language !== "typescript" || acceptedTestsDir !== DEFAULT_ACCEPTED_DIR ||
+    cfg.testsDir === adapterFor(cfg).defaultTestsDir || parent === ".") return acceptedTestsDir;
+  return posix.join(parent, "arnx");
+}
+
 /** The folders `arnx accept` keeps tests in, relative to the repository: the configured one and the defaults. */
-export function acceptedRoots(cfg: ReviewConfig, acceptedTestsDir = "tests/arnx"): string[] {
+export function acceptedRoots(cfg: ReviewConfig, acceptedTestsDir = DEFAULT_ACCEPTED_DIR): string[] {
   const rel = (d: string) => posix.normalize(posix.join(cfg.workdir, d)).replace(/\/$/, "");
-  return [...new Set([acceptedTestsDir, "__tests__/arnx", "tests/arnx"].map(rel))];
+  return [...new Set([acceptedDirFor(cfg, acceptedTestsDir), "__tests__/arnx", "tests/arnx"].map(rel))];
 }
 
 /** Whether `path` (relative to the repository) is a file `arnx accept` kept for this project. */

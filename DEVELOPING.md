@@ -438,6 +438,16 @@ A project the agent gives no tests_dir gets one from its runner's own configurat
 outside it (`testsdir.ts`: vitest include and projects, jest roots, testMatch and testRegex, pytest testpaths; set in
 the file by `withTestsDirs`, said once to the agent): a new `arnx_generated` folder beside most of the project's own
 tests. Configuration in JavaScript is read only where it is literal; otherwise the default stays and the probe decides.
+A runner may collect only files named another way (jest testRegex `__tests__/.*Spec`): for a TypeScript project the
+choice then holds `test_files` too, a `*` and the ending of its own tests' names (`namesFor`), written beside tests_dir.
+`adapterFor(cfg)` returns the adapter with the probes, the writable names, the test-file test, the words for the model
+and a kept file's name following that ending (`withTestFiles`); the key is optional and absent changes nothing, not even
+the stamp. When a configuration is code and the one-line test is not listed, `look` derives the place from the files the
+runner lists (`placementFrom`, one re-probe in the same session), `try_project` writes tests_dir and test_files into the
+file and runs the project again, and every later file for that project gets them too (`withPlacements`). A TypeScript
+project with a tests_dir that is not the default keeps accepted tests beside it, in a sibling `arnx` folder
+(`acceptedDirFor`), where the runner collects them. A path listed under `uncovered` is never routed to another project
+through `uses`; `mapHints` says when a `uses` entry matches only files in another language than the project's.
 An accepted test changed since `arnx accept` does not stop setup or the proof right after it (said once); `arnx
 approve` on its own and `arnx check` still refuse it.
 

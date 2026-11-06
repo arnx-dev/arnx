@@ -9,6 +9,7 @@ import type { ScalarTag, Tags } from "yaml";
 import { getAdapter } from "./adapters";
 import { baselineDigest } from "./baseline";
 import { python } from "./adapters/python";
+import { TEST_FILES } from "./adapters/typescript";
 import type { Adapter, AdapterId } from "./adapters/types";
 import { ArnxError, SetupRequired } from "./errors";
 import { GENERATED, isSecretEnvName, KEY_SHOWN, KEY_SHOWN_MEANS, type SecretPin, suspects } from "./secrets";
@@ -16,7 +17,7 @@ import { purePosix, pyJson, pyStr, pyTruthy } from "./util";
 
 export const KEYS = new Set(["version", "image", "workdir", "install", "test_command", "services", "env", "notes",
   "known_failing", "tests_dir", "allow_env_names", "approved", "language", "allow_secret_looking", "typecheck",
-  "deps_dir", "sandbox_only"]);
+  "deps_dir", "sandbox_only", "test_files"]);
 export const SERVICE_KEYS = new Set(["image", "env", "ready"]);
 export const SERVICE_NAME = /^[a-z][a-z0-9-]{0,30}$/;
 
@@ -53,6 +54,9 @@ export interface ReviewConfig {
   /** Where install put the dependencies in the image, outside /src (TypeScript only): every run links each
    * node_modules under it into the same place under the install root (depsLink in sandbox.ts). */
   depsDir?: string;
+  /** The names of the test files the runner collects, when not the usual ones (TypeScript only): a star and a suffix,
+   * such as "*Spec.tsx". arnx writes its generated tests with these names. Absent: the adapter's names. */
+  testFiles?: string;
 }
 
 type Raw = Record<string, unknown>;
@@ -260,7 +264,7 @@ export const secretPinsYaml = (pins: SecretPin[]) =>
 /** The sandbox-only files as YAML to append to a file that has none (setup adds them to the agent's file). */
 export const sandboxYaml = (paths: string[]) => toYaml({ [SANDBOX_KEY]: [...paths].sort() });
 export const PROJECT_KEYS = new Set(["root", "language", "runner", "image", "install", "test_command", "services", "env",
-  "owns", "uses", "notes", "known_failing", "tests_dir", "install_root", "typecheck", "deps_dir"]);
+  "owns", "uses", "notes", "known_failing", "tests_dir", "install_root", "typecheck", "deps_dir", "test_files"]);
 
 export interface Uncovered { path: string; reason: string }
 
@@ -355,6 +359,14 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
     } else if (adapter.id !== "typescript") problems.push(`${at}deps_dir: only for typescript projects`);
     else depsDir = spec.deps_dir.replace(/\/+$/, "");
   }
+  let testFiles: string | undefined;
+  if ("test_files" in spec) {
+    if (typeof spec.test_files !== "string" || !TEST_FILES.test(spec.test_files)) {
+      problems.push(`${at}test_files: must be a * and a test file suffix ending in a JavaScript or TypeScript extension, ` +
+        "such as *Spec.tsx");
+    } else if (adapter.id !== "typescript") problems.push(`${at}test_files: only for typescript projects`);
+    else testFiles = spec.test_files;
+  }
   const env = strMap(spec.env, `${at}env`, problems);
   problems.push(...secretNames(env, `${at}env`, allow));
   let own: Service[];
@@ -373,7 +385,8 @@ function parseProject(spec: Raw, name: string, at: string, fileRaw: Raw, service
   const knownFailing = strList(spec.known_failing, `${at}known_failing`, problems);
   return { raw: fileRaw, name, language: adapter.id, runner, image: image as string, workdir, install,
     testCommand: command, services: own, env, notes, knownFailing, testsDir, owns, uses, installRoot,
-    ...(typecheck === undefined ? {} : { typecheck }), ...(depsDir === undefined ? {} : { depsDir }) };
+    ...(typecheck === undefined ? {} : { typecheck }), ...(depsDir === undefined ? {} : { depsDir }),
+    ...(testFiles === undefined ? {} : { testFiles }) };
 }
 
 export function parseReviewFile(text: string): ReviewFile {

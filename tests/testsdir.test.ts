@@ -4,10 +4,10 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { getAdapter } from "../src/adapters";
+import { adapterFor, getAdapter } from "../src/adapters";
 import { defaultSettings } from "../src/settings";
 import { runSetup, withTestsDirs } from "../src/setup";
-import { exportedConfig, globRegex, runnerArgs, SPREAD, staticPrefix, testsDirFor, UNKNOWN } from "../src/testsdir";
+import { exportedConfig, globRegex, namesFor, runnerArgs, SPREAD, staticPrefix, testsDirFor, UNKNOWN } from "../src/testsdir";
 import { fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
@@ -130,6 +130,29 @@ test("jest: roots and testMatch, from jest.config.js or package.json; a spread t
   expect(testsDirFor(repo, ts("jest", run, "regex"))?.dir).toBe("spec/arnx_generated");
 });
 
+test("jest: roots and a testRegex name both the folder and the file name", () => {
+  const repo = files(tmp(), {
+    "jest.config.json": JSON.stringify({ roots: ["<rootDir>/src/js"], testRegex: "__tests__/.*Spec\\.tsx$" }),
+    "src/js/__tests__/FooterSpec.tsx": "", "src/js/__tests__/HeaderSpec.tsx": "",
+    "src/js/__tests__/utils/MenuSpec.tsx": "",
+  });
+  const run = "npx jest {targets}";
+  const choice = testsDirFor(repo, ts("jest", run));
+  expect(choice).toEqual({ dir: "src/js/__tests__/arnx_generated", testFiles: "*Spec.tsx", why: "jest roots and testMatch" });
+  expect(namesFor(["a/FooterSpec.tsx", "a/HeaderSpec.tsx", "a/b.test.ts"])).toEqual(["Spec.tsx", ".test.ts"]);
+  // The folder is not enough alone: the name is kept in the project's settings once the folder is not the default one.
+  const withName = { ...ts("jest", run), testFiles: "*Spec.tsx" };
+  const a = adapterFor(withName);
+  expect(a.probes("jest").map((p) => p.file)).toEqual(["arnx-probeSpec.tsx"]);
+  expect(a.writable.test("fooSpec.tsx")).toBe(true);
+  expect(a.writable.test("foo.test.ts")).toBe(false);
+  expect(a.isTestFile("fooSpec.tsx")).toBe(true);
+  expect(a.words("jest").testFiles).toContain("*Spec.tsx");
+  // A project whose default names are collected keeps the default: no name is set.
+  const plain = files(tmp(), { "jest.config.json": JSON.stringify({ roots: ["<rootDir>/test"] }), "test/a.test.ts": "" });
+  expect(testsDirFor(plain, ts("jest", run))).toEqual({ dir: "test/arnx_generated", why: "jest roots and testMatch" });
+});
+
 test("pytest: testpaths that leave tests/ out give a folder inside them; none without testpaths", () => {
   const repo = files(tmp(), {
     "svc/pyproject.toml": "[tool.pytest.ini_options]\ntestpaths = [\"tests/unit\", \"tests/integration\"]\n",
@@ -160,6 +183,20 @@ test("withTestsDirs sets tests_dir only where the file has none, and never on a 
   expect(out).toContain("tests_dir: other");
   expect(out.match(/tests_dir/g)).toHaveLength(2);
   expect(withTestsDirs("version: 2\n", repo)).toEqual(["version: 2\n", []]);
+});
+
+test("withTestsDirs writes test_files beside tests_dir when the runner collects only other names", () => {
+  const repo = files(tmp(), {
+    "jest.config.json": JSON.stringify({ roots: ["<rootDir>/src/js"], testRegex: "__tests__/.*Spec\\.tsx$" }),
+    "src/js/__tests__/FooterSpec.tsx": "",
+  });
+  const yaml = "version: 1\nprojects:\n  app:\n    root: .\n    language: typescript\n    runner: jest\n" +
+    "    image: node:22\n    test_command: npx jest {targets}\n";
+  const [out, set] = withTestsDirs(yaml, repo);
+  expect(set).toEqual([{ project: "app", dir: "src/js/__tests__/arnx_generated", testFiles: "*Spec.tsx",
+    why: "jest roots and testMatch" }]);
+  expect(out).toContain("tests_dir: src/js/__tests__/arnx_generated");
+  expect(out).toContain('test_files: "*Spec.tsx"');
 });
 
 test("setup sets tests_dir from pytest's testpaths, tells the agent once, and the accepted file keeps it", async () => {

@@ -5,50 +5,82 @@
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { parse as parseToml } from "smol-toml";
-import { getAdapter } from "./adapters";
+import { adapterFor } from "./adapters";
 import type { ReviewConfig } from "./config";
 
-/** A folder for arnx's tests (relative to the project's root) and what in the configuration says it is collected. */
-export interface TestsDirChoice { dir: string; why: string }
+/** A folder for arnx's tests (relative to the project's root), what in the configuration says it is collected, and the
+ * test file names when the runner collects only names other than the usual ones (test_files: "*Spec.tsx"). */
+export interface TestsDirChoice { dir: string; why: string; testFiles?: string }
 
 /** The folder arnx creates inside a folder the runner collects. */
 const GENERATED = "arnx_generated";
 /** The repository's path in the sandbox. */
 const MOUNT = "/src";
 
-/** tests_dir from the runner's configuration in the snapshot `snap`, when the folder the project has now
- * (cfg.testsDir) is not collected and a new folder inside one that is would be; null when the folder it has is
- * collected, or the configuration cannot be read for sure. */
+/** The endings of test file names among `own` (paths of the project's own test files), most frequent first, as
+ * test_files writes them without the star: `FooterSpec.tsx` gives `Spec.tsx`, `a.test.ts` gives `.test.ts`, `a_test.ts`
+ * gives `_test.ts`. A name with no ending to tell (all lower case, no separator) gives none. */
+export function namesFor(own: string[]): string[] {
+  const counts = new Map<string, number>();
+  for (const f of own) {
+    const m = /^(.*?)(\.(?:c|m)?[jt]sx?)$/.exec(posix.basename(f));
+    if (!m) continue;
+    const stem = m[1]!;
+    let at = -1;
+    for (let i = stem.length - 1; i > 0 && at < 0; i--) {
+      if (/[._-]/.test(stem[i]!) || (/[A-Z]/.test(stem[i]!) && /[a-z0-9]/.test(stem[i - 1]!))) at = i;
+    }
+    if (at < 0) continue;
+    const name = stem.slice(at) + m[2];
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([n]) => n);
+}
+
+/** tests_dir (and test_files, when the usual names are not collected anywhere it could go) from the runner's
+ * configuration in the snapshot `snap`, when the folder and names the project has now (cfg.testsDir, cfg.testFiles) are
+ * not collected and a new folder inside one that is would be; null when what it has is collected, or the
+ * configuration cannot be read for sure. */
 export function testsDirFor(snap: string, cfg: Pick<ReviewConfig, "language" | "runner" | "workdir" | "testCommand"
-  | "testsDir">): TestsDirChoice | null {
+  | "testsDir"> & { testFiles?: string }): TestsDirChoice | null {
   const reader = cfg.language === "python" ? pytestReader : cfg.runner === "vitest" ? vitestReader
     : cfg.runner === "jest" ? jestReader : null;
   const r = reader?.(snap, cfg.workdir, cfg.testCommand);
   if (!r) return null;
-  const names = getAdapter(cfg.language).probes(cfg.runner).map((p) => p.file);
+  const adapter = adapterFor(cfg);
+  const names = adapter.probes(cfg.runner).map((p) => p.file);
   const workdir = posix.normalize(cfg.workdir);
-  const collected = (dir: string) => names.some((n) => r.covers(posix.join(dir, n)));
+  const collected = (dir: string, files = names) => files.some((n) => r.covers(posix.join(dir, n)));
   if (collected(posix.join(workdir, cfg.testsDir))) return null;
-  const writable = getAdapter(cfg.language).writable;
+  const writable = adapter.writable;
   // The project's own tests the runner collects: their folders are candidates too (a testRegex names no folder).
   const own = filesUnder(snap, workdir).filter(r.covers);
   const folders = [...new Set(own.map((f) => posix.dirname(f)))]
     .sort((a, b) => a.split("/").length - b.split("/").length || (a < b ? -1 : 1));
-  const tried = [...r.candidates, ...folders.map((d) => posix.join(d, GENERATED))].map((c) => posix.normalize(c));
-  const fit = [...new Set(tried)].filter((dir) => {
-    const rel = posix.relative(workdir, dir);
-    return rel && !rel.startsWith("..") && !posix.isAbsolute(rel) && !holdsWritable(join(snap, dir), writable) &&
-      collected(dir);
-  });
-  if (!fit.length) return null;
+  const tried = [...new Set([posix.join(workdir, cfg.testsDir), ...r.candidates,
+    ...folders.map((d) => posix.join(d, GENERATED))].map((c) => posix.normalize(c)))];
   // Beside the project's own tests: the folder holding most of them.
   const count = (dir: string) => {
     const parent = posix.dirname(dir);
     return own.filter((f) => parent === "." || f.startsWith(`${parent}/`)).length;
   };
-  const counts = new Map(fit.map((d) => [d, count(d)]));
-  const best = [...fit].sort((a, b) => counts.get(b)! - counts.get(a)!)[0]!;
-  return { dir: posix.relative(workdir, best), why: r.why };
+  // The usual names first; the names the project's own tests have (TypeScript only: pytest runs the files it is given)
+  // when no folder collects those.
+  const custom = cfg.language === "typescript" && !cfg.testFiles ? namesFor(own) : [];
+  for (const suffix of [undefined, ...custom]) {
+    const files = suffix === undefined ? names : [`arnx-probe${suffix}`];
+    const writes = suffix === undefined ? writable : adapterFor({ ...cfg, testFiles: `*${suffix}` }).writable;
+    const fit = tried.filter((dir) => {
+      const rel = posix.relative(workdir, dir);
+      return rel && !rel.startsWith("..") && !posix.isAbsolute(rel) && !holdsWritable(join(snap, dir), writes) &&
+        collected(dir, files);
+    });
+    if (!fit.length) continue;
+    const counts = new Map(fit.map((d) => [d, count(d)]));
+    const best = [...fit].sort((a, b) => counts.get(b)! - counts.get(a)!)[0]!;
+    return { dir: posix.relative(workdir, best), why: r.why, ...(suffix === undefined ? {} : { testFiles: `*${suffix}` }) };
+  }
+  return null;
 }
 
 /** Most files filesUnder lists. */

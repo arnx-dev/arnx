@@ -44,11 +44,13 @@ export function route(file: ReviewFile, changed: string[], maxProjects: number):
   const broad = (p: { project: ReviewConfig }) => p.project.owns.some((o) => bare(o) === "**");
   for (const path of changed) {
     let covered = false;
+    // A path review.yaml lists as uncovered is not reached through another project's `uses`: only an owner covers it.
+    const isListed = reasons.some((r) => r.test(path));
     for (const p of projects) {
       if (p.owns(path)) {
         p.owned.push(path);
         covered = true;
-      } else if (p.uses(path)) {
+      } else if (!isListed && p.uses(path)) {
         p.used.push(path);
         if (p.depends(path)) p.throughDeps = true;
         covered = true;

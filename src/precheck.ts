@@ -4,13 +4,14 @@
 // counts as proven, except in a quick setup (a first review's), where the sample's run is the project's proof.
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
-import { adapterFor } from "./adapters";
+import { adapterFor, getAdapter } from "./adapters";
 import type { Listing, TestResult } from "./adapters/types";
 import type { BaselineTest } from "./baseline";
 import type { ReviewConfig } from "./config";
 import { describeHints, diagnose, firstErrors } from "./diagnose";
 import { ownerFile, runTests } from "./outcomes";
 import { REPORT_DIR, type Runner, type RunResult } from "./sandbox";
+import { namesFor } from "./testsdir";
 import { isKeptPath, writeDirOf } from "./testround";
 
 /** A list run collects, it runs no test: minutes means it is stuck, and the suite then tells. */
@@ -117,9 +118,17 @@ export async function precheck(session: Runner, snap: string, cfg: ReviewConfig,
 /** What the look saw: what stops the try (null when nothing does), how many tests and files the runner listed, and
  * the sample's run when one ran and nothing stopped it (a quick setup takes it for the suite's run). */
 export interface Look { early: Early | null; tests: number; files: number;
+  /** Where the runner collects arnx's one-line test, when the project's settings were wrong and its own listing showed
+   * the place (tests_dir, and test_files when it names the files another way): the look stopped there, for the try to
+   * write it into review.yaml and run again. */
+  placement?: Placement;
   /** The test files the runner listed (relative to the project root). */
   listed: string[];
   sample: { files: string[]; run: RunResult; results: TestResult[] } | null }
+
+/** A place for arnx's tests the runner was seen to collect: tests_dir, and test_files when the files are named another
+ * way (TypeScript only). */
+export interface Placement { testsDir: string; testFiles?: string }
 
 /** precheck, with what it listed and the sample's run. `baseline`: "record" while setup's agent is trying the project;
  * in a proof, the tests recorded as failing today: a file recorded as not loading stays recorded, and nobody tries
@@ -140,6 +149,8 @@ export async function look(session: Runner, snap: string, cfg: ReviewConfig, acc
   if (!listing.files.length) return { ...none, ...counts };
   const probe = await probeListed(session, snap, cfg);
   if (probe && !probe.seen) {
+    const placement = await placementFrom(session, snap, cfg, listing);
+    if (placement) return { ...none, ...counts, placement };
     return { ...none, ...counts, early: { summary: probeText(cfg) + again, output: probe.output, hints: "" } };
   }
   const sample = sampleOf(listing, cfg, snap, acceptedTestsDir);
@@ -171,6 +182,29 @@ export async function probeListed(session: Runner, snap: string, cfg: ReviewConf
   } finally {
     for (const p of files) rmSync(join(snap, p.rel), { force: true });
   }
+}
+
+/** Where to put arnx's tests so the runner lists them, from the test files it listed (relative to the project root):
+ * a new folder beside most of them, named like them when the usual names are not what they have. It is tried once, in
+ * the same session; null when the listing shows no other place, or the runner still does not list the one-line test
+ * there. */
+export async function placementFrom(session: Runner, snap: string, cfg: ReviewConfig, listing: Listing)
+  : Promise<Placement | null> {
+  if (!listing.files.length) return null;
+  const adapter = adapterFor(cfg);
+  const counts = new Map<string, number>();
+  for (const f of listing.files) counts.set(posix.dirname(f), (counts.get(posix.dirname(f)) ?? 0) + 1);
+  const folder = [...counts].sort((a, b) => b[1] - a[1] || a[0].split("/").length - b[0].split("/").length ||
+    (a[0] < b[0] ? -1 : 1))[0]![0];
+  const testsDir = posix.join(folder, "arnx_generated");
+  // The usual names stay when the runner's own tests have them; else the most common ending among the listed files.
+  const name = cfg.language === "typescript" && !cfg.testFiles ? namesFor(listing.files)[0] : undefined;
+  const usual = name !== undefined && getAdapter(cfg.language).isTestFile(`arnx-probe${name}`);
+  const testFiles = cfg.testFiles ?? (name !== undefined && !usual ? `*${name}` : undefined);
+  if (testsDir === cfg.testsDir && testFiles === cfg.testFiles) return null;
+  const placed = { ...cfg, testsDir, ...(testFiles === undefined ? {} : { testFiles }) };
+  const probe = await probeListed(session, snap, placed);
+  return probe?.seen ? { testsDir, ...(testFiles === undefined ? {} : { testFiles }) } : null;
 }
 
 /** Why the try stops when the runner does not list the one-line test. */

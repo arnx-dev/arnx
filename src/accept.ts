@@ -26,7 +26,7 @@ import { defaultMarks, firstLine, groupsOf, load, type Marks, parseMarks, parseR
 import { sayingDocker, type SessionFactory } from "./sandbox";
 import { refString, type Settings } from "./settings";
 import { agentUse, logUsage } from "./usage";
-import { collect, DOME, dockerSession, readCopies, testRound, writeDirOf } from "./testround";
+import { acceptedDirFor, collect, DOME, dockerSession, readCopies, testRound, writeDirOf } from "./testround";
 import { acceptedTestIds, recordAccepted, testsByFile } from "./check";
 import { isoSeconds } from "./util";
 import { inPool } from "./challenge";
@@ -350,12 +350,12 @@ function projectsOf(repo: string, rdir: string, review: Review, settings: Settin
   return review.projects.map((name) => {
     const cfg = file?.projects.find((p) => p.name === name);
     if (file && !cfg) throw new ArnxError(`review ${review.id} names project ${name}, which review.yaml no longer has`);
-    const adapter = getAdapter(cfg?.language ?? review.language);
+    const adapter = cfg ? adapterFor(cfg) : getAdapter(review.language);
     const testsRoot = legacy ? join(rdir, "tests") : join(rdir, "projects", name, "tests");
     const files = readCopies(testsRoot, adapter.writable);
     const rootRel = cfg ? cfg.workdir : ".";
     return { name, adapter, root: join(repo, DOME, rootRel), rootRel,
-      acceptedDir: settings.acceptedTestsDir, files,
+      acceptedDir: cfg ? acceptedDirFor(cfg, settings.acceptedTestsDir) : settings.acceptedTestsDir, files,
       writeDir: review.writeDirs[name] ?? review.writeDir };
   });
 }

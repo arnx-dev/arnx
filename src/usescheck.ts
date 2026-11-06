@@ -6,9 +6,10 @@
 import { posix } from "node:path";
 import type { ReviewFile } from "./config";
 import { matcher } from "./ignore";
+import { sourceLanguageOf } from "./languages";
 import { DEFINITION, type ScipIndex } from "./scip";
 
-export interface UsesHint { project: string; kind: "unreferenced" | "missing" | "uncovered" | "unanchored" | "catch-all";
+export interface UsesHint { project: string; kind: "unreferenced" | "missing" | "uncovered" | "unanchored" | "catch-all" | "other-language";
   text: string; entry?: string }
 
 /** File -> the other files whose definitions it refers to, over every index given (paths relative to the repository). */
@@ -34,6 +35,9 @@ export function fileReferences(indexes: ScipIndex[]): Map<string, Set<string>> {
   }
   return out;
 }
+
+/** An extension of each language arnx reviews, to name it. */
+const EXT: Record<string, string> = { python: "py", typescript: "ts", rust: "rs" };
 
 const folder = (f: string) => {
   const parts = f.split("/");
@@ -116,6 +120,14 @@ export function mapHints(file: ReviewFile, files: string[]): UsesHint[] {
           hints.push({ project: p.name, kind: "unanchored", entry, text: `${p.name}: uses ${entry} matches in ` +
             `${places.length} places (${few(places)}); anchor it to the one meant (${few(places.map((x) => `/${x}`))})` });
         }
+      }
+      // Source files in none of the project's language: its tests cannot run them, so the entry reviews nothing.
+      const langs = matched.map(sourceLanguageOf).filter((l) => l !== null);
+      if (langs.length && langs.every((l) => l.id !== p.language)) {
+        const names = [...new Set(langs.map((l) => l.name))].sort();
+        hints.push({ project: p.name, kind: "other-language", entry, text: `${p.name}: uses ${entry} matches only ` +
+          `${names.join(" and ")} files, and ${p.name} is ${sourceLanguageOf(`x.${EXT[p.language] ?? "x"}`)?.name ?? p.language}; ` +
+          `its tests cannot run them. Drop it, or list ${entry} under uncovered` });
       }
       const whole = projects.filter((o) => o.p !== p && files.some((f) => o.owns(f)) &&
         files.every((f) => !o.owns(f) || m(f))).map((o) => o.p.name);

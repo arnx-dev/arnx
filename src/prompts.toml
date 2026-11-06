@@ -313,6 +313,8 @@ projects:
     tests_dir: <optional: where arnx writes its tests, relative to root; arnx sets it from the runner's \
 configuration (vitest include, jest roots and testMatch, pytest testpaths), so set it only when try_project says \
 its folder is not picked up>
+    test_files: <optional, typescript only: "*" and the ending of the test file names the runner collects, such as \
+"*Spec.tsx"; arnx sets it with tests_dir, so set it only when try_project says the runner collects other names>
 uncovered: [{path: <path pattern>, reason: <why no project tests it: no tests, scripts, unsupported language, \
 infrastructure>}]   # source files only: leave docs, data and configuration out
 
@@ -335,7 +337,8 @@ exclude tests in test_command. Fix only what the environment causes. Failures th
 back to you once; trying the project again unchanged records them with their cause.
 - try_project also places a one-line test in the project's tests_dir and checks that the runner runs it. When it \
 does not, set tests_dir to a new, empty subfolder inside a folder the configuration includes (for example \
-__tests__/unit/arnx_generated). Never use a folder that holds the project's own tests, and do not change the \
+__tests__/unit/arnx_generated), and test_files when the runner collects only files with certain names (such as \
+*Spec.tsx). Never use a folder that holds the project's own tests, and do not change the \
 project's own configuration.
 - Once try_project has built a project's image, look around in it with exec (versions, files, a single test). Do \
 not put probes in test_command: each try_project runs the whole suite.

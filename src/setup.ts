@@ -12,7 +12,7 @@ import { type Baseline, BASELINE_FILE, type BaselineTest, baselineDigest, descri
 import { Boundary, boundaryOf, type Swap } from "./boundary";
 import type { Brain } from "./brain";
 import { clip, emit, EVENTS_FILE, EventLog, withEvents, withRole } from "./events";
-import { getAdapter, LANGUAGES } from "./adapters";
+import { adapterFor, getAdapter, LANGUAGES } from "./adapters";
 import type { AdapterId, TestResult } from "./adapters/types";
 import { addToSandbox, type Blanked, describeBlanked, describeWithheld, fakedKeysText, filesAt, leftOutBrief, hasCommits, snapshotDigest, someNames,
   takeSnapshot, type Withheld, workingTreeFiles } from "./change";
@@ -35,7 +35,7 @@ import { isSecretPath, maskPrivateKeys, type SecretPin } from "./secrets";
 import { namesStandIn, type StandInRow, standInsLine, writeStandIns } from "./standins";
 import { type AgentModel, allPrices, type Tool } from "./llm";
 import { ownerFile, runTests } from "./outcomes";
-import { look } from "./precheck";
+import { look, type Placement } from "./precheck";
 import { LocalBrain } from "./localbrain";
 import { promptsFor } from "./userprompts";
 import type { Say } from "./progress";
@@ -76,7 +76,9 @@ export interface SuiteCounts { acceptedFailing: number; unexpected: string[]; ba
   /** The type check did not run, timed out or failed without reporting: information, never a failed proof. */
   typecheckProblem?: string;
   /** A quick look's run: the test files the runner listed, all of which the whole suite would run. */
-  listed?: string[] }
+  listed?: string[];
+  /** The look saw where the runner collects arnx's one-line test, and it is not where review.yaml says: nothing ran. */
+  placement?: Placement }
 
 const noCounts = (): SuiteCounts => ({ acceptedFailing: 0, unexpected: [], baselineFailing: 0, left: [], flaky: [],
   failed: [], passed: 0, all: [] });
@@ -95,7 +97,7 @@ const failedTest = (t: TestResult) => t.outcome === "failed" || t.outcome === "e
 /** Why a run wrote no report, shortly: its exit code or time-out, whether the runner says it wrote one (arnx's
  * report option reached it then) when it is a runner that says, and the last lines of its output. */
 export function noReport(result: RunResult, cfg: ReviewConfig): string {
-  const adapter = getAdapter(cfg.language);
+  const adapter = adapterFor(cfg);
   const runner = adapter.words(cfg.runner).runner;
   const said = result.timedOut ? undefined : adapter.reportSaid?.(result.output, cfg.runner);
   const reach = said === undefined ? ""
@@ -212,7 +214,7 @@ export function failingFiles(results: TestResult[] | null, cfg: ReviewConfig): s
 function ownTestsIn(cfg: ReviewConfig, snap: string, acceptedTestsDir?: string): string[] {
   const dir = writeDirOf(cfg);
   return existsSync(join(snap, dir))
-    ? ownTestsInWriteDir(cfg, collect(snap, dir, getAdapter(cfg.language).writable), acceptedTestsDir) : [];
+    ? ownTestsInWriteDir(cfg, collect(snap, dir, adapterFor(cfg).writable), acceptedTestsDir) : [];
 }
 
 /** Folders that hold other people's code, never the project's own tests (build output is rarely committed, and a
@@ -298,6 +300,8 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     if (precheck && !targets.length && (cfg.language === "rust" || hasOwnTests(cfg, snap))) {
       const seen = await look(session, snap, cfg, acceptedTestsDir, baseline);
       const early = seen.early;
+      if (seen.placement) return [false, "the runner lists arnx's one-line test elsewhere", "", [], [], "",
+        { ...none, placement: seen.placement }] as Out;
       if (early) return [false, early.summary, tailOf(early.output), [], [], early.hints, none] as Out;
       if (quick && seen.sample) {
         sample = seen.sample;
@@ -307,7 +311,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     }
     // A whole-suite run carries a canary: one-line tests where arnx keeps accepted tests (.arnx/tests/), which the
     // project's own run must never collect.
-    const canary = targets.length || sample ? [] : getAdapter(cfg.language).probes(cfg.runner)
+    const canary = targets.length || sample ? [] : adapterFor(cfg).probes(cfg.runner)
       .map((p) => ({ path: join(snap, DOME, writeDirOf(cfg), p.file), source: p.source }));
     for (const c of canary) {
       mkdirSync(dirname(c.path), { recursive: true });
@@ -822,7 +826,7 @@ export function coverageMap(repo: string, file: ReviewFile, untracked = false): 
  * rerun just the files that failed. */
 export function envDigest(cfg: ReviewConfig): string {
   return JSON.stringify([cfg.image, cfg.workdir, cfg.install, cfg.testCommand, cfg.services, cfg.env, cfg.testsDir,
-    cfg.installRoot, cfg.runner, cfg.typecheck ?? null, cfg.depsDir ?? null]);
+    cfg.installRoot, cfg.runner, cfg.typecheck ?? null, cfg.depsDir ?? null, cfg.testFiles ?? null]);
 }
 
 /** known_failing entries that no note explains (by path or file name): each hides a whole test file. */
@@ -908,9 +912,34 @@ export function withTestsDirs(text: string, snap: string, keep: ReadonlySet<stri
     const c = testsDirFor(snap, cfg);
     if (!c) continue;
     doc.setIn(f.legacy ? ["tests_dir"] : ["projects", cfg.name, "tests_dir"], c.dir);
+    if (c.testFiles) doc.setIn(f.legacy ? ["test_files"] : ["projects", cfg.name, "test_files"], c.testFiles);
     set.push({ project: cfg.name, ...c });
   }
   return set.length ? [doc.toString({ flowCollectionPadding: false, lineWidth: 0 }), set] : [text, []];
+}
+
+/** `text` with tests_dir (and test_files) put on each project in `places` that sets no tests_dir; and whether it did. */
+export function withPlacements(text: string, places: ReadonlyMap<string, Placement>): [string, boolean] {
+  if (!places.size) return [text, false];
+  let f: ReviewFile;
+  try {
+    f = parseReviewFile(text);
+  } catch (e) {
+    if (!(e instanceof ArnxError)) throw e;
+    return [text, false];
+  }
+  const doc = parseDocument(text);
+  let changed = false;
+  for (const cfg of f.projects) {
+    const place = places.get(cfg.name);
+    const spec = f.legacy ? f.raw : (f.raw.projects as Record<string, Record<string, unknown>> | undefined)?.[cfg.name];
+    if (!place || !spec || "tests_dir" in spec) continue;
+    const at = f.legacy ? [] : ["projects", cfg.name];
+    doc.setIn([...at, "tests_dir"], place.testsDir);
+    if (place.testFiles) doc.setIn([...at, "test_files"], place.testFiles);
+    changed = true;
+  }
+  return changed ? [doc.toString({ flowCollectionPadding: false, lineWidth: 0 }), true] : [text, false];
 }
 
 /** `text` with the projects in `drop` taken out and `add` appended under uncovered (entries whose path is listed
@@ -1228,6 +1257,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     mostRan: new Map<string, { tests: number; command: string }>(),
     // The tests_dir arnx set on each project from its runner's configuration (withTestsDirs).
     placed: new Map<string, string>(),
+    /** Where the runner's listing showed it collects each project's tests (once each): put into every file the agent
+     * sends for a project that does not set its own tests_dir. */
+    placements: new Map<string, Placement>(),
     // The environment of each project whose tests were listed before its whole suite ran (precheck.ts): tried again
     // unchanged, it runs the whole suite.
     looked: new Map<string, string>(),
@@ -1349,12 +1381,16 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           "file.)\n";
       }
       // A project without tests_dir gets the folder its runner's configuration collects, said once to the agent.
-      const [yaml, placed] = withTestsDirs(kept, snap, new Set(keep.keys()));
+      let [yaml, placed] = withTestsDirs(kept, snap, new Set(keep.keys()));
       for (const p of placed.filter((x) => state.placed.get(x.project) !== x.dir)) {
         state.placed.set(p.project, p.dir);
         state.notice += `(tests_dir of ${p.project} set to ${p.dir}: the default folder lies outside its ${p.why}.)\n`;
+        if (p.testFiles) state.notice += `(test_files of ${p.project} set to ${p.testFiles}: its tests are named that way.)\n`;
       }
-      if (dropped || placed.length) args = { ...args, yaml };
+      // The place the runner's listing showed for a project, in every file that leaves tests_dir out.
+      const [placedYaml, again] = withPlacements(yaml, state.placements);
+      if (again) yaml = placedYaml;
+      if (dropped || placed.length || again) args = { ...args, yaml };
       // Saved when setup fails: with the user's allow-list, so the file left behind keeps it.
       state.lastTried = withOurs(yaml);
       try {
@@ -1578,6 +1614,24 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           error: clip(e.message, 500) });
         if (uiApp) return webUi(gist(e.message)); // web UI rule
         return `failed: ${e.message}\n${existsSync(log) ? readFileSync(log, "utf8").slice(-OUTPUT_TAIL) : ""}`;
+      }
+      // The runner's own listing showed where it collects arnx's tests: review.yaml says so, and the project runs again.
+      if (counts.placement && !state.placements.has(name)) {
+        const where = counts.placement;
+        state.placements.set(name, where);
+        announce = null;
+        const doc = parseDocument(parsed.yaml);
+        const at = f.legacy ? [] : ["projects", name];
+        doc.setIn([...at, "tests_dir"], where.testsDir);
+        if (where.testFiles) doc.setIn([...at, "test_files"], where.testFiles);
+        state.placed.set(name, where.testsDir);
+        state.notice += `(tests_dir of ${name} set to ${where.testsDir}` +
+          `${where.testFiles ? ` and test_files to ${where.testFiles}` : ""}: the runner lists arnx's one-line test there.)\n`;
+        say(`${name}: tests_dir set to ${where.testsDir}${where.testFiles ? `, test_files to ${where.testFiles}` : ""}`);
+        attempt({ ok: false, reused: false, summary: "", failing: 0, skips: 0, hints: "",
+          error: clip(`placement: ${where.testsDir}`, 500) });
+        state.tried.delete(name);
+        return tryProject({ yaml: doc.toString({ flowCollectionPadding: false, lineWidth: 0 }), project: name });
       }
       announce = null;
       state.summary = f.legacy ? summary : `${name}: ${summary}`;
