@@ -5,6 +5,11 @@ The flow, what each step writes, and what its results mean. Start with the [READ
 
     arnx init → arnx review → arnx triage → arnx accept → arnx prompt → arnx check
 
+arnx works best on single-package Python and TypeScript repositories. A repository with several packages is set up one part at a time: a
+review waits up to 10 minutes for the part its change touches, and `arnx setup` stops at 40 minutes overall (the default
+`setup_minutes`). Tests that run only in a browser (Playwright, Cypress and the like) are not run; setup lists them
+under `uncovered`. Details are in [SAFETY.md](SAFETY.md#what-arnx-covers).
+
 Commit `.arnx/config.toml` and `.arnx/review.yaml`: the next branch, a teammate's clone and CI reuse the proven
 environment without running setup again.
 

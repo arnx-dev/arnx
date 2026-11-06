@@ -10,6 +10,10 @@ Status: early release (0.1). Python (pytest), JavaScript/TypeScript (vitest, jes
 (cargo-nextest, [early](#rust-is-early)) repositories: a single package, a workspace, or many services. Open source
 (Apache 2.0) with your own model keys, or with models run by [arnx cloud](docs/CLOUD.md).
 
+arnx works best on single-package Python and TypeScript repositories. A repository with several packages is set up one part at a time, within
+setup's time limits, and tests that run only in a browser (Playwright, Cypress) are not run. More in
+[docs/SAFETY.md](docs/SAFETY.md#what-arnx-covers).
+
 ## What a finding looks like
 
 arnx reviewing its own `arnx remove` command (review `20261022-227eb7`, before 0.1). The change added a command that

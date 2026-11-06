@@ -158,7 +158,7 @@ test("a change no project covers is refused before any suite runs", async () => 
     }, runReview: reviewStub(reached) });
   expect(await cli.run("review")).toBe(3);
   expect(cli.stderr).toContain("no project covers this change: tools/release.py (scripts). Run `arnx setup --add` " +
-    "to cover these paths");
+    "to cover these paths. arnx works best on single-package Python and TypeScript repos; browser-only tests aren't run.");
   expect([proofSessions, setupRuns.length, reached.length]).toEqual([0, 0, 0]);
 });
 

@@ -145,5 +145,5 @@ export function uncoveredChange(file: ReviewFile, changed: string[], maxProjects
   const routing = route(file, changed, maxProjects);
   if (routing.routed.length) return null;
   const paths = routing.uncovered.map((u) => `${u.path} (${u.reason})`).join(", ");
-  return `no project covers this change: ${paths}. Run \`arnx setup --add\` to cover these paths`;
+  return `no project covers this change: ${paths}. Run \`arnx setup --add\` to cover these paths. arnx works best on single-package Python and TypeScript repos; browser-only tests aren't run.`;
 }
