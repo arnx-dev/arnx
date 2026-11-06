@@ -157,7 +157,7 @@ export const sourceFirst = (changed: string[]): string[] => {
  * lists its files). With `existing` (review.yaml as it is), its projects stay as they are, each chosen project joins
  * them (a project whose root it already has is not drafted again), and the NOT_SET_UP entry of each chosen project
  * goes. A project joining a file that has one with the same language and install root takes that one's image, install
- * and deps_dir (and its test_command, with `--project` swapped to the new project's name). Projects come most changed
+ * and deps_dir, said in a comment (its test_command is the draft's own). Projects come most changed
  * source files first. Null when no drafted project owns a changed file. */
 export function quickDraft(d: Detection, changed: string[], existing = ""): { yaml: string; names: string[] } | null {
   const draft = draftReview(d);
@@ -204,14 +204,16 @@ export function quickDraft(d: Detection, changed: string[], existing = ""): { ya
   doc.delete("approved");
   const taken = new Set(Object.keys((doc.toJS() as { projects?: Raw } | null)?.projects ?? {}));
   const names: string[] = [];
-  const neighbours = Object.values(((doc.toJS() as { projects?: Record<string, Raw> } | null)?.projects ?? {}));
+  const neighbours = Object.entries(((doc.toJS() as { projects?: Record<string, Raw> } | null)?.projects ?? {}));
   for (const n of chosen) {
     let name = n;
     for (let k = 2; taken.has(name); k++) name = `${n}-${k}`;
     taken.add(name);
     names.push(name);
-    inherit(projects[n] as Raw, name, neighbours);
+    const from = inherit(projects[n] as Raw, neighbours);
     doc.setIn(["projects", name], doc.createNode(projects[n]));
+    const node = doc.getIn(["projects", name], true);
+    if (from && isMap(node)) node.commentBefore = ` unsure: image and install copied from ${from}`;
   }
   for (const [n, svc] of Object.entries(services ?? {})) {
     if (!doc.hasIn(["services", n])) doc.setIn(["services", n], doc.createNode(svc));
@@ -236,14 +238,14 @@ export function quickDraft(d: Detection, changed: string[], existing = ""): { ya
 /** Where a project's install runs: its install_root, or its own root. */
 const installAt = (p: Raw) => String(p.install_root ?? p.root ?? ".");
 
-/** A drafted project takes the environment of a project already in the file with its language and install root: the
- * install built there is the one it needs, and a run that works there is a recipe worth keeping. */
-function inherit(p: Raw, name: string, existing: Raw[]): void {
-  const next = existing.find((e) => e.language === p.language && installAt(e) === installAt(p) && e.root !== p.root);
-  if (!next) return;
-  for (const key of ["image", "install", "deps_dir"]) if (next[key] !== undefined) p[key] = next[key];
-  const command = String(next.test_command ?? "");
-  if (/--project[ =]\S+/.test(command)) p.test_command = command.replace(/--project([ =])\S+/, `--project$1${name}`);
+/** A drafted project takes the install of a project already in the file with its language and install root: the
+ * install built there is the one it needs. Its test_command stays the draft's own: a runner's project name (`--project`)
+ * is not something detection knows, and a wrong one can run another project's tests. Returns the neighbour's name. */
+function inherit(p: Raw, existing: [string, Raw][]): string | null {
+  const next = existing.find(([, e]) => e.language === p.language && installAt(e) === installAt(p) && e.root !== p.root);
+  if (!next) return null;
+  for (const key of ["image", "install", "deps_dir"]) if (next[1][key] !== undefined) p[key] = next[1][key];
+  return next[0];
 }
 
 /** The project roots a review.yaml has. */

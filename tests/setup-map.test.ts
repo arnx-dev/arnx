@@ -214,6 +214,19 @@ test("a folder holding test files is not listed as having no tests", () => {
   ]);
 });
 
+test("a lone test file, or a file beside tests, is not listed as having no tests", () => {
+  const all = ["test_a.py", "api/test_b.py", "api/x.py", "api/y.py", "solo/z.py"];
+  expect(sourceGroups(["test_a.py", "api/test_b.py", "solo/z.py"], ["api/x.py"], all)).toEqual([
+    { path: "/test_a.py", reason: NOT_SET_UP, files: 1 },
+    { path: "/api/test_b.py", reason: NOT_SET_UP, files: 1 },
+    { path: "/solo/", reason: "no tests", files: 1 },
+  ]);
+  const yaml = `version: 1\nprojects:\n${API}uncovered:\n  - {path: /test_a.py, reason: no tests}\n` +
+    "  - {path: /api/y.py, reason: no tests}\n  - {path: /solo/z.py, reason: no tests}\n";
+  expect(parseReviewFile(honestReasons(yaml, all)).uncovered.map((u) => u.reason))
+    .toEqual([NOT_SET_UP, NOT_SET_UP, "no tests"]);
+});
+
 test("a folder with none still is", () => {
   expect(sourceGroups(["legacy/old.py"], [], ["legacy/old.py", "other/test_x.py"]))
     .toEqual([{ path: "/legacy/", reason: "no tests", files: 1 }]);

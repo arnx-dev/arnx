@@ -691,9 +691,15 @@ export const NO_TESTS = "no tests";
 export const SCRIPTS = "scripts";
 const SCRIPT_DIRS = new Set(["scripts", "script", "bin", "tools", "tool", "hack", "ci", ".github", ".husky", "devtools"]);
 
-/** Whether a test file sits under the folder `path` ("/dir/") among `files`; a single file has none under it. */
-const hasTests = (path: string, files: string[]) => path.endsWith("/") &&
-  files.some((f) => f.startsWith(path.slice(1)) && isTestPath(f));
+/** Whether tests belong to `path` among `files`: a folder ("/dir/") holds a test file; a file is one, or sits in a
+ * folder with one. Groups and agent-written entries are read the same way. */
+export function holdsTests(path: string, files: string[]): boolean {
+  const rel = path.replace(/^\//, "");
+  if (rel.endsWith("/")) return files.some((f) => f.startsWith(rel) && isTestPath(f));
+  if (isTestPath(rel)) return true;
+  const dir = posix.dirname(rel);
+  return files.some((f) => isTestPath(f) && posix.dirname(f) === dir);
+}
 
 /** `yaml` with the agent's own "no tests" entries under uncovered corrected the same way: a path that holds test
  * files among `files` is "not set up", never "no tests". */
@@ -707,7 +713,7 @@ export function honestReasons(yaml: string, files: string[]): string {
     const [path, reason] = [item.get("path"), item.get("reason")];
     if (typeof path !== "string" || typeof reason !== "string" || reason.trim().toLowerCase() !== NO_TESTS) continue;
     const under = matcher(path);
-    if (files.some((f) => isTestPath(f) && under(f))) {
+    if (holdsTests(path, files) || files.some((f) => isTestPath(f) && under(f))) {
       item.set("reason", NOT_SET_UP);
       changed = true;
     }
@@ -736,7 +742,7 @@ export function sourceGroups(unexplained: string[], claimed: string[], all: stri
         break;
       }
     }
-    const g = groups.get(path) ?? { path, reason: hasTests(path, all) ? NOT_SET_UP
+    const g = groups.get(path) ?? { path, reason: holdsTests(path, all) ? NOT_SET_UP
       : SCRIPT_DIRS.has(top) ? SCRIPTS : NO_TESTS, files: 0 };
     g.files += 1;
     groups.set(path, g);

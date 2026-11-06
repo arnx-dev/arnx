@@ -326,7 +326,7 @@ test("a new project takes the install of its neighbour", () => {
   const d = detect(repoWith(WORKSPACE));
   const first = quickDraft(d, ["packages/core/src/a.ts"])!;
   const edited = first.yaml.replace(/image: node:\S+/, "image: node:20.11")
-    .replace("npx vitest run {targets}", "npx vitest run --project core {targets}")
+    .replace("npx vitest run {targets}", "npx vitest run --project @w/ext {targets}")
     .replace(/(install:\n\s+- )(.*)/, "$1pnpm install --frozen-lockfile && pnpm -r build");
   const next = quickDraft(d, ["packages/ext/src/b.ts"], edited)!;
   expect(next.names).toEqual(["ext"]);
@@ -334,5 +334,7 @@ test("a new project takes the install of its neighbour", () => {
   const [core, ext] = f.projects;
   expect([ext!.image, ext!.install, ext!.depsDir]).toEqual([core!.image, core!.install, core!.depsDir]);
   expect(ext!.image).toBe("node:20.11");
-  expect(ext!.testCommand).toBe("npx vitest run --project ext {targets}");
+  // The runner's project name is not known: the neighbour's command is not copied, the draft's own stands.
+  expect(ext!.testCommand).toBe("npx vitest run {targets}");
+  expect(next.yaml).toContain("# unsure: image and install copied from core");
 });
