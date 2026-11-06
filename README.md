@@ -187,7 +187,7 @@ broke and how long setup took.
 
 ## Known limits
 
-- Changes up to 200 KB per review; review a long branch in parts with `--range A..B`. Lockfiles and generated files (bundles, snapshots, protocol output, files marked `linguist-generated`) stay in the sandbox but are not counted or sent.
+- Changes up to 200 KB per review; review a long branch in parts with `--range A..B`. Lockfiles and generated files (bundles, snapshots, protocol output, files marked `linguist-generated`) stay in the sandbox (readable there) but are not counted and not in the diff sent.
 - Python, JavaScript/TypeScript and Rust only (`arnx init` and `arnx doctor` say so for a repository in another
   language, before anything is sent). No Windows build: use WSL 2.
 - Setup records the tests your suite fails today, one by one, in `.arnx/baseline.json`, and later proofs do not

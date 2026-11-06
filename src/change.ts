@@ -275,13 +275,17 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
     notSent.push(...leftOutUntracked(repo));
   }
   // Generated files stay in the snapshot but are not counted and never go to a model.
-  const marked = markedGenerated(repo, files);
+  const marked = markedGenerated(repo, files, head);
+  const firstLines = (path: string, deleted: boolean): string[] => {
+    const side = deleted ? null : head === null ? fileSide(repo, path) : blobSide(repo, head, path);
+    return side && "text" in side && !side.binary ? splitLines(side.text.slice(0, 2000)).slice(0, 5) : [];
+  };
   const genOut = new Set<string>();
   diff = diff.split(DIFF_SECTION).filter((section) => {
     const { old, now } = sectionPaths(section);
     const path = now ?? old;
     if (path === null || !section.startsWith("diff --git ") ||
-      !(isGenerated(path) || marked.has(path) || looksGenerated(section))) return true;
+      !(isGenerated(path) || marked.has(path) || looksGenerated(section, firstLines(path, now === null)))) return true;
     genOut.add(path);
     return false;
   }).join("");
@@ -339,14 +343,28 @@ export function resolveChange(repo: string, range: string | null = null, allow: 
     ...(sealed.withheld.length ? { withheld: sealed.withheld } : {}), ...(namedOut.size ? { namedOut: [...namedOut].sort() } : {}) };
 }
 
-/** The files git attributes mark `linguist-generated`. */
-function markedGenerated(repo: string, files: readonly string[]): Set<string> {
+/** The files git attributes mark `linguist-generated`: as the reviewed commit has them (read through a temporary index,
+ * since an untracked or later .gitattributes is not part of it), or in the working tree when none is reviewed. */
+function markedGenerated(repo: string, files: readonly string[], head: string | null): Set<string> {
   const out = new Set<string>();
   if (!files.length) return out;
-  const r = spawnSync("git", ["-C", repo, "check-attr", "-z", "--stdin", "linguist-generated"],
-    { encoding: "utf8", input: files.join("\0") + "\0", maxBuffer: MAX_BUFFER });
-  const f = (r.stdout ?? "").split("\0");
-  for (let i = 0; i + 2 < f.length; i += 3) if (f[i + 2] === "set" || f[i + 2] === "true") out.add(f[i]!);
+  let dir: string | null = null;
+  const args = ["-C", repo, "check-attr", "-z", "--stdin", "linguist-generated"];
+  const env = { ...process.env };
+  try {
+    if (head !== null) {
+      dir = mkdtempSync(join(tmpdir(), "arnx-attr-"));
+      env.GIT_INDEX_FILE = join(dir, "index");
+      const read = spawnSync("git", ["-C", repo, "read-tree", head], { env, encoding: "utf8" });
+      if (read.status !== 0) return out;
+      args.splice(3, 0, "--cached");
+    }
+    const r = spawnSync("git", args, { encoding: "utf8", input: files.join("\0") + "\0", maxBuffer: MAX_BUFFER, env });
+    const f = (r.stdout ?? "").split("\0");
+    for (let i = 0; i + 2 < f.length; i += 3) if (f[i + 2] === "set" || f[i + 2] === "true") out.add(f[i]!);
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
   return out;
 }
 
