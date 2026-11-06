@@ -8,7 +8,8 @@ import { browserSuites, uiFramework } from "../src/browser";
 import { parseReviewFile } from "../src/config";
 import { ArnxError } from "../src/errors";
 import type { SessionFactory } from "../src/sandbox";
-import { coverageMap, runSetup, sourceGroups, webUiPaths, withUncovered } from "../src/setup";
+import { NOT_SET_UP } from "../src/draft";
+import { coverageMap, honestReasons, runSetup, sourceGroups, webUiPaths, withUncovered } from "../src/setup";
 import { filesLine, worthALook } from "../src/setupview";
 import { defaultSettings } from "../src/settings";
 import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -202,4 +203,29 @@ test("the files line counts the paths no project tests once there are more than 
   const f = { projects: [{ name: "api", owned: 3, used: 0 }], untrackedLeftOut: [] };
   expect(filesLine({ ...f, notTested: ["/a/", "/b/"] })).toBe("  Files: api owns 3, uses 0 · not tested: /a/, /b/");
   expect(filesLine({ ...f, notTested: ["/a/", "/b/", "/c/", "/d/"] })).toBe("  Files: api owns 3, uses 0 · not tested: 4 paths");
+});
+
+test("a folder holding test files is not listed as having no tests", () => {
+  const all = ["svc/app.py", "svc/tests/test_app.py", "legacy/old.py", "tools/gen.py"];
+  expect(sourceGroups(["svc/app.py", "legacy/old.py", "tools/gen.py"], [], all)).toEqual([
+    { path: "/svc/", reason: NOT_SET_UP, files: 1 },
+    { path: "/legacy/", reason: "no tests", files: 1 },
+    { path: "/tools/", reason: "scripts", files: 1 },
+  ]);
+});
+
+test("a folder with none still is", () => {
+  expect(sourceGroups(["legacy/old.py"], [], ["legacy/old.py", "other/test_x.py"]))
+    .toEqual([{ path: "/legacy/", reason: "no tests", files: 1 }]);
+});
+
+test("an agent's no-tests reason is corrected", () => {
+  const files = ["svc/app.py", "svc/tests/test_app.py", "legacy/old.py"];
+  const yaml = `version: 1\nprojects:\n${API}` +
+    "uncovered:\n  - {path: /svc/, reason: no tests}\n  - {path: /legacy/, reason: no tests}\n" +
+    "  - {path: /gone/, reason: \"vendored, no tests\"}\n";
+  const f = parseReviewFile(honestReasons(yaml, files));
+  expect(f.uncovered).toEqual([{ path: "/svc/", reason: NOT_SET_UP }, { path: "/legacy/", reason: "no tests" },
+    { path: "/gone/", reason: "vendored, no tests" }]);
+  expect(honestReasons("version: 1\n", files)).toBe("version: 1\n");
 });

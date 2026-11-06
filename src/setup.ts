@@ -5,7 +5,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirS
   writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
-import { isMap as isYamlMap, isScalar, parseDocument, visit } from "yaml";
+import { isMap as isYamlMap, isScalar, isSeq, parseDocument, visit } from "yaml";
 import { type AgentResult, StopRound, Workspace } from "./agent";
 import { type Baseline, BASELINE_FILE, type BaselineTest, baselineDigest, describeBaselineChanges, entryOf, keysOf,
   readBaseline, testKey, writeBaseline } from "./baseline";
@@ -22,7 +22,7 @@ import { configSuspects,
   type ReviewFile, sandboxOnlyOf, sandboxYaml, secretPinsOf, secretPinsYaml, stamp, stampedBaseline, stampFile,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
-import { draftYaml, NOT_SET_UP, quickDraft } from "./draft";
+import { draftYaml, NOT_SET_UP, quickDraft, sourceFirst } from "./draft";
 import { route } from "./route";
 import { MANY_SERVICES, manyServices, manyServicesReason } from "./facts";
 import { A_FAKED_FILE, classify, describeHints, diagnose, firstErrors, firstLine, type Hint, markUnproven, missingLeftOut, npxDownload, npxText,
@@ -691,9 +691,34 @@ export const NO_TESTS = "no tests";
 export const SCRIPTS = "scripts";
 const SCRIPT_DIRS = new Set(["scripts", "script", "bin", "tools", "tool", "hack", "ci", ".github", ".husky", "devtools"]);
 
+/** Whether a test file sits under the folder `path` ("/dir/") among `files`; a single file has none under it. */
+const hasTests = (path: string, files: string[]) => path.endsWith("/") &&
+  files.some((f) => f.startsWith(path.slice(1)) && isTestPath(f));
+
+/** `yaml` with the agent's own "no tests" entries under uncovered corrected the same way: a path that holds test
+ * files among `files` is "not set up", never "no tests". */
+export function honestReasons(yaml: string, files: string[]): string {
+  const doc = parseDocument(yaml);
+  const list = doc.errors.length ? null : doc.get("uncovered");
+  if (!isSeq(list)) return yaml;
+  let changed = false;
+  for (const item of list.items) {
+    if (!isYamlMap(item)) continue;
+    const [path, reason] = [item.get("path"), item.get("reason")];
+    if (typeof path !== "string" || typeof reason !== "string" || reason.trim().toLowerCase() !== NO_TESTS) continue;
+    const under = matcher(path);
+    if (files.some((f) => isTestPath(f) && under(f))) {
+      item.set("reason", NOT_SET_UP);
+      changed = true;
+    }
+  }
+  return changed ? doc.toString({ flowCollectionPadding: false, lineWidth: 0 }) : yaml;
+}
+
 /** `unexplained` grouped by the shallowest folder that holds no file a project owns or uses (`claimed`); a file with
- * no such folder above it is a group of its own. */
-export function sourceGroups(unexplained: string[], claimed: string[]): SourceGroup[] {
+ * no such folder above it is a group of its own. A group that holds test files (among `all`) is not "no tests": the
+ * tests exist, nothing runs them yet. */
+export function sourceGroups(unexplained: string[], claimed: string[], all: string[] = []): SourceGroup[] {
   const taken = new Set<string>();
   for (const f of claimed) {
     const parts = f.split("/");
@@ -711,7 +736,8 @@ export function sourceGroups(unexplained: string[], claimed: string[]): SourceGr
         break;
       }
     }
-    const g = groups.get(path) ?? { path, reason: SCRIPT_DIRS.has(top) ? SCRIPTS : NO_TESTS, files: 0 };
+    const g = groups.get(path) ?? { path, reason: hasTests(path, all) ? NOT_SET_UP
+      : SCRIPT_DIRS.has(top) ? SCRIPTS : NO_TESTS, files: 0 };
     g.files += 1;
     groups.set(path, g);
   }
@@ -783,7 +809,7 @@ export function coverageMap(repo: string, file: ReviewFile, untracked = false): 
     ({ name, owned, used, ...(untracked.owned || untracked.used ? { untracked } : {}) })),
   uncovered: uncovered.map(({ path, reason, files: n, untracked }) =>
     ({ path, reason, files: n, ...(untracked ? { untracked } : {}) })), unexplained, overlaps,
-  groups: sourceGroups(unexplained, claimed) };
+  groups: sourceGroups(unexplained, claimed, files) };
 }
 
 /** What a project's suite needs to run, apart from which files are set aside: a retry that changes none of it can
@@ -1303,7 +1329,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     // owns. A project that only uses an owned file waits: it is set up when a change reaches its own files. The
     // approved ones it keeps stay as they are.
     const touched = (f: ReviewFile): Set<string> => {
-      const r = route(f, o.quick!.files, Number.MAX_SAFE_INTEGER);
+      const r = route(f, sourceFirst(o.quick!.files), Number.MAX_SAFE_INTEGER);
       const all = [...r.routed, ...r.checkOnly.map((c) => ({ ...c, owned: [] as string[] }))];
       const owned = new Set(all.flatMap((x) => x.owned));
       return new Set(all.filter((x) => x.owned.length || x.used.some((u) => !owned.has(u))).map((x) => x.project.name));
@@ -1487,7 +1513,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const hold = (key: string) => state.held.set(name, { env, files: sandboxKey(), shown: new Set([...shown, key]),
         run: { digest: ranWith, summary, skips, counts } });
       // Failures that look like the environment go back to the agent once before they are recorded.
-      const faults = ok && counts.failed.length ? environmentFaults(counts, cfg) : null;
+      const faults = ok && counts.failed.length && !timeIsUp(limit) ? environmentFaults(counts, cfg) : null;
       if (faults && !shown.has(faults.key)) {
         hold(faults.key);
         state.problem = `${name}: ${plural(counts.failed.length, "failing test")} that look like the environment`;
@@ -1504,7 +1530,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const gap = ok ? coverageGap(cfg, snap, counts.listed ? counts.listed.map((f) => ({ fileAttr: f }) as TestResult)
         : counts.all, counts.listed ? undefined : state.mostRan.get(name), accepted,
         (r) => nested.some((w) => r === w || r.startsWith(`${w}/`)) || uncovered(r)) : null;
-      if (gap && !shown.has("gap")) {
+      if (gap && !shown.has("gap") && !timeIsUp(limit)) {
         hold("gap");
         state.problem = `${name}: ${gap.line}`;
         attempt({ ok: false, reused: false, summary: clip(summary, 500), failing: failing.length, skips: skips.length,
@@ -1620,7 +1646,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         const using = new Set([...users.routed, ...users.checkOnly].map((x) => x.project.name));
         state.waiting = later.filter((p) => using.has(p.name)).map((p) => p.name);
       }
-      let yaml = withUncovered(parsed.yaml, [...derivedOf(parsed.f, drop),
+      let yaml = withUncovered(honestReasons(parsed.yaml, coverageFiles(repo, untracked).files), [...derivedOf(parsed.f, drop),
         ...later.map((p) => ({ path: `/${p.workdir}/`, reason: NOT_SET_UP }))], [...drop, ...later.map((p) => p.name)]);
       let f: ReviewFile;
       try {

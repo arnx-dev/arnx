@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { parse } from "yaml";
 import { parseReviewFile } from "../src/config";
 import { describeDetection, detect } from "../src/detect";
-import { draftReview, draftYaml } from "../src/draft";
+import { draftReview, draftYaml, quickDraft } from "../src/draft";
 import { satisfies } from "../src/facts";
 import { defaultSettings } from "../src/settings";
 import { runSetup } from "../src/setup";
@@ -295,4 +295,44 @@ test("try_project refuses such a project while it lists three or more services",
     "services: set it up by hand, or with fewer. Do not try it: keep it under uncovered (path /server/, this reason)");
   expect(said).toContain("server: not set up: needs postgres, redis and minio; setup does not start three or more " +
     "services: set it up by hand, or with fewer");
+});
+
+const WORKSPACE = {
+  "package.json": pkg({ private: true, packageManager: "pnpm@9.12.0" }),
+  "pnpm-workspace.yaml": "packages:\n  - 'packages/*'\n",
+  "pnpm-lock.yaml": "",
+  "docs/advanced.md": "# advanced\n",
+  "scripts/release.ts": "",
+  "packages/core/package.json": pkg({ name: "@w/core", devDependencies: { vitest: "2" } }),
+  "packages/core/src/a.ts": "export const a = 1;\n",
+  "packages/core/src/a.test.ts": "",
+  "packages/ext/package.json": pkg({ name: "@w/ext", devDependencies: { vitest: "2" } }),
+  "packages/ext/src/b.ts": "export const b = 1;\n",
+  "packages/ext/src/c.ts": "export const c = 1;\n",
+  "packages/ext/src/b.test.ts": "",
+};
+
+test("a doc file alone does not choose a project; chosen projects come most changed source files first", () => {
+  const d = detect(repoWith(WORKSPACE));
+  // The root project owns docs/, but a doc file is not what a change to code is about.
+  expect(quickDraft(d, ["docs/advanced.md", "packages/core/src/a.ts"])!.names).toEqual(["core"]);
+  expect(quickDraft(d, ["packages/core/src/a.ts", "packages/ext/src/b.ts", "packages/ext/src/c.ts"])!.names)
+    .toEqual(["ext", "core"]);
+  // With no source file among them, every changed file counts as before.
+  expect(quickDraft(d, ["docs/advanced.md"])!.names).toEqual(["main"]);
+});
+
+test("a new project takes the install of its neighbour", () => {
+  const d = detect(repoWith(WORKSPACE));
+  const first = quickDraft(d, ["packages/core/src/a.ts"])!;
+  const edited = first.yaml.replace(/image: node:\S+/, "image: node:20.11")
+    .replace("npx vitest run {targets}", "npx vitest run --project core {targets}")
+    .replace(/(install:\n\s+- )(.*)/, "$1pnpm install --frozen-lockfile && pnpm -r build");
+  const next = quickDraft(d, ["packages/ext/src/b.ts"], edited)!;
+  expect(next.names).toEqual(["ext"]);
+  const f = parseReviewFile(next.yaml);
+  const [core, ext] = f.projects;
+  expect([ext!.image, ext!.install, ext!.depsDir]).toEqual([core!.image, core!.install, core!.depsDir]);
+  expect(ext!.image).toBe("node:20.11");
+  expect(ext!.testCommand).toBe("npx vitest run --project ext {targets}");
 });

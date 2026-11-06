@@ -6,6 +6,7 @@ import { posix } from "node:path";
 import { Document, isMap, isScalar, isSeq, type Node, parseDocument } from "yaml";
 import type { Candidate, Detection } from "./detect";
 import { manyServices, manyServicesReason, type ProjectFacts, type ServiceFact } from "./facts";
+import { SOURCE } from "./untested";
 
 type Raw = Record<string, unknown>;
 interface Mark { path: (string | number)[]; why: string }
@@ -144,18 +145,32 @@ function ownerOf(projects: Raw, path: string): string | null {
   return best;
 }
 
+/** The files that choose a project: the source files among `changed`; all of them when none is source. A documentation
+ * file next to code says nothing about which environment the change needs. */
+export const sourceFirst = (changed: string[]): string[] => {
+  const source = changed.filter((f) => SOURCE.test(f));
+  return source.length ? source : changed;
+};
+
 /** A quick setup's draft, for a first review: the drafted projects that own one of the `changed` files, the other
  * drafted projects listed under uncovered as NOT_SET_UP (a root project left out is not listed: setup's coverage map
  * lists its files). With `existing` (review.yaml as it is), its projects stay as they are, each chosen project joins
  * them (a project whose root it already has is not drafted again), and the NOT_SET_UP entry of each chosen project
- * goes. Null when no drafted project owns a changed file. */
+ * goes. A project joining a file that has one with the same language and install root takes that one's image, install
+ * and deps_dir (and its test_command, with `--project` swapped to the new project's name). Projects come most changed
+ * source files first. Null when no drafted project owns a changed file. */
 export function quickDraft(d: Detection, changed: string[], existing = ""): { yaml: string; names: string[] } | null {
   const draft = draftReview(d);
   if (!draft) return null;
   const projects = (draft.doc.projects ?? {}) as Raw;
   const have = existing ? parseRoots(existing) : new Set<string>();
   for (const [name, p] of Object.entries(projects)) if (have.has(String((p as Raw).root))) delete projects[name];
-  const chosen = [...new Set(changed.map((f) => ownerOf(projects, f)).filter((n): n is string => n !== null))];
+  const counts = new Map<string, number>();
+  for (const f of sourceFirst(changed)) {
+    const n = ownerOf(projects, f);
+    if (n !== null) counts.set(n, (counts.get(n) ?? 0) + 1);
+  }
+  const chosen = [...counts].sort((a, b) => b[1] - a[1]).map(([n]) => n);
   if (!chosen.length) return null;
   const later = Object.keys(projects).filter((n) => !chosen.includes(n));
   const aside = later.map((n) => String((projects[n] as Raw).root)).filter((r) => r !== ".")
@@ -166,6 +181,11 @@ export function quickDraft(d: Detection, changed: string[], existing = ""): { ya
   const others = Object.values(projects).map((p) => String((p as Raw).root)).filter((r) => r !== ".");
   if (top && others.length) (projects[top] as Raw).owns = ["**", ...others.map((r) => `!/${r}/`)];
   for (const n of later) delete projects[n];
+  for (const n of chosen) {
+    const p = projects[n];
+    delete projects[n];
+    projects[n] = p;
+  }
   // Services only the projects left for later use go with them.
   const used = new Set(Object.values(projects).flatMap((p) => ((p as Raw).services ?? []) as string[]));
   const services = draft.doc.services as Raw | undefined;
@@ -184,11 +204,13 @@ export function quickDraft(d: Detection, changed: string[], existing = ""): { ya
   doc.delete("approved");
   const taken = new Set(Object.keys((doc.toJS() as { projects?: Raw } | null)?.projects ?? {}));
   const names: string[] = [];
+  const neighbours = Object.values(((doc.toJS() as { projects?: Record<string, Raw> } | null)?.projects ?? {}));
   for (const n of chosen) {
     let name = n;
     for (let k = 2; taken.has(name); k++) name = `${n}-${k}`;
     taken.add(name);
     names.push(name);
+    inherit(projects[n] as Raw, name, neighbours);
     doc.setIn(["projects", name], doc.createNode(projects[n]));
   }
   for (const [n, svc] of Object.entries(services ?? {})) {
@@ -209,6 +231,19 @@ export function quickDraft(d: Detection, changed: string[], existing = ""): { ya
     if (!unc.items.length) doc.delete("uncovered");
   }
   return { yaml: doc.toString({ lineWidth: 0 }), names };
+}
+
+/** Where a project's install runs: its install_root, or its own root. */
+const installAt = (p: Raw) => String(p.install_root ?? p.root ?? ".");
+
+/** A drafted project takes the environment of a project already in the file with its language and install root: the
+ * install built there is the one it needs, and a run that works there is a recipe worth keeping. */
+function inherit(p: Raw, name: string, existing: Raw[]): void {
+  const next = existing.find((e) => e.language === p.language && installAt(e) === installAt(p) && e.root !== p.root);
+  if (!next) return;
+  for (const key of ["image", "install", "deps_dir"]) if (next[key] !== undefined) p[key] = next[key];
+  const command = String(next.test_command ?? "");
+  if (/--project[ =]\S+/.test(command)) p.test_command = command.replace(/--project([ =])\S+/, `--project$1${name}`);
 }
 
 /** The project roots a review.yaml has. */

@@ -315,3 +315,25 @@ test("setup stopped by a refused key says so, not that the environment does not 
     "Check the key, then run again.");
   expect(failure.json.reason).toStartWith("setup's model call failed: claude-sonnet-5-5: HTTP 401");
 });
+
+test("a run that passes at the limit is kept, its doubt said", async () => {
+  const repo = initRepo(join(tmp(), "late"));
+  mkdirSync(join(repo, "tests", "slow"), { recursive: true });
+  for (let i = 0; i < 25; i++) writeFileSync(join(repo, "tests", "slow", `test_s${i}.py`), "def test_s():\n    pass\n");
+  writeFileSync(join(repo, "tests", "test_fast.py"), "def test_f():\n    pass\n");
+  commit(repo, "tests");
+  const narrow = TWO.split("  web:")[0]!.replace("root: api", "root: .").replace("{targets}", "tests/test_fast.py {targets}");
+  let ms = 0;
+  const factory = fakeFactory(() => {
+    ms = 10 * MIN + 1; // the run ends at the limit
+    return [junitXml([["tests/test_fast.py", "test_f", "passed", ""]]), "", false];
+  });
+  const model = new ScriptedAgent([[tool("try_project", { yaml: narrow })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"), sessionFactory: factory,
+    timeLimit: { at: 10 * MIN, now: () => ms, minutes: 10 } });
+  // The doubt is not sent back to the agent (no time to answer it): the project is proven and the doubt is kept.
+  expect(r.ok).toBe(true);
+  expect(r.projects.map((p) => p.name)).toEqual(["api"]);
+  expect(r.projects[0]!.gap).toBe("25 of 26 files that look like tests never ran (tests/slow 25)");
+  expect(r.yamlText).toContain("test_command");
+});
