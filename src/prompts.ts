@@ -12,6 +12,7 @@ import { adapterFor } from "./adapters";
 import type { Words } from "./adapters/types";
 import type { Withheld } from "./change";
 import type { ReviewConfig } from "./config";
+import { DIFF_SECTION } from "./util";
 import { KEY_SHOWN, KEY_SHOWN_MEANS, maskPrivateKeys } from "./secrets";
 
 // The reviewer sees its project's whole part of the change: arnx refuses changes over MAX_DIFF_BYTES instead of
@@ -106,6 +107,53 @@ function substitute(template: string, values: Record<string, string | number>): 
 function clip(diff: string): string {
   if (diff.length <= DIFF_LIMIT) return diff;
   return diff.slice(0, DIFF_LIMIT) + "\n[diff truncated; read the changed files with the tools]\n";
+}
+
+/** The path a diff section is about: the new one, or the old one for a deletion. */
+function sectionPath(part: string): string {
+  const unquote = (p: string) => p.replace(/^"|"$/g, "").replace(/^[ab]\//, "");
+  const plus = /^\+\+\+ (.+)$/m.exec(part)?.[1], minus = /^--- (.+)$/m.exec(part)?.[1];
+  const path = [plus, minus].find((p) => !!p && p !== "/dev/null");
+  if (path) return unquote(path);
+  return /^diff --git a\/(.+?) b\/(.+)$/m.exec(part)?.[2] ?? "";
+}
+
+const DOC_FILE = /\.(md|mdx|rst|txt|adoc)$|(^|\/)(docs?|documentation)\//i;
+const TEST_FILE = /(^|\/)(tests?|__tests__|spec|specs)\/|(^|[._-])(test|tests|spec)(?=[._-]|$)|_test\.|\.test\.|\.spec\./i;
+
+/** The diff for a model that reads at most `limit` characters of it. A diff within the limit is returned as it is. A longer
+ * one is put in the order of what the reader needs: the file `first` (the suspect's), the files the test names, other
+ * source, tests, then docs; files that no longer fit are left out and named at the end. The first file is cut to fit
+ * when it alone is longer than the limit. */
+export function orderDiff(diff: string, first = "", limit = 30_000, test = ""): string {
+  if (diff.length <= limit) return diff;
+  const parts = diff.split(DIFF_SECTION).filter(Boolean).map((text) => ({ text, path: sectionPath(text) }));
+  const names = (path: string) => {
+    if (!path || !test) return false;
+    const stem = path.replace(/\.[^./]*$/, "");
+    const base = stem.slice(stem.lastIndexOf("/") + 1);
+    return test.includes(path) || test.includes(stem.replaceAll("/", ".")) || test.includes(stem) ||
+      (base.length >= 4 && new RegExp(`\\b${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(test));
+  };
+  const rank = (path: string) => path === first ? 0 : names(path) ? 1 : DOC_FILE.test(path) ? 4
+    : TEST_FILE.test(path) ? 3 : 2;
+  const ordered = parts.map((p, i) => ({ ...p, i, r: rank(p.path) })).sort((a, b) => a.r - b.r || a.i - b.i);
+  const out: string[] = [], left: string[] = [];
+  let used = 0;
+  for (const p of ordered) {
+    if (used + p.text.length <= limit) {
+      out.push(p.text);
+      used += p.text.length;
+    } else if (!out.length) {
+      out.push(p.text.slice(0, limit));
+      used = limit;
+    } else left.push(p.path || "(unnamed)");
+  }
+  if (!left.length) return out.join("");
+  const shown = left.slice(0, 20).join(", ") + (left.length > 20 ? `, and ${left.length - 20} more` : "");
+  const tail = `[${left.length} more file${left.length === 1 ? "" : "s"} changed: ${shown}; not shown]\n`;
+  const body = out.join("");
+  return (body.endsWith("\n") ? body : body + "\n") + tail;
 }
 
 const wordsOf = (cfg: ReviewConfig) => adapterFor(cfg).words(cfg.runner);
@@ -284,8 +332,8 @@ export class Prompts {
   }
 
   challengeUser(diff: string, testFile: string, testSource: string, testId: string, failure: string,
-                explanation: string, questions: string[] = []): string {
-    const body = substitute(this.t["challenge.task"], { diff: clip(diff).slice(0, 30_000), test_file: testFile,
+                explanation: string, questions: string[] = [], suspectFile = ""): string {
+    const body = substitute(this.t["challenge.task"], { diff: orderDiff(diff, suspectFile, 30_000, testSource), test_file: testFile,
       test_source: testSource.slice(0, 40_000), test_id: testId, failure: failure.slice(0, 4000),
       explanation: explanation || "(none given)" });
     if (!questions.length) return body;

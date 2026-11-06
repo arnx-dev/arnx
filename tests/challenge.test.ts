@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { challengeUser } from "../src/prompts";
+import { challengeUser, orderDiff } from "../src/prompts";
+import { Boundary, maskedJson } from "../src/boundary";
 import { challenge, CONCURRENCY, inPool } from "../src/challenge";
 import { sameTest } from "../src/report";
 import { ModelError } from "../src/errors";
@@ -148,4 +149,55 @@ test("the cases of one test are one test: its parameters are left out, its proje
   expect(sameTest(a)).toBe(sameTest(b));
   expect(sameTest(a)).not.toBe(sameTest(judged("F3", "t.py::test_y[a]", "confirmed", "")));
   expect(sameTest(a)).not.toBe(sameTest({ ...a, project: "other" }));
+});
+
+const section = (path: string, size: number, mark = path) =>
+  `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n+# ${mark}\n+${"x".repeat(size)}\n`;
+
+test("the judge sees the file the suspect is in even when the diff is long", () => {
+  const diff = section("src/a.py", 16_000) + section("src/b.py", 16_000) + section("src/pay.py", 2000);
+  const u = challengeUser(diff, "tests/t.py", "def test_x(): ...", "tests/t.py::test_x", "fail", "e", [], "src/pay.py");
+  expect(u).toContain("# src/pay.py");
+  expect(u).toContain("src/a.py");
+  expect(u).not.toContain("# src/b.py");
+  expect(u).toContain("[1 more file changed: src/b.py; not shown]");
+});
+
+test("a long diff is ordered: the suspect's file, files the test names, other source, tests, then docs", () => {
+  const diff = section("README.md", 100) + section("tests/test_k.py", 100) + section("src/other.py", 100) +
+    section("src/billing.py", 100) + section("src/pay.py", 100);
+  const out = orderDiff(diff, "src/pay.py", 450, "from src.billing import total");
+  const at = (m: string) => out.indexOf(`# ${m}`);
+  expect([at("src/pay.py"), at("src/billing.py")].every((n) => n >= 0)).toBe(true);
+  expect(at("src/pay.py")).toBeLessThan(at("src/billing.py"));
+  expect(out).toContain("more files changed: ");
+  const whole = orderDiff(diff, "src/pay.py", 100_000, "");
+  expect(whole).toBe(diff);
+  const order = orderDiff(diff, "src/pay.py", 700, "from src.billing import total");
+  const seen = ["src/pay.py", "src/billing.py", "src/other.py", "tests/test_k.py", "README.md"].map((m) => order.indexOf(`# ${m}`));
+  expect(seen.slice(0, 3).every((n) => n >= 0)).toBe(true);
+  expect(seen[0]!).toBeLessThan(seen[1]!);
+  expect(seen[1]!).toBeLessThan(seen[2]!);
+  expect(seen[4]!).toBe(-1);
+});
+
+test("a suspect's file longer than the limit is cut, not left out", () => {
+  const out = orderDiff(section("src/a.py", 500) + section("src/big.py", 5000), "src/big.py", 1000);
+  expect(out).toContain("# src/big.py");
+  expect(out).toContain("[1 more file changed: src/a.py; not shown]");
+});
+
+test("a key that straddles the cut is masked before the diff is cut", async () => {
+  const body = ["MIIEvQIBADAN", "BgkqhkiG9w0B", "AQEFAASCBKcw", "ggSjAgEAAoIB", "AQC7VJTUt9Us"].join("");
+  const [dashes, kind] = ["-----", "PRIVATE " + "KEY"];
+  const key = `${dashes}BEGIN ${kind}${dashes}\n${(body + "\n").repeat(30)}${dashes}END ${kind}${dashes}\n`;
+  const diff = `diff --git a/src/k.py b/src/k.py\n--- a/src/k.py\n+++ b/src/k.py\n@@ -1 +1 @@\n+${"y".repeat(29_900)}\n` +
+    key.split("\n").map((l) => `+${l}`).join("\n") + "\n";
+  const inner = new FakeJson([{ verdict: "confirmed", reason: "r" }]);
+  const model = maskedJson(inner, new Boundary());
+  const findings = [f(1)];
+  findings[0]!.suspect = "S1";
+  await challenge(findings, { model, diff, sources: {}, budgetUsd: 1, suspectFile: () => "src/k.py" });
+  expect(inner.calls[0]).not.toContain(body.slice(0, 20));
+  expect(inner.calls[0]).toContain("[private key]");
 });

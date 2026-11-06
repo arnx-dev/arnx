@@ -7,7 +7,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeF
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { Boundary, maskedJson } from "../src/boundary";
-import { CONCURRENCY, inPool } from "../src/challenge";
+import { CONCURRENCY, inPool, judgeUser } from "../src/challenge";
 import { sliceDiff } from "../src/change";
 import { loadReviewFile } from "../src/config";
 import { ArnxError, survivable } from "../src/errors";
@@ -70,13 +70,22 @@ export interface ReviewContext {
 
 interface Built { system: string; user: string }
 
+/** The filter a review's own values make, as the review held it when the second opinion was asked. */
+const boundaries = new WeakMap<ReviewContext, Boundary>();
+function boundaryFor(c: ReviewContext): Boundary {
+  let b = boundaries.get(c);
+  if (!b) boundaries.set(c, b = new Boundary()), b.addDiff(c.diff);
+  return b;
+}
+
 /** The prompts --prompt can replay. A new version is one more entry: it gets the finding and its review, no grade. */
 export const PROMPTS: Record<string, (f: Finding, c: ReviewContext) => Built> = {
   // As src/challenge.ts builds it for each finding.
   current: (f, c) => {
     const p = DEFAULT_PROMPTS;
-    return { system: p.challengeSystem(), user: p.challengeUser(c.diffs[f.project] ?? c.diff, f.file || "(unknown file)",
-      c.sources[f.file ?? ""] ?? "", f.testId, f.message, f.explanation, c.questions) };
+    const suspect = (c.review.suspects ?? []).find((x) => x.id === f.suspect && x.project === f.project)?.file;
+    return { system: p.challengeSystem(), user: judgeUser(p, c, c.diffs[f.project] ?? c.diff, f,
+      c.sources[f.file ?? ""] ?? "", suspect, c.questions, boundaryFor(c)) };
   },
 };
 

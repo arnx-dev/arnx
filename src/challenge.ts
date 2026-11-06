@@ -1,5 +1,6 @@
 // A second model, from another vendor when keys allow, marks each finding confirmed or disputed. Nothing is
 // deleted: a disputed finding stays in the report with the reason.
+import { boundaryOf } from "./boundary";
 import { survivable } from "./errors";
 import { clip, emit, hypId, withRole } from "./events";
 import { type JsonModel, type ModelUse, newUse, tally, type Trace } from "./llm";
@@ -68,9 +69,19 @@ export function shareVerdict(from: Finding, to: Finding): void {
   if (from.verdict !== null) to.sameAs = from.id;
 }
 
+/** What the second opinion is sent for `f`. The diff passes the outgoing filter before it is ordered and cut, so a cut
+ * never splits a masked span; the rest is masked as the call is made. */
+export function judgeUser(p: Prompts, model: object, diff: string, f: Finding, source: string,
+  suspectFile: string | undefined, questions: string[], boundary = boundaryOf(model)): string {
+  return p.challengeUser(boundary ? boundary.mask(diff) : diff, f.file || "(unknown file)", source, f.testId,
+    f.message, f.explanation, questions, suspectFile ?? "");
+}
+
 export async function challenge(findings: Finding[], o: { model: JsonModel; diff: string;
   /** The part of the change a finding's project was given, when it differs from `diff`. */
   diffOf?: (f: Finding) => string;
+  /** The file the finding's suspect is in: its diff is shown first when the change is long. */
+  suspectFile?: (f: Finding) => string | undefined;
   sources: Record<string, string>; budgetUsd: number; questions?: string[]; trace?: Trace;
   progress?: Say;
   /** Findings judged before (a resumed review): not sent again. */
@@ -111,8 +122,8 @@ export async function challenge(findings: Finding[], o: { model: JsonModel; diff
     o.progress?.(`second opinion on ${f.id} (${++started}/${pending.length})`);
     const t0 = performance.now();
     const secs = () => Math.round((performance.now() - t0) / 100) / 10;
-    const user = p.challengeUser(o.diffOf?.(f) ?? o.diff, f.file || "(unknown file)", o.sources[f.file ?? ""] ?? "",
-      f.testId, f.message, f.explanation, questions);
+    const user = judgeUser(p, o.model, o.diffOf?.(f) ?? o.diff, f, o.sources[f.file ?? ""] ?? "",
+      o.suspectFile?.(f), questions);
     let data: Record<string, unknown>, callCost = 0, by: string | undefined;
     try {
       const [reply, cost, usage, unknown, model] = await withRole("challenge",

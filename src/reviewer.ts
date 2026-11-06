@@ -783,6 +783,7 @@ export async function runReview(repo: string, o: { settings: Settings;
         `${f.file ?? f.testId})`);
     };
     const j = await brain.judge(challenged, questions, diffs, { diff: change.diff, sources,
+      suspectFile: (f) => suspects.find((x) => x.id === f.suspect && x.project === f.project)?.file,
       maxQuestions: s.maxQuestions, budgetLeft: left, trace, progress: o.progress, questionProjects,
       // Questions that ask the same thing became one: what referred to them is renumbered.
       merged: (merged, use) => {

@@ -159,6 +159,8 @@ export interface JudgeOptions {
   diff: string;
   /** Generated test files by path. */
   sources: Record<string, string>;
+  /** The file a finding's suspect is in, when it has one: its diff comes first when the change is long. */
+  suspectFile?(f: Finding): string | undefined;
   /** The project each question came from, in the order of `questions`. */
   questionProjects?: string[];
   maxQuestions: number;
