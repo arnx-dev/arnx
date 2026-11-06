@@ -201,7 +201,7 @@ function addopts(text: string): string {
     if (list) {
       out.push(l);
       if (l.includes("]")) break;
-    } else if (/^\s+\S/.test(l) && !/^\s*[\w.-]+\s*[=:]/.test(l)) out.push(l);
+    } else if (/^\s+\S/.test(l)) out.push(l); // an ini value continues on every indented line
     else break;
   }
   return out.join("\n").replace(/["',[\]]/g, " ");

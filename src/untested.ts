@@ -211,17 +211,20 @@ export function dbUntested(owned: string[], read: (path: string) => string | nul
 
 /** Names of test files by convention: `*_test.*`, `*.test.*`, `*.spec.*`, `*Spec.*`, `*Test.*`, `*Tests.*`, `test_*`. */
 const TEST_NAMED = /^test_|(?:[_.]test|[_.]spec|Spec|Tests?)\.[^./]+$/;
-const COMMENT_LINE = /^(?:#|\/\/|\/\*|\*|--|;)/;
+const COMMENT_LINE = /^(?:#|\/\/|\/\*|\*(?:\s|\/|$)|--(?:\s|$))/;
 const IMPORT_LINE = /^(?:import\b|from\s+\S+\s+import\b|use\s|using\s|#include\b|package\b|(?:const|let|var)\b[^=]*=\s*require\()/;
 
 /** Lines the diff adds to each file: not blank, not a comment, not an import. */
 function addedLines(diff: string): Map<string, number> {
   const out = new Map<string, number>();
-  let file: string | null = null;
+  let file: string | null = null, inHunk = false;
   for (const line of diff.split("\n")) {
     if (line.startsWith("diff --git ")) {
       file = null;
-    } else if (line.startsWith("+++ ")) {
+      inHunk = false;
+    } else if (line.startsWith("@@")) {
+      inHunk = true;
+    } else if (!inHunk && line.startsWith("+++ ")) {
       const m = /^\+\+\+ b\/(.+)$/.exec(line);
       file = m ? m[1]!.replace(/\t.*$/, "") : null;
     } else if (file !== null && line.startsWith("+")) {

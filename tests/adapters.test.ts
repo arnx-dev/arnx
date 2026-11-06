@@ -168,3 +168,12 @@ projects:
 `);
   expect(many.projects.map((p) => p.keepParallel)).toEqual([true, undefined]);
 });
+
+test("a continued addopts value is read to its end, whatever options come first", () => {
+  const cmd = "python -m pytest {targets}";
+  expect(serialOf(cmd, { "pytest.ini": "[pytest]\naddopts =\n    --cov=src\n    --junitxml=out.xml\n    -n auto\n" })).toBe("-n0");
+  expect(serialOf(cmd, { "setup.cfg": "[tool:pytest]\naddopts = --cov=src\n    -n auto\n" })).toBe("-n0");
+  // The value ends at the next unindented key or section.
+  expect(serialOf(cmd, { "pytest.ini": "[pytest]\naddopts =\n    --cov=src\nxfail_strict = true\n" })).toBeNull();
+  expect(serialOf(cmd, { "pytest.ini": "[pytest]\naddopts = -ra\n[other]\n  -n 4\n" })).toBeNull();
+});
