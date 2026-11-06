@@ -635,7 +635,12 @@ export function groupsOf(r: Review, of: Finding[] = r.findings): { group: Group 
     members.forEach((f) => seen.add(f.id));
     if (members.length) out.push({ group: g, findings: members });
   }
-  for (const f of of) if (!seen.has(f.id)) out.push({ group: null, findings: [f] });
+  // Cases of one test no group names are one issue, here and so in every count, list and mark built on this.
+  for (const f of of) {
+    if (seen.has(f.id)) continue;
+    const same = out.find((x) => !x.group && sameTest(x.findings[0]!) === sameTest(f));
+    if (same) same.findings.push(f); else out.push({ group: null, findings: [f] });
+  }
   // Most severe first, whatever order the groups were stored in; a finding left ungrouped has no estimate, so it goes
   // with the unestimated groups, never among the minor ones.
   return out.sort((a, b) => bySeverity({ severity: a.group?.severity } as Group, { severity: b.group?.severity } as Group));
@@ -1021,13 +1026,7 @@ export interface SummaryRow { mark: "✗" | "!" | "?" | "·"; ids: string[]; pro
 export function summaryRows(r: Review): SummaryRow[] {
   const isConfirmed = new Set(confirmed(r).map((f) => f.id));
   const unjudged = new Set(notChecked(r).map((f) => f.id));
-  // Cases of one test no one grouped (the grouping needs the second opinion) are one row.
-  const rows: ReturnType<typeof groupsOf> = [];
-  for (const row of groupsOf(r, active(r))) {
-    const same = !row.group && rows.find((x) => !x.group && sameTest(x.findings[0]!) === sameTest(row.findings[0]!));
-    if (same) same.findings.push(...row.findings);
-    else rows.push({ ...row, findings: [...row.findings] });
-  }
+  const rows = groupsOf(r, active(r));
   return rows.map(({ group, findings }) => {
     const mark = findings.some((f) => isConfirmed.has(f.id)) ? "✗" : findings.some((f) => unjudged.has(f.id)) ? "!"
       : findings.some((f) => f.dependsOn && f.verdict !== "disputed") ? "?" : "·";

@@ -120,3 +120,17 @@ test("terminal line, review.md and --json give the same issue and finding counts
   const [, , json] = reviewJson(r, "m", "j");
   expect([json.issues, json.finding_count]).toEqual([2, 3]);
 });
+
+test("the header's issue count equals the issues listed, when a group leaves out cases of one test", () => {
+  // F2 and F3 are cases of one test no group names: they are one issue everywhere.
+  const r = shop({ findings: [f("F1"), f("F2", { testId: "t.py::test_x[a]" }), f("F3", { testId: "t.py::test_x[b]" })],
+    groups: [{ findings: ["F1"], title: DISCOUNT, input: "", actual: "", expected: "", consequence: "" }], questions: [] });
+  const md = render(r);
+  const listed = (md.match(/^### Issue \d+ /gm) ?? []).length;
+  const header = /^(\d+) issues? from (\d+) findings?/m.exec(md)!;
+  expect([listed, +header[1]!, +header[2]!]).toEqual([2, 2, 3]);
+  expect(summary(r, "m")).toContain("2 issues confirmed (3 findings)");
+  const [, , json] = reviewJson(r, "m", "j");
+  expect([json.issues, json.finding_count]).toEqual([2, 3]);
+  expect(md.match(/^Mark:/gm)).toHaveLength(2);
+});
