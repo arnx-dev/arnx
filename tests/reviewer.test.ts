@@ -7,7 +7,7 @@ import { ArnxError, ModelError, SetupRequired } from "../src/errors";
 import { closeOpen, closers } from "../src/interrupt";
 import { LocalBrain } from "../src/localbrain";
 import { exitCode, incomplete, render, summary } from "../src/report";
-import { newReviewId, runReview, suspectOutcomes } from "../src/reviewer";
+import { claimed, newReviewId, runReview, suspectOutcomes } from "../src/reviewer";
 import { defaultSettings, type Settings } from "../src/settings";
 import { PRICES, type Reply } from "../src/llm";
 import type { SessionFactory } from "../src/sandbox";
@@ -170,7 +170,7 @@ test("second-model calls are logged in second-opinion.jsonl; after a timeout the
   const judge = new FakeJson([late, { groups: [] }]);
   const { review, rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent(), challenger: judge,
     sessionFactory: fakeFactory(runs) });
-  expect(judge.calls.join("\n")).not.toContain("::test_scratch"); // no explain call after the timeout
+  expect(judge.calls).toHaveLength(1); // no explain call after the timeout
   expect(review.groups).toEqual([]);
   const lines = readFileSync(join(rdir, "second-opinion.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   expect(lines.map((l) => [l.step, l.outcome])).toEqual([["challenge", "error"], ["explain", "skipped"]]);
@@ -182,7 +182,7 @@ test("an idle or attempt timeout (not worded 'no reply within') also skips the e
   const judge = new FakeJson([late, { groups: [] }]);
   const { rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent(), challenger: judge,
     sessionFactory: fakeFactory(runs) });
-  expect(judge.calls.join("\n")).not.toContain("::test_scratch");
+  expect(judge.calls).toHaveLength(1);
   const lines = readFileSync(join(rdir, "second-opinion.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   expect(lines.map((l) => [l.step, l.outcome])).toEqual([["challenge", "error"], ["explain", "skipped"]]);
 });
@@ -379,6 +379,34 @@ test("same name in a newer file: only the reported file counts", async () => {
 
 test("a failing test with no report at all is unclaimed, and the round is incomplete", async () => {
   const model = new ScriptedAgent([[tool("write_file", { path: GEN, content: SCRATCH })], [text("done")], [text("done")]]);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
+    sessionFactory: fakeFactory(failing("test_add")) });
+  expect(review.findings).toEqual([]);
+  expect(review.unclaimed!.map((u) => u.testId)).toEqual([`${GEN}::test_add`]);
+  expect(review.projectStats[0]!.noReport).toBe(true);
+  expect(exitCode(review)).toBe(2);
+});
+
+const failedAt = (testId: string, fileAttr = "") => ({ testId, fileAttr, name: testId.split("::").at(-1)!, outcome: "failed", message: "m" });
+
+test("a failing result with a classname id is claimed by a report that names its file", () => {
+  const t = failedAt("com.shop.AddTest::testAdd");
+  expect(claimed(t, [{ file: "src/test/java/com/shop/AddTest.java", name: "testAdd" }])).toBe(true);
+  expect(claimed(t, [{ file: "src/test/java/com/shop/AddTest.java", name: "testOther" }])).toBe(false);
+  // with a file attribute the file still has to match
+  expect(claimed(failedAt(`${GEN}::test_add`, GEN), [{ file: "tests/other/test_zz.py", name: "test_add" }])).toBe(false);
+});
+
+test("a class name keeps another class's test from being claimed", () => {
+  const t = failedAt(`${GEN}::TestA::test_x`, GEN);
+  expect(claimed(t, [{ file: GEN, name: "TestB::test_x" }])).toBe(false);
+  expect(claimed(t, [{ file: GEN, name: "TestA::test_x" }])).toBe(true);
+  expect(claimed(t, [{ file: GEN, name: "test_x" }])).toBe(true);
+});
+
+test("a report that claims nothing while a test fails is incomplete; a partial claim is not", async () => {
+  const empty = JSON.stringify({ tests: [], suspected_defects: [], questions: [] });
+  const model = new ScriptedAgent([[tool("write_file", { path: GEN, content: SCRATCH })], [text(empty)], [text(empty)]]);
   const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
     sessionFactory: fakeFactory(failing("test_add")) });
   expect(review.findings).toEqual([]);

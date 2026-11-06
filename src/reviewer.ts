@@ -210,13 +210,20 @@ export function buildChecked(rnd: Round, report: AgentReport, project: string): 
     expects: byId.get(t.testId) ?? byFunc.get(testKey(t.testId)) ?? "" }));
 }
 
-/** Whether the reviewer's last report names this failing test: the same file name and the same test key (a report
- * entry without a file matches any file). With no report, none is named. */
+/** Whether the reviewer's last report names this failing test: the same test key, in the same file name (a report
+ * entry without a file matches any file; a result with no file attribute starts its id with a classname, so only
+ * the key counts), and the same class when both sides give one. With no report, none is named. */
 export function claimed(t: TestResult, named: { file: string; name: string }[] | null): boolean {
-  const file = posix.basename(t.fileAttr || t.testId.split("::")[0]!);
   const key = testKey(t.testId);
-  return !!named?.some((n) => testKey(n.file ? `${n.file}::${n.name}` : n.name) === key &&
-    (!n.file || posix.basename(n.file) === file));
+  const file = t.fileAttr ? posix.basename(t.fileAttr) : null;
+  const classOf = (parts: string[]) => parts.length >= 2 ? parts.at(-2) : undefined;
+  const mine = classOf(t.testId.split("::").slice(1));
+  return !!named?.some((n) => {
+    if (testKey(n.name) !== key) return false;
+    if (n.file && file !== null && posix.basename(n.file) !== file) return false;
+    const theirs = classOf(n.name.split("::"));
+    return !(mine && theirs && mine !== theirs);
+  });
 }
 
 export function buildFindings(rnd: Round, report: AgentReport): Finding[] {
@@ -589,7 +596,8 @@ export async function runReview(repo: string, o: { settings: Settings;
       if (!rnd.env || rnd.env.state === "fallback") soFar.projectsReviewed += 1;
       soFar.testsWritten += c.findings.length + c.flaky.length + c.errors.length + c.passed.length;
       soFar.passed += c.passed.length;
-      soFar.findings += c.findings.length;
+      const named0 = reportedTests([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]);
+      soFar.findings += c.findings.filter((t) => claimed(t, named0)).length;
       soFar.flaky += c.flaky.length;
       return { i, rnd, hunted, second: projSecond, extras: projExtras, resumed: kept };
     };
@@ -719,7 +727,9 @@ export async function runReview(repo: string, o: { settings: Settings;
           ...(atCheckedOut ? {} : { old: true as const }) } } : {}),
         // A round with no report and no test that ran is not a finished one (tests that ran speak for themselves).
         // Failing tests with no report to claim them are unreported as well.
-        ...((tests === 0 || c.findings.length > 0) && !rnd.env && !hasReport([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]) ? { noReport: true } : {}) });
+        // A report that claims no test while one fails is no report of that test either.
+        ...(!rnd.env && ((tests === 0 && !hasReport([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText])) ||
+          (c.findings.length > 0 && reportedTests([...rnd.agent.earlierTexts ?? [], rnd.agent.finalText]) === null)) ? { noReport: true } : {}) });
       agentCost += rnd.agent.costUsd;
       Object.assign(agentUse, addUsage(agentUse, rnd.agent.usage));
       agentUse.calls += rnd.agent.calls;
