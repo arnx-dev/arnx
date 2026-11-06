@@ -112,7 +112,12 @@ const MAX_BUFFER = 1 << 30;
 export interface Limits { cpus: string; memory: string; pids: number; tmp: string }
 export const DEFAULT_LIMITS: Limits = { cpus: "2", memory: "4g", pids: 512, tmp: "1g" };
 
-export interface RunResult { exitCode: number | null; output: string; timedOut: boolean; seconds: number }
+export interface RunResult { exitCode: number | null; output: string; timedOut: boolean; seconds: number;
+  /** The output was longer than OUTPUT_LIMIT: only its end is here. */
+  truncated?: boolean }
+/** The end of `text` that fits OUTPUT_LIMIT, and whether anything was cut. */
+const kept = (text: string): { output: string; truncated?: true } =>
+  text.length > OUTPUT_LIMIT ? { output: text.slice(-OUTPUT_LIMIT), truncated: true } : { output: text };
 export interface Runner {
   /** Sessions answer later, and a run then does not hold the process; only a test's fake answers at once. */
   run(command: string, timeout: number): RunResult | Promise<RunResult>;
@@ -758,8 +763,7 @@ export class Session implements Runner {
       stepLog({ step: "container", project: this.cfg.name, ok: r.status === 0, secs: secsSince(t0) });
       if (r.status !== 0) {
         this.dropBox();
-        return { exitCode: r.status, output: (r.stdout + r.stderr).slice(-OUTPUT_LIMIT), timedOut: false,
-          seconds: seconds() };
+        return { exitCode: r.status, ...kept(r.stdout + r.stderr), timedOut: false, seconds: seconds() };
       }
     }
     const box = this.box!;
@@ -818,9 +822,11 @@ export class Session implements Runner {
         // Still listed meanwhile: a signal now removes the container this kill may not reach.
         await onTimeout();
         if (this.closed) return await this.closedAnswer();
-        return { exitCode: null, output: r.stdout.slice(-OUTPUT_LIMIT) + "\n[timed out]", timedOut: true, seconds };
+        const cut = kept(r.stdout);
+        return { exitCode: null, output: cut.output + "\n[timed out]", timedOut: true, seconds,
+          ...(cut.truncated ? { truncated: true } : {}) };
       }
-      return { exitCode: r.status, output: (r.stdout + r.stderr).slice(-OUTPUT_LIMIT), timedOut: false, seconds };
+      return { exitCode: r.status, ...kept(r.stdout + r.stderr), timedOut: false, seconds };
     } finally {
       this.running.delete(entry!);
     }

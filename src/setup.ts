@@ -44,7 +44,7 @@ import { copyManifests, dockerExec, dockerSteps, envKey, envTag, type ExecFactor
 import type { ScipIndex } from "./scip";
 import { EXEC, SetupExec, type TriedEnv } from "./setupexec";
 import { loadSettings, refString, type Settings, settingsPath, setupRef } from "./settings";
-import { runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
+import { QUICK_TYPECHECK_TIMEOUT, runTypecheck, TYPECHECK_TIMEOUT } from "./typecheck";
 import { SOURCE } from "./untested";
 import { BROWSER_TESTS, type BrowserSuite, browserSuites, uiFramework, WEB_UI } from "./browser";
 import { otherLanguageOf } from "./languages";
@@ -58,6 +58,8 @@ import { collect, DOME, dockerSession, isKeptPath, ownTestsInWriteDir, ownTestsP
 import { type TestsDirChoice, testsDirFor } from "./testsdir";
 
 export const SUITE_TIMEOUT = 1800;
+/** The one-line test's run after the suite (probe): a handful of seconds in a working environment. */
+export const PROBE_TIMEOUT = 300;
 export const OUTPUT_TAIL = 6000;
 
 /** What a suite's failures were: tests kept by `arnx accept` that fail as pinned, failures that block, failures the
@@ -71,6 +73,8 @@ export interface SuiteCounts { acceptedFailing: number; unexpected: string[]; ba
   all: TestResult[];
   /** What the failures point to (diagnose, the run apart, JEV), when the suite's failures were looked at. */
   hints?: Hint[];
+  /** The type check did not run, timed out or failed without reporting: information, never a failed proof. */
+  typecheckProblem?: string;
   /** A quick look's run: the test files the runner listed, all of which the whole suite would run. */
   listed?: string[] }
 
@@ -328,7 +332,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     // A project with no tests of its own has no suite to run: arnx's one-line test, which reviews depend on anyway,
     // proves the environment instead.
     if (!targets.length && !all?.length && cfg.language !== "rust" && !hasOwnTests(cfg, snap)) {
-      return await noOwnTests(session, snap, cfg, all === null, tailOf);
+      return await noOwnTests(session, snap, cfg, all === null, tailOf, quick);
     }
     let [ok, verdict, counts] = suiteOk(all, cfg, accepted, acceptedTestsDir, baseline);
     // Tests failing outside the baseline run once more, by file: one that passes then is flaky, not a new failure.
@@ -397,16 +401,10 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     const [probed, tail, ignored] = await probe(session, snap, cfg);
     if (ignored) return [false, `${summary}; but ${ignored}`, tailOf(tail), skips, failing, "", counts] as Out;
     if (probed && cfg.typecheck) {
-      // The type check runs once the suite runs: type errors are information, a command that cannot run is not.
-      const t = await runTypecheck(session, cfg);
-      if (t.status === "failed" || t.status === "timed-out") {
-        return [false, `${summary}; but the type check (typecheck) ${t.status === "failed" ? "failed without " +
-          "reporting a type error: it could not start, or its output is not tsc's" : `timed out after ` +
-          `${TYPECHECK_TIMEOUT} s`}`, tailOf(t.output), skips, failing, "", counts] as Out;
-      }
-      const errors = t.errors.length;
-      return [true, `${summary}; type check: ${errors ? `${errors} type error${errors === 1 ? "" : "s"}`
-        : "no type errors"}`, tailOf(result.output), skips, failing, said, counts] as Out;
+      // The type check runs once the suite runs. It is information: whatever it says, the tests ran.
+      const t = await typecheckNote(session, cfg, quick);
+      const kept = t.problem ? { ...counts, typecheckProblem: t.problem } : counts;
+      return [true, `${summary}${t.note}`, tailOf(t.problem ? t.output : result.output), skips, failing, said, kept] as Out;
     }
     return probed ? [true, summary, tailOf(result.output), skips, failing, said, counts] as Out
       : [false, `${summary}; but a one-line test placed in ${writeDirOf(cfg)}/ was not run: the runner leaves ` +
@@ -417,9 +415,35 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
   return [ok, said(summary), tail, skips.map(said), failing, said(hints), counts];
 }
 
+/** The type check's part of a proof's summary ("; type check: ..."): what it found, or why it gave nothing. It never
+ * fails the proof (information, like a review's). `problem`: it did not run, timed out, or failed without reporting
+ * a type error; `output`: the end of what it printed. */
+export async function typecheckNote(session: Runner, cfg: ReviewConfig, quick = false)
+  : Promise<{ note: string; problem?: string; output: string }> {
+  const timeout = quick ? QUICK_TYPECHECK_TIMEOUT : TYPECHECK_TIMEOUT;
+  let t;
+  try {
+    t = await runTypecheck(session, cfg, timeout);
+  } catch (e) {
+    if (!(e instanceof OutOfTime)) throw e;
+    return { note: "; type check: not run, out of time", problem: "not run, out of time", output: "" };
+  }
+  if (t.status === "failed") {
+    const problem = "failed without reporting a type error (it could not start, or its output is not tsc's)";
+    return { note: `; type check: ${problem}`, problem, output: t.output };
+  }
+  if (t.status === "timed-out") {
+    const problem = `timed out after ${timeout} s`;
+    return { note: `; type check: ${problem}`, problem, output: t.output };
+  }
+  const errors = t.errors.length;
+  return { note: `; type check: ${errors ? plural(errors, "type error") : "no type errors"}`, output: "" };
+}
+
 /** runSuite's answer for a project with no tests of its own: its environment proven by arnx's one-line test (and the
  * type check), or why that test did not run. `silent`: the whole-suite run wrote no report. */
-async function noOwnTests(session: Runner, snap: string, cfg: ReviewConfig, silent: boolean, tailOf: (s: string) => string)
+async function noOwnTests(session: Runner, snap: string, cfg: ReviewConfig, silent: boolean, tailOf: (s: string) => string,
+                          quick = false)
   : Promise<[boolean, string, string, string[], string[], string, SuiteCounts]> {
   const none = noCounts();
   const [probed, tail, ignored] = await probe(session, snap, cfg);
@@ -432,15 +456,9 @@ async function noOwnTests(session: Runner, snap: string, cfg: ReviewConfig, sile
   }
   if (ignored) return [false, `${NO_OWN_TESTS}; but ${ignored}`, tailOf(tail), [], [], "", none];
   if (cfg.typecheck) {
-    const t = await runTypecheck(session, cfg);
-    if (t.status === "failed" || t.status === "timed-out") {
-      return [false, `${NO_OWN_TESTS}; but the type check (typecheck) ${t.status === "failed" ? "failed without " +
-        "reporting a type error: it could not start, or its output is not tsc's" : `timed out after ` +
-        `${TYPECHECK_TIMEOUT} s`}`, tailOf(t.output), [], [], "", none];
-    }
-    const errors = t.errors.length;
-    return [true, `${NO_OWN_TESTS}; type check: ${errors ? plural(errors, "type error") : "no type errors"}`,
-      tailOf(tail), [], [], "", none];
+    const t = await typecheckNote(session, cfg, quick);
+    return [true, `${NO_OWN_TESTS}${t.note}`, tailOf(t.problem ? t.output : tail), [], [],  "",
+      t.problem ? { ...none, typecheckProblem: t.problem } : none];
   }
   return [true, NO_OWN_TESTS, tailOf(tail), [], [], "", none];
 }
@@ -475,7 +493,7 @@ async function askModel(model: FailureModel, results: TestResult[] | null, cfg: 
  * enough; the probes are removed afterwards. The probes are the run's only targets, so it also tells whether
  * test_command runs only {targets} (see ignoredTargets). [picked up, end of the output, why it runs more] */
 export async function probe(session: Pick<Runner, "run">, snap: string, cfg: ReviewConfig): Promise<[boolean, string, string]> {
-  const p = await probeRun(session, snap, cfg, writeDirOf(cfg), "probe.xml", SUITE_TIMEOUT);
+  const p = await probeRun(session, snap, cfg, writeDirOf(cfg), "probe.xml", PROBE_TIMEOUT);
   return [p.seen, maskPrivateKeys(p.result.output).slice(-OUTPUT_TAIL), p.seen ? ignoredTargets(p.results, p.files, cfg) : ""];
 }
 

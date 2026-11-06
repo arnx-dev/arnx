@@ -11,7 +11,7 @@ import { ciTypeChecker, detect, typeCheckable } from "../src/detect";
 import { EVENTS_FILE, type TraceEvent } from "../src/events";
 import { exitCode, load, render, summary } from "../src/report";
 import { runReview } from "../src/reviewer";
-import type { RunResult, Runner, SessionFactory } from "../src/sandbox";
+import { OutOfTime, type RunResult, type Runner, type SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { runSetup, runSuite } from "../src/setup";
 import { pythonTypeGap, typecheckGaps } from "../src/setupview";
@@ -125,6 +125,8 @@ class FakeTs implements Runner {
       const [output, exitCode] = tsc(this.snap, this.workdir);
       return { exitCode, output, timedOut: false, seconds: 1.5 };
     }
+    if (command.startsWith("no-time-tsc")) throw new OutOfTime(10);
+    if (command.startsWith("slow-tsc")) return { exitCode: null, output: "[timed out]", timedOut: true, seconds: 600 };
     if (command.startsWith("missing-tsc")) {
       return { exitCode: 127, output: "sh: 1: missing-tsc: not found", timedOut: false, seconds: 0.1 };
     }
@@ -339,11 +341,28 @@ ${typecheck ? `    typecheck: ${typecheck}\n` : ""}uncovered: []
       writeFileSync(join(snap, "web", "src", "a.ts"), "export const n: number = 'x'; // TYPE-ERROR\n");
       const [ok, summary] = await runSuite(cfg(TSC), snap, join(tmp(), "b.log"), { sessionFactory: sandbox() });
       expect([ok, summary]).toEqual([true, "1 passed; type check: 1 type error"]);
+      // A command that cannot run is information too: the project's tests ran, so it stands.
       const [bad, why, tail] = await runSuite(cfg("missing-tsc"), snap, join(tmp(), "b.log"),
         { sessionFactory: sandbox() });
-      expect([bad, why, tail]).toEqual([false, "1 passed; but the type check (typecheck) failed without reporting a " +
-        "type error: it could not start, or its output is not tsc's", "sh: 1: missing-tsc: not found"]);
+      expect([bad, why, tail]).toEqual([true, "1 passed; type check: failed without reporting a type error " +
+        "(it could not start, or its output is not tsc's)", "sh: 1: missing-tsc: not found"]);
     });
+
+  test("a type check with no time left does not stop a project whose tests ran", async () => {
+    const snap = join(tmp(), "snap");
+    mkdirSync(join(snap, "web", "src"), { recursive: true });
+    writeFileSync(join(snap, "web", "src", "a.ts"), "export const n = 1;\n");
+    const file = parseReviewFile(web("no-time-tsc")).projects[0]!;
+    const [ok, summary] = await runSuite(file, snap, join(tmp(), "b.log"), { sessionFactory: sandbox() });
+    expect(ok).toBe(true);
+    expect(summary).toContain("not run");
+    expect(summary).not.toContain("failed without reporting");
+    // A type check that timed out stands too.
+    const [slow, why] = await runSuite(parseReviewFile(web("slow-tsc")).projects[0]!, snap, join(tmp(), "b.log"),
+      { sessionFactory: sandbox() });
+    expect(slow).toBe(true);
+    expect(why).toContain("timed out");
+  });
 
   test("try_project tells the agent to add typecheck to a TypeScript project that can be type checked", async () => {
     const m = new ScriptedAgent([
@@ -450,7 +469,7 @@ test("a project with no type check that routing passes over is named as having n
     "other projects, and `api` reviewed those files.");
 });
 
-test("a web UI app whose tests run is no lost cause: a type check that cannot run goes back to the agent", async () => {
+test("a web UI app whose tests run is no lost cause: a type check that cannot run does not stop it", async () => {
   const repo = initRepo(join(tmp(), "ui"));
   mkdirSync(join(repo, "src"), { recursive: true });
   writeFileSync(join(repo, "package.json"), JSON.stringify({ dependencies: { "react-dom": "18.3.1" }, devDependencies: { vitest: "2" } }));
@@ -464,9 +483,9 @@ test("a web UI app whose tests run is no lost cause: a type check that cannot ru
   await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: sandbox() });
   const said = (call: number) => (m.calls[call]!.messages.at(-1)!.content as Record<string, unknown>[])
     .map((r) => String(r.content)).join("\n");
-  expect(said(1)).toContain("the type check (typecheck) failed without reporting");
+  expect(said(1)).toContain("type check: failed without reporting");
+  expect(said(1)).not.toContain("does not run yet");
   expect(said(1)).not.toContain("web UI");
-  expect(said(2)).toContain("the suite of ui runs");
 });
 
 describe("python type checks", () => {

@@ -6,9 +6,11 @@
 import { posix } from "node:path";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
-import type { Runner } from "./sandbox";
+import { OutOfTime, type Runner } from "./sandbox";
 
 export const TYPECHECK_TIMEOUT = 600;
+/** A quick setup's type check: it has minutes, not an hour. */
+export const QUICK_TYPECHECK_TIMEOUT = 180;
 /** Most errors review.json lists per project (`errors` always counts them all). */
 export const DIAGNOSTICS_KEPT = 100;
 const OUTPUT_KEPT = 2000;
@@ -84,17 +86,17 @@ export function parseTsc(output: string, workdir: string): TscError[] {
   return out;
 }
 
-/** The project's type check, once, in `session` on its snapshot as it is now. Never throws: a Docker error is a
- * failed check. */
-export async function runTypecheck(session: Runner, cfg: ReviewConfig): Promise<TypeCheckRun> {
+/** The project's type check, once, in `session` on its snapshot as it is now. A Docker error is a failed check; no
+ * time left (OutOfTime) is not a result: the check never started, and it is thrown. */
+export async function runTypecheck(session: Runner, cfg: ReviewConfig, timeout = TYPECHECK_TIMEOUT): Promise<TypeCheckRun> {
   try {
-    const r = await session.run(cfg.typecheck!, TYPECHECK_TIMEOUT);
+    const r = await session.run(cfg.typecheck!, timeout);
     const errors = r.timedOut ? [] : parseTsc(r.output, cfg.workdir);
     const status: TypeCheckStatus = r.timedOut ? "timed-out" : errors.length ? "errors"
       : r.exitCode === 0 ? "clean" : "failed";
     return { status, errors, output: r.output, exitCode: r.exitCode, timedOut: r.timedOut, seconds: r.seconds };
   } catch (e) {
-    if (!(e instanceof ArnxError)) throw e;
+    if (e instanceof OutOfTime || !(e instanceof ArnxError)) throw e;
     return { status: "failed", errors: [], output: e.message, exitCode: null, timedOut: false, seconds: 0 };
   }
 }

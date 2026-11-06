@@ -308,7 +308,7 @@ export const python: Adapter = {
     ` --junitxml=${shQuote(reportPath)}`,
   parseReport: (text) => parseJunit(text, (f) => f.endsWith(".py") ? f.slice(0, -3).replaceAll("/", ".") : ""),
   listCommand: (testCommand, targets) => testCommand.replaceAll("{targets}", targets.map(shQuote).join(" ")) +
-    " -p no:cacheprovider --continue-on-collection-errors --collect-only -q",
+    " -p no:cacheprovider --continue-on-collection-errors --collect-only -qq",
   parseList: (output, _listed, exitCode) => parsePytestList(output, exitCode),
   reportSetup: (snapshot) => {
     const dir = join(snapshot, ".arnx-run", HOOK_DIR), path = join(dir, "sitecustomize.py");

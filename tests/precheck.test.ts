@@ -7,7 +7,7 @@ import { parsePytestList } from "../src/adapters/python";
 import { parseNextestList, rust } from "../src/adapters/rust";
 import { typescript } from "../src/adapters/typescript";
 import { parseReviewFile } from "../src/config";
-import { probeText, sampleOf } from "../src/precheck";
+import { listTests, probeText, sampleOf } from "../src/precheck";
 import type { RunResult, Runner, SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { runSetup } from "../src/setup";
@@ -26,7 +26,7 @@ const FILES = ["tests/test_a.py", "tests/test_b.py", "tests/test_c.py", "tests/t
 const PROBE = "tests/arnx_generated/test_arnx_probe.py";
 
 /** An answer to one command: its exit code, its output, and the JUnit report it writes (if any). */
-interface Answer { exit?: number; output?: string; xml?: string }
+interface Answer { exit?: number; output?: string; xml?: string; truncated?: boolean }
 
 /** A Docker session whose commands answer by what they are: a listing (`--collect-only`), or a run. */
 class Session implements Runner {
@@ -40,7 +40,8 @@ class Session implements Runner {
       mkdirSync(dirname(join(this.snap, m[1]!)), { recursive: true });
       writeFileSync(join(this.snap, m[1]!), a.xml);
     }
-    return { exitCode: a.exit ?? 0, output: a.output ?? "", timedOut: false, seconds: 0.1 };
+    return { exitCode: a.exit ?? 0, output: a.output ?? "", timedOut: false, seconds: 0.1,
+      ...(a.truncated ? { truncated: true } : {}) };
   }
 }
 
@@ -269,4 +270,42 @@ test("with tests_dir from the runner's configuration, the listed one-line test a
     expect(c).toContain(probe);
     expect(c).not.toContain("tests/arnx_generated/");
   }
+});
+
+test("the listing asks pytest for a count per file", async () => {
+  const { sessions } = await setup(answers({ output: listed }), 1);
+  expect(sessions[0]!.commands[0]).toContain("--collect-only -qq");
+});
+
+test("a listing cut by the output limit is not read", async () => {
+  const cut = FILES.slice(0, 2).map((f) => `${f}::test_x`).join("\n");
+  expect(await listTests(new Session("/nonexistent", () => ({ output: cut, truncated: true })), tmp(),
+    parseReviewFile(YAML).projects[0]!, [])).toBeNull();
+  const { r, model, sessions } = await setup(answers({ output: cut, truncated: true }), 1);
+  expect(sessions[0]!.commands.some((c) => c.includes("--collect-only"))).toBe(true);
+  expect(result(model, 1)).not.toContain("never ran");
+  expect(result(model, 1)).not.toContain("listing the tests");
+  expect(r.ok).toBe(true);
+});
+
+test("a project with hundreds of test files lists them all", async () => {
+  const many = Array.from({ length: 300 }, (_, i) => `tests/test_f${i}.py: 1`).join("\n");
+  const { listing } = (await listTests(new Session("/nonexistent", () => ({ output: many })), tmp(),
+    parseReviewFile(YAML).projects[0]!, []))!;
+  expect(listing.files.length).toBe(300);
+  expect(listing.tests).toBe(300);
+});
+
+test("files that all fail to load are named, not called no tests", async () => {
+  const output = "______________________ ERROR collecting tests/test_e.py ______________________\n" +
+    "E   ModuleNotFoundError: No module named 'redis'\n" +
+    "ERROR tests/test_e.py\nERROR tests/test_d.py\n2 errors in 0.05s";
+  const { model } = await setup(answers({ exit: 1, output }), 1);
+  expect(result(model, 1)).toContain("2 test files do not load (tests/test_d.py, tests/test_e.py)");
+  expect(result(model, 1)).not.toContain("found none");
+});
+
+test("a runner that is not installed says so", async () => {
+  const { model } = await setup(answers({ exit: 127, output: "sh: 1: python: not found" }), 1);
+  expect(result(model, 1)).toContain("is not installed");
 });

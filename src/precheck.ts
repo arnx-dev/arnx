@@ -42,7 +42,8 @@ export async function listTests(session: Runner, snap: string, cfg: ReviewConfig
   mkdirSync(dirname(path), { recursive: true });
   adapter.reportSetup?.(snap, cfg.runner);
   const result = await session.run(command, LIST_TIMEOUT);
-  if (result.timedOut) return null;
+  // A listing cut by the output limit would count only its end: no listing is better than a false one.
+  if (result.timedOut || result.truncated) return null;
   const listed = existsSync(path) ? readFileSync(path, "utf8") : null;
   rmSync(path, { force: true });
   const listing = adapter.parseList(result.output, listed, result.exitCode, cfg.runner, cfg.workdir);
@@ -52,15 +53,19 @@ export async function listTests(session: Runner, snap: string, cfg: ReviewConfig
 /** Why a listing stops the try ("" when it does not). `known`: files recorded as not loading, which do not stop it. */
 export function listingProblem(listing: Listing, exitCode: number | null, known: (file: string) => boolean = () => false): string {
   if (listing.failed) {
+    if (exitCode === 127) return "listing the tests stopped: the runner is not installed (exit 127); install it in install";
     return `listing the tests stopped with an error (exit ${exitCode ?? "?"}) before any test ran: the runner does not ` +
       "start, or its configuration does not load; the end of the output says why";
   }
-  if (!(listing.tests ?? listing.files.length)) return "listing the tests found none: test_command collects no tests";
   const broken = listing.broken.filter((f) => !known(f));
   const n = broken.length;
   if (n) {
     return `listing the tests: ${plural(n, "test file")} do${n === 1 ? "es" : ""} not load (${few(broken)}), ` +
       "so none of their tests would run";
+  }
+  // Files that do not load are named above, never called "none".
+  if (!(listing.tests ?? listing.files.length) && !listing.broken.length) {
+    return "listing the tests found none: test_command collects no tests";
   }
   return "";
 }
