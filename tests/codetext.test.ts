@@ -95,7 +95,11 @@ test("code inside strings is code: names in interpolation reach the result", () 
 });
 
 // Crafted text: every shape that could make a scanner back up or stack. Linear means 4x the text takes about 4x the
-// time: with sizes 4, 8 and 16 MB (best of three), 16 MB must take under 8x what 4 MB took. Quadratic work takes 16x.
+// time: with sizes 0.5 to 8 MB (best of three), 8 MB must take under 8x what 2 MB took. Quadratic work takes 16x.
+// codeText is synchronous, so nothing can stop a call that runs away, and a test that only checks afterwards would sit
+// at full CPU for minutes (and print nothing: the report is buffered) for the one regression it exists to catch. So the
+// sizes go up from small, and a shape whose call is past what linear work takes at that size stops there, failed,
+// before a larger input is built or scanned.
 const MB = 1 << 20;
 const shapes: [string, string, (bytes: number) => string][] = [
   ["a long base64 run in a string", "a.py", (b) => 'KEY = "' + "QUJDREVGR0hJSktMTU5PUA==".repeat(b / 24) + '"\nx = 1\n'],
@@ -111,9 +115,12 @@ const shapes: [string, string, (bytes: number) => string][] = [
   ["f-string braces never closed", "a.py", (b) => 'f"{'.repeat(b / 3)],
   ["interpolation openers", "a.kt", (b) => '"${$x{{'.repeat(b / 7)],
 ];
-const best = (text: string, path: string) => {
+const SIZES = [0.5, 1, 2, 4, 8];
+/** What a call at `mb` may take: linear work needs well under half of this at any size (8 MB takes about a second). */
+const tooSlow = (mb: number) => 400 + 500 * mb;
+const best = (text: string, path: string, mb: number) => {
   let ms = Infinity;
-  for (let k = 0; k < 3; k++) {
+  for (let k = 0; k < 3 && (k === 0 || ms < tooSlow(mb)); k++) {
     const t = performance.now();
     codeText(text, path);
     ms = Math.min(ms, performance.now() - t);
@@ -122,9 +129,14 @@ const best = (text: string, path: string) => {
 };
 for (const [name, path, make] of shapes) {
   test(`linear on crafted input: ${name}`, () => {
-    const times = [4, 8, 16].map((mb) => best(make(Math.floor(mb * MB)), path));
-    console.log(`${name}: 4/8/16 MB in ${times.map((t) => Math.round(t)).join("/")} ms`);
+    const times: number[] = [];
+    for (const mb of SIZES) {
+      times.push(best(make(Math.floor(mb * MB)), path, mb));
+      if (times.at(-1)! >= tooSlow(mb)) break;
+    }
+    console.log(`${name}: ${SIZES.join("/")} MB in ${times.map((t) => Math.round(t)).join("/")} ms`);
+    expect(times.length).toBe(SIZES.length);
     // A floor keeps a few milliseconds of noise from reading as growth.
-    expect(times[2]!).toBeLessThan(8 * Math.max(times[0]!, 40));
+    expect(times[4]!).toBeLessThan(8 * Math.max(times[2]!, 40));
   }, 120000);
 }
