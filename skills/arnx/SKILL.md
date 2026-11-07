@@ -60,7 +60,7 @@ Report every finding (id, status, one line on the bug; groups from `groups` once
 `cost_usd` and the path to `review.md`. For a `fix_proof` entry with `before_status` `"fixed"`, say "`<test_id>` fails
 before the change and passes after: a fix or new behaviour"; no other entry is one. Read a `not-checked` finding before
 acting, never fix it as if confirmed. `status` `partly-covered` or `not-tested`: finding nothing says nothing about
-those files (exit stays 0). Tell the user to run `arnx triage <id>`, `arnx accept <id>`, and tell you. Stop: change no code.
+those files (does not set the exit code). Tell the user to run `arnx triage <id>`, `arnx accept <id>`, and tell you. Stop: change no code.
 
 While they triage, help when asked: explain a finding, read the code behind it, say what you think. The marks and
 answers are theirs: do not write them, and do not treat a mark you suggested as made.

@@ -225,7 +225,7 @@ A summary of the review, as the terminal shows it. The whole review is `review_j
 | `source_files` | number | Optional. Unique changed source files in the change; absent in older reviews. |
 | `issues` | number | Entries in `findings`: the summary's numbered rows. |
 | `finding_count` | number | The findings in all those rows (the `ids` added up), as the summary and review.md count them. Unreported failing tests are not findings. |
-| `findings` | array | One entry per issue the change may have caused, as the summary groups and orders them (most severe first): `{ ids, state, confirmed, regression, projects, title, severity }`. `ids`: the findings (`F1`) with this cause; `state`: their verdicts in words (`confirmed`, `disputed`, `not challenged`, `depends on Q1`, or counts such as `1 confirmed, 1 disputed`); `confirmed`: one of them is confirmed (worth a look, exit stays 0); `regression`: one passed before the change; `title`: the problem in a few words; `severity`: `high`, `medium`, `low` or `null` (the grouping model's estimate). |
+| `findings` | array | One entry per issue the change may have caused, as the summary groups and orders them (most severe first): `{ ids, state, confirmed, regression, projects, title, severity }` (plus `fallback: true` when the project was tested on another commit's image). `ids`: the findings (`F1`) with this cause; `state`: their verdicts in words (`confirmed`, `disputed`, `not challenged`, `depends on Q1`, or counts such as `1 confirmed, 1 disputed`); `confirmed`: one of them is confirmed (worth a look; does not set the exit code); `regression`: one passed before the change; `title`: the problem in a few words; `severity`: `high`, `medium`, `low` or `null` (the grouping model's estimate). |
 | `pre_existing` | array of strings | Findings that fail with the same message before the change; never the exit code. |
 | `questions` | array | `{ id, question, project, optional }`: `Q1` first. Only the user answers them. `optional`: no issue waits on it (a test another finding proves already settles the issue); an answer still lets `arnx accept` write a test. |
 | `tests_written` | number | Tests the reviewer wrote. |
@@ -240,7 +240,7 @@ A summary of the review, as the terminal shows it. The whole review is `review_j
 
 | `result` | Exit | When |
 |---|---|---|
-| `findings` | 0, 1 or 2 | A confirmed finding (exit 0, or 2 when the review did not finish) or a not-checked one (exit 1). |
+| `findings` | 0, 1 or 2 | A confirmed finding (exit 0, or 2 when the review did not finish; also when every confirmed finding ran on another commit's image, `fallback`) or a not-checked one (exit 1). |
 | `incomplete` | 2 | No confirmed or not-checked finding, and the review did not finish (`problems` says why). |
 | `clean` | 0 | No confirmed or not-checked finding (disputed ones do not count), and the review finished. |
 
