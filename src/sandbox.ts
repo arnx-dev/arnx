@@ -171,7 +171,14 @@ export interface Runner {
   /** Set when sandbox-only files are placed for each run (withSandboxFiles): a report's text with what it quotes of
    * them taken out, for a report the runner wrote outside arnx's own report folder. */
   clean?(report: string): string;
+  /** One run that keeps nothing it prints, for the rerun with a real key (realkey.ts): `src` mounted at /src, no network
+   * whatever the services, its output never read. Absent where runs reach a copy of the code in the image (baked.ts). */
+  sealed?(command: string, timeout: number, src: string): SealedRun | Promise<SealedRun>;
 }
+/** All a sealed run gives back: how it ended. */
+export interface SealedRun { exitCode: number | null; timedOut: boolean }
+/** Throwaway copies that hold a real key while a sealed run reads them (realkey.ts): removed on any exit, an interrupt too. */
+export const realKeyCopies = new Set<string>();
 /** Runs `body` with a ready session for the config's environment and tears it down afterwards. `envFrom`: the
  * snapshot whose manifests pick the image, when it is not `snap` (the before/after check runs the code before the
  * change in the change's image); `key`: that image's key, taken before runs could change those manifests (cargo
@@ -592,6 +599,15 @@ export function cleanupLiveSessions(): void {
       failed.push(e);
     }
   }
+  // After the sessions: no run reads a copy any more.
+  for (const dir of [...realKeyCopies]) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      realKeyCopies.delete(dir);
+    } catch (e) {
+      failed.push(e);
+    }
+  }
   const { left } = leaving;
   if (left.length) {
     try {
@@ -778,6 +794,45 @@ export class Session implements Runner {
     return this.runIn(command, timeout, adapterFor(this.cfg).keepBuild?.emptied ?? [], "exec");
   }
 
+  /** One run in a container of its own with `src` at /src, `--network none` whatever the services, and stdout and stderr
+   * never read: Docker's client writes them nowhere (realkey.ts). The command and the env are as a run's. */
+  async sealed(command: string, timeout: number, src: string): Promise<SealedRun> {
+    if (this.closed) return this.closedAnswer().then(() => ({ exitCode: null, timedOut: false }));
+    timeout = stepTimeout(timeout);
+    const name = `arnx-${this.id}-sealed-${randomHex(3)}`;
+    const user = `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`;
+    const argv = runArgv({ image: this.image, name, network: "none", snapshot: src, workdir: this.cfg.workdir,
+      env: this.realEnv(this.cfg.env), command: this.real(depsLink(this.cfg) + command), limits: this.limits, user,
+      runEnv: adapterFor(this.cfg).runEnv });
+    const [bin, ...args] = argv;
+    const started = performance.now();
+    let entry: { stop: () => void; container: string | null } | undefined;
+    const r = await spawned(bin!, args, timeout * 1000, (stop) => {
+      entry = { stop, container: name };
+      this.running.add(entry);
+    }, { quiet: true });
+    try {
+      if (r.stopped) {
+        await this.closedAnswer();
+        return { exitCode: null, timedOut: false };
+      }
+      stepLog({ step: "sealed", project: this.cfg.name, secs: Math.round((performance.now() - started) / 100) / 10,
+        timed_out: r.timedOut, exit: r.status });
+      if (r.notFound) throw new SetupRequired("Docker is not installed; arnx runs tests only inside Docker");
+      if (r.timedOut) {
+        try {
+          await dockerAsync(["kill", name]);
+        } catch {
+          // close removes it
+        }
+        return { exitCode: null, timedOut: true };
+      }
+      return { exitCode: r.status, timedOut: false };
+    } finally {
+      this.running.delete(entry!);
+    }
+  }
+
   /** What a run gets when its session is closed. During an interrupt, no answer: what waits on it stops where it is, as
    * with a model call in flight, so no failed run reads as the code's, no review closes as failed and no model is asked
    * again before the exit. Otherwise an error, so nothing waits for ever. */
@@ -948,11 +1003,13 @@ const EXITED_GRACE = 1000;
  *
  * After the process was blocked (another project's step), a timer fires before what happened meanwhile is seen. So the
  * limit is judged one turn later: a command that had exited by then is not timed out, and its output has been read. */
-export function spawned(bin: string, args: string[], ms: number, started: (stop: () => void) => void)
+export function spawned(bin: string, args: string[], ms: number, started: (stop: () => void) => void,
+                        o: { quiet?: boolean } = {})
   : Promise<{ status: number | null; stdout: string; stderr: string; timedOut: boolean; stopped: boolean; notFound: boolean;
     trimmed: boolean }> {
   return new Promise((resolve) => {
-    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    // `quiet`: the command's output goes nowhere, never read into this process.
+    const child = spawn(bin, args, { stdio: o.quiet ? "ignore" : ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "", status: number | null = null, exited = false, cut = false, timedOut = false,
       stopped = false, notFound = false, done = false, trimmed = false;
     let grace: ReturnType<typeof setTimeout> | undefined;
@@ -961,8 +1018,8 @@ export function spawned(bin: string, args: string[], ms: number, started: (stop:
       trimmed = true;
       return s.slice(-OUTPUT_LIMIT);
     };
-    child.stdout.setEncoding("utf8").on("data", (t: string) => { stdout = tail(stdout + t); });
-    child.stderr.setEncoding("utf8").on("data", (t: string) => { stderr = tail(stderr + t); });
+    child.stdout?.setEncoding("utf8").on("data", (t: string) => { stdout = tail(stdout + t); });
+    child.stderr?.setEncoding("utf8").on("data", (t: string) => { stderr = tail(stderr + t); });
     const finish = () => {
       if (done) return;
       done = true;
@@ -973,8 +1030,8 @@ export function spawned(bin: string, args: string[], ms: number, started: (stop:
     const kill = () => {
       cut = true;
       child.kill("SIGKILL");
-      child.stdout.destroy();
-      child.stderr.destroy();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       if (exited) finish();
     };
     const timer = setTimeout(() => setImmediate(() => {

@@ -97,14 +97,17 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   header line stays and the run after it gets the fake, tokens of 8 or more separated only by blanks, `\n` or `\r` written out, quotes,
   commas, `+` or `.`. It stops at a name unless a token of 8 or more with a digit, `+` or `/` follows, as a wrapped line of a key can read as a name by
   chance; a name in the run gets the fake too, and the filter hides that much.
-  A test that parses a key fails on its fake. Setup and each review name the files holding one, with `arnx allow-secret PATH`. A
-  failure is unproven when its exception's last line reads as a key failing to parse, or a missing-file or open-failure line names
-  such a file: no finding, a review exits as incomplete (2) and `arnx check` too. It names the file its text shows, else "a faked
-  file". Setup keeps such a test out of `baseline.json` and lists it. **Limits, as this reads words:** a failure the fake caused with no
-  parse words or file name (a hash check, a swallowed parse error, a `skipif`) can read as a finding, as already failing or as skipped,
-  and setup can record such a failure (a hash check, for example) as a failure of the project in the baseline,
-  and a real failure whose exception holds such words (`invalid api key`) reads as unproven. Where a fake exists and a test fails or is
-  skipped, the terminal and `arnx check` say so: `Fix the code; if this test needs a real key: arnx allow-secret PATH`.
+  A test that parses or hashes a key can fail or skip on its fake. In a review, setup's suite run and `arnx check`, each such test
+  runs once more with the real key, read from the file on this machine for that run only, in a throwaway copy of the sandbox with
+  `--network none`. Only its outcome is kept: its output is never read, and the copy, its report and its files are removed before
+  anything else reads them, so none of it reaches a model, a log, `.arnx` or `review.json`. A test that then passes, or a skip that
+  then runs, needs the real key: unproven, never a finding; a review and `arnx check` exit as incomplete (2), and setup keeps it out
+  of `baseline.json`. One that fails again stands. Past 20 such tests per review, or when no rerun can run (no report, out of time,
+  an image holding its own copy of the code), a failure reads as unproven, not rerun, and a skip stays a skip. **Limits:** a test
+  that also needs the network or a service fails again and stands; with two faked files it says "a faked file"; the copy holds
+  the real key while the run lasts, and an arnx killed outright leaves it in the temp folder. Setup and each
+  review name the files holding a fake, with `arnx allow-secret PATH`, and where a fake exists and a test fails or is skipped, the
+  terminal and `arnx check` say so: `Fix the code; if this test needs a real key: arnx allow-secret PATH`.
   **What still leaves.** A file named like a secret and holding no key: `.key`, `.p12`, a `.pem` with no block arnx knows (a `.pem`
   holding only certificates, public keys or DH parameters stays); any `.env`, `.npmrc`, `.ppk`, `credentials*.json`,
   `service-account*.json` and the like, key or not; a file over 32 MB; a binary or UTF-16 file holding a key, which is never edited; a

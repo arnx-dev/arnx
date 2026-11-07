@@ -56,7 +56,8 @@ export class FakeJson implements JsonModel {
   }
 }
 
-export type Script = (command: string, n: number) => [string | null, string, boolean];
+/** `dir`: the folder the run sees at /src (the snapshot, or the throwaway copy a real-key rerun runs in). */
+export type Script = (command: string, n: number, dir: string) => [string | null, string, boolean];
 
 /** How a fake runner treats arnx's probe test: "pass" reports it (the default), "ignore" runs the script as for any
  * other command, like a runner whose configuration leaves the tests folder out; "with-suite" reports it along with
@@ -68,7 +69,22 @@ const PROBE = /\S*test_arnx_probe\.py/;
  * written where the runner would write it. */
 export class FakeSession implements Runner {
   commands: string[] = [];
+  /** The real-key reruns: each command and the folder it saw at /src. */
+  sealedRuns: { command: string; src: string }[] = [];
   constructor(readonly snap: string, readonly script: Script, readonly options: FakeOptions = {}) {}
+
+  /** As a real session's: the script's output is dropped here, as Docker's is never read. */
+  sealed(command: string, _timeout: number, src: string): { exitCode: number | null; timedOut: boolean } {
+    this.sealedRuns.push({ command, src });
+    const [xml, , timedOut] = this.script(command, this.commands.length + this.sealedRuns.length, src);
+    const m = /--junitxml=\/src\/(\S+)/.exec(command);
+    if (xml !== null && m) {
+      const path = join(src, m[1]!);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, xml);
+    }
+    return { exitCode: timedOut ? null : 0, timedOut };
+  }
 
   run(command: string): RunResult {
     this.commands.push(command);
@@ -79,7 +95,7 @@ export class FakeSession implements Runner {
     let [xml, output, timedOut] = probe && mode === "pass"
       ? [`<?xml version="1.0"?><testsuites><testsuite name="pytest">${probeCase}</testsuite></testsuites>`, "1 passed",
         false]
-      : this.script(command, this.commands.length);
+      : this.script(command, this.commands.length, this.snap);
     if (probe && mode === "with-suite" && xml !== null) xml = xml.replace("</testsuite>", `${probeCase}</testsuite>`);
     const m = /--junitxml=\/src\/(\S+)/.exec(command);
     if (xml !== null && m) {

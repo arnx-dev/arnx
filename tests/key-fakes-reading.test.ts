@@ -2,7 +2,7 @@
 // that does not stop or crowd out the rest. Keys are built at run time.
 import { expect, test } from "bun:test";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Workspace } from "../src/agent";
 import { changeLimits, resolveChange, takeSnapshot } from "../src/change";
@@ -72,51 +72,46 @@ function project(files: Record<string, string> = {}, after: Record<string, strin
 const review = (repo: string, message: string, outcome = "failed") => runReview(repo, { settings: SETTINGS,
   agentModel: new RecordingAgent(WRITE(), REPORT), challenger: new RecordingJson(), progress: () => {},
   sessionFactory: fakeFactory(() => [junitXml([[GEN, "test_add", outcome, message]]), "1 run\n", false]) });
-const mark = (message: string, leftOut: string[] = [], fakedKeys = ["tests/data/server.pem"]) => markUnproven(
-  [{ testId: "t.py::a", fileAttr: "t.py", name: "a", outcome: "failed", message }], { leftOut, fakedKeys, all: [...leftOut, ...fakedKeys] })[0]!;
+/** A failure beside a fake as markUnproven reads it, with what the rerun with the real key gave (undefined: no rerun was asked). */
+const mark = (message: string, leftOut: string[] = [], fakedKeys = ["tests/data/server.pem"], real?: string | null) => markUnproven(
+  [{ testId: "t.py::a", fileAttr: "t.py", name: "a", outcome: "failed", message }],
+  { leftOut, fakedKeys, all: [...leftOut, ...fakedKeys], ...(real === undefined ? {} : { real: new Map([["t.py::a", real]]) }) })[0]!;
 /** As pytest writes a failure: its short message, the source lines, the exception on `E` lines. */
 const pytest = (source: string, ...exception: string[]) => `${exception[0]}\n${source.split("\n").map((l) => `    ${l}`).join("\n")}\n${exception.map((l) => `E   ${l}`).join("\n")}\n\napp.py:3: ${exception[0]!.split(":")[0]}`;
 
-// --- 1. the exception's own last line ------------------------------------------------------------------------------------------
+// --- 1. no word decides: the rerun with the real key does ---------------------------------------------------------------------
 
 for (const [row, message] of [
   ["a local named for base64", pytest("encoded_as_base64 = 3\n> assert encoded_as_base64 == 2", "assert 3 == 2")],
-  ["a local named pem, the raise inside it", pytest("pem = load()\n> raise ValueError('nope')", "ValueError: nope")],
-  ["a source line that says base64", pytest("> return base64.b64encode(None)", "TypeError: a bytes-like object is required")],
-  ["binascii", pytest("> decode(x)", "binascii.Error: Incorrect padding")],
-  ["bare pem, lower case", pytest("> load(x)", "ValueError: bad pem in config")],
-  ["a source line with the words", pytest("# could not parse the private key\n> assert 1 == 2", "assert 1 == 2")],
   ["the file's name in an assert", pytest("> assert p == q", "assert 'tests/data/server.pem' == 'tests/data/other.pem'")],
-] as const) {
-  test(`a real failure beside a fake is a finding: ${row}`, () => {
-    expect(mark(message).needs).toBeUndefined();
-    expect(mark(message).outcome).toBe("failed");
-  });
-}
-
-for (const [row, line] of [
-  ["cryptography", "ValueError: Could not deserialize key data. The data may be in an incorrect format."],
+  ["cryptography", pytest("> load(x)", "ValueError: Could not deserialize key data. The data may be in an incorrect format.")],
   ["ssl", "ssl.SSLError: [SSL] PEM lib (_ssl.c:3851)"],
-  ["PyCryptodome", "ValueError: RSA key format is not supported"],
-  ["paramiko", "paramiko.ssh_exception.SSHException: not a valid RSA private key file"],
-  ["rsa", "pyasn1.error.PyAsn1Error: BER length field size 71 exceeds limit (8)"],
-  ["PyJWT", "jwt.exceptions.InvalidKeyError: Expecting a PEM-formatted key."],
   ["node", "Error: error:1E08010C:DECODER routines::unsupported"],
-  ["node's ASN.1", "Error: error:0680007B:ASN.1 encoding routines::header too long"],
+  ["a missing-file line naming the fake", "E   OSError: could not open tests/data/server.pem"],
 ] as const) {
-  test(`a key that does not parse is unproven: ${row}`, () => {
-    expect(mark(pytest("> load(x)", line)).needs).toBe("a faked file");
-    expect(mark(line).needs).toBe("a faked file");
-    // A chained exception reads by its last one.
-    expect(mark(pytest("> load(x)", "KeyError: 'a'", "", "During handling of the above exception", line)).needs).toBe("a faked file");
+  test(`a failure beside a fake reads by the rerun, not its words: ${row}`, () => {
+    // Fails again with the real key: a finding, as it ran.
+    expect(mark(message, [], undefined, "failed")).toMatchObject({ outcome: "failed", message });
+    expect(mark(message, [], undefined, "failed").needs).toBeUndefined();
+    // Passes with it: the fake's, needing the real key.
+    expect(mark(message, [], undefined, "passed")).toMatchObject({ outcome: "error", needs: "tests/data/server.pem", fakedKey: true });
+    expect(mark(message, [], undefined, "passed").notRerun).toBeUndefined();
+    // Not rerun: it may need it, never a finding.
+    expect(mark(message, [], undefined, null)).toMatchObject({ outcome: "error", needs: "tests/data/server.pem", notRerun: true });
+    // No rerun asked of it: as it ran.
+    expect(mark(message).needs).toBeUndefined();
   });
 }
 
-test("a name counts in a missing-file or open-failure line only, for a fake and for a file left out", () => {
-  expect(mark("E   OSError: could not open tests/data/server.pem").needs).toBe("tests/data/server.pem");
-  expect(mark("E   FileNotFoundError: [Errno 2] No such file or directory: 'tests/data/server.pem'").needs).toBe("tests/data/server.pem");
+test("a name counts in a missing-file or open-failure line only, for a file left out", () => {
   expect(mark("E   assert 'tests/data/ca.p12' == 'x'", ["tests/data/ca.p12"], []).needs).toBeUndefined();
   expect(mark("E   OSError: unable to read tests/data/ca.p12", ["tests/data/ca.p12"], []).needs).toBe("tests/data/ca.p12");
+  // A file left out goes first, whatever the rerun gave.
+  expect(mark("E   OSError: unable to read tests/data/ca.p12", ["tests/data/ca.p12"], undefined, "passed").needs).toBe("tests/data/ca.p12");
+});
+
+test("with two faked files the rerun cannot tell which: a faked file", () => {
+  expect(mark("E   assert 1 == 2", [], ["a.pem", "b.pem"], "passed").needs).toBe("a faked file");
 });
 
 // --- 2. the words at the fail point -------------------------------------------------------------------------------------------
@@ -305,14 +300,17 @@ const setupRepo = (files: Record<string, string>) => {
   commit(repo, "shop");
   return repo;
 };
-const setupWith = (repo: string, rows: [string, string, string, string][]) => runSetup(repo, defaultSettings(),
+type Rows = [string, string, string, string][];
+const setupWith = (repo: string, rows: Rows | ((dir: string) => Rows)) => runSetup(repo, defaultSettings(),
   new ScriptedAgent([[tool("propose", { yaml: SETUP_YAML })], [text("done")]]), { outDir: join(tmp(), "setup"), progress: () => {},
-    sessionFactory: fakeFactory(() => [junitXml(rows), "ran\n", false]) });
+    sessionFactory: fakeFactory((_c, _n, dir) => [junitXml(typeof rows === "function" ? rows(dir) : rows), "ran\n", false]) });
+/** Whether the run at `dir` holds the real key of `path`. */
+const realIn = (dir: string, path = "tests/data/server.pem") => existsSync(join(dir, path)) && readFileSync(join(dir, path), "utf8") === pem;
 
 test("setup: a test failing on the fake is no failure of the project: not in the baseline, listed as needing the key", async () => {
   const repo = setupRepo({ "tests/data/server.pem": pem });
-  const r = await setupWith(repo, [["test_shop.py", "test_ok", "passed", ""],
-    ["test_shop.py", "test_key", "failed", "E   ValueError: Could not deserialize key data. Open tests/data/server.pem"]]);
+  const r = await setupWith(repo, (dir) => [["test_shop.py", "test_ok", "passed", ""],
+    ["test_shop.py", "test_key", realIn(dir) ? "passed" : "failed", "E   ValueError: Could not deserialize key data. Open tests/data/server.pem"]]);
   expect(r.ok).toBe(true);
   const proof = r.projects[0]!;
   expect(proof.failed ?? []).toEqual([]);
@@ -387,24 +385,26 @@ test("the left-out line, nothing touched and no failure: one short count", async
 test("check --review says a file holds a fake, not that it is left out", async () => {
   const repo = project({ "tests/data/server.pem": pem });
   const { rdir } = await review(repo, "E   assert 1 == 5");
-  const r = await recheckReview(repo, rdir, SETTINGS, { sessionFactory: fakeFactory(() =>
-    [junitXml([[GEN, "test_add", "failed", "E   ValueError: Could not deserialize key data."]]), "1 failed\n", false]) });
+  const r = await recheckReview(repo, rdir, SETTINGS, { sessionFactory: fakeFactory((_c, _n, dir) =>
+    [junitXml([[GEN, "test_add", realIn(dir) ? "passed" : "failed", "E   ValueError: Could not deserialize key data."]]), "1 failed\n", false]) });
   const [said, code] = recheckSummary(r);
   expect(code).toBe(2);
   expect(said).not.toContain("left out");
   expect(said).toContain("arnx allow-secret");
 });
 
-test("the unproven line names the file the failure read; with two fakes and a computed path it does not guess", async () => {
+test("with two fakes the unproven line cannot tell which, even when the failure names one: it does not guess", async () => {
   const two = { "a_deploy/real.key": pem, "tests/data/server.pem": pem };
-  const repo = project(two);
-  const { review: r } = await review(repo, "E   ValueError: Could not deserialize key data.");
+  const reviewReal = (message: string) => runReview(project(two), { settings: SETTINGS, agentModel: new RecordingAgent(WRITE(), REPORT),
+    challenger: new RecordingJson(), progress: () => {}, sessionFactory: fakeFactory((_c, _n, dir) =>
+      [junitXml([[GEN, "test_add", realIn(dir) ? "passed" : "failed", message]]), "1 run\n", false]) });
+  const { review: r } = await reviewReal("E   ValueError: Could not deserialize key data.");
   expect(r.couldNotRun?.[0]?.needs).toBe("a faked file");
   const said = summary(r, "review.md");
   expect(said).toContain("arnx allow-secret PATH");
   expect(said).not.toContain("allow-secret a_deploy");
-  const named = await review(project(two), `> load(open("tests/data/server.pem"))\nE   ValueError: Could not deserialize key data.`);
-  expect(named.review.couldNotRun?.[0]?.needs).toBe("tests/data/server.pem");
+  const named = await reviewReal(`> load(open("tests/data/server.pem"))\nE   ValueError: Could not deserialize key data.`);
+  expect(named.review.couldNotRun?.[0]?.needs).toBe("a faked file");
 });
 
 test("allow-secret's words: a new key-like string gets a stand-in", async () => {

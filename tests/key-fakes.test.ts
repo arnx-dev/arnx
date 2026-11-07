@@ -74,6 +74,13 @@ const pytest: SessionFactory = async (_cfg, at, _log, body) => body({
     const r = spawnSync("sh", ["-c", c], { cwd: at, encoding: "utf8", timeout: timeout * 1000,
       env: { PATH: process.env.PATH, HOME: process.env.HOME, PYTHONDONTWRITEBYTECODE: "1" } });
     return { exitCode: r.status, output: (r.stdout ?? "") + (r.stderr ?? ""), timedOut: false, seconds: 0.2 };
+  },
+  // The rerun with the real key: in the copy it is given, its output dropped.
+  sealed(command: string, timeout: number, src: string) {
+    const c = command.replaceAll("/src/", `${src}/`).replaceAll("/src", src);
+    const r = spawnSync("sh", ["-c", c], { cwd: src, stdio: "ignore", timeout: timeout * 1000,
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, PYTHONDONTWRITEBYTECODE: "1" } });
+    return { exitCode: r.status, timedOut: false };
   } });
 const hasPytest = spawnSync("python3", ["-m", "pytest", "--version"]).status === 0;
 /** How long a test may take that runs real pytest several times: on a loaded machine that passes bun's default. */
@@ -390,6 +397,8 @@ test("real pytest, a test that parses a fixture key: a fake reads as unproven, a
   expect(r.findings).toEqual([]);
   expect(exitCode(r)).toBe(2);
   expect(r.couldNotRun?.[0]?.needs).toBe("tests/data/fixture.txt");
+  // The rerun with the real key parsed it and passed: settled, not a guess.
+  expect(r.couldNotRun?.[0]?.notRerun).toBeUndefined();
   const said = summary(r, join(rdir, "review.md"));
   expect(said).toContain("tests/data/fixture.txt");
   expect(said).toContain("arnx allow-secret");
@@ -423,20 +432,24 @@ test("the review and setup line names a faked key and the way to the real one, w
   expect(r.notSent).not.toContain("tests/data/fixture.txt");
 });
 
-for (const [name, message, unproven] of [
-  ["names the file in an open failure", "E   OSError: could not open tests/data/fixture.txt", true],
-  ["names the file in an assert", "E   assert 'tests/data/fixture.txt' == 'x'", false],
-  ["a key that does not parse", "ValueError: Could not deserialize key data", true],
-  ["openssl's words", "ssl.SSLError: [SSL] PEM lib (_ssl.c:3862)", true],
-  ["a plain failure", "assert 1 == 5", false],
+for (const [name, message] of [
+  ["names the file in an open failure", "E   OSError: could not open tests/data/fixture.txt"],
+  ["names the file in an assert", "E   assert 'tests/data/fixture.txt' == 'x'"],
+  ["a key that does not parse", "ValueError: Could not deserialize key data"],
+  ["openssl's words", "ssl.SSLError: [SSL] PEM lib (_ssl.c:3862)"],
+  ["a plain failure", "assert 1 == 5"],
 ] as const) {
-  test(`a failure beside a faked key: ${name}`, async () => {
-    const repo = project({ "tests/data/fixture.txt": pem });
-    const { review: r } = await runReview(repo, { settings: SETTINGS, agentModel: new RecordingAgent(WRITE(), REPORT), challenger: new RecordingJson(),
-      progress: () => {}, sessionFactory: fakeFactory(() => [junitXml([[GEN, "test_add", "failed", message]]), "1 failed\n", false]) });
-    expect(r.findings.length).toBe(unproven ? 0 : 1);
-    expect(exitCode(r)).toBe(unproven ? 2 : 0);
-  });
+  for (const unproven of [true, false]) {
+    test(`a failure beside a faked key reads by the rerun, not its words: ${name}, ${unproven ? "passing" : "failing"} with the real key`, async () => {
+      const repo = project({ "tests/data/fixture.txt": pem });
+      const real = (dir: string) => readFileSync(join(dir, "tests/data/fixture.txt"), "utf8") === pem;
+      const { review: r } = await runReview(repo, { settings: SETTINGS, agentModel: new RecordingAgent(WRITE(), REPORT), challenger: new RecordingJson(),
+        progress: () => {}, sessionFactory: fakeFactory((_c, _n, dir) => [junitXml([[GEN, "test_add", unproven && real(dir) ? "passed" : "failed", message]]),
+          "1 failed\n", false]) });
+      expect(r.findings.length).toBe(unproven ? 0 : 1);
+      expect(exitCode(r)).toBe(unproven ? 2 : 0);
+    });
+  }
 }
 
 test("no faked key, a failure about a key is a finding", async () => {

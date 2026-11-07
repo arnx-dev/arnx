@@ -14,6 +14,7 @@ import { configSuspects, loadReviewFile, type ReviewConfig, sandboxOnlyOf, secre
 import { ArnxError } from "./errors";
 import { placed } from "./fixprompt";
 import { baseName, ownerFile, runTests, type TestResult } from "./outcomes";
+import { keyReruns, rerunCandidates, rerunWithRealKeys } from "./realkey";
 import { load, type Review } from "./report";
 import type { Say } from "./progress";
 import { sayingDocker, type SessionFactory } from "./sandbox";
@@ -29,7 +30,7 @@ const FIX_WITH_FAKE = "Fix the code; if this test needs a real key: `arnx allow-
 
 export interface ProjectCheck { /** Something in it was masked. */ standInsShown?: boolean;
   /** Files the snapshot left out as secret-looking; tests that failed for one, which could not run. */
-  leftOut?: Withheld[]; fakedKeys?: string[]; couldNotRun?: { testId: string; needs: string; faked?: boolean }[]; project: string; files: string[];
+  leftOut?: Withheld[]; fakedKeys?: string[]; couldNotRun?: { testId: string; needs: string; faked?: boolean; notRerun?: boolean }[]; project: string; files: string[];
   passed: string[]; failed: TestResult[];
   skipped: number; noReport: boolean; accepted?: string[]; reason?: string; log?: string | null;
   reviews?: Record<string, string>; workdir?: string;
@@ -188,6 +189,8 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
   const file = loadReviewFile(repo);
   const out: ProjectCheck[] = [];
   let known: AcceptedIds | undefined;
+  // The check's reruns with a real key, over all its projects.
+  const reruns = keyReruns();
   for (const cfg of file.projects) {
     const files = keptTestFiles(repo, cfg, settings.acceptedTestsDir, file.projects);
     if (!files.length) continue;
@@ -210,7 +213,7 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       // it (the snapshot is removed below).
       const groups = [...new Set(files.map(reviewGroup))];
       const target = (f: string) => posix.relative(cfg.workdir, runPath(f)) || runPath(f);
-      const runs = await sayingDocker(o.progress, () => (o.sessionFactory ?? dockerSession)(cfg, snap,
+      const done = await sayingDocker(o.progress, () => (o.sessionFactory ?? dockerSession)(cfg, snap,
         join(repo, ".arnx", "run", `check-${cfg.name}-build.log`), async (session) => {
           if (!session.copies) swapFiles(snap, [...placed], swap);
           // One after another: they share the session and the snapshot.
@@ -219,12 +222,22 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
             ran.push([g, ...await runTests(session, snap, cfg, files.filter((f) => reviewGroup(f) === g).map(target),
               groups.length > 1 ? `check-${i + 1}.xml` : "check.xml", CHECK_TIMEOUT)] as const);
           }
-          return ran;
+          // A failure or a skip beside a fake runs once more with the real key, each review's tests apart again: outcomes only.
+          const real = new Map<string, string | null>();
+          for (const [g, , results] of taken.fakedKeys.length ? ran : []) {
+            const mine = files.filter((f) => reviewGroup(f) === g).map(target);
+            const got = await rerunWithRealKeys(session, snap, cfg, { source: { repo, head: null }, fakedKeys: taken.fakedKeys,
+              tests: rerunCandidates([results]), target: (t) => mine.find((f) => ownerFile(t.fileAttr, [f]) !== null) ?? null,
+              budget: reruns, timeout: CHECK_TIMEOUT });
+            for (const [id, outcome] of got) real.set(id, outcome);
+          }
+          return [ran, real] as const;
         }, undefined, undefined, swap));
       // A test failing for a file left out, or for a key the sandbox holds a fake of, says nothing about the code.
       const lacking = taken.withheld.map((w) => w.path);
+      const [runs, real] = done;
       const results = markUnproven(runs.flatMap(([, , r]) => r ?? []), { leftOut: lacking, fakedKeys: taken.fakedKeys,
-        all: lacking.length || taken.fakedKeys.length ? filesAt(repo, null, true) : [] });
+        all: lacking.length ? filesAt(repo, null, true) : [], real });
       const missing = runs.filter(([, , r]) => r === null);
       const log = checkLog(cfg.name);
       rmSync(join(repo, log), { force: true });
@@ -242,7 +255,8 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       const notRun = missing.length ? [] : files.filter((f) => !results.some((t) => ownerFile(t.fileAttr, [target(f)]) !== null));
       known ??= acceptedIds(repo);
       const ran = results.filter((t) => t.outcome !== "skipped");
-      const couldNotRun = ran.filter((t) => t.needs).map((t) => ({ testId: t.testId, needs: t.needs!, ...(t.fakedKey ? { faked: true } : {}) }));
+      const couldNotRun = ran.filter((t) => t.needs).map((t) => ({ testId: t.testId, needs: t.needs!, ...(t.fakedKey ? { faked: true } : {}),
+        ...(t.notRerun ? { notRerun: true } : {}) }));
       const failed = ran.filter((t) => !t.needs && (t.outcome === "failed" || t.outcome === "error"));
       const reviews = Object.fromEntries(failed.map((t) => [t.testId, reviewOf(known!, cfg.workdir, t.testId)])
         .filter(([, r]) => r));
@@ -826,7 +840,8 @@ export function checkJson(results: ProjectCheck[], code: number, changed: Change
         ...(r.notRun ? { not_run: r.notRun.map(runPath) } : {}),
         ...(r.leftOut ? { left_out: r.leftOut } : {}),
         ...(r.fakedKeys ? { faked_keys: r.fakedKeys } : {}),
-        ...(r.couldNotRun ? { could_not_run: r.couldNotRun.map((x) => ({ test_id: x.testId, needs: x.needs, ...(x.faked ? { faked_key: true } : {}) })) } : {}) };
+        ...(r.couldNotRun ? { could_not_run: r.couldNotRun.map((x) => ({ test_id: x.testId, needs: x.needs, ...(x.faked ? { faked_key: true } : {}),
+          ...(x.notRerun ? { not_rerun: true } : {}) })) } : {}) };
     }),
     changed, may_contradict: contradict, stand_ins_shown: results.some((r) => !!r.standInsShown) }, null, 2);
 }

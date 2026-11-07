@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import { join, posix } from "node:path";
 import type { TestResult } from "./adapters/types";
 import type { ReviewConfig } from "./config";
+import type { RealOutcomes } from "./realkey";
 import { envValue } from "./secrets";
 import { clip } from "./events";
 
@@ -163,50 +164,44 @@ function namedIn(text: string, files: string[], all: string[]): string[] {
   });
 }
 
-/** What a private key failing to parse says on its exception's line, in the words of the common libraries: a fake is no key. */
-const KEY_PARSE = /could not (?:deserialize|parse|load|decode|read)[^\n]{0,60}key|(?:invalid|malformed|bad|unsupported|unable to (?:load|parse|read|decode)|failed to (?:load|parse|read|decode)|not a valid)[^\n]{0,60}\b(?:key|der|asn\.?1)\b|key[^\n]{0,40}not supported|asn\.?1|\bPKCS ?#?\d|InvalidKey|DECODER routines|ERR_OSSL|OSSL_|MalformedFraming|secretOrPrivateKey/i;
-const PEM_WORD = /\bPEM\b/;
-/** The start of an exception's line, in any language's words. */
-const EXCEPTION = /^(?:[\w$.]*(?:Error|Exception|Warning)\b|error\b|called `|[\w$.]*InvalidKey)/;
-
-/** The line that says what a failure was, not its source lines or its traceback: pytest's last `E` exception, or a
- * message's last exception line, else the last `E` line or the first line. */
-export function exceptionLine(message: string): string {
-  const lines = message.split("\n").map((l) => l.trim());
-  const marked = lines.filter((l) => /^E(?:\s|$)/.test(l)).map((l) => l.replace(/^E\s*/, "")).filter(Boolean);
-  const pool = marked.length ? marked : lines.filter((l) => l && !/^at\s/.test(l));
-  return pool.filter((l) => EXCEPTION.test(l)).at(-1) ?? (marked.length ? marked.at(-1)! : pool[0] ?? "");
-}
-
-/** What an unproven failure says when it cannot tell which fake it read. */
+/** What an unproven failure says when the sandbox holds more than one fake, so it cannot tell which. */
 export const A_FAKED_FILE = "a faked file";
 
 /** `results` with each failure that says nothing about the project marked. A missing-file or open-failure line names a file of
- * `leftOut`: it could not run, however the runner reports it (an import inside a test is a plain failure). Such a line names a
- * file of `fakedKeys`, or the exception reads as a key that does not parse while the snapshot holds a fake: it may need the real
- * key, of the file its text shows, or of a file it cannot tell. */
-export function markUnproven(results: TestResult[], o: { leftOut: string[]; fakedKeys: string[]; all: string[] }): TestResult[] {
+ * `leftOut`: it could not run, however the runner reports it (an import inside a test is a plain failure). With a private key
+ * faked in the snapshot (`fakedKeys`), `real` holds what the rerun with the real key gave the tests it was for (realkey.ts): a
+ * failure or a skip that went otherwise there was the fake's and needs the real key; a failure not rerun may need it; one the
+ * real key gives too stands, and so does a skip. A test `real` does not hold is as it ran. */
+export function markUnproven(results: TestResult[], o: { leftOut: string[]; fakedKeys: string[]; all: string[]; real?: RealOutcomes })
+  : TestResult[] {
   if (!o.leftOut.length && !o.fakedKeys.length) return results;
+  const key = o.fakedKeys.length === 1 ? o.fakedKeys[0]! : A_FAKED_FILE;
   return results.map((t) => {
-    if (!failed(t)) return t;
-    const failing = t.message.split("\n").filter((l) => MISSING.test(l) || OPEN_FAILED.test(l)).join("\n");
-    const needs = missingLeftOut([t.message], o.leftOut, o.all)[0] ?? namedIn(failing, o.leftOut, o.all)[0];
-    if (needs) return { ...t, outcome: "error", needs, message: `needs ${needs}, left out as secret-looking: ${t.message}` };
-    if (!o.fakedKeys.length) return t;
-    const line = exceptionLine(t.message);
-    const key = namedIn(failing, o.fakedKeys, o.all)[0] ?? (KEY_PARSE.test(line) || PEM_WORD.test(line)
-      ? namedIn(t.message, o.fakedKeys, o.all)[0] ?? A_FAKED_FILE : undefined);
-    return key ? { ...t, outcome: "error", needs: key, fakedKey: true, message: `may need the real key in ${key}, a fake in the sandbox: ${t.message}` } : t;
+    if (failed(t) && o.leftOut.length) {
+      const failing = t.message.split("\n").filter((l) => MISSING.test(l) || OPEN_FAILED.test(l)).join("\n");
+      const needs = missingLeftOut([t.message], o.leftOut, o.all)[0] ?? namedIn(failing, o.leftOut, o.all)[0];
+      if (needs) return { ...t, outcome: "error", needs, message: `needs ${needs}, left out as secret-looking: ${t.message}` };
+    }
+    if (!o.fakedKeys.length || t.needs || !(failed(t) || t.outcome === "skipped") || !o.real?.has(t.testId)) return t;
+    const real = o.real.get(t.testId) ?? null;
+    if (real === null) {
+      return failed(t) ? { ...t, outcome: "error", needs: key, fakedKey: true, notRerun: true,
+        message: `may need the real key in ${key}, a fake in the sandbox; not rerun with it: ${t.message}` } : t;
+    }
+    if (failed(t) ? real === "failed" || real === "error" : real === "skipped") return t;
+    return { ...t, outcome: "error", needs: key, fakedKey: true, message: `needs the real key in ${key}, a fake in the sandbox: ${t.message}` };
   });
 }
 
 /** What unproven tests need, for a person: `n` tests, the files left out, the files holding a fake. */
-export function unprovenText(n: number, items: readonly { needs: string; faked?: boolean }[], names: (paths: string[]) => string): string {
+export function unprovenText(n: number, items: readonly { needs: string; faked?: boolean; notRerun?: boolean }[],
+                             names: (paths: string[]) => string): string {
   const of = (faked: boolean) => [...new Set(items.filter((x) => !!x.faked === faked).map((x) => x.needs))];
   const out = of(false), real = of(true);
   const they = (one: string, many: string) => n === 1 ? one : many;
+  const may = items.some((x) => x.faked && x.notRerun);
   return [...out.length ? [`could not run: ${they("it needs", "they need")} ${names(out)}, left out as secret-looking`] : [],
-    ...real.length ? [`${out.length ? "or " : ""}unproven: ${they("it may need", "they may need")} the real key in ${names(real)}${real.every((p) => p === A_FAKED_FILE) ? "" : ", a fake in the sandbox"}`] : []].join(", ");
+    ...real.length ? [`${out.length ? "or " : ""}unproven: ${may ? they("it may need", "they may need") : they("it needs", "they need")} the real key in ${names(real)}${real.every((p) => p === A_FAKED_FILE) ? "" : ", a fake in the sandbox"}`] : []].join(", ");
 }
 
 /** The package npx tried to download because it is not installed where the command ran ("@scope/name" decoded), or

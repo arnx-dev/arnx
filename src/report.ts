@@ -185,9 +185,11 @@ export interface Review {
   blankedLines?: Blanked[];
   /** Changed files left out as secret-looking: what they hold and where, never the text. */
   leftOutFiles?: Withheld[];
-  /** Tests that failed for a file left out, or (`faked`) for a private key the sandbox holds a fake of: unproven, which leaves
-   * the review incomplete. */
-  couldNotRun?: { test: string; needs: string; faked?: boolean }[];
+  /** Tests that failed for a file left out, or (`faked`) for a private key the sandbox holds a fake of, shown by a rerun with the
+   * real key: unproven, which leaves the review incomplete. */
+  couldNotRun?: { test: string; needs: string; faked?: boolean;
+    /** With `faked`: not rerun with the real key (realkey.ts), so it only may need it; without, the rerun showed it does. */
+    notRerun?: boolean }[];
   /** Files whose private key the sandbox holds as a fake. */
   fakedKeys?: string[];
   /** Beside a fake: tests every run skipped, which may have skipped for it. */
@@ -862,8 +864,9 @@ export function render(r: Review): string {
     out.push(`- Comment lines blanked as secret-looking (not sent): ${describeBlanked(r.blankedLines)}`);
   }
   for (const x of r.couldNotRun ?? []) {
-    out.push(x.needs === A_FAKED_FILE ? `- Unproven: \`${x.test}\` may need the real key in a faked file.`
-      : x.faked ? `- Unproven: \`${x.test}\` may need the real key in \`${x.needs}\`, a fake in the sandbox.`
+    const where = x.needs === A_FAKED_FILE ? "a faked file" : `\`${x.needs}\``;
+    out.push(x.faked && x.notRerun ? `- Unproven: \`${x.test}\` may need the real key in ${where}, a fake in the sandbox; not rerun with it.`
+      : x.faked ? `- Unproven: \`${x.test}\` needs the real key in ${where}, a fake in the sandbox.`
       : `- Could not run: \`${x.test}\` needs \`${x.needs}\`, left out.`);
   }
   if (r.fakedKeys?.length) {

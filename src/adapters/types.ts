@@ -9,6 +9,8 @@ export interface TestResult {
    * the snapshot): it is unproven, which says nothing about the project. */
   needs?: string;
   fakedKey?: true;
+  /** With `fakedKey`: no rerun with the real key settled it (realkey.ts), so it only may need the key. */
+  notRerun?: true;
   testId: string;
   fileAttr: string;
   name: string;

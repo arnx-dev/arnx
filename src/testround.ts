@@ -22,6 +22,7 @@ import { filesAt, snapshot, takeSnapshot, type Withheld, withSandboxFiles } from
 import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { EnvFailed } from "./errors";
 import { markUnproven } from "./diagnose";
+import { type KeyReruns, keyReruns, type RealOutcomes, rerunCandidates, rerunWithRealKeys } from "./realkey";
 import { clip, emit, testMessage } from "./events";
 import { baseName, type Classified, classify, describeRun, funcOf, ownerFile, runBounded, runTests, serialFlag, type TestResult } from "./outcomes";
 import { buildContextOf, DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
@@ -383,7 +384,9 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   recordEnvFailure?: boolean;
   /** Build each failing test's evidence pack from the snapshot: `diff` is the project's part of the change, `message`
    * its commit message. */
-  evidence?: { diff: string; message: string } }): Promise<Tested> {
+  evidence?: { diff: string; message: string };
+  /** The review's reruns with a real key left (realkey.ts); default: a round's own KEY_RERUN_MOST. */
+  keyReruns?: KeyReruns }): Promise<Tested> {
   const say = (m: string) => o.progress?.(`${cfg.name}: ${m}`);
   const adapter = adapterFor(cfg);
   mkdirSync(o.outDir, { recursive: true });
@@ -404,6 +407,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   let checked: TypeCheckRun | undefined, typecheck: TypeCheck | undefined;
   let reached: string[] | undefined;
   let evidence: Record<string, string> | undefined;
+  let real: RealOutcomes | undefined;
   const dbNames = databaseEnv(cfg.env, cfg.services);
   try {
     const snap = join(tmp, "repo");
@@ -565,6 +569,16 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
             ran(i + 1, got, false, secs);
           }
         }
+        // A failure or a skip beside a fake runs once more with the real key, in a copy no one else reads: only outcomes come back.
+        if (fakedKeys.length) {
+          const tests = rerunCandidates(r, new Set([...Object.keys(hungLimits), ...notRunSet]));
+          if (tests.length) say("running again with the real key, no network");
+          real = await rerunWithRealKeys(session, snap, cfg, { source: { repo, head }, fakedKeys, tests,
+            target: (t) => {
+              const p = ownerFile(t.fileAttr, Object.keys(f));
+              return p ? posix.relative(cfg.workdir, p) || "." : null;
+            }, budget: o.keyReruns ?? keyReruns(), timeout: RUN_BOUNDS.together, serial });
+        }
         // Read run by run above, before the type check clears the report folder.
         if (o.coverage && noted) {
           const own = new Set(o.coverage);
@@ -601,8 +615,8 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
     }
     [agent, files, results] = got;
     // A test failing for a file the snapshot left out, or a key it holds a fake of, says nothing about the project.
-    const tree = removed.length || fakedKeys.length ? filesAt(repo, head, !!o.untracked) : [];
-    results = results.map((run) => run && markUnproven(run, { leftOut: removed, fakedKeys, all: tree }));
+    const tree = removed.length ? filesAt(repo, head, !!o.untracked) : [];
+    results = results.map((run) => run && markUnproven(run, { leftOut: removed, fakedKeys, all: tree, ...(real ? { real } : {}) }));
     const classes = o.before ? classify(results) : null;
     const failing = classes?.findings ?? [];
     // Chosen by test id, so the same tests are checked whatever order the runner reported them in.

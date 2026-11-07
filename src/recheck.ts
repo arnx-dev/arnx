@@ -13,6 +13,7 @@ import { A_FAKED_FILE, markUnproven, unprovenText } from "./diagnose";
 import { SetupRequired } from "./errors";
 import { asError, ownerFile, runTests, type TestResult } from "./outcomes";
 import type { Say } from "./progress";
+import { keyReruns, type RealOutcomes, rerunCandidates, rerunWithRealKeys } from "./realkey";
 import { confirmed, notChecked, type Finding, load, type Review } from "./report";
 import type { SessionFactory } from "./sandbox";
 import type { Settings } from "./settings";
@@ -30,7 +31,7 @@ export interface ReviewRecheck { review: string; findings: FindingRecheck[];
   /** A message was masked. */
   standInsShown?: boolean;
   /** Files left out as secret-looking that its tests needed, and those left out in all. */
-  couldNotRun?: { needs: string; faked?: boolean }[]; leftOut?: string[]; fakedKeys?: string[] }
+  couldNotRun?: { needs: string; faked?: boolean; notRerun?: boolean }[]; leftOut?: string[]; fakedKeys?: string[] }
 
 /** The generated tests a review kept for one project, by repository-relative path. */
 function generated(rdir: string, project: string, writable: RegExp): Record<string, string> {
@@ -39,11 +40,15 @@ function generated(rdir: string, project: string, writable: RegExp): Record<stri
   return readCopies(root, writable);
 }
 
+/** A finding's outcome in one run, and what it needs when it could not run. */
+interface Seen { outcome: string; message: string; needs?: string; fakedKey?: true; notRerun?: true }
+
 /** A finding's outcome in one run: its own result, else the load error of its file, else absent. */
-function outcomeIn(run: TestResult[] | null, f: Finding): { outcome: string; message: string; needs?: string; fakedKey?: true } {
+function outcomeIn(run: TestResult[] | null, f: Finding): Seen {
   if (run === null) return { outcome: "missing", message: "" };
   const own = run.find((t) => t.testId === f.testId);
-  const need = (t: TestResult) => ({ ...(t.needs ? { needs: t.needs } : {}), ...(t.fakedKey ? { fakedKey: t.fakedKey } : {}) });
+  const need = (t: TestResult) => ({ ...(t.needs ? { needs: t.needs } : {}), ...(t.fakedKey ? { fakedKey: t.fakedKey } : {}),
+    ...(t.notRerun ? { notRerun: t.notRerun } : {}) });
   if (own) return { outcome: own.outcome, message: own.message, ...need(own) };
   const load = f.file ? run.find((t) => t.outcome === "error" && ownerFile(t.fileAttr, [f.file!]) !== null) : undefined;
   return load ? { outcome: "error", message: load.message, ...need(load) } : { outcome: "absent", message: "" };
@@ -61,7 +66,9 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
   // A coding agent reads what a check says, and the code it ran on holds real values.
   const boundary = new Boundary(configSuspects(repo));
   let shown = false;
-  const leftOut = new Set<string>(), fakedKeys = new Set<string>(), couldNotRun = new Map<string, boolean>();
+  const leftOut = new Set<string>(), fakedKeys = new Set<string>(), couldNotRun = new Map<string, { faked: boolean; notRerun: boolean }>();
+  // The check's reruns with a real key, over all its projects.
+  const reruns = keyReruns();
   for (const name of [...new Set(todo.map((f) => f.project))]) {
     const cfg = file.projects.find((p) => p.name === name) ?? (file.legacy ? file.projects[0] : undefined);
     if (!cfg) {
@@ -72,7 +79,7 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
     const mine = todo.filter((f) => f.project === name);
     const owner = (f: Finding) => f.file && files[f.file] !== undefined ? f.file : ownerFile(f.testId.split("::")[0]!,
       Object.keys(files));
-    const runs = new Map<string, { outcome: string; message: string; needs?: string; fakedKey?: true }[]>(mine.map((f) => [f.id, []]));
+    const runs = new Map<string, Seen[]>(mine.map((f) => [f.id, []]));
     const unrunnable = mine.filter((f) => !owner(f));
     for (const f of unrunnable) runs.get(f.id)!.push({ outcome: "missing", message: "the review kept no test file for it" });
     const runnable = mine.filter((f) => owner(f));
@@ -91,7 +98,7 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
         const lacking = taken.withheld.map((w) => w.path);
         lacking.forEach((p) => leftOut.add(p));
         taken.fakedKeys.forEach((p) => fakedKeys.add(p));
-        const tree = lacking.length || taken.fakedKeys.length ? filesAt(repo, null, true) : [];
+        const tree = lacking.length ? filesAt(repo, null, true) : [];
         // The review's generated files go in as they ran, in place of anything in its tests directory.
         mkdirSync(join(snap, writeDir), { recursive: true });
         for (const rel of collect(snap, writeDir, adapter.writable)) rmSync(join(snap, rel), { force: true });
@@ -101,6 +108,10 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
         }
         const ours = Object.keys(files);
         const swap = swapIn(boundary, snap, (rel) => ours.includes(rel));
+        // Each run's results, and the findings it ran for.
+        const raws: { open: Finding[]; parsed: TestResult[] | null }[] = [];
+        const marked = (parsed: TestResult[] | null, real?: RealOutcomes) => parsed && markUnproven(parsed,
+          { leftOut: lacking, fakedKeys: taken.fakedKeys, all: tree, ...(real ? { real } : {}) }).map((t) => ({ ...t, testId: boundary.mask(t.testId) }));
         await (o.sessionFactory ?? dockerSession)(cfg, snap, join(tmp, "build.log"), async (session) => {
           if (!session.copies) swapFiles(snap, ours, swap);
           for (let i = 1; i <= settings.runs; i++) {
@@ -112,8 +123,18 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
             o.progress?.(`${name}: run ${i}/${settings.runs}, ${targets.length} file${targets.length === 1 ? "" : "s"}`);
             const [, parsed] = await runTests(session, snap, cfg, targets, `recheck-${i}.xml`, RUN_TIMEOUT);
             // The saved finding's id holds a stand-in where the run's holds the value (a parametrized test).
-            const results = parsed && markUnproven(parsed.map(asError), { leftOut: lacking, fakedKeys: taken.fakedKeys, all: tree }).map((t) => ({ ...t, testId: boundary.mask(t.testId) }));
-            for (const f of open) runs.get(f.id)!.push(outcomeIn(results, f));
+            const raw = parsed && parsed.map(asError);
+            raws.push({ open, parsed: raw });
+            for (const f of open) runs.get(f.id)!.push(outcomeIn(marked(raw), f));
+          }
+          // A failure or a skip beside a fake runs once more with the real key: outcomes only, and the runs read again with them.
+          if (taken.fakedKeys.length) {
+            const real = await rerunWithRealKeys(session, snap, cfg, { source: { repo, head: null }, fakedKeys: taken.fakedKeys,
+              tests: rerunCandidates(raws.map((x) => x.parsed)), target: (t) => {
+                const p = ownerFile(t.fileAttr, ours);
+                return p ? posix.relative(cfg.workdir, p) || p : null;
+              }, budget: reruns, timeout: RUN_TIMEOUT });
+            for (const f of runnable) runs.set(f.id, raws.filter((x) => x.open.includes(f)).map((x) => outcomeIn(marked(x.parsed, real), f)));
           }
           return null;
         }, undefined, undefined, swap);
@@ -127,7 +148,7 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
       const lack = seen.find((r) => r.needs);
       const status: RecheckStatus = lack && !failed ? "no-report" : failed ? "still-failing"
         : seen.length === settings.runs && seen.every((r) => r.outcome === "passed") ? "fixed" : "no-report";
-      if (lack && !failed) couldNotRun.set(lack.needs!, !!lack.fakedKey);
+      if (lack && !failed) couldNotRun.set(lack.needs!, { faked: !!lack.fakedKey, notRerun: !!lack.notRerun });
       const message = failed?.message ?? seen.find((r) => r.outcome !== "passed")?.message ?? "";
       const said = boundary.mask(message);
       shown ||= said !== message;
@@ -137,7 +158,8 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
   const order = new Map(review.findings.map((f, i) => [f.id, i]));
   out.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
   return { review: review.id, findings: out, ...(shown ? { standInsShown: true } : {}),
-    ...(couldNotRun.size ? { couldNotRun: [...couldNotRun].sort().map(([needs, faked]) => ({ needs, ...(faked ? { faked } : {}) })) } : {}),
+    ...(couldNotRun.size ? { couldNotRun: [...couldNotRun].sort().map(([needs, x]) => ({ needs, ...(x.faked ? { faked: true } : {}),
+      ...(x.notRerun ? { notRerun: true } : {}) })) } : {}),
     ...(leftOut.size ? { leftOut: [...leftOut].sort() } : {}), ...(fakedKeys.size ? { fakedKeys: [...fakedKeys].sort() } : {}) };
 }
 

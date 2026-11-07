@@ -1029,7 +1029,17 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
   const xmlPrints = sandboxPrints(from, files, true);
   const reports = join(snap, REPORT_DIR);
   const copies = runner.copies ? { copies: (output: string) => runner.copies!(output) } : {};
-  return { ...copies, clean: (report) => stripSandbox(report, xmlPrints), run: async (command, timeout) => {
+  // A sealed run's copy is thrown away after it: the files go in and stay until then.
+  const sealed = runner.sealed ? { sealed: (command: string, timeout: number, src: string) => {
+    for (const rel of files) {
+      const to = join(src, rel);
+      if (existsSync(to)) continue;
+      mkdirSync(dirname(to), { recursive: true });
+      copyFileSync(join(from, rel), to);
+    }
+    return runner.sealed!(command, timeout, src);
+  } } : {};
+  return { ...copies, ...sealed, clean: (report) => stripSandbox(report, xmlPrints), run: async (command, timeout) => {
     const placed: string[] = [], made: string[] = [];
     let result;
     try {

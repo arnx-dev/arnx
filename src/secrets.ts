@@ -399,6 +399,19 @@ export function fakeKeys(text: string, o: { view?: boolean } = {}): { text: stri
   return { text: parts.join(""), count };
 }
 
+/** `faked`, a file as the sandbox holds it, with each fake of its private key back to the token of `original` (the file on the
+ * host) it stands for, and all else as it is: only for the one run that needs the real key (realkey.ts), never for what is
+ * read, kept or sent. Null when that is not all that differs: nothing real goes in. */
+export function withRealKeys(original: string, faked: string): string | null {
+  if (fakeKeys(original).text === faked) return original;
+  const own = keyTokens(original), back = new Map<string, string>();
+  for (const t of own) back.set(keyFake(t), t);
+  if (!back.size) return null;
+  const real = faked.replace(KEY_TOKEN, (m: string, skip: string | undefined) => skip === undefined ? back.get(m) ?? m : m);
+  // Whole keys only: a fake left in (a key the file on the host no longer holds) puts nothing in.
+  return real !== faked && fakeKeys(real).text === faked && [...keyTokens(real)].every((t) => own.has(t)) ? real : null;
+}
+
 /** The keys known by how they start, on a run of KEY_RUN_MIN or more, whole or wrapped, outside a header's text. */
 const headerlessKeys = (text: string): Hit[] => privateKeySpans(text).filter((s) => s.kind === "start")
   .map((s) => ({ 0: /^[A-Za-z0-9+/=]+/.exec(text.slice(s.from, s.to))![0], index: s.from, start: true }));

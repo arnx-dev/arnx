@@ -36,6 +36,7 @@ import { type AgentReport, type Checked, type Finding, type FixProof, hasReport,
 import { dockerSteps, type SessionFactory } from "./sandbox";
 import { skippedTypecheck, type TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
+import { keyReruns } from "./realkey";
 import { docsFilter, route, uncoveredChange } from "./route";
 import { isSecretPath } from "./secrets";
 import { commitMessageValues } from "./evidence";
@@ -426,7 +427,9 @@ export async function runReview(repo: string, o: { settings: Settings;
     const writeDirs: Record<string, string> = {};
     const flaky: string[] = [], errors: string[] = [], notSent = new Set(change.withheld?.map((w) => w.path));
     const leftOutFiles = new Map((change.withheld ?? []).map((w) => [w.path, w]));
-    const couldNotRun: { test: string; needs: string; faked?: boolean }[] = [];
+    const couldNotRun: { test: string; needs: string; faked?: boolean; notRerun?: boolean }[] = [];
+    // The review's reruns with a real key, over all its projects.
+    const reruns = keyReruns();
     const unclaimed: NonNullable<Review["unclaimed"]> = [];
     const typesUnchecked = pythonTypeGap(file, repo, routing.routed.map((x) => x.project.name));
     const fakedKeys = new Set<string>();
@@ -568,7 +571,7 @@ export async function runReview(repo: string, o: { settings: Settings;
       const reusedCost = !prior ? 0 : (prior.second?.costUsd ?? 0) + prior.extras.reduce((a, u) => a + u.costUsd, 0);
       const opts = { brain, budgetUsd: Math.max(0, projectBudget - (cutUse?.costUsd ?? 0) - reusedCost), writeDir, runs: s.runs, outDir,
         sessionFactory: o.sessionFactory ?? dockerSession, progress: o.progress, coverage: scope.owned,
-        untracked: !!change.withUntracked, recordEnvFailure: true, ...(brain.label ? {} : { evidence: { diff, message } }),
+        untracked: !!change.withUntracked, recordEnvFailure: true, ...(brain.label ? {} : { evidence: { diff, message } }), keyReruns: reruns,
         // The code before the change: its base (HEAD for uncommitted work); a first commit has none, nor has a
         // repository with no commits yet. Without one, or for a change to tests or docs only, there is no fix proof.
         ...(s.beforeCheck ? { before: { base: change.base === EMPTY_TREE ? null : change.base, diff: change.diff,
@@ -794,7 +797,9 @@ export async function runReview(repo: string, o: { settings: Settings;
       const lacked = (rnd.leftOut ?? []).filter((w) => !change.withheld?.some((x) => x.path === w.path));
       if (lacked.length) diffs[cfg.name] = `${diffs[cfg.name]}\n\n${leftOutNote(lacked)}\n`;
       for (const w of rnd.leftOut ?? []) leftOutFiles.set(w.path, w);
-      for (const t of c.errors) if (t.needs) couldNotRun.push({ test: t.testId, needs: t.needs, ...(t.fakedKey ? { faked: true } : {}) });
+      for (const t of c.errors) {
+        if (t.needs) couldNotRun.push({ test: t.testId, needs: t.needs, ...(t.fakedKey ? { faked: true } : {}), ...(t.notRerun ? { notRerun: true } : {}) });
+      }
       rnd.fakedKeys?.forEach((p) => fakedKeys.add(p));
       skippedTests += c.skipped;
       // An environment that could not be had is said per project (stats), not as why the reviewer stopped.

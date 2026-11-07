@@ -35,6 +35,7 @@ import { isSecretPath, maskPrivateKeys, type SecretPin } from "./secrets";
 import { namesStandIn, type StandInRow, standInsLine, writeStandIns } from "./standins";
 import { type AgentModel, allPrices, type Tool } from "./llm";
 import { ownerFile, runTests } from "./outcomes";
+import { keyReruns, rerunCandidates, rerunWithRealKeys } from "./realkey";
 import { look, type Placement } from "./precheck";
 import { LocalBrain } from "./localbrain";
 import { promptsFor } from "./userprompts";
@@ -98,7 +99,9 @@ const noCounts = (): SuiteCounts => ({ acceptedFailing: 0, unexpected: [], basel
   failed: [], passed: 0, all: [] });
 
 /** A test that needs a file left out, or a private key (`faked`) the sandbox holds as a fake. */
-export interface Unproven { testId: string; needs: string; faked?: true }
+export interface Unproven { testId: string; needs: string; faked?: true;
+  /** With `faked`: not rerun with the real key, so it only may need it. */
+  notRerun?: true }
 
 /** The accepted files of this project (`accepted`, acceptedPins) that match their pin, and those changed since. */
 function acceptedOf(cfg: ReviewConfig, accepted: AcceptedPins, dir?: string): AcceptedPins {
@@ -142,7 +145,7 @@ export function suiteOk(results: TestResult[] | null, cfg: ReviewConfig, accepte
   let baselineFailing = 0;
   for (const t of results) {
     if (t.needs) {
-      unproven.push({ testId: t.testId, needs: t.needs, ...(t.fakedKey ? { faked: true as const } : {}) });
+      unproven.push({ testId: t.testId, needs: t.needs, ...(t.fakedKey ? { faked: true as const } : {}), ...(t.notRerun ? { notRerun: true as const } : {}) });
       counts.set("unproven", (counts.get("unproven") ?? 0) + 1);
       continue;
     }
@@ -347,7 +350,13 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     }
     // A test failing for a file left out, or a key's fake, is no failure of the project.
     const reported = kept(ran);
-    const all = reported && leftOut ? markUnproven(reported, { leftOut: leftOut.secret, fakedKeys: leftOut.fakedKeys, all: leftOut.all }) : reported;
+    // A failure or a skip beside a fake runs once more with the real key, in a copy no one else reads: outcomes only.
+    const real = reported && leftOut?.fakedKeys.length && leftOut.repo ? await rerunWithRealKeys(session, snap, cfg, {
+      source: { repo: leftOut.repo, head: null }, fakedKeys: leftOut.fakedKeys, tests: rerunCandidates([reported]),
+      target: (t) => t.fileAttr || null, budget: keyReruns(), timeout: SUITE_TIMEOUT, ...(boundary ? { id: (x: string) => boundary.mask(x) } : {}) })
+      : undefined;
+    const all = reported && leftOut ? markUnproven(reported, { leftOut: leftOut.secret, fakedKeys: leftOut.fakedKeys, all: leftOut.all,
+      ...(real ? { real } : {}) }) : reported;
     if ((all ?? []).some((t) => [t.fileAttr, t.testId].some((x) => x && /(?:^|\/)\.arnx\//.test(x)))) {
       return [false, "the project's test run collects files under .arnx/ (a test arnx placed in .arnx/tests/ ran). " +
         "arnx keeps its accepted tests there so your own run never runs them: make the runner leave .arnx/ out " +
@@ -626,12 +635,14 @@ export interface NeededFile { path: string; secret: boolean; faked?: true }
 
 /** The files the snapshot left out (`secret`, those left out as secret-looking), those with a key's fake, and the repository's
  * files (to tell a shared name apart), for runSuite. */
-export interface LeftOut { paths: string[]; secret: string[]; fakedKeys: string[]; all: string[] }
+export interface LeftOut { paths: string[]; secret: string[]; fakedKeys: string[]; all: string[];
+  /** The working tree the snapshot is of: where a rerun reads a faked file's real key (realkey.ts). */
+  repo?: string }
 
 /** What a later proof's snapshot lacks: what its runs may need and no change to review.yaml brings. */
-const lackingOf = (taken: { withheld: Withheld[]; fakedKeys: string[] }, all: string[]): LeftOut => {
+const lackingOf = (taken: { withheld: Withheld[]; fakedKeys: string[] }, all: string[], repo: string): LeftOut => {
   const secret = taken.withheld.map((w) => w.path);
-  return { paths: secret, secret, fakedKeys: taken.fakedKeys, all };
+  return { paths: secret, secret, fakedKeys: taken.fakedKeys, all, repo };
 };
 
 /** A run's failure names files the snapshot left out (repository paths). */
@@ -1371,7 +1382,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const ignoredFile = loadIgnore(repo);
     const secret = new Set(withheld.map((w) => w.path));
     const leftOut: LeftOut = { paths: [...secret, ...files.filter((p) => ignoredFile(p) && !secret.has(p) &&
-      !sandbox.has(p))], secret: [...secret], fakedKeys, all: files };
+      !sandbox.has(p))], secret: [...secret], fakedKeys, all: files, repo };
     // Suites that run in a browser are never set up: listed under uncovered as browser tests.
     const readSnap = (rel: string) => {
       try {
@@ -2216,7 +2227,7 @@ export async function approveFile(repo: string, o: { by: string; at: string; pro
     const snap = join(tmp, "repo");
     const untracked = o.untracked ?? settings?.untracked ?? false;
     const taken = takeSnapshot(repo, null, snap, secretPinsOf(f.raw), { sandbox: sandboxOnlyOf(f.raw), untracked });
-    const lacking = lackingOf(taken, filesAt(repo, null, untracked));
+    const lacking = lackingOf(taken, filesAt(repo, null, untracked), repo);
     // The file may hold a guess's stand-in, which runs read as the value; the logs keep neither.
     const boundary = new Boundary(configSuspects(repo));
     boundary.addScrubbed(taken);
@@ -2321,7 +2332,7 @@ export async function rerecordBaseline(repo: string, o: { by: string; at: string
     const untracked = o.untracked ?? settings?.untracked ?? false;
     const taken = takeSnapshot(repo, null, snap, secretPinsOf(f.raw), { sandbox: sandboxOnlyOf(f.raw), untracked });
     boundary.addScrubbed(taken);
-    const lacking = lackingOf(taken, filesAt(repo, null, untracked));
+    const lacking = lackingOf(taken, filesAt(repo, null, untracked), repo);
     const swap = swapIn(boundary, snap);
     copyManifests(snap, join(tmp, "manifests"));
     for (const cfg of f.projects) {
