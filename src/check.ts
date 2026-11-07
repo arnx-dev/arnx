@@ -516,7 +516,7 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
     lines.push("Next: arnx check");
     return [lines.join("\n"), 1];
   }
-  if (blocked.length) return [lines.join("\n"), 2];
+  if (blocked.length || notRun.length) return [lines.join("\n"), 2];
   lines.push("✓ Accepted tests unchanged since arnx accept");
   lines.push(`Commit the fixes, the accepted tests and ${ACCEPTED_RECORD} together.`);
   return [lines.join("\n"), 0];

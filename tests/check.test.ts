@@ -2,7 +2,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { check, checkSummary } from "../src/check";
+import { check, checkJson, checkSummary } from "../src/check";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { dockerSteps, type SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
@@ -96,4 +96,9 @@ test("a kept file the runner reports nothing for is named as not run, and stays 
   expect(results[0]!.notRun).toEqual([".arnx/tests/svc/tests/arnx/r1/test_other.py"]);
   expect(checkSummary(results)[0]).toContain("✗ 1 accepted test file did not run, the runner leaves it out: " +
     "svc/tests/arnx/r1/test_other.py");
+  const [text, code] = checkSummary(results);
+  expect(code).toBe(2);
+  expect(text).not.toContain("Accepted tests unchanged");
+  expect(text).not.toContain("Commit the fixes");
+  expect(JSON.parse(checkJson(results, code)).result).toBe("no-report");
 });

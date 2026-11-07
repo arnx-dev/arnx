@@ -42,7 +42,7 @@ the path each test runs from; `files` are where they are kept.
 | `failed` | array | Tests that failed: see [Each failed test](#each-failed-test). |
 | `skipped` | number | Tests skipped: one accept could not cut out of a kept file, or (accepted by an arnx before 0.1.2) not confirmed, marked intended or noise, or set aside. |
 | `could_not_run`, `left_out`, `faked_keys` | array | Optional. `{ test_id, needs, faked_key? }`: unproven tests, which failed for a file left out as secret-looking or (`faked_key`) for a private key the sandbox holds as a fake: no failure of the code (exit 2). `needs` is the file, or `a faked file` when the failure does not show which. `{ path, line, label }`: the files left out; `line` 0 when the whole file counts (its name, its size). `faked_keys`: paths of the files holding a fake. |
-| `not_run` | array of strings | Optional. Kept test files the runner reported nothing for (its configuration leaves their name or folder out), as the paths they run from. The text says so too; the files stay in `files`. |
+| `not_run` | array of strings | Optional. Kept test files the runner reported nothing for (its configuration leaves their name or folder out), as the paths they run from. The text says so too; the files stay in `files`. A run with any is exit 2, never `pass`. |
 
 ## Each failed test
 
@@ -84,7 +84,7 @@ passes and F3's fails: they may contradict`. Which one holds is the user's call.
 |---|---|---|
 | `pass` | 0 | Every accepted test passes: the bugs they lock are fixed. |
 | `fail` | 1 | Some accepted tests fail: a bug not fixed yet, or a change that broke what they lock. Fix the code. A test that is wrong about a real bug is the user's call: they mark its finding `rewrite` with a reason in review.md, then `arnx accept --again <id>`. |
-| `no-report` | 2 | Some tests did not report. |
+| `no-report` | 2 | Some tests did not report, are unproven, or a kept test file was not run (`not_run`). |
 | `nothing-accepted` | 3 | No accepted tests yet (nothing has been through `arnx accept`). |
 | `tests-changed` | 4 | Accepted test files changed since accept, so nothing ran: a test edited until it passes proves nothing. The user restores them (`arnx accept --again <id>`, or `git checkout` when the committed copy is the accepted one: `arnx check` without `--json` names it then), or records an intended edit with `arnx accept --keep-edits`. |
 

@@ -137,7 +137,7 @@ What a review sends, and what it leaves out (untracked files, `.arnxignore`, sec
 ## Exit codes and JSON
 
 Exit codes: 0 fine (confirmed findings are worth a look and do not fail the run; CI reads `result` `findings` in `review --json`, or `findings[].confirmed`), 1 a finding the second opinion did not check, 2 incomplete, 3 setup needed. `arnx check`: 0 all accepted
-tests pass, 1 some fail, 2 some did not report or are unproven, 3 nothing accepted yet, 4 an accepted test changed since accept.
+tests pass, 1 some fail, 2 some did not report, are unproven or were not run, 3 nothing accepted yet, 4 an accepted test changed since accept.
 A test file that does not finish (its tests have no result) is one error, never a finding, and makes the review incomplete. Files that time out together are run apart (180 s each, 600 s in all); files the time never reached are named as not run. A failing test in a file that hangs in a later run reads as flaky.
 
 When a commit's own environment does not build or runs no test (an older commit whose install no longer works), that project is reported not tested, the other projects finish, and the review makes no model call for it and exits 2. If the image built for another commit of the project exists and holds no differing copy of the code, the tests run on it instead; the report says so, the review is never complete, and findings from it do not fail the run. A failure to reach the package index is not this: it keeps its own advice.
