@@ -573,7 +573,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         if (fakedKeys.length) {
           const tests = rerunCandidates(r, new Set([...Object.keys(hungLimits), ...notRunSet]));
           if (tests.length) say("running again with the real key, no network");
-          real = await rerunWithRealKeys(session, snap, cfg, { source: { repo, head }, fakedKeys, tests,
+          real = await rerunWithRealKeys(session, snap, cfg, { source: { repo, head }, fakedKeys, tests, all: r,
             target: (t) => {
               const p = ownerFile(t.fileAttr, Object.keys(f));
               return p ? posix.relative(cfg.workdir, p) || "." : null;

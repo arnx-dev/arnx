@@ -13,7 +13,7 @@ import { A_FAKED_FILE, markUnproven, unprovenText } from "./diagnose";
 import { SetupRequired } from "./errors";
 import { asError, ownerFile, runTests, type TestResult } from "./outcomes";
 import type { Say } from "./progress";
-import { keyReruns, type RealOutcomes, rerunCandidates, rerunWithRealKeys } from "./realkey";
+import { keyReruns, type RealOutcomes, rerunCandidates, rerunWithRealKeys, sweepRealKeyCopies } from "./realkey";
 import { confirmed, notChecked, type Finding, load, type Review } from "./report";
 import type { SessionFactory } from "./sandbox";
 import type { Settings } from "./settings";
@@ -69,6 +69,7 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
   const leftOut = new Set<string>(), fakedKeys = new Set<string>(), couldNotRun = new Map<string, { faked: boolean; notRerun: boolean }>();
   // The check's reruns with a real key, over all its projects.
   const reruns = keyReruns();
+  sweepRealKeyCopies();
   for (const name of [...new Set(todo.map((f) => f.project))]) {
     const cfg = file.projects.find((p) => p.name === name) ?? (file.legacy ? file.projects[0] : undefined);
     if (!cfg) {
@@ -130,7 +131,7 @@ export async function recheckReview(repo: string, rdir: string, settings: Settin
           // A failure or a skip beside a fake runs once more with the real key: outcomes only, and the runs read again with them.
           if (taken.fakedKeys.length) {
             const real = await rerunWithRealKeys(session, snap, cfg, { source: { repo, head: null }, fakedKeys: taken.fakedKeys,
-              tests: rerunCandidates(raws.map((x) => x.parsed)), target: (t) => {
+              tests: rerunCandidates(raws.map((x) => x.parsed)), all: raws.map((x) => x.parsed), target: (t) => {
                 const p = ownerFile(t.fileAttr, ours);
                 return p ? posix.relative(cfg.workdir, p) || p : null;
               }, budget: reruns, timeout: RUN_TIMEOUT });

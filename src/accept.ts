@@ -23,6 +23,7 @@ import { isModelKey } from "./prompts";
 import { promptsFor } from "./userprompts";
 import { defaultMarks, firstLine, groupsOf, load, type Marks, parseMarks, parseReports, type Review, wrapMarkdown }
   from "./report";
+import { keyReruns } from "./realkey";
 import { sayingDocker, type SessionFactory } from "./sandbox";
 import { refString, type Settings } from "./settings";
 import { agentUse, logUsage } from "./usage";
@@ -381,6 +382,8 @@ export function makeAnswerRunner(repo: string, file: ReviewFile, settings: Setti
                                  brain: Brain = new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings),
                                    prompts: promptsFor(repo) }))
   : AnswerRunner {
+  // One accept's answer rounds share the reruns with a real key.
+  const reruns = keyReruns();
   return async (qid, question, answer, diff, outDir, project) => {
     const cfg = file.projects.find((p) => p.name === project) ?? file.projects[0]!;
     const base = writeDirOf(cfg, "answers");
@@ -394,7 +397,7 @@ export function makeAnswerRunner(repo: string, file: ReviewFile, settings: Setti
     // Untracked files only when the config sends them (a one-off --untracked review leaves them out here).
     const rnd = await testRound(repo, null, cfg, { brain,
       ask: () => ({ kind: "answer", input: { cfg, question, answer, diff: part } }), writeDir: base,
-      budgetUsd: settings.answerBudgetUsd, runs: settings.runs, outDir, sessionFactory, untracked: settings.untracked,
+      budgetUsd: settings.answerBudgetUsd, runs: settings.runs, outDir, sessionFactory, untracked: settings.untracked, keyReruns: reruns,
       ...(progress ? { progress: (m: string) => progress(`${qid} · ${m}`) } : {}) });
     // A remote brain's cost goes by its tier and harness, never a model name.
     logUsage(repo, "accept", [agentUse(brain.label ? `${brain.label}/answer` : `anthropic:${agentModel!.model}`,

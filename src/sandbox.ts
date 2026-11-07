@@ -15,6 +15,7 @@ import type { CopyOnly } from "./baked";
 import type { Swap } from "./boundary";
 import { digest, loadReviewFile, type ReviewConfig } from "./config";
 import { ArnxError, EnvFailed, SetupRequired } from "./errors";
+import { removeTree } from "./safefs";
 import { envValue, globRegex } from "./secrets";
 import { pyJson, randomHex, shQuote, sleep } from "./util";
 
@@ -539,8 +540,10 @@ async function ensureBuilt(cfg: ReviewConfig, snapshot: string, logPath: string,
 export function runArgv(o: { image: string; name: string; network: string; snapshot: string; workdir: string;
   env: Record<string, string>; command: string; limits: Limits; user: string; runEnv: string[];
   /** Extra bind mounts, "host:container" (the code indexer's output folder). */
-  mounts?: string[] }): string[] {
-  const argv = [sandboxOptions.docker, "run", "--rm", "--name", o.name, "--network", o.network,
+  mounts?: string[];
+  /** Docker keeps no log of what it prints (a sealed run's): its log driver could keep or ship it. */
+  noLog?: boolean }): string[] {
+  const argv = [sandboxOptions.docker, "run", "--rm", "--name", o.name, "--network", o.network, ...o.noLog ? ["--log-driver", "none"] : [],
     "--cpus", o.limits.cpus, "--memory", o.limits.memory, "--memory-swap", o.limits.memory,
     "--pids-limit", String(o.limits.pids), "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
     "--user", o.user, "--tmpfs", `/tmp:rw,exec,size=${o.limits.tmp}`,
@@ -600,14 +603,7 @@ export function cleanupLiveSessions(): void {
     }
   }
   // After the sessions: no run reads a copy any more.
-  for (const dir of [...realKeyCopies]) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-      realKeyCopies.delete(dir);
-    } catch (e) {
-      failed.push(e);
-    }
-  }
+  for (const dir of [...realKeyCopies]) if (removeTree(dir)) realKeyCopies.delete(dir);
   const { left } = leaving;
   if (left.length) {
     try {
@@ -803,7 +799,7 @@ export class Session implements Runner {
     const user = `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`;
     const argv = runArgv({ image: this.image, name, network: "none", snapshot: src, workdir: this.cfg.workdir,
       env: this.realEnv(this.cfg.env), command: this.real(depsLink(this.cfg) + command), limits: this.limits, user,
-      runEnv: adapterFor(this.cfg).runEnv });
+      runEnv: adapterFor(this.cfg).runEnv, noLog: true });
     const [bin, ...args] = argv;
     const started = performance.now();
     let entry: { stop: () => void; container: string | null } | undefined;
@@ -817,7 +813,7 @@ export class Session implements Runner {
         return { exitCode: null, timedOut: false };
       }
       stepLog({ step: "sealed", project: this.cfg.name, secs: Math.round((performance.now() - started) / 100) / 10,
-        timed_out: r.timedOut, exit: r.status });
+        timed_out: r.timedOut });
       if (r.notFound) throw new SetupRequired("Docker is not installed; arnx runs tests only inside Docker");
       if (r.timedOut) {
         try {

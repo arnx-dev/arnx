@@ -35,7 +35,7 @@ import { isSecretPath, maskPrivateKeys, type SecretPin } from "./secrets";
 import { namesStandIn, type StandInRow, standInsLine, writeStandIns } from "./standins";
 import { type AgentModel, allPrices, type Tool } from "./llm";
 import { ownerFile, runTests } from "./outcomes";
-import { keyReruns, rerunCandidates, rerunWithRealKeys } from "./realkey";
+import { type KeyReruns, keyReruns, rerunCandidates, rerunWithRealKeys, sweepRealKeyCopies } from "./realkey";
 import { look, type Placement } from "./precheck";
 import { LocalBrain } from "./localbrain";
 import { promptsFor } from "./userprompts";
@@ -352,8 +352,8 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     const reported = kept(ran);
     // A failure or a skip beside a fake runs once more with the real key, in a copy no one else reads: outcomes only.
     const real = reported && leftOut?.fakedKeys.length && leftOut.repo ? await rerunWithRealKeys(session, snap, cfg, {
-      source: { repo: leftOut.repo, head: null }, fakedKeys: leftOut.fakedKeys, tests: rerunCandidates([reported]),
-      target: (t) => t.fileAttr || null, budget: keyReruns(), timeout: SUITE_TIMEOUT, ...(boundary ? { id: (x: string) => boundary.mask(x) } : {}) })
+      source: { repo: leftOut.repo, head: null }, fakedKeys: leftOut.fakedKeys, tests: rerunCandidates([reported]), all: [reported],
+      target: (t) => t.fileAttr || null, budget: leftOut.reruns ?? keyReruns(), timeout: SUITE_TIMEOUT, ...(boundary ? { id: (x: string) => boundary.mask(x) } : {}) })
       : undefined;
     const all = reported && leftOut ? markUnproven(reported, { leftOut: leftOut.secret, fakedKeys: leftOut.fakedKeys, all: leftOut.all,
       ...(real ? { real } : {}) }) : reported;
@@ -637,12 +637,14 @@ export interface NeededFile { path: string; secret: boolean; faked?: true }
  * files (to tell a shared name apart), for runSuite. */
 export interface LeftOut { paths: string[]; secret: string[]; fakedKeys: string[]; all: string[];
   /** The working tree the snapshot is of: where a rerun reads a faked file's real key (realkey.ts). */
-  repo?: string }
+  repo?: string;
+  /** The command's reruns with a real key left: one setup, approve or baseline record shares them. */
+  reruns?: KeyReruns }
 
 /** What a later proof's snapshot lacks: what its runs may need and no change to review.yaml brings. */
 const lackingOf = (taken: { withheld: Withheld[]; fakedKeys: string[] }, all: string[], repo: string): LeftOut => {
   const secret = taken.withheld.map((w) => w.path);
-  return { paths: secret, secret, fakedKeys: taken.fakedKeys, all, repo };
+  return { paths: secret, secret, fakedKeys: taken.fakedKeys, all, repo, reruns: keyReruns() };
 };
 
 /** A run's failure names files the snapshot left out (repository paths). */
@@ -1276,6 +1278,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
                          limit: TimeLimit, boundary: Boundary): Promise<SetupResult> {
   const say = o.progress ?? (() => {});
   mkdirSync(o.outDir, { recursive: true });
+  sweepRealKeyCopies();
   const existing = o.project || o.add ? loadReviewFile(repo, { requireApproved: false }) : null;
   if (o.project && !existing!.projects.some((p) => p.name === o.project)) {
     throw new ArnxError(`no project ${o.project} in .arnx/review.yaml`);
@@ -1382,7 +1385,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const ignoredFile = loadIgnore(repo);
     const secret = new Set(withheld.map((w) => w.path));
     const leftOut: LeftOut = { paths: [...secret, ...files.filter((p) => ignoredFile(p) && !secret.has(p) &&
-      !sandbox.has(p))], secret: [...secret], fakedKeys, all: files, repo };
+      !sandbox.has(p))], secret: [...secret], fakedKeys, all: files, repo, reruns: keyReruns() };
     // Suites that run in a browser are never set up: listed under uncovered as browser tests.
     const readSnap = (rel: string) => {
       try {

@@ -2,14 +2,18 @@
 // only the rerun's outcome is kept. Keys are generated here, at run time.
 import { expect, test } from "bun:test";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { makeAnswerRunner } from "../src/accept";
+import { takeSnapshot, withSandboxFiles } from "../src/change";
 import { check, checkSummary } from "../src/check";
-import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
+import { loadReviewFile, parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { exitCode, render, summary } from "../src/report";
 import { runReview } from "../src/reviewer";
-import { dockerSteps, Session, sandboxOptions } from "../src/sandbox";
-import { KEY_RERUN_MOST } from "../src/realkey";
+import { dockerSteps, REPORT_DIR, type Runner, runArgv, Session, sandboxOptions } from "../src/sandbox";
+import { KEY_RERUN_MOST, keyReruns, rerunWithRealKeys } from "../src/realkey";
+import { writeDirOf } from "../src/testround";
 import { fakeKeys, withRealKeys } from "../src/secrets";
 import { defaultSettings, type Settings, writeSettings } from "../src/settings";
 import { runSetup } from "../src/setup";
@@ -141,16 +145,172 @@ test("the real-key run's output, report and files are in no request, file or log
   expect(leaks(JSON.stringify(r.review))).toBe(false);
 });
 
-test(`past ${KEY_RERUN_MOST} tests a review reruns no more: the rest read as unproven, not rerun, never a finding`, async () => {
+const GEN2 = "tests/arnx_generated/test_more.py";
+type Row = [string, string, string, string];
+const named = (file: string, n: number, prefix: string) => Array.from({ length: n }, (_, i) => `${prefix}${String(i).padStart(2, "0")}`)
+  .map((name) => [file, name, "failed", "E   assert 1 == 2"] as Row);
+
+test(`the cap counts every test run with the key: past ${KEY_RERUN_MOST} a file is not rerun, and its failures read as unproven, not rerun`, async () => {
   const repo = project();
-  const many = Array.from({ length: KEY_RERUN_MOST + 2 }, (_, i) => `test_k${String(i).padStart(2, "0")}`);
-  const r = await review(repo, () => [junitXml(many.map((n) => [GEN, n, "failed", "E   assert 1 == 2"] as [string, string, string, string])),
-    "ran\n", false]);
-  expect(r.seen.flatMap((s) => s.sealedRuns).length).toBe(1);
-  // The first by test id were rerun and failed again; the last two were not rerun.
-  expect(r.review.couldNotRun?.map((x) => x.test)).toEqual(many.slice(KEY_RERUN_MOST).map((n) => `${GEN}::${n}`));
-  expect(summary(r.review, "review.md")).toContain(`they may need the real key in ${PEM_PATH}`);
-  expect(render(r.review)).toContain("not rerun with it");
+  // 15 tests in one file, 7 in another: the first fits, the second would pass the cap.
+  const rows = [...named(GEN, 15, "test_a"), ...named(GEN2, 7, "test_b")];
+  const seen: FakeSession[] = [];
+  const agent = new RecordingAgent([[tool("write_file", { path: GEN, content: SOURCE }), tool("write_file", { path: GEN2, content: SOURCE }),
+    tool("run_tests", {})]], REPORT);
+  const out = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson(), progress: () => {},
+    sessionFactory: fakeFactory(() => [junitXml(rows), "ran\n", false], seen) });
+  const sealed = seen.flatMap((s) => s.sealedRuns);
+  expect(sealed.length).toBe(1);
+  expect(sealed[0]!.command).toContain(GEN);
+  expect(sealed[0]!.command).not.toContain(GEN2);
+  expect(out.review.couldNotRun?.map((x) => x.test)).toEqual(rows.slice(15).map(([f, n]) => `${f}::${n}`));
+  expect(out.review.couldNotRun?.every((x) => x.notRerun)).toBe(true);
+  expect(summary(out.review, "review.md")).toContain(`they may need the real key in ${PEM_PATH}`);
+  expect(render(out.review)).toContain("not rerun with it");
+});
+
+test(`a file of more than ${KEY_RERUN_MOST} tests is never rerun, even for one failure`, async () => {
+  const repo = project();
+  const rows: Row[] = [...named(GEN, KEY_RERUN_MOST, "test_p").map(([f, n]) => [f, n, "passed", ""] as Row), [GEN, "test_add", "failed", "E   x"]];
+  const r = await review(repo, () => [junitXml(rows), "ran\n", false]);
+  expect(r.seen.flatMap((s) => s.sealedRuns)).toEqual([]);
+  expect(r.review.couldNotRun).toEqual([{ test: `${GEN}::test_add`, needs: PEM_PATH, faked: true, notRerun: true }]);
+});
+
+test("arnx accept's answer rounds share one cap: what one round ran with the key, the next cannot", async () => {
+  const repo = project();
+  const file = loadReviewFile(repo);
+  const base = writeDirOf(file.projects[0]!, "answers");
+  const rows = named(`${base}/test_ans.py`, 15, "test_q");
+  const round = () => [[tool("write_file", { path: `${base}/test_ans.py`, content: SOURCE }), tool("run_tests", {})],
+    [text(`{"tests": [{"test": "${base}/test_ans.py::test_q00", "expects": "x"}]}`)]];
+  const agent = new ScriptedAgent([...round(), ...round()]);
+  const seen: FakeSession[] = [];
+  const run = makeAnswerRunner(repo, file, SETTINGS, agent, fakeFactory(() => [junitXml(rows), "ran\n", false], seen));
+  await run("Q1", "q?", "yes", "", join(tmp(), "a1"), file.projects[0]!.name);
+  expect(seen.flatMap((s) => s.sealedRuns).length).toBe(1);
+  await run("Q2", "q?", "yes", "", join(tmp(), "a2"), file.projects[0]!.name);
+  expect(seen.flatMap((s) => s.sealedRuns).length).toBe(1);
+});
+
+// --- a test that turns on the rerun: links, modes, its report ----------------------------------------------------------------------
+
+/** A snapshot of a project holding the key, as a review takes it, and what reruns there need. */
+function keyedSnap() {
+  const repo = project();
+  const snap = join(mkdtempSync(join(tmp(), "arnx-")), "repo");
+  takeSnapshot(repo, null, snap, [], {});
+  expect(readFileSync(join(snap, PEM_PATH), "utf8")).not.toBe(pem);
+  const cfg = parseReviewConfig(YAML);
+  const failing = { testId: `${GEN}::test_add`, fileAttr: GEN, name: "test_add", outcome: "failed", message: "E   x" };
+  const rerun = (runner: Runner, rows: Row[] = [[GEN, "test_add", "passed", ""]], budget = keyReruns()) => rerunWithRealKeys(runner, snap,
+    cfg, { source: { repo, head: null }, fakedKeys: [PEM_PATH], tests: [failing], all: [[failing]], target: () => GEN, budget,
+      timeout: 30 });
+  return { repo, snap, cfg, rerun };
+}
+/** A runner whose sealed run does `act` in the copy, then writes `rows` as its report. */
+const sealedRunner = (act: (src: string) => void, rows: Row[] = [[GEN, "test_add", "passed", ""]]) => {
+  const seen: string[] = [];
+  const runner: Runner = { run: () => ({ exitCode: 0, output: "", timedOut: false, seconds: 0 }), sealed: (command, _t, src) => {
+    seen.push(src);
+    act(src);
+    const m = /--junitxml=\/src\/(\S+)/.exec(command);
+    if (m && rows.length && existsSync(dirname(join(src, m[1]!)))) writeFileSync(join(src, m[1]!), junitXml(rows));
+    return { exitCode: 0, timedOut: false };
+  } };
+  return { runner, seen };
+};
+/** Every file under `dir` that holds a body line of the real key, no link followed. */
+const holdingKey = (dir: string) => files(dir, () => false).filter(([, t]) => bodyLines.some((l) => t.includes(l))).map(([p]) => p);
+
+test("a link the faked run left that leads out of the copy takes nothing out: the snapshot keeps its fake, and nothing reruns", async () => {
+  const { snap, rerun } = keyedSnap();
+  // As the reviewer's probe: tests/data becomes a link to a folder of the snapshot holding the fake.
+  mkdirSync(join(snap, "leak"));
+  writeFileSync(join(snap, "leak/server.pem"), readFileSync(join(snap, PEM_PATH)));
+  rmSync(join(snap, "tests/data"), { recursive: true });
+  symlinkSync("../../repo/leak", join(snap, "tests/data"));
+  const before = files(snap, () => false);
+  const { runner, seen } = sealedRunner(() => {});
+  const got = await rerun(runner);
+  expect(got.get(`${GEN}::test_add`)).toBeNull();
+  expect(seen).toEqual([]);
+  expect(files(snap, () => false)).toEqual(before);
+  expect(holdingKey(dirname(snap))).toEqual([]);
+});
+
+test("a link inside the copy that leads out through another is dropped too", async () => {
+  const { snap, rerun } = keyedSnap();
+  const fake = readFileSync(join(snap, PEM_PATH));
+  mkdirSync(join(snap, "sub"));
+  symlinkSync("..", join(snap, "sub/up"));
+  // Read as text it stays inside; followed, sub/up/.. is the folder above the copy, and repo/ there is the snapshot.
+  rmSync(join(snap, "tests/data"), { recursive: true });
+  mkdirSync(join(snap, "elsewhere/tests/data"), { recursive: true });
+  writeFileSync(join(snap, "elsewhere/tests/data/server.pem"), fake);
+  symlinkSync("../sub/up/../repo/elsewhere/tests/data", join(snap, "tests/data"));
+  const { runner } = sealedRunner(() => {});
+  await rerun(runner);
+  expect(holdingKey(dirname(snap))).toEqual([]);
+});
+
+test("a FIFO the faked run left is left out of the copy, and the rerun goes on", async () => {
+  const { snap, rerun } = keyedSnap();
+  expect(spawnSync("mkfifo", [join(snap, "pipe")]).status).toBe(0);
+  const { runner, seen } = sealedRunner(() => {});
+  expect((await rerun(runner)).get(`${GEN}::test_add`)).toBe("passed");
+  expect(seen.length).toBe(1);
+});
+
+test("a test that takes the write bit from a folder of the copy leaves no real key on disk", async () => {
+  const { snap, rerun } = keyedSnap();
+  const { runner, seen } = sealedRunner((src) => chmodSync(join(src, "tests/data"), 0o500));
+  const got = await rerun(runner);
+  expect(got.get(`${GEN}::test_add`)).toBe("passed");
+  expect(seen.length).toBe(1);
+  expect(existsSync(seen[0]!)).toBe(false);
+  expect(holdingKey(dirname(snap))).toEqual([]);
+});
+
+test("a copy an earlier arnx left behind is removed by the next run", async () => {
+  const dead = spawnSync("true").pid!;
+  const left = join(tmp(), `repo.${dead}.realkey`);
+  mkdirSync(join(left, "tests/data"), { recursive: true });
+  writeFileSync(join(left, PEM_PATH), pem);
+  chmodSync(join(left, "tests/data"), 0o500);
+  const repo = project();
+  await check(repo, SETTINGS, { sessionFactory: fakeFactory(() => [null, "", false]) });
+  expect(existsSync(left)).toBe(false);
+});
+
+test("the report is read only as a regular file in the copy: a link to a file outside is not followed", async () => {
+  const { snap, rerun } = keyedSnap();
+  const outside = join(dirname(snap), "outside.xml");
+  writeFileSync(outside, junitXml([[GEN, "test_add", "passed", ""]]));
+  const { runner } = sealedRunner((src) => {
+    mkdirSync(join(src, REPORT_DIR), { recursive: true });
+    rmSync(join(src, REPORT_DIR, "realkey.xml"), { force: true });
+    symlinkSync(outside, join(src, REPORT_DIR, "realkey.xml"));
+  }, []);
+  expect((await rerun(runner)).get(`${GEN}::test_add`)).toBeNull();
+});
+
+test("nor is a report under a folder the test made a link to outside", async () => {
+  const { snap, rerun } = keyedSnap();
+  const outside = join(dirname(snap), "out");
+  mkdirSync(outside);
+  writeFileSync(join(outside, "realkey.xml"), junitXml([[GEN, "test_add", "passed", ""]]));
+  const { runner } = sealedRunner((src) => {
+    rmSync(join(src, REPORT_DIR), { recursive: true, force: true });
+    symlinkSync(outside, join(src, REPORT_DIR));
+  }, []);
+  expect((await rerun(runner)).get(`${GEN}::test_add`)).toBeNull();
+});
+
+test("a test missing from the rerun's report is not rerun, however its file ran", async () => {
+  const { rerun } = keyedSnap();
+  const { runner } = sealedRunner(() => {}, [[GEN, "test_other", "passed", ""]]);
+  expect((await rerun(runner, [[GEN, "test_other", "passed", ""]])).get(`${GEN}::test_add`)).toBeNull();
 });
 
 test("the real key goes back only where its fake stands: a file that differs otherwise gets nothing", () => {
@@ -163,6 +323,31 @@ test("the real key goes back only where its fake stands: a file that differs oth
   // A line the file on the host no longer has, or a key that is not this one: nothing goes in.
   expect(withRealKeys(text, faked.replace("KEY =", "KEYS ="))).toBe(text.replace("KEY =", "KEYS ="));
   expect(withRealKeys(text.replace(bodyLines[0]!, bodyLines[0]!.split("").reverse().join("")), faked)).toBeNull();
+});
+
+test("a sandbox-only file is never written through a link a run left, for a run or a sealed run", async () => {
+  const root = mkdtempSync(join(tmp(), "w-"));
+  const snap = join(root, "repo"), outside = join(root, "outside");
+  mkdirSync(join(`${snap}.sandbox`, "data"), { recursive: true });
+  writeFileSync(join(`${snap}.sandbox`, "data/cfg.txt"), "SANDBOX-ONLY");
+  mkdirSync(outside);
+  mkdirSync(snap);
+  symlinkSync("../outside", join(snap, "data"));
+  const copy = join(root, "copy");
+  mkdirSync(copy);
+  symlinkSync("../outside", join(copy, "data"));
+  const inner: Runner = { run: () => ({ exitCode: 0, output: "", timedOut: false, seconds: 0 }),
+    sealed: () => ({ exitCode: 0, timedOut: false }) };
+  const placed = withSandboxFiles(inner, snap);
+  await placed.run("true", 5);
+  await placed.sealed!("true", 5, copy);
+  expect(readdirSync(outside)).toEqual([]);
+  // A dangling link where the file goes is not written through either.
+  rmSync(join(snap, "data"));
+  mkdirSync(join(snap, "data"));
+  symlinkSync(join(outside, "made.txt"), join(snap, "data/cfg.txt"));
+  await placed.run("true", 5);
+  expect(readdirSync(outside)).toEqual([]);
 });
 
 // --- check and setup's baseline ---------------------------------------------------------------------------------------------------
@@ -228,6 +413,7 @@ test("the rerun runs with no network, even with services, and what it prints is 
     expect(argv[argv.indexOf("--network") + 1]).toBe("none");
     expect(argv.filter((a) => a === "--network").length).toBe(1);
     expect(argv).toContain(`${src}:/src`);
+    expect(argv[argv.indexOf("--log-driver") + 1]).toBe("none");
     expect(argv).not.toContain(`${join(dir, "snap")}:/src`);
     expect(logged.join("\n")).not.toContain("SENTINEL");
     s.close();
@@ -235,6 +421,14 @@ test("the rerun runs with no network, even with services, and what it prints is 
     sandboxOptions.docker = saved;
     dockerSteps.log = savedLog;
   }
+});
+
+test("runArgv: a run that keeps no log asks Docker for none; other runs keep the daemon's own", () => {
+  const o = { image: "img", name: "n", network: "none", snapshot: "/s", workdir: ".", env: {}, command: "true",
+    limits: { cpus: "1", memory: "1g", pids: 10, tmp: "1g" }, user: "1:1", runEnv: [] };
+  const sealed = runArgv({ ...o, noLog: true });
+  expect(sealed[sealed.indexOf("--log-driver") + 1]).toBe("none");
+  expect(runArgv(o)).not.toContain("--log-driver");
 });
 
 test.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: the rerun's container has no network but loopback", async () => {

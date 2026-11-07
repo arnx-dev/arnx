@@ -36,7 +36,7 @@ import { type AgentReport, type Checked, type Finding, type FixProof, hasReport,
 import { dockerSteps, type SessionFactory } from "./sandbox";
 import { skippedTypecheck, type TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
-import { keyReruns } from "./realkey";
+import { keyReruns, sweepRealKeyCopies } from "./realkey";
 import { docsFilter, route, uncoveredChange } from "./route";
 import { isSecretPath } from "./secrets";
 import { commitMessageValues } from "./evidence";
@@ -428,8 +428,9 @@ export async function runReview(repo: string, o: { settings: Settings;
     const flaky: string[] = [], errors: string[] = [], notSent = new Set(change.withheld?.map((w) => w.path));
     const leftOutFiles = new Map((change.withheld ?? []).map((w) => [w.path, w]));
     const couldNotRun: { test: string; needs: string; faked?: boolean; notRerun?: boolean }[] = [];
-    // The review's reruns with a real key, over all its projects.
+    // The review's reruns with a real key, over all its projects; copies an earlier arnx left go first.
     const reruns = keyReruns();
+    sweepRealKeyCopies();
     const unclaimed: NonNullable<Review["unclaimed"]> = [];
     const typesUnchecked = pythonTypeGap(file, repo, routing.routed.map((x) => x.project.name));
     const fakedKeys = new Set<string>();

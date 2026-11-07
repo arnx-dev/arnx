@@ -14,7 +14,7 @@ import { configSuspects, loadReviewFile, type ReviewConfig, sandboxOnlyOf, secre
 import { ArnxError } from "./errors";
 import { placed } from "./fixprompt";
 import { baseName, ownerFile, runTests, type TestResult } from "./outcomes";
-import { keyReruns, rerunCandidates, rerunWithRealKeys } from "./realkey";
+import { keyReruns, rerunCandidates, rerunWithRealKeys, sweepRealKeyCopies } from "./realkey";
 import { load, type Review } from "./report";
 import type { Say } from "./progress";
 import { sayingDocker, type SessionFactory } from "./sandbox";
@@ -189,6 +189,7 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
   const file = loadReviewFile(repo);
   const out: ProjectCheck[] = [];
   let known: AcceptedIds | undefined;
+  sweepRealKeyCopies();
   // The check's reruns with a real key, over all its projects.
   const reruns = keyReruns();
   for (const cfg of file.projects) {
@@ -227,7 +228,7 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
           for (const [g, , results] of taken.fakedKeys.length ? ran : []) {
             const mine = files.filter((f) => reviewGroup(f) === g).map(target);
             const got = await rerunWithRealKeys(session, snap, cfg, { source: { repo, head: null }, fakedKeys: taken.fakedKeys,
-              tests: rerunCandidates([results]), target: (t) => mine.find((f) => ownerFile(t.fileAttr, [f]) !== null) ?? null,
+              tests: rerunCandidates([results]), all: [results], target: (t) => mine.find((f) => ownerFile(t.fileAttr, [f]) !== null) ?? null,
               budget: reruns, timeout: CHECK_TIMEOUT });
             for (const [id, outcome] of got) real.set(id, outcome);
           }

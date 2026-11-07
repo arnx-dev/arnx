@@ -19,6 +19,7 @@ import { isGenerated, isLockfile, loadIgnore, looksGenerated } from "./ignore";
 import { BIG_KEYS_MOST, excludePathspecs, fakeKeys, filePin, holdsOnlyPublicPem, holdsPrivateKey, isCertainRule, isCodePath, isKeyFileName, isSecretPath,
   type KeyScan, keyTokens, MAY_HOLD_KEY, mayShowPrivateKey, privateKeyIn, scanKeys, type SecretPin, standInsFor, suspects, usedAsName,
   secretFileValues, WORD_RULE } from "./secrets";
+import { realFolders, writeNew } from "./safefs";
 import { buildContextDir, manifestRule, REPORT_DIR, type Runner } from "./sandbox";
 import { standInsSetting } from "./settings";
 import { DIFF_SECTION, splitLines } from "./util";
@@ -1032,10 +1033,8 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
   // A sealed run's copy is thrown away after it: the files go in and stay until then.
   const sealed = runner.sealed ? { sealed: (command: string, timeout: number, src: string) => {
     for (const rel of files) {
-      const to = join(src, rel);
-      if (existsSync(to)) continue;
-      mkdirSync(dirname(to), { recursive: true });
-      copyFileSync(join(from, rel), to);
+      if (lstatSync(join(src, rel), { throwIfNoEntry: false }) || !realFolders(src, rel, true)) continue;
+      writeNew(join(src, rel), readFileSync(join(from, rel)), statSync(join(from, rel)).mode & 0o777);
     }
     return runner.sealed!(command, timeout, src);
   } } : {};
@@ -1045,11 +1044,14 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
     try {
       for (const rel of files) {
         const to = join(snap, rel);
-        if (existsSync(to)) continue;
+        // Nothing there, a link or not: a link a run left is never written through.
+        if (lstatSync(to, { throwIfNoEntry: false })) continue;
         // Folders made for a file go again after the run, deepest first.
-        for (let d = dirname(rel); d !== "." && !existsSync(join(snap, d)); d = dirname(d)) made.unshift(join(snap, d));
-        mkdirSync(dirname(to), { recursive: true });
-        copyFileSync(join(from, rel), to);
+        const missing: string[] = [];
+        for (let d = dirname(rel); d !== "." && !lstatSync(join(snap, d), { throwIfNoEntry: false }); d = dirname(d)) missing.unshift(join(snap, d));
+        made.unshift(...missing);
+        if (!realFolders(snap, rel, true)) continue;
+        writeNew(to, readFileSync(join(from, rel)), statSync(join(from, rel)).mode & 0o777);
         // Its time as the copy beside the snapshot has it: a run never sees it as changed since the last one.
         const st = statSync(join(from, rel));
         utimesSync(to, st.atime, st.mtime);
