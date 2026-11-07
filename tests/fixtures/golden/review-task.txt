@@ -10,7 +10,9 @@ Write tests for this change that catch defects: defects in the change itself, an
 
 Do not assume the current code is correct. Each test should assert the behaviour the code is supposed to have. If you conclude the code is wrong, keep the test asserting the correct behaviour (it will fail). A test that fails because of your own mistake (a wrong import, fixture or setup) is not a finding: fix it.
 
-When the code does not tell you what the intended behaviour is, do not guess in a test: ask a question instead. Write questions for the person who owns the product, who knows what it should do but may not read code: plain language, one decision per question, code names only when needed. At most 5.
+When the code does not tell you what the intended behaviour is, do not guess in a test: ask a question instead. Write questions for the person who owns the product, who knows what it should do but may not read code: plain language, one decision per question, code names only when needed. At most 5. Ask only what the change does not settle: read its changelog, docs and comments first. A question holds the question alone, with no remark about what you read.
+
+In an explanation, state as fact only what a test or the code you read shows. A claim about how a dependency, a caller or the UI behaves needs a test or code that shows it; otherwise write "not checked:" before it.
 
 When you are done, reply with JSON only, no other text:
 {"tests": [{"test": "<file>::<test name>", "expects": "<one sentence: the behaviour this test asserts>"}],
