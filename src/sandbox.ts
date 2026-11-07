@@ -271,7 +271,8 @@ export function isManifest(path: string): boolean {
   return manifestGlobs.some((g) => g.test(name));
 }
 
-/** Whether `rel` (repository path) is a file that keys `cfg`'s image: its adapter's manifests, where envKey reads them. */
+/** Whether `rel` (repository path) is a file that keys `cfg`'s image: its adapter's manifests, where the build context keeps their real values (a nested manifest still counts for envKey, which reads the snapshot, but
+ * the context holds its stand-in). */
 function keysImage(cfg: ReviewConfig, rel: string): boolean {
   const root = posix.normalize(cfg.installRoot).replace(/^\.$/, "").replace(/\/$/, "");
   if (root && !rel.startsWith(`${root}/`)) return false;
@@ -331,6 +332,13 @@ function newerThanBuild(snapshot: string, context: string, rel = ""): void {
   }
 }
 
+/** An image holds the code of the context it was built from, maybe another session's: the snapshot's own files count as
+ * newer than it (newerThanBuild), for the languages whose builds trust their age. */
+function newerThanImage(cfg: ReviewConfig, snapshot: string): void {
+  const context = buildContextOf(snapshot);
+  if (adapterFor(cfg).keepBuild && context !== snapshot) newerThanBuild(snapshot, context);
+}
+
 /** Copies every file that can key an image (any language's manifests, at any depth) from `snapshot` to `dest`:
  * keys computed there stay as the snapshot was before runs wrote into it (cargo writes a missing Cargo.lock). */
 export function copyManifests(snapshot: string, dest: string): void {
@@ -351,16 +359,20 @@ export function envKey(cfg: ReviewConfig, snapshot: string): string {
     : [cfg.image, root, cfg.install]));
   const work = join(snapshot, root);
   const adapter = adapterFor(cfg);
-  const entries = !existsSync(work) ? [] : adapter.nestedManifests ? nestedFiles(work) : readdirSync(work).sort();
-  for (const pattern of adapter.manifests) {
-    const rx = globRegex(pattern);
-    for (const rel of entries) {
-      const p = join(work, rel);
-      if (!rx.test(posix.basename(rel)) || !statSync(p).isFile()) continue;
-      h.update(Buffer.concat([Buffer.from(rel + "\0"), readFileSync(p)]));
+  const rxs = adapter.manifests.map(globRegex);
+  for (const rx of rxs) {
+    for (const rel of manifestFiles(work, (name) => rx.test(name))) {
+      h.update(Buffer.concat([Buffer.from(rel + "\0"), readFileSync(join(work, rel))]));
     }
   }
   return h.digest("hex").slice(0, 16);
+}
+
+/** The manifests and lockfiles (files whose name `match` accepts) at any depth under `dir`, sorted POSIX paths relative to
+ * it, outside the folders nestedFiles leaves out. The one reading of "what an install reads" for the environment's key
+ * (envKey) and the key of an image made from the code (baked.ts bakedKey). */
+export function manifestFiles(dir: string, match: (name: string) => boolean): string[] {
+  return existsSync(dir) ? nestedFiles(dir).filter((rel) => match(posix.basename(rel))) : [];
 }
 
 /** Files under `dir` (sorted POSIX paths relative to it), without build output, dependencies and hidden folders
@@ -441,8 +453,7 @@ async function sharedBuild(cfg: ReviewConfig, snapshot: string, logPath: string,
     try {
       const built = await running.done;
       // The build holds the builder's code: this snapshot's own files must count as newer than it.
-      const context = buildContextOf(snapshot);
-      if (adapterFor(cfg).keepBuild && context !== snapshot) newerThanBuild(snapshot, context);
+      newerThanImage(cfg, snapshot);
       return built;
     } finally {
       // Whoever waited reads the same build log from its own place.
@@ -466,6 +477,7 @@ async function ensureBuilt(cfg: ReviewConfig, snapshot: string, logPath: string,
   const t0 = performance.now();
   if (docker(["image", "inspect", tag]).status === 0) {
     stepLog({ step: "image", project: cfg.name, tag, built: false, secs: secsSince(t0) });
+    newerThanImage(cfg, snapshot);
     return tag;
   }
   if (built) throw new ArnxError(`${cfg.name}: its test image is gone`);

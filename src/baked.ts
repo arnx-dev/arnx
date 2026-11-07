@@ -14,7 +14,7 @@ import { parse as parseToml } from "smol-toml";
 import { getAdapter } from "./adapters";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
-import { buildContextOf, DEFAULT_LIMITS, docker, dockerSteps, dockerfile, isManifest, notCode, projectOf, runArgv } from "./sandbox";
+import { buildContextOf, DEFAULT_LIMITS, docker, dockerSteps, dockerfile, isManifest, manifestFiles, notCode, projectOf, runArgv } from "./sandbox";
 import { randomHex, shQuote } from "./util";
 
 /** A copy of a snapshot folder (`scope`, relative to the repository; "" for the repository) at `root` in the image:
@@ -324,8 +324,10 @@ export function bakedIn(cfg: ReviewConfig, image: string, snap: string): Baked |
 export function bakedKey(key: string, cfg: ReviewConfig, snap: string): string {
   const h = createHash("sha256").update(dockerfile(cfg)).update("\0");
   const code = buildContextOf(snap);
+  const skip = notCode(cfg, snap, "");
+  const files = [...scopeFiles(code, "", skip), ...manifestFiles(code, isManifest).filter((f) => !skip.some((k) => f === k || f.startsWith(`${k}/`)))];
   // Every manifest and lockfile at any depth: an install can read one anywhere (`pip install -r app/requirements.txt`).
-  for (const f of scopeFiles(code, "", notCode(cfg, snap, ""), true)) {
+  for (const f of files.sort()) {
     h.update(`${f}\0${statSync(join(code, f)).mode & 0o111 ? "x" : ""}\0`).update(readFileSync(join(code, f))).update("\0");
   }
   return `${key}-src-${h.digest("hex").slice(0, 12)}`;

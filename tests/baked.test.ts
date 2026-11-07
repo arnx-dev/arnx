@@ -522,9 +522,9 @@ test("projects on one install share the image made from the same code", () => {
 });
 
 /** A docker whose builds take a moment and are counted; a Dockerfile holding `FAIL` fails without leaving the tag. */
-function slowDocker(): { builds: () => number; has: (tag: string) => boolean; listing: () => string[] } {
+function slowDocker(existing: string[] = []): { builds: () => number; has: (tag: string) => boolean; listing: () => string[] } {
   const dir = tmp();
-  writeFileSync(join(dir, "images"), "");
+  writeFileSync(join(dir, "images"), existing.map((t) => `${t}\n`).join(""));
   writeFileSync(join(dir, "docker"), `#!/bin/sh
 case "$1" in
   info) echo 27;;
@@ -658,6 +658,52 @@ projects:
     slowDocker();
     await Promise.all([ensureEnv(cfg, one, join(tmp(), "a.log"), "rk"), ensureEnv(cfg, two, join(tmp(), "b.log"), "rk")]);
     for (const dir of [one, two]) expect(statSync(join(dir, "src/lib.rs")).mtimeMs).toBeGreaterThan(old.getTime() + 1000);
+  } finally {
+    Object.assign(sandboxOptions, saved);
+  }
+});
+
+test("a nested manifest below the install root changes the environment's key", () => {
+  const cfg = parseReviewFile(`version: 1
+projects:
+  app:
+    root: app
+    install_root: .
+    image: python:3.12-slim
+    install: ["pip install -r app/requirements.txt"]
+    test_command: python -m pytest -q {targets}
+`).projects[0]!;
+  const one = write(join(tmp(), "one"), { "app/a.py": "1", "app/requirements.txt": "x==1\n" });
+  const two = write(join(tmp(), "two"), { "app/a.py": "1", "app/requirements.txt": "x==2\n" });
+  expect(envKey(cfg, two)).not.toBe(envKey(cfg, one));
+  // code is not a manifest
+  const three = write(join(tmp(), "three"), { "app/a.py": "2", "app/requirements.txt": "x==1\n" });
+  expect(envKey(cfg, three)).toBe(envKey(cfg, one));
+});
+
+test("an image that already exists does not make a newer snapshot look built", async () => {
+  const saved = { docker: sandboxOptions.docker, buildkit: sandboxOptions.buildkit };
+  try {
+    sandboxOptions.buildkit = false;
+    const cfg = parseReviewFile(`version: 1
+projects:
+  calc:
+    root: .
+    language: rust
+    runner: nextest
+    image: rust:1-bookworm
+    install: ["cargo build"]
+    test_command: cargo nextest run {targets}
+`).projects[0]!;
+    const old = new Date("2001-01-01T00:00:00Z");
+    const dir = join(tmp(), "snap");
+    write(dir, { "src/lib.rs": "real", "Cargo.toml": "[package]" });
+    write(`${dir}.build`, { "src/lib.rs": "stand-in", "Cargo.toml": "[package]" });
+    utimesSync(join(dir, "src/lib.rs"), old, old);
+    const docker = slowDocker(["arnx-env:have"]);
+    await ensureEnv(cfg, dir, join(tmp(), "a.log"), "have");
+    expect(docker.builds()).toBe(0);
+    expect(statSync(join(dir, "src/lib.rs")).mtimeMs).toBeGreaterThan(old.getTime() + 1000);
   } finally {
     Object.assign(sandboxOptions, saved);
   }
