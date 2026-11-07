@@ -375,7 +375,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   /** Run the project's type check (`cfg.typecheck`) once after the final runs, without the generated tests:
    * `changed` are the change's files (repository paths); with errors, `base` (null: the change has none; absent: no
    * comparison) is the code before the change to compare them with. */
-  typecheck?: { changed: string[]; base?: string | null; skipped?: TypeCheck };
+  typecheck?: { changed: string[]; base?: string | null; skipped?: TypeCheck; record?: boolean };
   /** A working-tree round (head null) copies untracked files too (opted in, or no commits yet); default: tracked
    * files only, since the agent reads the snapshot and the tests' output goes to the model. */
   untracked?: boolean;
@@ -704,7 +704,7 @@ function clearArnxFiles(snap: string, cfg: ReviewConfig, writeDir: string): void
  * review's. */
 export async function typecheckRound(repo: string, head: string | null, cfg: ReviewConfig, o: { changed: string[];
   base?: string | null; outDir: string; sessionFactory?: SessionFactory; progress?: Say; untracked?: boolean;
-  boundary?: Boundary; skipped?: TypeCheck }): Promise<TypeCheck | null> {
+  boundary?: Boundary; skipped?: TypeCheck; record?: boolean }): Promise<TypeCheck | null> {
   if (!cfg.typecheck) return null;
   if (o.skipped) {
     o.progress?.(`${cfg.name}: type check: ${describeTypecheck(o.skipped)}`);
@@ -726,7 +726,8 @@ export async function typecheckRound(repo: string, head: string | null, cfg: Rev
       return await typecheckHere(session, snap, cfg, writeDirOf(cfg), say);
     }, undefined, undefined, swap);
     return await typecheckDone(repo, cfg, run, { changed: o.changed, ...(o.base !== undefined ? { base: o.base } : {}),
-      headSnap: snap, headKey, tmp, outDir: o.outDir, sessionFactory, say, ...(baked ? {} : { swap }) });
+      headSnap: snap, headKey, tmp, outDir: o.outDir, sessionFactory, say, ...(baked ? {} : { swap }),
+      ...(o.record ? { record: true } : {}) });
   } catch (e) {
     const run: TypeCheckRun = { status: "failed", errors: [], output: e instanceof Error ? e.message : String(e),
       exitCode: null, timedOut: false, seconds: 0 };
@@ -761,7 +762,7 @@ async function typecheckHere(session: Runner, snap: string, cfg: ReviewConfig, w
  * what keys the image, its dependencies differ there and errors are not compared. */
 async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun, o: { changed: string[];
   base?: string | null; headSnap: string; headKey: string; tmp: string; outDir: string; sessionFactory: SessionFactory;
-  say: (m: string) => void; swap?: Swap }): Promise<TypeCheck> {
+  say: (m: string) => void; swap?: Swap; record?: boolean }): Promise<TypeCheck> {
   let secs = run.seconds;
   let before: { status: TypeCheckBefore; errors?: TscError[] } | undefined, error: string | undefined;
   if (run.status === "errors" && o.base !== undefined) {
@@ -789,7 +790,8 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
     }
   }
   // What the code before the change had decides whether later reviews skip the check, never what the change adds.
-  if (before?.status === "compared") recordTypecheck(repo, cfg, before.errors!.length);
+  if (!o.record) { /* a change that is not on the checked-out code says nothing about it */ }
+  else if (before?.status === "compared") recordTypecheck(repo, cfg, before.errors!.length);
   else if (run.status === "clean") recordTypecheck(repo, cfg, 0);
   const t = typeCheckOf(cfg, run, o.changed, secs, before, workspaceNames(o.headSnap));
   emit("typecheck.done", { project: cfg.name, status: t.status, errors: t.errors, in_changed_files: t.inChangedFiles,

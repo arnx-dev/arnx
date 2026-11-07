@@ -4,7 +4,7 @@
 // deterministic, so once is enough. It is information: it never changes a test's outcome, a finding, whether a run
 // reported, or the exit code.
 import { createHash } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
@@ -164,6 +164,8 @@ export function typeCheckOf(cfg: ReviewConfig, run: TypeCheckRun, changed: Itera
 const INPUT_FILE = /^(tsconfig[^/]*\.json|package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|pyproject\.toml)$/;
 export function typecheckInputs(repo: string, cfg: ReviewConfig): string {
   const h = createHash("sha256");
+  // The project's own steps (install, test, image, env...): a fix there changes what the check can see.
+  h.update(JSON.stringify({ ...cfg, raw: undefined }));
   for (const dir of new Set([".", cfg.workdir || "."])) {
     let names: string[] = [];
     try { names = readdirSync(join(repo, dir)).filter((n) => INPUT_FILE.test(n)).sort(); } catch { /* no folder */ }
@@ -194,6 +196,14 @@ export function recordTypecheck(repo: string, cfg: ReviewConfig, errors: number,
     } else if (all[cfg.name]) delete all[cfg.name];
     else return;
     mkdirSync(join(repo, ".arnx"), { recursive: true });
+    // Local state: git must not see it, so the ignore line comes first (a repository set up before it lacks it).
+    const ignore = join(repo, ".arnx", ".gitignore");
+    if (existsSync(ignore)) {
+      const text = readFileSync(ignore, "utf8");
+      if (!text.split("\n").some((l) => l.trim() === TYPECHECK_RECORD)) {
+        appendFileSync(ignore, (text === "" || text.endsWith("\n") ? "" : "\n") + `${TYPECHECK_RECORD}\n`);
+      }
+    }
     writeFileSync(join(repo, ".arnx", TYPECHECK_RECORD), `${JSON.stringify(all, null, 2)}\n`);
   } catch { /* the check just runs next time */ }
 }
@@ -230,7 +240,8 @@ export function describeTypecheck(t: Pick<TypeCheck, "status" | "errors" | "inCh
   | "before"> & Partial<Pick<TypeCheck, "skippedFor" | "project">>): string {
   if (t.status === "clean") return "no type errors";
   if (t.status === "skipped") {
-    return `skipped: ${t.skippedFor?.errors ?? SWAMPED_ERRORS} errors when last run; \`arnx setup --project ${t.project}\` runs it again`;
+    return `skipped: the code had ${t.skippedFor?.errors ?? SWAMPED_ERRORS} errors when last run, so errors this change ` +
+      `adds are not checked; \`arnx setup --project ${t.project}\` runs it again`;
   }
   if (t.status === "timed-out") return `timed out after ${TYPECHECK_TIMEOUT} s`;
   if (t.status === "failed") return "did not run: the command failed without reporting a type error";

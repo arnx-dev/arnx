@@ -188,8 +188,10 @@ its own, under "Type check": it never fails a test, turns a run into no report, 
 When the code before the change already has 100 type errors or more, the check tells a review nothing and costs
 minutes. Setup and reviews note that in `.arnx/typecheck.json` (local, git-ignored), and for 14 days the next reviews
 skip the check and say so ("Type check skipped: N errors when last run; `arnx setup --project X` runs it again").
-The count is of the code before the change, never of the errors a change adds, which are always shown. A changed
-`typecheck` command, tsconfig, package.json, lockfile or pyproject, or a change that edits one, runs the check again.
+The count is of the code before the change, never of the errors a change adds; the review that finds the project
+swamped shows them, but a skipped review does not check the change's own errors at all (it says so). A changed
+`typecheck` command, tsconfig, package.json, lockfile or pyproject, a change to the project's steps in review.yaml, or a change that edits one of those files, runs the check again.
+A review of another commit (`--range`) neither reads nor writes the record.
 
 arnx does not type check Python. When the repository's CI runs mypy, pyright, basedpyright or ty (a mention in a comment
 or a `pip install` line does not count), setup and review print one line naming the Python projects whose types are not

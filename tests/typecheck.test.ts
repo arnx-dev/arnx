@@ -3,7 +3,7 @@
 // "no report", never the exit code. No model or Docker: the sandbox is a fake that type checks like tsc.
 import { COPY_SUFFIX } from "../src/testround";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
 import { typescript } from "../src/adapters/typescript";
 import { GITIGNORE } from "../src/cli";
@@ -376,15 +376,50 @@ describe("a swamped type check", () => {
     expect(seen.flatMap((s) => s.commands).filter((c) => c === TSC)).toEqual([]);
     expect(seen).toHaveLength(1);
     expect([r.passed, r.missingRuns, exitCode(r)]).toEqual([1, 0, 0]);
-    const line = "skipped: 100 errors when last run; `arnx setup --project main` runs it again";
+    const line = "skipped: the code had 100 errors when last run, so errors this change adds are not checked; " +
+      "`arnx setup --project main` runs it again";
     expect(describeTypecheck(r.typecheck![0]!)).toBe(line);
-    const md = readFileSync(join(rdir, "review.md"), "utf8");
-    expect(md).toContain(`\nType check ${line}.\n`);
-    expect(md.replace(/\n  /g, " ")).toContain(`- Skipped \`${TSC}\`: ${line.replace("skipped: ", "")}.\n`);
+    const md = readFileSync(join(rdir, "review.md"), "utf8").replace(/\n {2}|\n(?=check below)/g, " ");
+    expect(md.replace(/(?<=\w)\n(?=\w)/g, " ")).toContain(`\nType check ${line}.\n`);
+    expect(md).toContain(`- Skipped \`${TSC}\`: ${line.replace("skipped: ", "")}.\n`);
+    // Nothing above a skipped entry says the check ran on the change.
+    expect(md).not.toContain("ran once on the change");
     const json = JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")) as Record<string, unknown>;
-    expect((json.typecheck as Record<string, unknown>[])[0]).toMatchObject({ status: "skipped",
-      skipped_for: { errors: 100 } });
+    const entry = (json.typecheck as Record<string, unknown>[])[0]!;
+    expect(entry).toMatchObject({ status: "skipped", skipped_for: { errors: 100 } });
+    // No count that could read like a clean check.
+    for (const k of ["errors", "in_changed_files", "diagnostics"]) expect(k in entry).toBe(false);
     expect(load(rdir).typecheck).toEqual(r.typecheck!);
+  });
+
+  test("a range review of an older commit neither reads nor writes the record", async () => {
+    swampedBaseline();
+    await review();
+    const before = readFileSync(record(), "utf8");
+    commit(repo, "tip with an error");
+    const { review: r } = await runReview(repo, { settings: SETTINGS, agentModel: agent(), challenger: new FakeJson([]),
+      sessionFactory: sandbox(), range: "HEAD~2..HEAD~1" });
+    expect(r.typecheck![0]!.status).not.toBe("skipped");
+    expect(readFileSync(record(), "utf8")).toBe(before);
+    rmSync(record());
+    await runReview(repo, { settings: SETTINGS, agentModel: agent(), challenger: new FakeJson([]),
+      sessionFactory: sandbox(), range: "HEAD~2..HEAD~1" });
+    expect(existsSync(record())).toBe(false);
+  });
+
+  test("the project's install and test steps are part of what a record depends on", async () => {
+    swampedBaseline();
+    await review();
+    writeFileSync(reviewConfigPath(repo), stamp(parseReviewConfig(`${TYPED}install:\n  - echo fixed\n`), "Dev", "2026-10-20"));
+    expect((await review()).review.typecheck![0]!.status).toBe("errors");
+  });
+
+  test("typecheck.json is listed in .arnx/.gitignore before a review first writes it", async () => {
+    swampedBaseline();
+    writeFileSync(join(repo, ".arnx", ".gitignore"), "reviews/\n");
+    await review();
+    expect(existsSync(record())).toBe(true);
+    expect(readFileSync(join(repo, ".arnx", ".gitignore"), "utf8").split("\n")).toContain("typecheck.json");
   });
 
   test("a changed command runs it again", async () => {

@@ -823,9 +823,11 @@ export function render(r: Review): string {
   }
   const checks = r.typecheck ?? [];
   if (checks.length) {
-    out.push("## Type check", "",
-      "The project's own type check (`typecheck` in .arnx/review.yaml) ran once on the change, without arnx's " +
-      "generated tests. It is information only: it changes no test, finding or exit code.", "");
+    out.push("## Type check", "");
+    if (checks.some((t) => t.status !== "skipped")) {
+      out.push("The project's own type check (`typecheck` in .arnx/review.yaml) ran once on the change, without arnx's " +
+        "generated tests. It is information only: it changes no test, finding or exit code.", "");
+    }
     for (const t of checks) {
       const did = t.status === "skipped" ? "Skipped" : "Ran";
       out.push(`- ${multi(r) ? `\`${t.project}\` ${did.toLowerCase()}` : did} \`${t.command}\`: ${describeTypecheck(t).replace(/^skipped: /, "")}.`);
@@ -1288,7 +1290,11 @@ export function save(r: Review, rdir: string, diff: string): void {
     project_stats: (r.projectStats ?? []).map((p) => rekey(p, snake)),
     usage: (r.usage ?? []).map((u) => rekey(u, snake)), ...(r.timings ? { timings: rekey(r.timings, snake) } : {}),
     ...(r.fixProof ? { fix_proof: r.fixProof.map((x) => rekey(x, snake)) } : {}),
-    ...(r.typecheck ? { typecheck: r.typecheck.map((t) => rekey(t, snake)) } : {}),
+    // A skipped check counted nothing: no errors, no list, which could read like a clean one.
+    ...(r.typecheck ? { typecheck: r.typecheck.map((t) => {
+      const { errors: _e, inChangedFiles: _c, diagnostics: _d, ...rest } = t;
+      return rekey(t.status === "skipped" ? rest : t, snake);
+    }) } : {}),
     ...(r.typesUnchecked ? { types_unchecked: r.typesUnchecked } : {}),
     ...(r.providerFailures ? { provider_failures: r.providerFailures } : {}),
     ...(r.unclaimed ? { unclaimed: r.unclaimed.map((u) => rekey(u, snake)) } : {}),
@@ -1329,7 +1335,10 @@ export function load(rdir: string): Review {
   } catch { /* no diff kept: the review's own count stands */ }
   if (data.timings) r.timings = rekey(data.timings as object, camel) as Review["timings"];
   if (data.fix_proof) r.fixProof = (data.fix_proof as object[]).map((x) => rekey(x, camel) as unknown as FixProof);
-  if (data.typecheck) r.typecheck = (data.typecheck as object[]).map((t) => rekey(t, camel) as unknown as TypeCheck);
+  if (data.typecheck) r.typecheck = (data.typecheck as object[]).map((t) => {
+    const k = rekey(t, camel) as unknown as TypeCheck;
+    return k.status === "skipped" ? { ...k, errors: 0, inChangedFiles: 0, diagnostics: [] } : k;
+  });
   return r;
 }
 

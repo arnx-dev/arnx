@@ -524,9 +524,12 @@ export async function runReview(repo: string, o: { settings: Settings;
     // Projects whose kept round a failed model call stopped: tested again on resume.
     const redone = new Set<string>();
     // A project whose type check was swamped before the change when last run (and whose config is unchanged) skips it.
+    // The record describes the checked-out code: a review of another commit neither reads nor writes it.
+    const onCheckedOut = change.head === null || change.head === commitOf(repo, "HEAD");
     const skipOf = (c: ReviewConfig) => {
+      if (!onCheckedOut) return {};
       const skipped = skippedTypecheck(repo, c, change.files);
-      return skipped ? { skipped } : {};
+      return skipped ? { skipped, record: true } : { record: true };
     };
     const runProject = async (i: number): Promise<Done> => {
       const { project: cfg, owned, used } = routing.routed[i]!;
