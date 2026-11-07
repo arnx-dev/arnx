@@ -185,7 +185,9 @@ test("check --json results match exit codes as check-json.md says", () => {
     expect(JSON.parse(checkJson([], code as number, code === 4 ? changed : [])).result).toBe(result);
   }
   expect(checkSummary([])[1]).toBe(3);
-  expect(checkSummary([{ ...project, failed: [] }])[1]).toBe(0);
+  expect(checkSummary([{ ...project, failed: [], notRun: [] }])[1]).toBe(0);
+  // A kept file the runner left out is exit 2, never a pass.
+  expect(checkSummary([{ ...project, failed: [] }])[1]).toBe(2);
   expect(checkSummary([{ ...project, noReport: true }])[1]).toBe(2);
 });
 
