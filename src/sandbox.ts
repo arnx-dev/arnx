@@ -376,11 +376,40 @@ export async function ensureEnv(cfg: ReviewConfig, snapshot: string, logPath: st
   const tag = envTag(key ?? envKey(cfg, snapshot));
   if (!remember && failedBuilds.has(tag) && docker(["image", "inspect", tag]).status !== 0) throw failedBuilds.get(tag)!;
   try {
-    return await ensureBuilt(cfg, snapshot, logPath, tag, { mark, built });
+    return await sharedBuild(cfg, snapshot, logPath, tag, { mark, built });
   } catch (e) {
     if (remember && e instanceof EnvFailed && !e.network) failedBuilds.set(tag, e);
     throw e;
   }
+}
+
+/** Builds in progress, by tag: a second ask for a tag being built waits for that build, whoever asks (another project,
+ * another session of the same review). A build that fails fails for every one waiting; nothing is kept once it ends. */
+const building = new Map<string, { done: Promise<string>; logPath: string }>();
+
+async function sharedBuild(cfg: ReviewConfig, snapshot: string, logPath: string, tag: string,
+                           opts: { mark: boolean; built: boolean }): Promise<string> {
+  if (opts.built) return ensureBuilt(cfg, snapshot, logPath, tag, opts);
+  const running = building.get(tag);
+  if (running) {
+    dockerSteps.say?.(`${cfg.name}: waiting for the build of its test image`);
+    try {
+      return await running.done;
+    } finally {
+      // Whoever waited reads the same build log from its own place.
+      if (running.logPath !== logPath && existsSync(running.logPath)) {
+        try {
+          mkdirSync(dirname(logPath), { recursive: true });
+          copyFileSync(running.logPath, logPath);
+        } catch {
+          // the log is a convenience; the build's result stands
+        }
+      }
+    }
+  }
+  const done = ensureBuilt(cfg, snapshot, logPath, tag, opts).finally(() => building.delete(tag));
+  building.set(tag, { done, logPath });
+  return done;
 }
 
 async function ensureBuilt(cfg: ReviewConfig, snapshot: string, logPath: string, tag: string,

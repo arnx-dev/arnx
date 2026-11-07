@@ -5,9 +5,10 @@ import { join } from "node:path";
 import { bakedIn, bakedKey, commandPaths, differing, findCopies, onlyInCopies, packageName, reached, scopeFiles }
   from "../src/baked";
 import { takeSnapshot } from "../src/change";
-import { parseReviewConfig } from "../src/config";
+import { parseReviewConfig, parseReviewFile, type ReviewConfig } from "../src/config";
 import { cacheRecords, sourceRecords } from "../src/envprune";
-import { buildContextOf, dockerSteps, envKey, sandboxOptions } from "../src/sandbox";
+import { EnvFailed } from "../src/errors";
+import { buildContextOf, dockerSteps, ensureEnv, envKey, sandboxOptions } from "../src/sandbox";
 import { dockerSession } from "../src/testround";
 import { commit, initRepo } from "./helpers/gitutil";
 import { useTmp } from "./helpers/tmp";
@@ -91,14 +92,14 @@ test("the rebuilt image's key follows the code it holds, not the tests or report
   const cfg = parseReviewConfig(BAKED);
   const snap = write(tmp(), { "app/a.py": "1", "app/b.py": "b", "app/requirements.txt": "x" });
   const copies = [{ root: "/opt/app", scope: "app", files: ["a.py", "b.py"] }];
-  const first = bakedKey("abc", cfg, copies, snap);
+  const first = bakedKey("abc", cfg, snap);
   expect(first).toMatch(/^abc-src-[0-9a-f]{12}$/);
   // generated tests, an accepted test put in place from .arnx/tests, the runners' reports: same code, same image
   write(snap, { [`app/${cfg.testsDir}/test_gen.py`]: "g", "app/tests/arnx/r1/test_k.py": "k",
     ".arnx/tests/app/tests/arnx/r1/test_k.py": "k", ".arnx-run/final-1.xml": "<x/>" });
-  expect(bakedKey("abc", cfg, copies, snap)).toBe(first);
+  expect(bakedKey("abc", cfg, snap)).toBe(first);
   writeFileSync(join(snap, "app/a.py"), "2");
-  expect(bakedKey("abc", cfg, copies, snap)).not.toBe(first);
+  expect(bakedKey("abc", cfg, snap)).not.toBe(first);
 });
 
 /** A docker holding `images` that lists /opt/app/{a,b,c}.py in every image, each hashed as `old`, and builds by
@@ -136,8 +137,7 @@ test("an image made from the code is marked with its tag and reused for the same
     const open = (snap: string) => dockerSession(cfg, snap, join(tmp(), "build.log"), async () => null);
     await open(one);
     expect(docker.builds()).toHaveLength(1);
-    const tag = `arnx-env:${bakedKey(envKey(cfg, one), cfg, [{ root: "/opt/app", scope: "app", files: ["a.py"] }],
-      one)}`;
+    const tag = `arnx-env:${bakedKey(envKey(cfg, one), cfg, one)}`;
     expect(docker.builds()[0]).toContain(`COPY . /src\nRUN : ${tag}\n`);
     // The same code in a later session (the generated tests now in place) uses that image.
     await open(write(join(tmp(), "two"), { ...code, [`app/${cfg.testsDir}/test_gen.py`]: "g" }));
@@ -211,7 +211,7 @@ test("an image's copy of other code is rebuilt from the build context, with the 
       const other = join(tmp(), "other");
       return write(other, { "app/a.py": "older\n", "app/b.py": "B\n", "app/c.py": "C\n" });
     });
-    const tag = bakedKey(envKey(cfg, snap), cfg, [{ root: "/opt/app", scope: "app", files: ["a.py", "b.py", "c.py"] }], snap);
+    const tag = bakedKey(envKey(cfg, snap), cfg, snap);
     await dockerSession(cfg, snap, join(tmp(), "build.log"), async () => null);
     const [build] = builds();
     expect(build).toContain(`arnx-env:${tag}`);
@@ -432,7 +432,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: code baked into the ima
         ["main: the test image holds an older copy of the code (/opt/app); using one made from this code"]);
       // Its build cache records are found from its marked step (read only: nothing is pruned here).
       const cfg = parseReviewConfig(BAKED);
-      const tag = `arnx-env:${bakedKey(envKey(cfg, two), cfg, [{ root: "/opt/app", scope: "app", files: [] }], two)}`;
+      const tag = `arnx-env:${bakedKey(envKey(cfg, two), cfg, two)}`;
       if (sandboxOptions.buildkit) {
         const found = sourceRecords(cacheRecords(), [tag]).map((r) => r.description);
         expect(found.some((d) => d.endsWith(`/bin/sh -c : ${tag}`))).toBe(true);
@@ -479,4 +479,112 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: code baked into the ima
       dockerSteps.say = saved;
     }
   }, 600_000);
+});
+
+test("the image key changes with what goes into the image and not with what does not", () => {
+  const cfg = parseReviewConfig(BAKED);
+  const snap = write(join(tmp(), "snap"), { "app/a.py": "1", "app/requirements.txt": "x" });
+  const copies = [{ root: "/opt/app", scope: "app", files: ["a.py"] }];
+  const first = bakedKey("abc", cfg, snap);
+  // another install line is another image, whatever the key before it says
+  const other = parseReviewConfig(BAKED.replace("cp -r . /opt/app", "cp -r . /opt/app && make"));
+  expect(bakedKey("abc", other, snap)).not.toBe(first);
+  // a lockfile or manifest is part of the image too
+  const locked = write(join(tmp(), "locked"), { "app/a.py": "1", "app/requirements.txt": "y" });
+  expect(bakedKey("abc", cfg, locked)).not.toBe(first);
+  // the .arnx folder (records, kept tests, review folders) is not part of the code
+  write(snap, { ".arnx/review.yaml": "x", ".arnx/reviews/r1/review.json": "{}", ".arnx/tests/app/tests/t.py": "t" });
+  expect(bakedKey("abc", cfg, snap)).toBe(first);
+});
+
+test("the same code under another review id gives the same image key", () => {
+  const cfg = parseReviewConfig(BAKED);
+  const code = { "app/a.py": "1", "app/requirements.txt": "x" };
+  const one = write(join(tmp(), "one"), { ...code, ".arnx/reviews/20260101-aaaa/review.json": "{\"id\":\"a\"}" });
+  const two = write(join(tmp(), "two"), { ...code, ".arnx/reviews/20260202-bbbb/review.json": "{\"id\":\"b\"}",
+    ".arnx-run/final-9.xml": "<x/>" });
+  const copies = [{ root: "/opt/app", scope: "app", files: ["a.py"] }];
+  expect(bakedKey("abc", cfg, two)).toBe(bakedKey("abc", cfg, one));
+});
+
+test("projects on one install share the image made from the same code", () => {
+  const spec = (dir: string) => `  ${dir}:
+    root: ${dir}
+    install_root: .
+    image: python:3.12-slim
+    install: ["pip install -r app/requirements.txt"]
+    test_command: python -m pytest -q {targets}
+`;
+  const [app, web] = parseReviewFile(`version: 1\nprojects:\n${spec("app")}${spec("web")}`).projects as [ReviewConfig, ReviewConfig];
+  const snap = write(join(tmp(), "snap"), { "app/a.py": "1", "web/b.py": "2", "app/requirements.txt": "x" });
+  expect(app.installRoot).toBe(web.installRoot);
+  expect(bakedKey("abc", web, snap)).toBe(bakedKey("abc", app, snap));
+  // other code is another image
+  const changed = write(join(tmp(), "changed"), { "app/a.py": "1", "web/b.py": "3", "app/requirements.txt": "x" });
+  expect(bakedKey("abc", web, changed)).not.toBe(bakedKey("abc", app, snap));
+});
+
+/** A docker whose builds take a moment and are counted; a Dockerfile holding `FAIL` fails without leaving the tag. */
+function slowDocker(): { builds: () => number; has: (tag: string) => boolean } {
+  const dir = tmp();
+  writeFileSync(join(dir, "images"), "");
+  writeFileSync(join(dir, "docker"), `#!/bin/sh
+case "$1" in
+  info) echo 27;;
+  image) grep -qxF "$3" '${join(dir, "images")}' || exit 1;;
+  build) echo b >> '${join(dir, "count")}'; text=$(cat); sleep 0.4
+    case "$text" in *FAIL*) echo "boom" >&2; exit 1;; esac
+    echo "$3" >> '${join(dir, "images")}';;
+esac
+exit 0
+`);
+  chmodSync(join(dir, "docker"), 0o755);
+  sandboxOptions.docker = join(dir, "docker");
+  return {
+    builds: () => (existsSync(join(dir, "count")) ? readFileSync(join(dir, "count"), "utf8").split("\n").filter(Boolean).length : 0),
+    has: (tag) => readFileSync(join(dir, "images"), "utf8").split("\n").includes(tag),
+  };
+}
+
+test("two sessions asking for one image build it once", async () => {
+  const saved = { docker: sandboxOptions.docker, buildkit: sandboxOptions.buildkit };
+  try {
+    sandboxOptions.buildkit = false;
+    const cfg = parseReviewConfig(BAKED);
+    const snap = write(tmp(), { "app/a.py": "1", "app/requirements.txt": "x" });
+    const docker = slowDocker();
+    const [a, b] = await Promise.all([ensureEnv(cfg, snap, join(tmp(), "a.log"), "shared-k"),
+      ensureEnv(cfg, snap, join(tmp(), "b.log"), "shared-k")]);
+    expect(a).toBe("arnx-env:shared-k");
+    expect(b).toBe(a);
+    expect(docker.builds()).toBe(1);
+    // another key is another build, and a finished one is not built again
+    await Promise.all([ensureEnv(cfg, snap, join(tmp(), "c.log"), "other-k"), ensureEnv(cfg, snap, join(tmp(), "d.log"), "shared-k")]);
+    expect(docker.builds()).toBe(2);
+  } finally {
+    Object.assign(sandboxOptions, saved);
+  }
+});
+
+test("a shared build that fails fails for both, and leaves no tag", async () => {
+  const saved = { docker: sandboxOptions.docker, buildkit: sandboxOptions.buildkit };
+  try {
+    sandboxOptions.buildkit = false;
+    const cfg = parseReviewConfig(BAKED.replace("cp -r . /opt/app", "FAIL"));
+    const snap = write(tmp(), { "app/a.py": "1", "app/requirements.txt": "x" });
+    const docker = slowDocker();
+    const logs = [join(tmp(), "a.log"), join(tmp(), "b.log")];
+    const results = await Promise.allSettled(logs.map((l) => ensureEnv(cfg, snap, l, "bad-k")));
+    expect(results.map((r) => r.status)).toEqual(["rejected", "rejected"]);
+    for (const r of results) expect((r as PromiseRejectedResult).reason).toBeInstanceOf(EnvFailed);
+    expect(docker.builds()).toBe(1);
+    expect(docker.has("arnx-env:bad-k")).toBe(false);
+    // both logs hold the build's output
+    for (const l of logs) expect(readFileSync(l, "utf8")).toContain("boom");
+    // a later ask builds again (the failure is not kept for ever)
+    await ensureEnv(cfg, snap, join(tmp(), "c.log"), "bad-k").catch(() => null);
+    expect(docker.builds()).toBe(2);
+  } finally {
+    Object.assign(sandboxOptions, saved);
+  }
 });

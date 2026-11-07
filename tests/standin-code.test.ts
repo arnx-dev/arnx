@@ -293,21 +293,20 @@ test_command: cd /opt/app && python -m pytest -q {targets}
   };
   const [one, two] = [take(), take()];
   expect(envKey(cfg, two)).toBe(envKey(cfg, one));
-  const copies = [{ root: "/opt/app", scope: "app", files: ["settings.py"] }];
-  expect(bakedKey("k", cfg, copies, two)).toBe(bakedKey("k", cfg, copies, one));
+  expect(bakedKey("k", cfg, two)).toBe(bakedKey("k", cfg, one));
   expect(snapshotDigest(two)).toBe(snapshotDigest(one));
   expect(snapshotDigest(buildContextOf(two))).toBe(snapshotDigest(buildContextOf(one)));
   // It hashes what such an image holds, the build context: not what a run leaves in the snapshot.
-  const first = bakedKey("k", cfg, copies, one);
+  const first = bakedKey("k", cfg, one);
   writeFileSync(join(one, "app/settings.py"), "a run wrote this\n");
-  expect(bakedKey("k", cfg, copies, one)).toBe(first);
+  expect(bakedKey("k", cfg, one)).toBe(first);
   // What the image holds is what its key hashes: another guess there is another image; none of it is the real value.
   const changed = repoWith({ "app/requirements.txt": "pkg==1\n", "app/pyproject.toml": `[x]\nauth_token = "${OTHER_GUESS}"\n`,
     "app/settings.py": `db_password = "Tr5wE1yU7iO3pA9s"\n`, "app/b.py": "b\n", "app/c.py": "c\n" });
   const three = join(tmp(), "three");
   takeSnapshot(changed, null, three, []);
   expect(envKey(cfg, three)).toBe(envKey(cfg, one));
-  expect(bakedKey("k", cfg, copies, three)).not.toBe(bakedKey("k", cfg, copies, one));
+  expect(bakedKey("k", cfg, three)).not.toBe(bakedKey("k", cfg, one));
 });
 
 test("a big file's guess is a stand-in in the build context too, and real in the run", () => {

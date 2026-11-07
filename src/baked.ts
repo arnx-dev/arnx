@@ -14,7 +14,7 @@ import { parse as parseToml } from "smol-toml";
 import { getAdapter } from "./adapters";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
-import { buildContextOf, DEFAULT_LIMITS, docker, dockerSteps, isManifest, REPORT_DIR, runArgv } from "./sandbox";
+import { buildContextOf, DEFAULT_LIMITS, docker, dockerSteps, dockerfile, envKey, isManifest, REPORT_DIR, runArgv } from "./sandbox";
 import { randomHex, shQuote } from "./util";
 
 /** A copy of a snapshot folder (`scope`, relative to the repository; "" for the repository) at `root` in the image:
@@ -331,23 +331,16 @@ export function bakedIn(cfg: ReviewConfig, image: string, snap: string): Baked |
   return { copies, differ: differing(copies, hashes, buildContextOf(snap)) };
 }
 
-/** The image key for the code in the snapshot: the environment's key and a hash of the code in the scopes the copies
- * came from, as the build context holds it (what such an image holds). Tests and reports beside the code do not count, so
- * every session on the same code (a round, its answer rounds, a check) and every later review of it use one image. */
-export function bakedKey(key: string, cfg: ReviewConfig, copies: BakedCopy[], snap: string): string {
-  const h = createHash("sha256");
+/** The image key for the code in the snapshot: the environment's key, the Dockerfile's text (the install steps, with the
+ * image and the install's folder), and a hash of the code the build context holds (what such an image copies in).
+ * Nothing else enters it: not which project asks, the review, the tests and reports beside the code, nor `.arnx`. So
+ * every session on the same code (a round, its answer rounds, a check), every project on the same install and every
+ * later review of it use one image. */
+export function bakedKey(key: string, cfg: ReviewConfig, snap: string): string {
+  // envKey adds the current manifests and lockfiles: the key before it is the key of the image this one was made from.
+  const h = createHash("sha256").update(dockerfile(cfg)).update("\0").update(envKey(cfg, snap)).update("\0");
   const code = buildContextOf(snap);
-  const wanted = new Set(copies.map((c) => c.scope));
-  const known = scopesOf(cfg, snap);
-  // A package's folder (packageCopy) is a scope of its own, after the project's and the repository's.
-  const own = [...wanted].filter((w) => !known.some((s) => s.scope === w)).sort()
-    .map((scope) => ({ scope, files: scopeFiles(code, scope, notCode(cfg, snap, scope)) }));
-  for (const { scope, files } of [...known.filter((s) => wanted.has(s.scope)), ...own]) {
-    for (const f of files) {
-      const rel = inScope(scope, f);
-      h.update(`${rel}\0`).update(readFileSync(join(code, rel))).update("\0");
-    }
-  }
+  for (const f of scopeFiles(code, "", notCode(cfg, snap, ""))) h.update(`${f}\0`).update(readFileSync(join(code, f))).update("\0");
   return `${key}-src-${h.digest("hex").slice(0, 12)}`;
 }
 

@@ -111,7 +111,7 @@ export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, e
     copies = baked?.copies ?? [];
     if (baked?.differ.length) {
       dockerSteps.say?.(rebuildText(cfg, baked));
-      const own = bakedKey(image.slice(image.indexOf(":") + 1), cfg, baked.copies, snap);
+      const own = bakedKey(image.slice(image.indexOf(":") + 1), cfg, snap);
       image = await ensureEnv(cfg, snap, buildLog, own, { mark: true });
     }
   } else {
