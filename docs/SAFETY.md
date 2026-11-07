@@ -105,8 +105,8 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   regular file in the copy, and the copy is removed before anything else reads it, the owner's bits put back first on any folder
   the test locked; so none of it reaches a model, a log, `.arnx` or `review.json`. A test that then passes, or a skip that then
   runs, needs the real key: unproven, never a finding; a review and `arnx check` exit as incomplete (2), and setup keeps it out of
-  `baseline.json`. One that fails again stands. At most 20 tests run with the real key per command (a review, an accept, a
-  setup, a check), every test of a file it reruns counted; past that, or when no rerun can run (no report, the test missing from
+  `baseline.json`. One that fails again stands. At most 20 tests run with the real key per arnx command, all its steps together
+  (a re-prove, the review, answer rounds, a closing check), every test of a file it reruns counted; past that, or when no rerun can run (no report, the test missing from
   it, out of time, an image holding its own copy of the code), a failure reads as unproven, not rerun, and a skip stays a skip.
   **Limits:** the outcomes themselves go on, at most 20 per command, into what a model reads; a test that also needs the network
   or a service fails again and stands; with two faked files it says "a faked file"; the copy holds the real key while the run

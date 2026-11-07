@@ -69,6 +69,7 @@ import { installSkills, SKILL_DIRS, skillDirsShown, skillStates, userSkillRoot }
 import { DEFAULTS, isModelKey, PLACEHOLDERS, PROMPT_KEYS, type PromptKey, textHash } from "./prompts";
 import { CLOUD_PROMPTS, copyDefault, hasOverrides, type Override, overrideWarnings, PROMPTS_FILE, promptsPath,
   readOverrides } from "./userprompts";
+import { withCommandReruns } from "./realkey";
 import { recheckJson, recheckReview, recheckSummary } from "./recheck";
 import { applyRemove, planRemove } from "./remove";
 import { versionLine } from "./version";
@@ -2336,7 +2337,8 @@ export async function main(argv: string[], deps: Partial<CliDeps> = {}): Promise
   const j: JsonOut | null = p.args.values.json ? { command: p.command, write: d.out, done: false } : null;
   const human: CliDeps = j ? { ...d, out: d.err, interactive: false, banner: false, ask: async () => null, keys: undefined,
     draw: undefined, color: d.colorErr } : d;
-  const code = await run(p.command, p.args, new Commands(human, j), human);
+  // Every step of the command (a re-prove, the review, answer rounds, a closing check) shares one cap of reruns with a real key.
+  const code = await withCommandReruns(() => run(p.command, p.args, new Commands(human, j), human));
   // A command that wrote no object of its own still answers in JSON: its result and exit code.
   if (j && !j.done) j.write(jsonObject(p.command, code === 0 ? "ok" : "fail", code));
   return code;

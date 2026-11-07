@@ -12,12 +12,13 @@ import { loadReviewFile, parseReviewConfig, reviewConfigPath, stamp } from "../s
 import { exitCode, render, summary } from "../src/report";
 import { runReview } from "../src/reviewer";
 import { dockerSteps, REPORT_DIR, type Runner, runArgv, Session, sandboxOptions } from "../src/sandbox";
-import { KEY_RERUN_MOST, keyReruns, rerunWithRealKeys } from "../src/realkey";
+import { commandReruns, KEY_RERUN_MOST, keyReruns, rerunWithRealKeys, withCommandReruns } from "../src/realkey";
 import { writeDirOf } from "../src/testround";
 import { fakeKeys, withRealKeys } from "../src/secrets";
 import { defaultSettings, type Settings, writeSettings } from "../src/settings";
-import { runSetup } from "../src/setup";
-import { fakeFactory, type FakeSession, type Script, ScriptedAgent, text, tool } from "./helpers/fakes";
+import { approveFile, runSetup } from "../src/setup";
+import { Cli } from "./helpers/cli";
+import { fakeFactory, FakeSession, type Script, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { RecordingAgent, RecordingJson } from "./helpers/recording";
@@ -191,6 +192,47 @@ test("arnx accept's answer rounds share one cap: what one round ran with the key
   expect(seen.flatMap((s) => s.sealedRuns).length).toBe(1);
   await run("Q2", "q?", "yes", "", join(tmp(), "a2"), file.projects[0]!.name);
   expect(seen.flatMap((s) => s.sealedRuns).length).toBe(1);
+});
+
+test("one command's steps share one cap: accept's re-prove, answer rounds and closing check together run at most 20 with the key", async () => {
+  const repo = project();
+  const file = loadReviewFile(repo);
+  const base = writeDirOf(file.projects[0]!, "answers");
+  const KEPT = "tests/arnx/r1/test_kept.py";
+  put(repo, `.arnx/tests/${KEPT}`, SOURCE);
+  const sealed = (seen: FakeSession[]) => seen.flatMap((x) => x.sealedRuns).length;
+  await withCommandReruns(async () => {
+    // The re-prove: its suite fails 15 tests on the fake.
+    const proof: FakeSession[] = [];
+    await approveFile(repo, { by: "Dev", at: "x", sessionFactory: fakeFactory(() => [junitXml(named("tests/test_s.py", 15, "test_s")),
+      "ran\n", false], proof) });
+    expect(sealed(proof)).toBe(1);
+    // An answer round of 10 failing tests no longer fits.
+    const answers: FakeSession[] = [];
+    const agent = new ScriptedAgent([[tool("write_file", { path: `${base}/test_ans.py`, content: SOURCE }), tool("run_tests", {})],
+      [text(`{"tests": [{"test": "${base}/test_ans.py::test_q00", "expects": "x"}]}`)]]);
+    await makeAnswerRunner(repo, file, SETTINGS, agent, fakeFactory(() => [junitXml(named(`${base}/test_ans.py`, 10, "test_q")), "ran\n",
+      false], answers))("Q1", "q?", "yes", "", join(tmp(), "a1"), file.projects[0]!.name);
+    expect(sealed(answers)).toBe(0);
+    // The closing check's 5 still do.
+    const checked: FakeSession[] = [];
+    await check(repo, SETTINGS, { sessionFactory: fakeFactory(() => [junitXml(named(KEPT, 5, "test_k")), "ran\n", false], checked) });
+    expect(sealed(checked)).toBe(1);
+  });
+});
+
+test("the CLI runs each command in one budget, and none outlives it", async () => {
+  const repo = project();
+  put(repo, ".arnx/tests/tests/arnx/r1/test_kept.py", SOURCE);
+  const during: (object | null)[] = [];
+  const cli = new Cli({ cwd: repo, checkSessions: async (_c, snap, _l, body) => {
+    during.push(commandReruns());
+    return body(new FakeSession(snap, () => [junitXml([["tests/arnx/r1/test_kept.py", "test_add", "passed", ""]]), "ran\n", false]));
+  } });
+  await cli.run("check");
+  expect(during.length).toBeGreaterThan(0);
+  expect(during.every((b) => b !== null)).toBe(true);
+  expect(commandReruns()).toBeNull();
 });
 
 // --- a test that turns on the rerun: links, modes, its report ----------------------------------------------------------------------

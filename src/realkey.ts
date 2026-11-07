@@ -21,7 +21,22 @@ import { withRealKeys } from "./secrets";
 export const KEY_RERUN_MOST = 20;
 /** What is left of that number. */
 export interface KeyReruns { left: number }
-export const keyReruns = (): KeyReruns => ({ left: KEY_RERUN_MOST });
+/** The running command's budget (withCommandReruns), shared by all its steps. */
+let command: KeyReruns | null = null;
+/** The budget a step uses: the running command's, else one of its own (a step called outside the CLI). */
+export const keyReruns = (): KeyReruns => command ?? { left: KEY_RERUN_MOST };
+/** The running command's budget, or null outside one. */
+export const commandReruns = (): KeyReruns | null => command;
+/** Runs `fn`, one command of the CLI: every step in it (a re-prove, a review, answer rounds, a check) shares one budget. */
+export async function withCommandReruns<T>(fn: () => Promise<T>): Promise<T> {
+  const outer = command;
+  command = outer ?? { left: KEY_RERUN_MOST };
+  try {
+    return await fn();
+  } finally {
+    command = outer;
+  }
+}
 
 /** What the rerun gave a test, by test id: its outcome, or null when it was not rerun (past KEY_RERUN_MOST, out of time, no
  * report or not in it, no run can reach the real key, or a copy that could not be made safely). */
@@ -89,7 +104,7 @@ export function sweepRealKeyCopies(root = tmpdir()): void {
       for (const child of readdirSync(dir)) {
         const m = COPY_NAME.exec(child);
         const at = join(dir, child);
-        if (!m || realKeyCopies.has(at) || (Number(m[1]) !== process.pid && alive(Number(m[1])))) continue;
+        if (!m || realKeyCopies.has(at) || !lstatSync(at).isDirectory() || (Number(m[1]) !== process.pid && alive(Number(m[1])))) continue;
         removeTree(at);
       }
     } catch {
@@ -98,9 +113,12 @@ export function sweepRealKeyCopies(root = tmpdir()): void {
   }
 }
 
+/** A faked file of the copy about to get its real key. */
+interface Placing { rel: string; at: string; real: string; faked: string; mode: number }
+
 /** The faked file `rel` of the copy with its real key, checked before anything is written: every folder on the way a real
  * folder of the copy, the file a regular file. "unsafe": a check failed, so nothing may be written; null: no key to place. */
-function realText(source: KeySource, copy: string, rel: string): { at: string; real: string; faked: string; mode: number } | "unsafe" | null {
+function realText(source: KeySource, copy: string, rel: string): Placing | "unsafe" | null {
   if (!realFoldersOrMissing(copy, rel)) return "unsafe";
   const at = join(copy, rel);
   const st = lstatSync(at, { throwIfNoEntry: false });
@@ -109,7 +127,7 @@ function realText(source: KeySource, copy: string, rel: string): { at: string; r
   const faked = readRegular(at, MAX_KEY_FILE);
   const own = faked === null ? null : ownText(source, rel);
   const real = own === null || faked === null ? null : withRealKeys(own, faked);
-  return real === null ? null : { at, real, faked: faked!, mode: st.mode & 0o777 };
+  return real === null ? null : { rel, at, real, faked: faked!, mode: st.mode & 0o777 };
 }
 
 /** Whether the way to `rel` is free of links and other files, as far as it goes (a folder may be missing). */
@@ -165,15 +183,15 @@ export async function rerunWithRealKeys(runner: Runner, snap: string, cfg: Revie
   if (!take.length) return out;
   const copy = copyOf(snap);
   realKeyCopies.add(copy);
-  const placed: { at: string; faked: string }[] = [];
+  const placed: { rel: string; faked: string }[] = [];
   try {
     if (!removeTree(copy)) return out;
-    let real: { at: string; real: string; faked: string; mode: number }[];
+    let real: Placing[];
     try {
       copyTreeInside(snap, copy);
       const found = o.fakedKeys.map((rel) => realText(o.source, copy, rel));
       if (found.includes("unsafe")) return out;
-      real = found.filter((x): x is { at: string; real: string; faked: string; mode: number } => !!x && x !== "unsafe");
+      real = found.filter((x): x is Placing => !!x && x !== "unsafe");
     } catch {
       return out;
     }
@@ -181,7 +199,7 @@ export async function rerunWithRealKeys(runner: Runner, snap: string, cfg: Revie
     // Every check passed: each goes in as a new file, never through a link.
     for (const r of real) {
       unlinkSync(r.at);
-      placed.push({ at: r.at, faked: r.faked });
+      placed.push({ rel: r.rel, faked: r.faked });
       writeNew(r.at, r.real, r.mode);
     }
     o.budget.left -= count;
@@ -207,10 +225,12 @@ export async function rerunWithRealKeys(runner: Runner, snap: string, cfg: Revie
   } finally {
     if (removeTree(copy)) realKeyCopies.delete(copy);
     else {
-      // Kept for the exit's sweep and the next run's; its keys are fakes again meanwhile.
+      // Kept for the exit's sweep and the next run's. Meanwhile each key file still where it went, by the same checks as
+      // placing it, gets its fake back; a test may have copied or moved one, so nothing is promised.
       for (const p of placed) {
         try {
-          const fd = openSync(p.at, constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW);
+          if (!realFoldersOrMissing(copy, p.rel) || !realFolders(copy, p.rel) || !lstatSync(join(copy, p.rel)).isFile()) continue;
+          const fd = openSync(join(copy, p.rel), constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW);
           try {
             writeSync(fd, p.faked);
           } finally {
@@ -220,7 +240,7 @@ export async function rerunWithRealKeys(runner: Runner, snap: string, cfg: Revie
           // gone or moved: nothing to put back
         }
       }
-      process.stderr.write(`arnx: could not remove ${copy}; its key files hold fakes again\n`);
+      process.stderr.write(`arnx: could not remove ${copy}, which may still hold a real key; the next review, setup or check removes it\n`);
     }
   }
 }
