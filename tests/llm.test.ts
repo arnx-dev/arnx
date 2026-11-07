@@ -201,6 +201,17 @@ test("a JSON call to a model with no price costs 0 and counts as billed with unk
   expect([r[0], r[1], r[3]]).toEqual([{ verdict: "disputed" }, 0, 1]);
 });
 
+test("anthropic: an aborted signal stops the stream and the retries", async () => {
+  const messages = new FakeMessages([null, "hello"]);
+  const agent = new AnthropicAgent("claude-sonnet-5-5", "medium", "k", { messages }, { idleSeconds: 30, sleep: noSleep });
+  const m = new AnthropicJson(parseModelRef("anthropic:claude-sonnet-5-5"), agent, PRICES);
+  const stop = new AbortController();
+  const call = m.completeJson("sys", "user", SCHEMA, stop.signal);
+  setTimeout(() => stop.abort(), 20);
+  await expect(call).rejects.toThrow("request cancelled");
+  expect(messages.kwargs).toHaveLength(1);
+});
+
 test("anthropic: a stream that goes silent is retried", async () => {
   const messages = new FakeMessages([null, "hello"]);
   const agent = new AnthropicAgent("claude-sonnet-5-5", "medium", "k", { messages }, { idleSeconds: 0.05, sleep: noSleep });

@@ -183,7 +183,8 @@ export interface AgentModel {
   readonly provider?: string;
   /** Told when a call stalls or loses its connection and is retried, so progress can say so. */
   notice?: (message: string) => void;
-  create(a: { system: string; tools: Tool[]; messages: Message[]; maxTokens: number }): Promise<Reply>;
+  /** `signal`: abort the request (and stop retrying) when the caller no longer wants the reply. */
+  create(a: { system: string; tools: Tool[]; messages: Message[]; maxTokens: number; signal?: AbortSignal }): Promise<Reply>;
 }
 
 /** The parsed reply, its cost, the token usage it was priced from, attempts billed with unknown usage, and (from a
@@ -342,14 +343,15 @@ export class AnthropicAgent implements AgentModel {
 
   /** Stream one request to its final message; a stream silent for `idle` seconds, or still running after the attempt
    * limit, is aborted and retried. `billed.unknown` counts attempts that streamed and were then cut off. */
-  private async send(params: Record<string, unknown>, attempts: Attempt[], billed: { unknown: number }):
-    Promise<Anthropic.Message> {
+  private async send(params: Record<string, unknown>, attempts: Attempt[], billed: { unknown: number },
+                     signal?: AbortSignal): Promise<Anthropic.Message> {
     // An outage wait is not the call's time: the deadline moves by each wait taken.
     let deadline = performance.now() + this.total * 1000;
     let timeouts = 0;
     // What each attempt met while every one found the provider down; null once one failed otherwise.
     let down: string[] | null = [];
     for (let attempt = 1; ; attempt++) {
+      if (signal?.aborted) throw this.cancelled(billed);
       let stream: MessageStream | undefined;
       let timeout: Attempt["timeout"], events = 0, chunks = 0, first: number | null = null, gap = 0;
       let firstByte: number | null = null;
@@ -383,6 +385,8 @@ export class AnthropicAgent implements AgentModel {
         arm(this.idle);
       };
       let delay = 0;
+      const onAbort = () => stream?.abort();
+      signal?.addEventListener("abort", onAbort, { once: true });
       try {
         arm(this.firstEvent);
         // The SDK filters SSE pings before its iterator. Observe bytes before parsing so heartbeats (and partial
@@ -404,6 +408,7 @@ export class AnthropicAgent implements AgentModel {
           timeout: this.total * 1000, fetch: observedFetch,
           ...(this.baseURL ? { baseURL: this.baseURL, authToken: null } : {}) }) as unknown as MessagesClient;
         stream = client.messages.stream(params);
+        if (signal?.aborted) stream.abort();
         for await (const _event of stream) {
           first ??= performance.now();
           events++;
@@ -415,6 +420,11 @@ export class AnthropicAgent implements AgentModel {
         outageWaited.delete(this.provider);
         return message;
       } catch (e) {
+        // The caller no longer wants the reply: no retry.
+        if (signal?.aborted) {
+          if (first !== null || firstByte !== null) billed.unknown++;
+          throw this.cancelled(billed);
+        }
         // Not the SDK, its transport or our timeout: a bug in arnx, passed on as is (never retried).
         if (!timeout && !(e instanceof Anthropic.AnthropicError)) throw e;
         const reason = timeout === "total" ? `no reply within ${this.total}s (total timeout)`
@@ -460,6 +470,7 @@ export class AnthropicAgent implements AgentModel {
           this.notice?.(`${this.model}: ${reason}; retrying (${attempt + 1}/${ANTHROPIC_ATTEMPTS}) in ${delay}s`);
         }
       } finally {
+        signal?.removeEventListener("abort", onAbort);
         settled = true;
         clearTimeout(timer);
         clearTimeout(cutoff);
@@ -469,7 +480,13 @@ export class AnthropicAgent implements AgentModel {
     }
   }
 
-  async create({ system, tools, messages, maxTokens }: Parameters<AgentModel["create"]>[0]): Promise<Reply> {
+  private cancelled(billed: { unknown: number }): ModelError {
+    const err = new ModelError(`${this.model}: request cancelled`);
+    err.unknownCalls = billed.unknown;
+    return err;
+  }
+
+  async create({ system, tools, messages, maxTokens, signal }: Parameters<AgentModel["create"]>[0]): Promise<Reply> {
     // Summarized thinking streams while the model thinks (billed the same as hidden thinking). Without it the API
     // sends nothing until thinking ends, and a long think would look like a dead connection.
     const params: Record<string, unknown> = { model: this.model, max_tokens: maxTokens, system, messages,
@@ -480,7 +497,7 @@ export class AnthropicAgent implements AgentModel {
     const attempts: Attempt[] = [], billed = { unknown: 0 };
     try {
       // One pool per model: a busy Sonnet reviewer does not hold back Haiku part hunters.
-      resp = await withProviderSlot(`${this.provider}:${this.model}`, () => this.send(params, attempts, billed));
+      resp = await withProviderSlot(`${this.provider}:${this.model}`, () => this.send(params, attempts, billed, signal));
     } catch (e) {
       if (e instanceof ModelError) e.attempts = attempts;
       throw e;
@@ -512,7 +529,8 @@ export class AnthropicJson implements JsonModel {
     this.ref = refString(ref);
   }
 
-  async completeJson(system: string, user: string, schema: Record<string, unknown>): Promise<JsonReply> {
+  async completeJson(system: string, user: string, schema: Record<string, unknown>, signal?: AbortSignal)
+    : Promise<JsonReply> {
     const messages: Message[] = [{ role: "user", content: user + "\n\nReply with one JSON object matching this JSON " +
       "Schema, and nothing else:\n" + JSON.stringify(schema) }];
     let total = 0, usage = NO_USAGE, unknown = 0, tries = 0;
@@ -521,7 +539,7 @@ export class AnthropicJson implements JsonModel {
       let reply: Reply;
       try {
         // Thinking counts toward max_tokens: room for a hunt's thinking and its list.
-        reply = await this.agent.create({ system, tools: [], messages, maxTokens: 16_000 });
+        reply = await this.agent.create({ system, tools: [], messages, maxTokens: 16_000, signal });
       } catch (e) {
         if (e instanceof ModelError) e.unknownCalls += unknown;
         if (e instanceof ModelError && total > 0) {
