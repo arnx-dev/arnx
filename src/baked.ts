@@ -14,7 +14,7 @@ import { parse as parseToml } from "smol-toml";
 import { getAdapter } from "./adapters";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
-import { buildContextOf, DEFAULT_LIMITS, docker, dockerSteps, dockerfile, envKey, isManifest, REPORT_DIR, runArgv } from "./sandbox";
+import { buildContextOf, DEFAULT_LIMITS, docker, dockerSteps, dockerfile, isManifest, notCode, projectOf, runArgv } from "./sandbox";
 import { randomHex, shQuote } from "./util";
 
 /** A copy of a snapshot folder (`scope`, relative to the repository; "" for the repository) at `root` in the image:
@@ -35,8 +35,8 @@ const FIND = `find / -xdev \\( ${[...PRUNED_PATHS.map((p) => `-path ${p}`), ...P
 const MIN_FILES = 3;
 
 /** Files under `dir` of the snapshot (POSIX paths relative to it), without manifests (installs copy those on purpose,
- * and they key the image already), dependency folders, git data and the files below `skip` (relative to `dir`). */
-export function scopeFiles(snap: string, dir: string, skip: string[] = []): string[] {
+ * and they key the image already; `withManifests` keeps them), dependency folders, git data and the files below `skip` (relative to `dir`). */
+export function scopeFiles(snap: string, dir: string, skip: string[] = [], withManifests = false): string[] {
   const out: string[] = [];
   const base = join(snap, dir);
   if (!existsSync(base)) return out;
@@ -47,7 +47,7 @@ export function scopeFiles(snap: string, dir: string, skip: string[] = []): stri
       const st = lstatSync(join(base, r));
       if (st.isDirectory()) {
         if (!PRUNED_NAMES.includes(name)) visit(r);
-      } else if (st.isFile() && !isManifest(name)) out.push(r);
+      } else if (st.isFile() && (withManifests || !isManifest(name))) out.push(r);
     }
   };
   visit("");
@@ -124,22 +124,6 @@ export function differing(copies: BakedCopy[], imageHashes: Map<string, string>,
   }
   return [...out].sort();
 }
-
-/** Where `arnx accept` keeps tests (testround.ts DOME); `arnx check` puts each in place from there. */
-const KEPT = ".arnx/tests";
-
-/** What in a scope is not the code under test (relative to the scope): the generated tests' folder (it changes during
- * a round), and in the repository's scope arnx's own folder, the runners' reports and the accepted tests a check put
- * in place. */
-function notCode(cfg: ReviewConfig, snap: string, scope: string): string[] {
-  const tests = posix.normalize(posix.join(projectOf(cfg), cfg.testsDir));
-  const rel = (p: string) => (scope ? posix.relative(scope, p) : p);
-  const kept = existsSync(join(snap, KEPT)) ? (readdirSync(join(snap, KEPT), { recursive: true }) as string[])
-    .map((p) => p.split("\\").join("/")).filter((p) => statSync(join(snap, KEPT, p)).isFile()) : [];
-  return [tests, ".arnx", REPORT_DIR, ...kept].filter((p) => !scope || p.startsWith(`${scope}/`)).map(rel);
-}
-
-const projectOf = (cfg: ReviewConfig) => posix.normalize(cfg.workdir).replace(/^\.$/, "").replace(/\/$/, "");
 
 /** The scopes a copy is looked for in: the project's folder (an install that copies `.`) and the repository's. An image's
  * copy comes from the snapshot's build context, so that is what it is compared with: its guesses are stand-ins. */
@@ -332,15 +316,18 @@ export function bakedIn(cfg: ReviewConfig, image: string, snap: string): Baked |
 }
 
 /** The image key for the code in the snapshot: the environment's key, the Dockerfile's text (the install steps, with the
- * image and the install's folder), and a hash of the code the build context holds (what such an image copies in).
+ * image and the install's folder), and a hash of every file the build context holds that goes into the image: the code,
+ * and the manifests and lockfiles at any depth.
  * Nothing else enters it: not which project asks, the review, the tests and reports beside the code, nor `.arnx`. So
  * every session on the same code (a round, its answer rounds, a check), every project on the same install and every
  * later review of it use one image. */
 export function bakedKey(key: string, cfg: ReviewConfig, snap: string): string {
-  // envKey adds the current manifests and lockfiles: the key before it is the key of the image this one was made from.
-  const h = createHash("sha256").update(dockerfile(cfg)).update("\0").update(envKey(cfg, snap)).update("\0");
+  const h = createHash("sha256").update(dockerfile(cfg)).update("\0");
   const code = buildContextOf(snap);
-  for (const f of scopeFiles(code, "", notCode(cfg, snap, ""))) h.update(`${f}\0`).update(readFileSync(join(code, f))).update("\0");
+  // Every manifest and lockfile at any depth: an install can read one anywhere (`pip install -r app/requirements.txt`).
+  for (const f of scopeFiles(code, "", notCode(cfg, snap, ""), true)) {
+    h.update(`${f}\0${statSync(join(code, f)).mode & 0o111 ? "x" : ""}\0`).update(readFileSync(join(code, f))).update("\0");
+  }
   return `${key}-src-${h.digest("hex").slice(0, 12)}`;
 }
 

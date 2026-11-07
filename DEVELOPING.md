@@ -87,7 +87,7 @@ fields are in `skills/arnx/references/json.md` and `check-json.md`; `tests/json-
                                          faked; guesses stay real, and get stand-ins in the build context beside it
         dockerSession      sandbox.ts    build the env image once, start services, internal network
           bakedIn          baked.ts      an older copy of the code in the image: use an image made from this code
-                                         (keyed on the code, kept for later sessions; `env prune` removes it)
+                                         (keyed on the install and the code it holds, so projects on one install and later sessions share it; `env prune` removes it)
           probe            testround.ts  arnx's one-line test must pass, else the round stops before any model call
           agentRound       localbrain.ts the brain's round starts with its tools (with --hunt, the tool-less hunters
                                          too); after each final reply, the facts

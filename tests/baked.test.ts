@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { bakedIn, bakedKey, commandPaths, differing, findCopies, onlyInCopies, packageName, reached, scopeFiles }
   from "../src/baked";
@@ -91,7 +91,6 @@ test("a copy counts only when runs reach it: by a named path, or a symlink under
 test("the rebuilt image's key follows the code it holds, not the tests or reports beside it", () => {
   const cfg = parseReviewConfig(BAKED);
   const snap = write(tmp(), { "app/a.py": "1", "app/b.py": "b", "app/requirements.txt": "x" });
-  const copies = [{ root: "/opt/app", scope: "app", files: ["a.py", "b.py"] }];
   const first = bakedKey("abc", cfg, snap);
   expect(first).toMatch(/^abc-src-[0-9a-f]{12}$/);
   // generated tests, an accepted test put in place from .arnx/tests, the runners' reports: same code, same image
@@ -484,7 +483,6 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: code baked into the ima
 test("the image key changes with what goes into the image and not with what does not", () => {
   const cfg = parseReviewConfig(BAKED);
   const snap = write(join(tmp(), "snap"), { "app/a.py": "1", "app/requirements.txt": "x" });
-  const copies = [{ root: "/opt/app", scope: "app", files: ["a.py"] }];
   const first = bakedKey("abc", cfg, snap);
   // another install line is another image, whatever the key before it says
   const other = parseReviewConfig(BAKED.replace("cp -r . /opt/app", "cp -r . /opt/app && make"));
@@ -503,7 +501,6 @@ test("the same code under another review id gives the same image key", () => {
   const one = write(join(tmp(), "one"), { ...code, ".arnx/reviews/20260101-aaaa/review.json": "{\"id\":\"a\"}" });
   const two = write(join(tmp(), "two"), { ...code, ".arnx/reviews/20260202-bbbb/review.json": "{\"id\":\"b\"}",
     ".arnx-run/final-9.xml": "<x/>" });
-  const copies = [{ root: "/opt/app", scope: "app", files: ["a.py"] }];
   expect(bakedKey("abc", cfg, two)).toBe(bakedKey("abc", cfg, one));
 });
 
@@ -525,14 +522,15 @@ test("projects on one install share the image made from the same code", () => {
 });
 
 /** A docker whose builds take a moment and are counted; a Dockerfile holding `FAIL` fails without leaving the tag. */
-function slowDocker(): { builds: () => number; has: (tag: string) => boolean } {
+function slowDocker(): { builds: () => number; has: (tag: string) => boolean; listing: () => string[] } {
   const dir = tmp();
   writeFileSync(join(dir, "images"), "");
   writeFileSync(join(dir, "docker"), `#!/bin/sh
 case "$1" in
   info) echo 27;;
   image) grep -qxF "$3" '${join(dir, "images")}' || exit 1;;
-  build) echo b >> '${join(dir, "count")}'; text=$(cat); sleep 0.4
+  build) echo b >> '${join(dir, "count")}'; text=$(cat); for last; do :; done
+    (cd "$last" && find . -type f | sort) >> '${join(dir, "listing")}'; sleep 0.4
     case "$text" in *FAIL*) echo "boom" >&2; exit 1;; esac
     echo "$3" >> '${join(dir, "images")}';;
 esac
@@ -543,6 +541,7 @@ exit 0
   return {
     builds: () => (existsSync(join(dir, "count")) ? readFileSync(join(dir, "count"), "utf8").split("\n").filter(Boolean).length : 0),
     has: (tag) => readFileSync(join(dir, "images"), "utf8").split("\n").includes(tag),
+    listing: () => (existsSync(join(dir, "listing")) ? readFileSync(join(dir, "listing"), "utf8").split("\n").filter(Boolean) : []),
   };
 }
 
@@ -584,6 +583,81 @@ test("a shared build that fails fails for both, and leaves no tag", async () => 
     // a later ask builds again (the failure is not kept for ever)
     await ensureEnv(cfg, snap, join(tmp(), "c.log"), "bad-k").catch(() => null);
     expect(docker.builds()).toBe(2);
+  } finally {
+    Object.assign(sandboxOptions, saved);
+  }
+});
+
+test("a manifest at any depth below the install root is part of the image key", () => {
+  const spec = `version: 1
+projects:
+  app:
+    root: app
+    install_root: .
+    image: python:3.12-slim
+    install: ["pip install -r app/requirements.txt"]
+    test_command: python -m pytest -q {targets}
+`;
+  const cfg = parseReviewFile(spec).projects[0]!;
+  const one = write(join(tmp(), "one"), { "app/a.py": "1", "app/requirements.txt": "x==1\n" });
+  const two = write(join(tmp(), "two"), { "app/a.py": "1", "app/requirements.txt": "x==2\n" });
+  expect(bakedKey("abc", cfg, two)).not.toBe(bakedKey("abc", cfg, one));
+  // a nested package manifest and a lockfile too
+  const web = write(join(tmp(), "web"), { "web/package.json": "{\"main\":\"a\"}", "web/yarn.lock": "1" });
+  const web2 = write(join(tmp(), "web2"), { "web/package.json": "{\"main\":\"b\"}", "web/yarn.lock": "1" });
+  const web3 = write(join(tmp(), "web3"), { "web/package.json": "{\"main\":\"a\"}", "web/yarn.lock": "2" });
+  expect(bakedKey("abc", cfg, web2)).not.toBe(bakedKey("abc", cfg, web));
+  expect(bakedKey("abc", cfg, web3)).not.toBe(bakedKey("abc", cfg, web));
+});
+
+test("what the key leaves out is left out of the build: .arnx, generated and kept tests, reports", async () => {
+  const saved = { docker: sandboxOptions.docker, buildkit: sandboxOptions.buildkit };
+  try {
+    sandboxOptions.buildkit = false;
+    const cfg = parseReviewConfig(BAKED);
+    const code = { "app/a.py": "1", "app/requirements.txt": "x", [`app/${cfg.testsDir}/test_gen.py`]: "g",
+      ".arnx/review.yaml": "y", ".arnx/reviews/r1/review.json": "{}", ".arnx-run/final-1.xml": "<x/>" };
+    const v1 = write(join(tmp(), "v1"), { ...code, ".arnx/tests/app/tests/arnx/r1/test_k.py": "v1",
+      "app/tests/arnx/r1/test_k.py": "v1" });
+    const v2 = write(join(tmp(), "v2"), { ...code, ".arnx/tests/app/tests/arnx/r1/test_k.py": "v2",
+      "app/tests/arnx/r1/test_k.py": "v2" });
+    expect(bakedKey("abc", cfg, v2)).toBe(bakedKey("abc", cfg, v1));
+    const docker = slowDocker();
+    await ensureEnv(cfg, v1, join(tmp(), "b.log"), "k1");
+    expect(docker.listing().sort()).toEqual(["./app/a.py", "./app/requirements.txt"]);
+    // the snapshot itself is untouched
+    expect(existsSync(join(v1, "app/tests/arnx/r1/test_k.py"))).toBe(true);
+  } finally {
+    Object.assign(sandboxOptions, saved);
+  }
+});
+
+test("a session waiting for a shared build has its own code made newer than the build", async () => {
+  const saved = { docker: sandboxOptions.docker, buildkit: sandboxOptions.buildkit };
+  try {
+    sandboxOptions.buildkit = false;
+    const cfg = parseReviewFile(`version: 1
+projects:
+  calc:
+    root: .
+    language: rust
+    runner: nextest
+    image: rust:1-bookworm
+    install: ["cargo build"]
+    test_command: cargo nextest run {targets}
+`).projects[0]!;
+    const old = new Date("2001-01-01T00:00:00Z");
+    const snapshot = (name: string) => {
+      const dir = join(tmp(), name);
+      write(dir, { "src/lib.rs": "real", "Cargo.toml": "[package]" });
+      write(`${dir}.build`, { "src/lib.rs": "stand-in", "Cargo.toml": "[package]" });
+      utimesSync(join(dir, "src/lib.rs"), old, old);
+      return dir;
+    };
+    const [one, two] = [snapshot("one"), snapshot("two")];
+    slowDocker();
+    await Promise.all([ensureEnv(cfg, one, join(tmp(), "a.log"), "rk"), ensureEnv(cfg, two, join(tmp(), "b.log"), "rk")]);
+    for (const dir of [one, two]) expect(statSync(join(dir, "src/lib.rs")).mtimeMs).toBeGreaterThan(old.getTime() + 1000);
   } finally {
     Object.assign(sandboxOptions, saved);
   }

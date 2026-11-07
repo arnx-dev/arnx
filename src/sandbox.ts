@@ -5,8 +5,10 @@
 // its build (Rust): its session's runs share one (see Session).
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync }
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync,
+  symlinkSync, utimesSync, writeFileSync }
   from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import { adapterFor, getAdapter, LANGUAGES } from "./adapters";
 import type { CopyOnly } from "./baked";
@@ -107,6 +109,49 @@ export const NETWORK_OPEN = "Docker keeps an address on this machine for test ne
 export const networkNotice = { said: false };
 export const OUTPUT_LIMIT = 200_000;
 export const REPORT_DIR = ".arnx-run";
+
+/** Where `arnx accept` keeps tests (testround.ts DOME); `arnx check` puts each in place from there. */
+const KEPT = ".arnx/tests";
+
+export const projectOf = (cfg: ReviewConfig) => posix.normalize(cfg.workdir).replace(/^\.$/, "").replace(/\/$/, "");
+
+/** What in a scope is not the code under test (relative to the scope): the generated tests' folder (it changes during
+ * a round), and in the repository's scope arnx's own folder, the runners' reports and the accepted tests a check put
+ * in place. Neither the image key nor the image holds these: runs read tests from the mounted copy. */
+export function notCode(cfg: ReviewConfig, snap: string, scope: string): string[] {
+  const tests = posix.normalize(posix.join(projectOf(cfg), cfg.testsDir));
+  const rel = (p: string) => (scope ? posix.relative(scope, p) : p);
+  const kept = existsSync(join(snap, KEPT)) ? (readdirSync(join(snap, KEPT), { recursive: true }) as string[])
+    .map((p) => p.split("\\").join("/")).filter((p) => statSync(join(snap, KEPT, p)).isFile()) : [];
+  return [tests, ".arnx", REPORT_DIR, ...kept].filter((p) => !scope || p.startsWith(`${scope}/`)).map(rel);
+}
+
+/** A copy of `context` without the paths in `skip`, made of hard links where it can (a folder of its own, removed by
+ * the caller), or `context` itself when none of them is there. */
+function withoutPaths(context: string, skip: string[]): string {
+  if (!skip.some((p) => existsSync(join(context, p)))) return context;
+  const out = mkdtempSync(join(tmpdir(), "arnx-context-"));
+  const visit = (rel: string) => {
+    for (const e of readdirSync(join(context, rel), { withFileTypes: true })) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (skip.includes(r)) continue;
+      const from = join(context, r), to = join(out, r);
+      if (e.isDirectory()) {
+        mkdirSync(to, { recursive: true });
+        visit(r);
+      } else if (e.isSymbolicLink()) symlinkSync(readlinkSync(from), to);
+      else if (e.isFile()) {
+        try {
+          linkSync(from, to);
+        } catch {
+          copyFileSync(from, to);
+        }
+      }
+    }
+  };
+  visit("");
+  return out;
+}
 const MAX_BUFFER = 1 << 30;
 
 export interface Limits { cpus: string; memory: string; pids: number; tmp: string }
@@ -394,7 +439,11 @@ async function sharedBuild(cfg: ReviewConfig, snapshot: string, logPath: string,
   if (running) {
     dockerSteps.say?.(`${cfg.name}: waiting for the build of its test image`);
     try {
-      return await running.done;
+      const built = await running.done;
+      // The build holds the builder's code: this snapshot's own files must count as newer than it.
+      const context = buildContextOf(snapshot);
+      if (adapterFor(cfg).keepBuild && context !== snapshot) newerThanBuild(snapshot, context);
+      return built;
     } finally {
       // Whoever waited reads the same build log from its own place.
       if (running.logPath !== logPath && existsSync(running.logPath)) {
@@ -426,8 +475,10 @@ async function ensureBuilt(cfg: ReviewConfig, snapshot: string, logPath: string,
   const context = buildContextOf(snapshot);
   // A build that does not finish is a failed environment like one that fails: its log says so, and the review goes on.
   const build = async () => {
+    // What the image key leaves out (arnx's own folder, generated and kept tests, reports) is not built in either.
+    const staged = withoutPaths(context, notCode(cfg, snapshot, ""));
     try {
-      return await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", context], { timeout: stepTimeout(BUILD_TIMEOUT),
+      return await dockerAsync(["build", "-t", tag, ...labels, "-f", "-", staged], { timeout: stepTimeout(BUILD_TIMEOUT),
         stdin: text });
     } catch (e) {
       if (!(e instanceof ArnxError) || e instanceof SetupRequired || !/^docker build did not finish in /.test(e.message)) throw e;
@@ -435,6 +486,8 @@ async function ensureBuilt(cfg: ReviewConfig, snapshot: string, logPath: string,
       writeFileSync(logPath, `${e.message}\n`);
       stepLog({ step: "image", project: cfg.name, tag, built: true, ok: false, timeout: true, secs: secsSince(t0) });
       throw new EnvFailed(`${e.message}; see ${logPath}`, "build", basename(logPath));
+    } finally {
+      if (staged !== context) rmSync(staged, { recursive: true, force: true });
     }
   };
   let r = await build();
