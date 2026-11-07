@@ -47,9 +47,14 @@ because of your own mistake (a wrong import, fixture or setup) is not a finding:
 
 When the code does not tell you what the intended behaviour is, do not guess in a test: ask a question instead. \
 Write questions for the person who owns the product, who knows what it should do but may not read code: plain \
-language, one decision per question, code names only when needed. At most $max_questions. Ask only what the change does not settle: read its changelog, docs and comments first. A question holds the question alone, with no remark about what you read.
+language, one decision per question, code names only when needed. At most $max_questions. \
+Ask only what the change does not settle: read its changelog, docs and comments first. A question \
+holds the question alone, with no remark about what you read.
 
-In an explanation, state as fact only what a test or the code you read shows. A claim about how a dependency, a caller or the UI behaves needs a test or code that shows it; otherwise write "not checked:" before it.
+In an explanation, state as fact only what a test or the code you read shows. A claim about how a \
+dependency, a caller or the UI behaves needs a test or code that shows it; otherwise write \
+"unverified:" before it. Use a key-like value from the code exactly as written; do not encode, \
+re-case or cut it by hand in a test.
 
 When you are done, reply with JSON only, no other text:
 {"tests": [{"test": "<file>::<test name>", "expects": "<one sentence: the behaviour this test asserts>"}],
@@ -103,7 +108,9 @@ First, find the defects this change introduces or exposes. Read the changed code
 it, what runs before and after it, and the data it reads and writes.$no_tests Report only what you can point to in \
 the code, and for each suspected defect a concrete input or state that shows it, the result the code should give, \
 and the result it gives. When the code does not tell you what the intended behaviour is, ask instead: plain \
-language, for the person who owns the product. Ask only what the change does not settle: read its changelog, docs and comments first. A question holds the question alone, with no remark about what you read.
+language, for the person who owns the product. \
+Ask only what the change does not settle: check its changelog, docs and comments first, if you can \
+read them. A question holds the question alone, with no remark about what you read.
 
 Reply with JSON only, no other text, at most $max_suspects suspects, the most harmful first:
 {"suspects": [{"file": "<path>", "line": <number>, "claim": "<one sentence: what is wrong>", "why": "<the \
@@ -142,9 +149,14 @@ Do not assume the current code is correct. Each test should assert the behaviour
 you conclude the code is wrong, keep the test asserting the correct behaviour (it will fail). A test that fails \
 because of your own mistake (a wrong import, fixture or setup) is not a finding: fix it. When the code does not \
 tell you what the intended behaviour is, do not guess in a test: ask a question instead (plain language, one \
-decision per question; at most $max_questions in all). Ask only what the change does not settle: read its changelog, docs and comments first. A question holds the question alone, with no remark about what you read.
+decision per question; at most $max_questions in all). \
+Ask only what the change does not settle: read its changelog, docs and comments first. A question \
+holds the question alone, with no remark about what you read.
 
-In an explanation, state as fact only what a test or the code you read shows. A claim about how a dependency, a caller or the UI behaves needs a test or code that shows it; otherwise write "not checked:" before it.
+In an explanation, state as fact only what a test or the code you read shows. A claim about how a \
+dependency, a caller or the UI behaves needs a test or code that shows it; otherwise write \
+"unverified:" before it. Use a key-like value from the code exactly as written; do not encode, \
+re-case or cut it by hand in a test.
 
 When you are done, reply with JSON only, no other text:
 {"tests": [{"test": "<file>::<test name>", "expects": "<one sentence: the behaviour this test asserts>", "suspect": \
@@ -346,15 +358,16 @@ __tests__/unit/arnx_generated), and test_files when the runner collects only fil
 project's own configuration.
 - Once try_project has built a project's image, look around in it with exec (versions, files, a single test). Do \
 not put probes in test_command: each try_project runs the whole suite.
-- A type check whose errors name one missing module (a generated client such as @prisma/client, or an unbuilt \
-workspace package) says nothing about the change. For a generated client add its generate step to install (never \
+- A type check whose errors mostly name modules it cannot see (a generated client such as @prisma/client, or an \
+unbuilt workspace package) says nothing about the change. For a generated client add its generate step to install (never \
 test_command; it needs the network). Do not build workspace packages to hide it.
-- A project that try_project has proven stays in the file: do not drop it or list its folder under uncovered.
+- A project that try_project has proven stays in the file unless another project in it takes its folder: \
+do not drop it or list its folder under uncovered.
 - Do not set up tests that run in a browser (Playwright, Cypress, Storybook, vitest browser mode). arnx lists them \
 under uncovered as browser tests.
 - A web UI app (react-dom, next, vue, svelte, @angular/core, solid-js, preact, nuxt, @sveltejs/kit, astro or \
 electron among its dependencies) gets two runs of its node or jsdom unit tests. A failed image build or a wrong \
-tests_dir does not use up a run. If both runs fail, arnx lists it under uncovered as web UI. Do not try it again; \
+tests_dir does not use up a run. If two runs fail with no test passing, arnx lists it under uncovered as web UI. Do not try it again; \
 go on with the rest.
 - Do not set up a project whose tests need three or more services (databases, caches, object stores, queues): \
 it does not run within setup's time. The draft lists it under uncovered, naming them; keep it there and go on with \

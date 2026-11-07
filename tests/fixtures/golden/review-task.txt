@@ -12,7 +12,7 @@ Do not assume the current code is correct. Each test should assert the behaviour
 
 When the code does not tell you what the intended behaviour is, do not guess in a test: ask a question instead. Write questions for the person who owns the product, who knows what it should do but may not read code: plain language, one decision per question, code names only when needed. At most 5. Ask only what the change does not settle: read its changelog, docs and comments first. A question holds the question alone, with no remark about what you read.
 
-In an explanation, state as fact only what a test or the code you read shows. A claim about how a dependency, a caller or the UI behaves needs a test or code that shows it; otherwise write "not checked:" before it.
+In an explanation, state as fact only what a test or the code you read shows. A claim about how a dependency, a caller or the UI behaves needs a test or code that shows it; otherwise write "unverified:" before it. Use a key-like value from the code exactly as written; do not encode, re-case or cut it by hand in a test.
 
 When you are done, reply with JSON only, no other text:
 {"tests": [{"test": "<file>::<test name>", "expects": "<one sentence: the behaviour this test asserts>"}],

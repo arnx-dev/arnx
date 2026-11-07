@@ -4,7 +4,7 @@
 // holds PROMPT_VERSION. 0.1.9 changed: the hunt, review and prove tasks (a question holds the question alone and
 // asks only what the change does not settle; an explanation states as fact only what a test or the code shows) and
 // the setup task (test_files, the reasons for uncovered folders, two runs for a web UI app, a type check that
-// names one missing module, a proven project stays in the file). The default judge prompt did not change.
+// names one missing module, a proven project stays in the file). The default judge prompt templates did not change.
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -23,7 +23,7 @@ const JUDGE_SHA = ["12121d7b3881127998db9156d6cf140331a06a2944eaf8d48d36fdf202df
 const NEWER = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompts-0.1.9.json"), "utf8")) as Frozen;
 
 test("PROMPT_VERSION has 0.1.9's value; 0.1.7's fixture keeps what 0.1.8 shipped", () => {
-  expect(PROMPT_VERSION).toBe("57d401f4abf3");
+  expect(PROMPT_VERSION).toBe("65f314c59b1f");
   expect(NEWER.PROMPT_VERSION?.text).toBe(PROMPT_VERSION);
   expect(CHANGED.PROMPT_VERSION?.text).toBe("1624d507cd4f");
   expect(Object.keys(CHANGED)).toEqual(["setupTask", "setupTask/draft", "PROMPT_VERSION"]);
@@ -46,16 +46,24 @@ test("every built prompt is byte-equal to the release that last changed it", () 
 });
 
 test("0.1.9's lines are in the review, hunt, prove and setup tasks, and the judge prompt is untouched", () => {
+  const askHunt = "Ask only what the change does not settle: check its changelog, docs and comments first, if you can read them.";
   const ask = "Ask only what the change does not settle: read its changelog, docs and comments first. A question holds " +
     "the question alone, with no remark about what you read.";
   const fact = "In an explanation, state as fact only what a test or the code you read shows.";
-  for (const k of ["review.task", "hunt.task", "prove.task"] as const) expect(DEFAULTS[k]).toContain(ask);
-  for (const k of ["review.task", "prove.task"] as const) expect(DEFAULTS[k]).toContain(fact);
+  for (const k of ["review.task", "prove.task"] as const) expect(DEFAULTS[k]).toContain(ask);
+  expect(DEFAULTS["hunt.task"]).toContain(askHunt);
+  for (const k of ["review.task", "prove.task"] as const) {
+    expect(DEFAULTS[k]).toContain(fact);
+    expect(DEFAULTS[k]).toContain('otherwise write "unverified:" before it.');
+    expect(DEFAULTS[k]).not.toContain("not checked");
+    expect(DEFAULTS[k]).toContain("Use a key-like value from the code exactly as written; do not encode, re-case or cut " +
+      "it by hand in a test.");
+  }
   expect(DEFAULTS["setup.task"]).toContain("gets two runs of its node or jsdom unit tests");
   expect(DEFAULTS["setup.task"]).not.toContain("one try");
-  expect(DEFAULTS["setup.task"]).toContain("A type check whose errors name one missing module");
+  expect(DEFAULTS["setup.task"]).toContain("A type check whose errors mostly name modules it cannot see");
   expect(DEFAULTS["setup.task"]).toContain("not set up (a folder with tests you did not set up)");
-  expect(DEFAULTS["setup.task"]).toContain("A project that try_project has proven stays in the file");
+  expect(DEFAULTS["setup.task"]).toContain("A project that try_project has proven stays in the file unless another project in it takes its folder");
   const judge = ["challenge.system", "challenge.task", "challenge.depends"] as const;
   const sha = (k: (typeof judge)[number]) => createHash("sha256").update(DEFAULTS[k]).digest("hex");
   expect(judge.map(sha)).toEqual(JUDGE_SHA);
