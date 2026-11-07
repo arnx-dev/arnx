@@ -899,7 +899,7 @@ class Commands {
    * of `what` (from setup's unproven `attempt`, when there is one); the review goes on after it, so it says only what
    * it set up and what stopped it. */
   private async setupFlow(repo: string, a: Args, { project, add = false, quick }: { project?: string; add?: boolean;
-    quick?: { files: string[]; what: string; attempt?: string } }): Promise<number> {
+    quick?: { files: string[]; what: string; why?: string; attempt?: string } }): Promise<number> {
     // doctor's checks first: a missing key or a stopped Docker ends setup here, before it reads or spends anything.
     // Setup runs one model, so only its key is needed.
     const ready = await this.ready(repo, a, (s) => [setupRef(s)]);
@@ -917,7 +917,7 @@ class Commands {
     };
     // A review waits on a quick setup: it stops at QUICK_MINUTES, and `arnx setup` takes the rest.
     const cap = quick ? Math.min(s.setupMinutes, QUICK_MINUTES) : s.setupMinutes;
-    this.d.out(quick ? `${add ? "Setting up" : "First run: setting up"} just enough to test ${quick.what} (about ` +
+    this.d.out(quick ? `${add ? "Setting up" : "First run: setting up"} just enough to test ${quick.why ?? quick.what} (about ` +
       `2–6 min, stops at ${cap} min).` : setupPreview(repo, s, untracked));
     const outDir = join(repo, ".arnx", "setup");
     // JEV is asked only when the config turns it on and its key is set (the key alone does nothing).
@@ -1588,12 +1588,13 @@ class Commands {
     }
     // The parts of the change no project covers whose reason a setup can answer (setupParts), each tried once.
     const all = coverageFiles(repo, untracked).files;
-    const { files, parts } = setupParts(file, change.files, quickFailed(repo), (p) => entryHoldsTests(p, all));
+    const { files, parts, why } = setupParts(file, change.files, quickFailed(repo), (p) => entryHoldsTests(p, all));
     if (!files.length) return null;
     // A try that fails leaves review.yaml and the baseline as they were, so the rest is reviewed as before.
     const kept = [reviewConfigPath(repo), baselinePath(repo)].map((path) =>
       [path, existsSync(path) ? readFileSync(path) : null] as const);
-    const code = await this.setupFlow(repo, a, { add: true, quick: { files, what: parts.join(", ") } });
+    const code = await this.setupFlow(repo, a, { add: true, quick: {
+      files, what: parts.join(", "), why: parts.map((p, i) => `${p} (${why[i]})`).join(", ") } });
     if (code !== 0) {
       for (const [path, bytes] of kept) {
         if (bytes) writeFileSync(path, bytes);

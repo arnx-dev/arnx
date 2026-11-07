@@ -175,12 +175,13 @@ export function keptOut(reason: string): boolean {
 /** What a review sets up before it runs: the changed source files no project covers (`files`), and the parts they are
  * in (`parts`: their entry under uncovered, or the folder of a file no entry lists). Left out: files in a language arnx
  * does not review, entries kept out for arnx's own reason (keptOut; a "no tests" entry that holds tests counts),
- * and parts a review's setup already failed on (`failed`). */
+ * and parts a review's setup already failed on (`failed`). `why`: each part's reason, short (the entry's up to its colon; "not set up yet" for a file no entry lists). */
 export function setupParts(file: ReviewFile, changed: string[], failed: Set<string>,
-                           hasTests: (path: string) => boolean): { files: string[]; parts: string[] } {
+                           hasTests: (path: string) => boolean): { files: string[]; parts: string[]; why: string[] } {
   const entries = file.uncovered.map((u) => ({ ...u, test: matcher(u.path) }));
   const files: string[] = [];
   const parts: string[] = [];
+  const why: string[] = [];
   for (const u of route(file, changed.filter((f) => SOURCE.test(f)), Number.MAX_SAFE_INTEGER).uncovered) {
     if (otherLanguageOf(u.path)) continue;
     const entry = entries.find((e) => e.test(u.path));
@@ -191,9 +192,12 @@ export function setupParts(file: ReviewFile, changed: string[], failed: Set<stri
     const part = entry?.path ?? (dir === "." ? `/${u.path}` : `/${dir}/`);
     if (failed.has(part)) continue;
     files.push(u.path);
-    if (!parts.includes(part)) parts.push(part);
+    if (!parts.includes(part)) {
+      parts.push(part);
+      why.push(entry ? (entry.reason.split(":")[0] ?? "").trim() : "not set up yet");
+    }
   }
-  return { files, parts };
+  return { files, parts, why };
 }
 
 /** Why a review of `changed` cannot run: no project covers any of it (each file with the reason it is uncovered).

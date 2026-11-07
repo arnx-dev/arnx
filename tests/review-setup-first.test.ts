@@ -294,6 +294,7 @@ test("a folder no project can be drafted for is tried once, then refused at once
   const first = review();
   expect(await first.run("review")).toBe(3);
   expect(first.stdout).toContain("Nothing here arnx can test: no project it can set up owns a file /misc/ touches.");
+  expect(first.stdout).toContain("just enough to test /misc/ (not set up yet) (about");
   // One next step, the refusal's, at the end.
   expect(first.stdout).not.toContain("Next:");
   expect(first.stdout).not.toContain("Reviewing the rest");
@@ -352,7 +353,10 @@ test("setupParts: which changed files a review sets up first, by the reason thei
   expect(setupParts(f, changed, new Set(["/failed/"]), hasTests)).toEqual({
     files: ["web/web.py", "later/a.ts", "lib/util.py", "legacy/old.py", "plugins/one/main.py", "extra/new.py"],
     parts: ["/web/", "/later/", "/lib/", "/legacy/", "/plugins/*/", "/extra/"],
+    // Why each part is set up, short: the entry's reason up to its colon, or "not set up yet" for a file no project lists.
+    why: [TIME_LEFT_OUT, "not set up yet", NO_TESTS, "flaky on the old CI, left out by hand", "not set up yet",
+      "not set up yet"],
   });
   // Nothing outside a project: nothing to set up.
-  expect(setupParts(f, ["api/api.py", "web/README.md"], new Set(), hasTests)).toEqual({ files: [], parts: [] });
+  expect(setupParts(f, ["api/api.py", "web/README.md"], new Set(), hasTests)).toEqual({ files: [], parts: [], why: [] });
 });
