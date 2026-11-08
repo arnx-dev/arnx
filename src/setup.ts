@@ -1773,8 +1773,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       // unchanged, they stand and are said at approval.
       if (ok && counts.typecheckProblem && ask("typecheck", `its type check: ${counts.typecheckProblem}`)) {
         hold("typecheck");
-        stand("");
         const line = `the type check of ${name}: ${counts.typecheckProblem}`;
+        stand(line);
         state.problem = `${name}: ${line}`;
         attempt({ ok: false, reused: false, summary: clip(summary, 500), failing: failing.length, skips: skips.length,
           hints: clip(line, 1000) });
@@ -2137,7 +2137,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       let best: { accepted: string; final: ReviewFile; aside: string[] } | null = null;
       for (const file of [state.lastFile, ...stood.map((x) => x.file).reverse()]) {
         const left = keepProven(file, !late);
-        if (left && state.accepted !== null && state.final && (!best || left.length < best.aside.length)) {
+        // The most projects kept wins; on a tie, the earlier candidate (the last whole file first).
+        if (left && state.accepted !== null && state.final &&
+          (!best || state.final.projects.length > best.final.projects.length)) {
           best = { accepted: state.accepted, final: state.final, aside: left };
         }
         [state.accepted, state.final] = [null, null];

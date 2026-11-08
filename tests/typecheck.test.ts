@@ -718,7 +718,9 @@ ${typecheck ? `    typecheck: ${typecheck}\n` : ""}uncovered: []
     expect(r.runs.map((x) => x.name)).toEqual(["web"]);
     expect(approvalChecks(parseReviewFile(web("missing-tsc")), r.projects))
       .toEqual(["web: type check failed without reporting a type error"]);
-    expect(said.some((l) => l.startsWith("web: ✓ try 1 stands"))).toBe(true);
+    // The line carries the note, as the gap and type-gap lines do.
+    expect(said.find((l) => l.startsWith("web: ✓ try 1 stands"))).toEndWith(" · the type check of web: failed " +
+      "without reporting a type error (it could not start, or its output is not tsc's)");
   });
 
   test("a type gap went back to the agent; the limit cuts its next try: the first try stands with the gap", async () => {
