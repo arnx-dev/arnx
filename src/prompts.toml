@@ -75,6 +75,10 @@ coverage_db = """
 them against the database the tests can reach ($names): create what the code needs, plant rows, run the code, and \
 check the results."""
 
+# The reviewer's last turn when its budget would run out with tests written since its last report: no tool runs in it.
+last_word = """
+The review's budget is nearly spent: this is your last reply, and no tool runs in it. Do not call a tool. Reply now with the JSON your task asks for, on the tests you have written (run or not), as you would when done."""
+
 # The hunt runs before the tests, in the same conversation: the reviewer first reads the change and the code
 # around it and lists suspected defects (writing and running are refused until it replies), then tests each suspect.
 # A second hunter from another vendor gets the same opening without tools, with the changed definitions whole.

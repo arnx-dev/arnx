@@ -61,11 +61,6 @@ const NUDGE_SHARE = 0.5;
 const NUDGE_USD = 0.1;
 const NO_FACTS: Facts = { untestedFiles: [], dbUntested: [], generatedFiles: [] };
 const CLOSED = "not yet: first reply with the suspects as JSON; then you can write and run tests";
-/** The reviewer's last word when its budget would run out with tests written since its last report (runAgent
- * `lastWord`): no tool runs in that turn. */
-const LAST_WORD = "The review's budget is nearly spent: this is your last reply, and no tool runs in it. Do not call a " +
-  "tool. Reply now with the JSON your task asks for, on the tests you have written (run or not), as you would when " +
-  "done.";
 /** The tools closed while the hunt is open. */
 const CLOSED_TOOLS = new Set(["write_file", "run_tests"]);
 /** A round's transcript file, when it has an outDir. */
@@ -273,7 +268,7 @@ export class LocalBrain implements Brain {
                reaching: (calls: ToolCall[]) => ToolCall[] = (calls) => calls) {
     const replies: string[] = [];
     let last = 0, spent = 0, unasked: { text: string; turn: number } | null = null;
-    // Tests written since the last report: the budget running out asks for one more report (LAST_WORD).
+    // Tests written since the last report: the budget running out asks for one more report (review.last_word).
     let wrote = false;
     return { system, user, budgetUsd: x.budgetUsd, prices: this.m.prices, transcript: transcriptOf(x),
       unasked: () => unasked,
@@ -285,7 +280,7 @@ export class LocalBrain implements Brain {
         unasked = { text: reply, turn };
         wrote = false;
       },
-      lastWord: () => (wrote ? LAST_WORD : null),
+      lastWord: () => (wrote ? this.p.lastWordTask() : null),
       followUp: async (reply: string) => {
         unasked = null;
         replies.push(reply);

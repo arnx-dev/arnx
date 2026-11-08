@@ -28,6 +28,7 @@ export const PLACEHOLDERS = {
   "review.task": ["diff", "scope", "property", "tests_dir", "runner", "test_files", "max_questions"],
   "review.coverage": ["files"],
   "review.coverage_db": ["files", "names"],
+  "review.last_word": [],
   "hunt.system": [],
   "hunt.opening": ["diff", "scope", "context"],
   "hunt.task": ["no_tests", "max_suspects"],
@@ -254,6 +255,11 @@ export class Prompts {
     return base ? base + extra : extra.trimStart() + " Then reply with the JSON again, listing every test.";
   }
 
+  /** The reviewer's last turn when its budget runs out: its report on the tests it wrote. */
+  lastWordTask(): string {
+    return literal(this.t["review.last_word"]);
+  }
+
   huntSystem(): string {
     return literal(this.t["hunt.system"]);
   }
@@ -451,7 +457,8 @@ export function explainUser(diff: string, findings: { id: string; testId: string
 const VERSIONED: PromptKey[] = ["review.system", "review.task", "setup.system", "setup.task", "challenge.system",
   "challenge.task", "answer.task", "review.env_hint", "review.coverage", "hunt.system", "hunt.opening", "hunt.task",
   "hunt.no_tests", "hunt.second_files", "prove.task", "review.coverage_db", "prove.untested", "rank.system",
-  "rank.task", "challenge.depends", "questions.asked", "questions.system", "questions.task", "setup.draft"];
+  "rank.task", "challenge.depends", "questions.asked", "questions.system", "questions.task", "setup.draft",
+  "review.last_word"];
 
 export const PROMPT_VERSION = createHash("sha256").update(VERSIONED.map((k) => DEFAULTS[k]).join("\0"))
   .digest("hex").slice(0, 12);

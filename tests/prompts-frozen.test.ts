@@ -4,7 +4,8 @@
 // holds PROMPT_VERSION. 0.1.9 changed: the hunt, review and prove tasks (a question holds the question alone and
 // asks only what the change does not settle; an explanation states as fact only what a test or the code shows) and
 // the setup task (test_files, the reasons for uncovered folders, two runs for a web UI app, a type check that
-// names one missing module, a proven project stays in the file). The default judge prompt templates did not change.
+// names one missing module, a proven project stays in the file), and it added review.last_word (the reviewer's last
+// turn when its budget runs out). The default judge prompt templates did not change.
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -23,7 +24,7 @@ const JUDGE_SHA = ["12121d7b3881127998db9156d6cf140331a06a2944eaf8d48d36fdf202df
 const NEWER = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompts-0.1.9.json"), "utf8")) as Frozen;
 
 test("PROMPT_VERSION has 0.1.9's value; 0.1.7's fixture keeps what 0.1.8 shipped", () => {
-  expect(PROMPT_VERSION).toBe("65f314c59b1f");
+  expect(PROMPT_VERSION).toBe("d80ccf1654c5");
   expect(NEWER.PROMPT_VERSION?.text).toBe(PROMPT_VERSION);
   expect(CHANGED.PROMPT_VERSION?.text).toBe("1624d507cd4f");
   expect(Object.keys(CHANGED)).toEqual(["setupTask", "setupTask/draft", "PROMPT_VERSION"]);
@@ -31,7 +32,7 @@ test("PROMPT_VERSION has 0.1.9's value; 0.1.7's fixture keeps what 0.1.8 shipped
 
 test("every built prompt is byte-equal to the release that last changed it", () => {
   const cases = promptCases();
-  expect(Object.keys(cases).filter((k) => !(k in FROZEN))).toEqual(["setupTask/draft"]);
+  expect(Object.keys(cases).filter((k) => !(k in FROZEN))).toEqual(["lastWordTask", "setupTask/draft"]);
   expect(Object.keys(FROZEN).filter((k) => !(k in cases))).toEqual([]);
   expect(Object.keys(NEWER).filter((k) => !(k in cases) && k !== "PROMPT_VERSION")).toEqual([]);
   for (const [name, text] of Object.entries(cases)) {
@@ -41,8 +42,8 @@ test("every built prompt is byte-equal to the release that last changed it", () 
   }
   // Only the prompts 0.1.9 words differ from 0.1.8's.
   const moved = Object.keys(NEWER).map((k) => k.split("/")[0]!);
-  expect([...new Set(moved)].sort()).toEqual(["PROMPT_VERSION", "huntTask", "proveTask", "reviewTask", "secondHuntTask",
-    "setupTask"]);
+  expect([...new Set(moved)].sort()).toEqual(["PROMPT_VERSION", "huntTask", "lastWordTask", "proveTask", "reviewTask",
+    "secondHuntTask", "setupTask"]);
 });
 
 test("0.1.9's lines are in the review, hunt, prove and setup tasks, and the judge prompt is untouched", () => {
@@ -64,6 +65,7 @@ test("0.1.9's lines are in the review, hunt, prove and setup tasks, and the judg
   expect(DEFAULTS["setup.task"]).toContain("A type check whose errors mostly name modules it cannot see");
   expect(DEFAULTS["setup.task"]).toContain("not set up (a folder with tests you did not set up)");
   expect(DEFAULTS["setup.task"]).toContain("A project that try_project has proven stays in the file unless another project in it takes its folder");
+  expect(DEFAULTS["review.last_word"]).toContain("this is your last reply, and no tool runs in it");
   const judge = ["challenge.system", "challenge.task", "challenge.depends"] as const;
   const sha = (k: (typeof judge)[number]) => createHash("sha256").update(DEFAULTS[k]).digest("hex");
   expect(judge.map(sha)).toEqual(JUDGE_SHA);
@@ -74,7 +76,7 @@ test("src/prompts.toml holds every key, each using exactly the placeholders the 
   const steps = [...toml.matchAll(/^\[([a-z]+)\]$/gm)].map((m) => m[1]);
   expect(steps).toEqual(["review", "hunt", "prove", "rank", "questions", "challenge", "answer", "explain", "setup",
     "fix"]);
-  expect(PROMPT_KEYS).toHaveLength(28);
+  expect(PROMPT_KEYS).toHaveLength(29);
   for (const key of PROMPT_KEYS) {
     expect([key, ...placeholdersIn(DEFAULTS[key])].sort()).toEqual([key, ...PLACEHOLDERS[key]].sort());
     for (const p of NEEDED[key] ?? []) expect(PLACEHOLDERS[key] as readonly string[]).toContain(p);

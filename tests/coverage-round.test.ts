@@ -11,13 +11,13 @@ import { filesToAsk } from "../src/untested";
 import { parseReviewConfig, parseReviewFile, reviewConfigPath, stamp } from "../src/config";
 import { snapshot } from "../src/change";
 import { PRICES } from "../src/llm";
-import { coverageTask, PROMPT_VERSION, reviewSystem } from "../src/prompts";
+import { coverageTask, DEFAULTS, PROMPT_VERSION, Prompts, reviewSystem } from "../src/prompts";
 import { parseReport, parseReports } from "../src/report";
 import { ModelError } from "../src/errors";
 import type { Reply } from "../src/llm";
 import { envTests, runReview } from "../src/reviewer";
 import { defaultSettings } from "../src/settings";
-import { FakeJson, fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
+import { BusyAgent, FakeJson, fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo, runGit } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
@@ -197,6 +197,23 @@ test("no follow-up past half the round's budget", async () => {
   await new LocalBrain({ agentModel: room, prices: PRICES }).agentRound("review", reviewInput(0.05),
     Promise.resolve(roundTools()));
   expect(room.calls).toHaveLength(2);
+});
+
+test("the reviewer's last word is review.last_word, and a repository's override replaces it", async () => {
+  // $0.004 a reply: after a write and a read, the next call would cross $0.01, so it is the last word.
+  const run = async (prompts?: Prompts) => {
+    const model = new BusyAgent([[tool("write_file", { path: "tests/arnx_generated/test_a.py", content: "x" })]],
+      [tool("read_file", { path: "b.py" })], [text(REPORT)]);
+    const r = await new LocalBrain({ agentModel: model, prices: PRICES, ...(prompts ? { prompts } : {}) })
+      .agentRound("review", reviewInput(0.01), Promise.resolve(roundTools()));
+    const asked = model.calls[2]!.messages.at(-1)!.content as { type: string; text?: string }[];
+    return { r, said: asked.at(-1)!.text };
+  };
+  const plain = await run();
+  expect(plain.said).toBe(DEFAULTS["review.last_word"]);
+  expect([plain.r.agent.stop, plain.r.agent.finalText]).toEqual(["budget", REPORT]);
+  const own = await run(new Prompts({ ...DEFAULTS, "review.last_word": "Report now." }, ["review.last_word"]));
+  expect(own.said).toBe("Report now.");
 });
 
 test("a follow-up stops at its limit and the round keeps its report", async () => {
