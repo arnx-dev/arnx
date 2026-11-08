@@ -26,7 +26,7 @@ to the baseline) is the user's to judge: pass `changes` on to them.
 | `schema_version` | number | 1. |
 | `command` | string | The command, as typed: `init`, `doctor`, `review`, … |
 | `result` | string | One word: `ok`, `fail`, or the command's own (below). |
-| `exit_code` | number | The process exit code: 0 fine; 1 confirmed findings (`review`) or failing tests (`check`); 2 could not finish or a usage error; 3 setup needed; 4 accepted tests edited (`check`). |
+| `exit_code` | number | The process exit code: 0 fine (a confirmed finding does not fail a `review`; a change of documentation only is not reviewed: `result` `clean`, `status` `docs-only`, `--docs` reviews it); 1 a finding not checked (`review`) or failing tests (`check`); 2 could not finish or a usage error; 3 setup needed; 4 accepted tests edited (`check`). |
 
 Every other field is the command's own, in snake_case. Paths are relative to the repository root, times are ISO
 8601, money is a number of US dollars in a field ending `_usd`.
@@ -170,7 +170,7 @@ recorded (else `error`, exit 3, nothing sent). What is worth a look is in `warni
 | `seconds` | number | How long setup took, the proof included. |
 | `stop` | string | Why setup's agent stopped: `end_turn`, `budget`, `max_turns`, `time` (it reached `setup_minutes`, the proof included), or another. |
 | `uncovered_projects` | array of strings | At `setup_minutes` with some projects proven (`result` `ok`, `stop` `time`): the projects of its last attempt it had not proven, now listed under `uncovered` (reason `setup reached its time limit`), for `arnx setup --add`; `next` is then `["arnx setup --add"]`. Empty otherwise. |
-| `failure` | object or null | Why setup failed: `{ kind, reason, failing }`. `kind` is `environment` (it never got a suite running: a build that fails, a runner that does not start, the budget or the turns used up, no proposal, a run that needs a file arnx left out, after which setup stops, or only web UI apps whose one try failed: `reason` is `only web UI here, which arnx does not set up` and `next` is empty), `tests` (the suite runs and the current code fails tests outside the baseline; `failing` holds their ids) or `time` (setup reached `setup_minutes`; `next` is `arnx setup --project NAME` for the project it was on, `arnx setup` again, or `arnx approve` when the proof ran out of time). `null` unless `fail`. |
+| `failure` | object or null | Why setup failed: `{ kind, reason, failing }`. `kind` is `environment` (it never got a suite running: a build that fails, a runner that does not start, the budget or the turns used up, no proposal, a run that needs a file arnx left out, after which setup stops, or only web UI apps whose two counted runs failed: `reason` is `only web UI here, which arnx does not set up` and `next` is empty), `tests` (the suite runs and the current code fails tests outside the baseline; `failing` holds their ids) or `time` (setup reached `setup_minutes`; `next` is `arnx setup --project NAME` for the project it was on, `arnx setup` again, or `arnx approve` when the proof ran out of time). `null` unless `fail`. |
 | `next` | array of strings | The commands to run next: `arnx review` once proven; `arnx approve` (after fixing `review_yaml`: it proves it again); `arnx setup --force` when there was no attempt. When setup stopped for a file it left out: `arnx allow-secret PATH` (secret-looking) or `add !PATH to .arnxignore`, then `arnx setup`. |
 
 | `result` | Exit | When |
@@ -221,10 +221,12 @@ A summary of the review, as the terminal shows it. The whole review is `review_j
 | `review_md`, `review_json` | string | The review for people and for programs, relative to the repository. |
 | `change` | string | What was reviewed, such as `uncommitted (base 1a2b3c4)`. |
 | `files_changed`, `added`, `removed` | number | Files in the change; lines added and removed. |
-| `status` | string | `complete`, `incomplete` (see `problems`), or `partly-covered` (changed source files no test refers to: `not_tested`). |
+| `status` | string | `complete`, `incomplete` (see `problems`), `partly-covered` (some changed source files no test was seen reaching: `not_tested`), or `not-tested` (none of them was; the exit code stays 0, so CI decides on `status`). |
+| `source_files` | number | Optional. Unique changed source files in the change; absent in older reviews. |
 | `issues` | number | Entries in `findings`: the summary's numbered rows. |
-| `findings` | array | One entry per issue the change may have caused, as the summary groups and orders them (most severe first): `{ ids, state, confirmed, regression, projects, title, severity }`. `ids`: the findings (`F1`) with this cause; `state`: their verdicts in words (`confirmed`, `disputed`, `not challenged`, `depends on Q1`, or counts such as `1 confirmed, 1 disputed`); `confirmed`: one of them is confirmed (exit 1); `regression`: one passed before the change; `title`: the problem in a few words; `severity`: `high`, `medium`, `low` or `null` (the grouping model's estimate). |
-| `pre_existing` | array of strings | Findings that fail the same way before the change: not caused by it, never the exit code. |
+| `finding_count` | number | The findings in all those rows (the `ids` added up), as the summary and review.md count them. Unreported failing tests are not findings. |
+| `findings` | array | One entry per issue the change may have caused, as the summary groups and orders them (most severe first): `{ ids, state, confirmed, regression, projects, title, severity }` (plus `fallback: true` when the project was tested on another commit's image). `ids`: the findings (`F1`) with this cause; `state`: their verdicts in words (`confirmed`, `disputed`, `not challenged`, `depends on Q1`, or counts such as `1 confirmed, 1 disputed`); `confirmed`: one of them is confirmed (worth a look; does not set the exit code); `regression`: one passed before the change; `title`: the problem in a few words; `severity`: `high`, `medium`, `low` or `null` (the grouping model's estimate). |
+| `pre_existing` | array of strings | Findings that fail with the same message before the change; never the exit code. |
 | `questions` | array | `{ id, question, project, optional }`: `Q1` first. Only the user answers them. `optional`: no issue waits on it (a test another finding proves already settles the issue); an answer still lets `arnx accept` write a test. |
 | `tests_written` | number | Tests the reviewer wrote. |
 | `cost_usd` | number | What the review cost. |
@@ -232,15 +234,15 @@ A summary of the review, as the terminal shows it. The whole review is `review_j
 | `untracked_left_out` | number | Untracked files not sent (0 when none). |
 | `problems` | array of strings | Why the review is incomplete or only partly covered, in words; empty when complete. |
 | `provider_failures` | array of strings | A sentence per model provider that was down or refused its key; empty when none. |
-| `not_tested` | array of strings | Changed files no arnx test refers to, and files no project covers. |
+| `not_tested` | array of strings | Changed files no arnx test was seen reaching, and files no project covers or whose tests review.yaml says do not run. |
 | `your_call` | string or null | What only the user can decide, as the summary says it: issues not proven (disputed, or waiting on a question) and the questions an issue waits on; or that every issue comes marked real. `null` when findings are marked one by one (not grouped) or there are none. |
 | `next` | array of strings | `arnx accept` alone when every issue comes marked real and no issue waits on a question; else `arnx triage`, `arnx accept` when there are findings or questions (the user's); else empty. |
 
 | `result` | Exit | When |
 |---|---|---|
-| `findings` | 1 | At least one confirmed finding. |
-| `incomplete` | 2 | No confirmed finding, and the review did not finish (`problems` says why). |
-| `clean` | 0 | No confirmed finding, and the review finished. |
+| `findings` | 0, 1 or 2 | A confirmed finding (exit 0, or 2 when the review did not finish; also when every confirmed finding ran on another commit's image, `fallback`) or a not-checked one (exit 1). |
+| `incomplete` | 2 | No confirmed or not-checked finding, and the review did not finish (`problems` says why). |
+| `clean` | 0 | No confirmed or not-checked finding (disputed ones do not count), and the review finished. |
 
 `not-ready` (doctor's checks failed) and `error` (no consent, no environment set up, …) are as above.
 
@@ -265,7 +267,7 @@ answers as `review.md` holds them now (latest review, or the id given).
 | Field | Type | Meaning |
 |---|---|---|
 | `files` | array | One per file allowed: `{ path, matches, labels }`. `matches`: how many key-like strings it holds; `labels`: each one's kind and line, `{ label, line }` (`AKIA…`, `a private key`). Never the strings themselves. Not with `--remove`. |
-| `removed` | array of strings | Only with `--remove`: the paths whose pins were taken out, so their files are withheld again. |
+| `removed` | array of strings | Only with `--remove`: the paths whose pins were taken out: a private key is a fake again, and other text as before. |
 | `review_yaml` | string | `.arnx/review.yaml`, where they are pinned. |
 | `next` | array of strings | `arnx setup` before setup, else `arnx review` (it proves the changed file again first). |
 

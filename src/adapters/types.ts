@@ -5,6 +5,12 @@ export type AdapterId = "python" | "typescript" | "rust" | "csharp";
 
 /** One test in one run, from the runner's report. */
 export interface TestResult {
+  /** The file left out of the snapshot this failure needs, or the file whose private key it may need (`fakedKey`, a fake in
+   * the snapshot): it is unproven, which says nothing about the project. */
+  needs?: string;
+  fakedKey?: true;
+  /** With `fakedKey`: no rerun with the real key settled it (realkey.ts), so it only may need the key. */
+  notRerun?: true;
   testId: string;
   fileAttr: string;
   name: string;
@@ -64,10 +70,18 @@ export interface Adapter {
   reportSaid?(output: string, runner: string): string | null | undefined;
   /** Shell command that runs the targets and writes a report to reportPath (inside the container). */
   command(testCommand: string, targets: string[], reportPath: string, runner: string): string;
+  /** The flag that makes the runner use one process for arnx's runs of a few generated files, only when the project
+   * configured parallel workers (`test_command` or the runner's own config files, read through `read`: a path
+   * relative to the project's root, null when there is no such file); null: nothing to turn off. Appended last, so
+   * it wins over the project's own setting. */
+  serialFlag?(testCommand: string, read: (rel: string) => string | null, runner: string): string | null;
   /** Parse the report file the command wrote; null when it is unreadable. projectRoot is the project's directory
    * relative to the repository root; `exists` tells whether a path relative to it is a file in the snapshot (Rust
    * finds the source file of a test inside src/ by its module path). */
   parseReport(text: string, runner: string, projectRoot: string, exists?: (rel: string) => boolean): TestResult[] | null;
+  /** The parsed results with the failure messages the report left empty filled from the run's output (bun's JUnit
+   * report holds none); absent for runners whose report has them. */
+  messagesFrom?(results: TestResult[], output: string, runner: string): TestResult[];
   /** Shell command that lists the tests a run of the targets would run (all of them with none), running none; null when
    * the runner has no list form or test_command cannot be turned into one safely. A runner that writes its list to a
    * file writes it to listPath (inside the container). */

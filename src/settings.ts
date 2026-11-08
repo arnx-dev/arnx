@@ -155,6 +155,7 @@ export interface KnownProvider {
 export const KNOWN_PROVIDERS: readonly KnownProvider[] = [
   { name: "deepseek", label: "DeepSeek", model: "deepseek-flash", checked: false,
     table: { api: "messages", url: "https://api.deepseek.com/anthropic", key_env: "DEEPSEEK_API_KEY" } },
+  // Moonshot allows one request at a time per organization on the owner's tier (2026-11-05): parallel calls queue or fail.
   { name: "kimi", label: "Kimi", model: "kimi-k3", checked: false,
     table: { api: "responses", url: "https://api.moonshot.ai/v1", key_env: "MOONSHOT_API_KEY",
       effort: { medium: "high" }, store: false } },

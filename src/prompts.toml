@@ -47,7 +47,14 @@ because of your own mistake (a wrong import, fixture or setup) is not a finding:
 
 When the code does not tell you what the intended behaviour is, do not guess in a test: ask a question instead. \
 Write questions for the person who owns the product, who knows what it should do but may not read code: plain \
-language, one decision per question, code names only when needed. At most $max_questions.
+language, one decision per question, code names only when needed. At most $max_questions. \
+Ask only what the change does not settle: read its changelog, docs and comments first. A question \
+holds the question alone, with no remark about what you read.
+
+In an explanation, state as fact only what a test or the code you read shows. A claim about how a \
+dependency, a caller or the UI behaves needs a test or code that shows it; otherwise write \
+"unverified:" before it. Use a key-like value from the code exactly as written; do not encode, \
+re-case or cut it by hand in a test.
 
 When you are done, reply with JSON only, no other text:
 {"tests": [{"test": "<file>::<test name>", "expects": "<one sentence: the behaviour this test asserts>"}],
@@ -67,6 +74,10 @@ coverage_db = """
  These changed files hold database code, and no test that connects to the database refers to them yet: $files. Test \
 them against the database the tests can reach ($names): create what the code needs, plant rows, run the code, and \
 check the results."""
+
+# The reviewer's last turn when its budget would run out with tests written since its last report: no tool runs in it.
+last_word = """
+The review's budget is nearly spent: this is your last reply, and no tool runs in it. Do not call a tool. Reply now with the JSON your task asks for, on the tests you have written (run or not), as you would when done."""
 
 # The hunt runs before the tests, in the same conversation: the reviewer first reads the change and the code
 # around it and lists suspected defects (writing and running are refused until it replies), then tests each suspect.
@@ -101,7 +112,9 @@ First, find the defects this change introduces or exposes. Read the changed code
 it, what runs before and after it, and the data it reads and writes.$no_tests Report only what you can point to in \
 the code, and for each suspected defect a concrete input or state that shows it, the result the code should give, \
 and the result it gives. When the code does not tell you what the intended behaviour is, ask instead: plain \
-language, for the person who owns the product.
+language, for the person who owns the product. \
+Ask only what the change does not settle: check its changelog, docs and comments first, if you can \
+read them. A question holds the question alone, with no remark about what you read.
 
 Reply with JSON only, no other text, at most $max_suspects suspects, the most harmful first:
 {"suspects": [{"file": "<path>", "line": <number>, "claim": "<one sentence: what is wrong>", "why": "<the \
@@ -140,7 +153,14 @@ Do not assume the current code is correct. Each test should assert the behaviour
 you conclude the code is wrong, keep the test asserting the correct behaviour (it will fail). A test that fails \
 because of your own mistake (a wrong import, fixture or setup) is not a finding: fix it. When the code does not \
 tell you what the intended behaviour is, do not guess in a test: ask a question instead (plain language, one \
-decision per question; at most $max_questions in all).
+decision per question; at most $max_questions in all). \
+Ask only what the change does not settle: read its changelog, docs and comments first. A question \
+holds the question alone, with no remark about what you read.
+
+In an explanation, state as fact only what a test or the code you read shows. A claim about how a \
+dependency, a caller or the UI behaves needs a test or code that shows it; otherwise write \
+"unverified:" before it. Use a key-like value from the code exactly as written; do not encode, \
+re-case or cut it by hand in a test.
 
 When you are done, reply with JSON only, no other text:
 {"tests": [{"test": "<file>::<test name>", "expects": "<one sentence: the behaviour this test asserts>", "suspect": \
@@ -313,8 +333,10 @@ projects:
     tests_dir: <optional: where arnx writes its tests, relative to root; arnx sets it from the runner's \
 configuration (vitest include, jest roots and testMatch, pytest testpaths), so set it only when try_project says \
 its folder is not picked up>
-uncovered: [{path: <path pattern>, reason: <why no project tests it: no tests, scripts, unsupported language, \
-infrastructure>}]   # source files only: leave docs, data and configuration out
+    test_files: <optional, typescript only: "*" and the ending of the test file names the runner collects, such as \
+"*Spec.tsx"; arnx sets it with tests_dir, so set it only when try_project says the runner collects other names>
+uncovered: [{path: <path pattern>, reason: <why no project tests it: no tests (only for a folder with no test \
+files), not set up (a folder with tests you did not set up), scripts, unsupported language, infrastructure>}]   # source files only: leave docs, data and configuration out
 
 Paths in owns, uses and uncovered work like .gitignore: a trailing / names a directory, a leading / anchors to the \
 repository root, * stays in one directory and ** crosses directories.
@@ -335,15 +357,22 @@ exclude tests in test_command. Fix only what the environment causes. Failures th
 back to you once; trying the project again unchanged records them with their cause.
 - try_project also places a one-line test in the project's tests_dir and checks that the runner runs it. When it \
 does not, set tests_dir to a new, empty subfolder inside a folder the configuration includes (for example \
-__tests__/unit/arnx_generated). Never use a folder that holds the project's own tests, and do not change the \
+__tests__/unit/arnx_generated), and test_files when the runner collects only files with certain names (such as \
+*Spec.tsx). Never use a folder that holds the project's own tests, and do not change the \
 project's own configuration.
 - Once try_project has built a project's image, look around in it with exec (versions, files, a single test). Do \
 not put probes in test_command: each try_project runs the whole suite.
+- A type check whose errors mostly name modules it cannot see (a generated client such as @prisma/client, or an \
+unbuilt workspace package) says nothing about the change. For a generated client add its generate step to install (never \
+test_command; it needs the network). Do not build workspace packages to hide it.
+- A project that try_project has proven stays in the file unless another project in it takes its folder: \
+do not drop it or list its folder under uncovered.
 - Do not set up tests that run in a browser (Playwright, Cypress, Storybook, vitest browser mode). arnx lists them \
 under uncovered as browser tests.
 - A web UI app (react-dom, next, vue, svelte, @angular/core, solid-js, preact, nuxt, @sveltejs/kit, astro or \
-electron among its dependencies) gets one try at its node or jsdom unit tests. If that try fails, arnx lists it \
-under uncovered as web UI. Do not try it again; go on with the rest.
+electron among its dependencies) gets two runs of its node or jsdom unit tests. A failed image build or a wrong \
+tests_dir does not use up a run. If two runs fail with no test passing, arnx lists it under uncovered as web UI. Do not try it again; \
+go on with the rest.
 - Do not set up a project whose tests need three or more services (databases, caches, object stores, queues): \
 it does not run within setup's time. The draft lists it under uncovered, naming them; keep it there and go on with \
 the rest. try_project refuses it while it lists three or more.

@@ -66,7 +66,7 @@ export async function projectIndex(cfg: ReviewConfig, snap: string, outDir: stri
     requireDocker();
     mkdirSync(dir, { recursive: true });
     rmSync(join(dir, "index.scip"), { force: true });
-    const env = await ensureEnv(cfg, snap, join(outDir, "env-build.log"));
+    const env = await ensureEnv(cfg, snap, join(outDir, "env-build.log"), undefined, { remember: true });
     const image = await indexImage(env, spec.layer(env));
     const [, ...args] = runArgv({ image, name, network: "none", snapshot: snap, workdir: cfg.workdir, env: cfg.env,
       command: [...links(cfg.testCommand), spec.command].join("; "), limits: DEFAULT_LIMITS,

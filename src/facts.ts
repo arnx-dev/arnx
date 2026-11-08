@@ -46,6 +46,8 @@ export interface ProjectFacts {
   groups: string[];
   /** Python: root itself installs (a build system or setup.py). */
   installable: boolean;
+  /** Python: its setup.py builds compiled extensions (ext_modules, cythonize or Extension). */
+  nativeBuild: boolean;
   /** JavaScript: install scripts or patches that need more than package.json and the lockfile. */
   needsTree: boolean;
   /** JavaScript: package manager settings next to the lockfile that install needs too. */
@@ -65,6 +67,10 @@ export interface ProjectFacts {
   lockApt: string[];
   /** Dependency names that hint at the test setup (ts-node, tsx). */
   deps: string[];
+  /** JavaScript: the Prisma schema (relative to installRoot) when the project depends on Prisma and one exists. */
+  prisma?: string;
+  /** The CLI that generates it: "prisma" as installed, or "prisma@X" pinned to the client's version. */
+  prismaCli?: string;
 }
 
 export interface Facts { projects: ProjectFacts[]; jobs: CiJob[]; services: ServiceFact[] }
@@ -80,11 +86,14 @@ export function manyServices(f: ProjectFacts): string[] | null {
   return f.root !== "." && f.services.length >= MANY_SERVICES ? f.services.map((s) => s.value) : null;
 }
 
+/** What every manyServicesReason says, whatever the services. */
+export const MANY_SERVICES_SAID = "setup does not start three or more services";
+
 /** Why such a project is under uncovered: "needs postgres, redis and minio; setup does not start three or more
  * services: set it up by hand, or with fewer". */
 export function manyServicesReason(names: string[]): string {
   const all = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names.join("");
-  return `needs ${all}; setup does not start three or more services: set it up by hand, or with fewer`;
+  return `needs ${all}; ${MANY_SERVICES_SAID}: set it up by hand, or with fewer`;
 }
 
 type Raw = Record<string, unknown>;
@@ -245,7 +254,7 @@ export function readFacts(repo: string, paths: string[], candidates: Candidate[]
     const above = testsFirst(jobs.filter((j) => fits(j) && !tied.includes(j) && j.dirs.some((d) => ups.includes(d))));
     const f: ProjectFacts = { root: c.root, language: c.language,
       versions: versionsOf(ups, [...tied, ...above], jobs, docker.get(c.root) ?? [], files), manager: null,
-      installRoot: c.root, lockfile: null, requirements: [], extras: [], groups: [], installable: false,
+      installRoot: c.root, lockfile: null, requirements: [], extras: [], groups: [], installable: false, nativeBuild: false,
       needsTree: false, copy: [], jobs: tied.map((j) => j.id), services: [], maybeServices: [], env: {}, envNames: [],
       apt: [...new Set(tied.flatMap((j) => j.apt))], lockApt: [], deps: [] };
     if (c.language === "typescript") jsFacts(f, ups, paths, files);
@@ -255,6 +264,16 @@ export function readFacts(repo: string, paths: string[], candidates: Candidate[]
     f.deps = deps.filter((d) => /^(ts-node|tsx|@swc\/register|esbuild-register)$/.test(d));
     const testText = [...(tests.get(c) ?? []).slice(0, 40), at(c.root, "conftest.py"), at(c.root, "tests/conftest.py")]
       .map(read).join("\n");
+    if (c.language === "typescript" && deps.some((d) => d === "prisma" || d === "@prisma/client")) {
+      const cli = prismaCli(files.json(c.manifest), deps.includes("prisma"));
+      const schemas = paths.filter((p) => posix.basename(p) === "schema.prisma" && (c.root === "." || p.startsWith(`${c.root}/`)))
+        .sort((a, b) => a.length - b.length);
+      const at0 = f.installRoot === "." ? "" : `${f.installRoot}/`;
+      if (cli && schemas[0] && schemas[0].startsWith(at0)) {
+        f.prisma = schemas[0].slice(at0.length);
+        f.prismaCli = cli;
+      }
+    }
     servicesOf(f, deps, testText, tied, compose.apps.filter((a) => a.dir === c.root), services);
     for (const name of [".env.example", ".env.sample", ".env.template", ".env.test", ".env.dist", "env.example"]) {
       for (const m of read(at(c.root, name)).matchAll(/^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=/gm)) {
@@ -455,6 +474,10 @@ function pythonFacts(f: ProjectFacts, ups: string[], paths: string[], { set, tom
   f.groups = groups.filter((g) => TEST_EXTRA.test(g));
   f.installable = (!!py && (isMap(py["build-system"]) || isMap(tool.poetry))) || set.has(at(f.root, "setup.py")) ||
     (set.has(at(f.root, "setup.cfg")) && /\[metadata\]/.test(read(at(f.root, "setup.cfg"))));
+  // Only a setup.py that names extensions: a pyproject or meson build makes its own extensions at pip install.
+  f.nativeBuild = set.has(at(f.root, "setup.py")) &&
+    /\b(ext_modules|cythonize)\b|\bExtension\(/.test(read(at(f.root, "setup.py")).split("\n")
+      .filter((l) => !l.trim().startsWith("#")).join("\n"));
   const reqs = paths.filter((p) => dirOf(p) === f.root || dirOf(p) === at(f.root, "requirements"))
     .map((p) => (f.root === "." ? p : p.slice(f.root.length + 1)))
     .filter((p) => /^(requirements\/)?[^/]*requirements[^/]*\.txt$|^requirements\/[^/]+\.txt$/.test(p))
@@ -494,6 +517,17 @@ const globDir = (g: string) => new RegExp(`^${g.split("/").map((s) => s === "**"
   s.replace(/[.+^${}()|[\]\\]/g, "\\$&").replaceAll("*", "[^/]*").replaceAll("?", "[^/]")).join("/")}$`);
 
 /** Names the project depends on, for telling which services its tests use. */
+/** The CLI that generates Prisma's client: `prisma` when the project depends on it (its own version), else pinned to
+ * the declared `@prisma/client` version (an exact, caret or tilde one). Null when that version cannot be pinned. */
+function prismaCli(pkg: unknown, hasCli: boolean): string | null {
+  if (hasCli) return "prisma";
+  if (!isMap(pkg)) return null;
+  const v = [pkg.dependencies, pkg.devDependencies, pkg.optionalDependencies]
+    .map((d) => (isMap(d) ? d["@prisma/client"] : undefined)).find((x) => typeof x === "string") as string | undefined;
+  const exact = /^[\^~]?(\d+\.\d+\.\d+(?:-[\w.]+)?)$/.exec(v?.trim() ?? "");
+  return exact ? `prisma@${exact[1]}` : null;
+}
+
 function dependencyNames(f: ProjectFacts, c: Candidate, { read, json, toml }: Files): string[] {
   const out = new Set<string>();
   if (c.language === "typescript") {

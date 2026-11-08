@@ -6,6 +6,8 @@ import { posix } from "node:path";
 import { Document, isMap, isScalar, isSeq, type Node, parseDocument } from "yaml";
 import type { Candidate, Detection } from "./detect";
 import { manyServices, manyServicesReason, type ProjectFacts, type ServiceFact } from "./facts";
+import { keptOut } from "./route";
+import { SOURCE } from "./untested";
 
 type Raw = Record<string, unknown>;
 interface Mark { path: (string | number)[]; why: string }
@@ -144,18 +146,35 @@ function ownerOf(projects: Raw, path: string): string | null {
   return best;
 }
 
+/** The files that choose a project: the source files among `changed`; all of them when none is source. A documentation
+ * file next to code says nothing about which environment the change needs. */
+export const sourceFirst = (changed: string[]): string[] => {
+  const source = changed.filter((f) => SOURCE.test(f));
+  return source.length ? source : changed;
+};
+
 /** A quick setup's draft, for a first review: the drafted projects that own one of the `changed` files, the other
  * drafted projects listed under uncovered as NOT_SET_UP (a root project left out is not listed: setup's coverage map
  * lists its files). With `existing` (review.yaml as it is), its projects stay as they are, each chosen project joins
- * them (a project whose root it already has is not drafted again), and the NOT_SET_UP entry of each chosen project
- * goes. Null when no drafted project owns a changed file. */
-export function quickDraft(d: Detection, changed: string[], existing = ""): { yaml: string; names: string[] } | null {
+ * them (a project whose root it already has is not drafted again), and the entries under uncovered in each chosen
+ * project go, unless arnx keeps them out for its own reason (keptOut). A project joining a file that has one with the
+ * same language and install root takes that one's image, install and deps_dir, said in a comment (its test_command is
+ * the draft's own). With `attempt` (setup's last unproven attempt), its projects stand in for the drafted ones
+ * (fromAttempt). Projects come most changed source files first. Null when no drafted project owns a changed file. */
+export function quickDraft(d: Detection, changed: string[], existing = "", attempt = "")
+  : { yaml: string; names: string[] } | null {
   const draft = draftReview(d);
   if (!draft) return null;
+  if (attempt) fromAttempt(draft, attempt);
   const projects = (draft.doc.projects ?? {}) as Raw;
   const have = existing ? parseRoots(existing) : new Set<string>();
   for (const [name, p] of Object.entries(projects)) if (have.has(String((p as Raw).root))) delete projects[name];
-  const chosen = [...new Set(changed.map((f) => ownerOf(projects, f)).filter((n): n is string => n !== null))];
+  const counts = new Map<string, number>();
+  for (const f of sourceFirst(changed)) {
+    const n = ownerOf(projects, f);
+    if (n !== null) counts.set(n, (counts.get(n) ?? 0) + 1);
+  }
+  const chosen = [...counts].sort((a, b) => b[1] - a[1]).map(([n]) => n);
   if (!chosen.length) return null;
   const later = Object.keys(projects).filter((n) => !chosen.includes(n));
   const aside = later.map((n) => String((projects[n] as Raw).root)).filter((r) => r !== ".")
@@ -166,6 +185,11 @@ export function quickDraft(d: Detection, changed: string[], existing = ""): { ya
   const others = Object.values(projects).map((p) => String((p as Raw).root)).filter((r) => r !== ".");
   if (top && others.length) (projects[top] as Raw).owns = ["**", ...others.map((r) => `!/${r}/`)];
   for (const n of later) delete projects[n];
+  for (const n of chosen) {
+    const p = projects[n];
+    delete projects[n];
+    projects[n] = p;
+  }
   // Services only the projects left for later use go with them.
   const used = new Set(Object.values(projects).flatMap((p) => ((p as Raw).services ?? []) as string[]));
   const services = draft.doc.services as Raw | undefined;
@@ -184,12 +208,16 @@ export function quickDraft(d: Detection, changed: string[], existing = ""): { ya
   doc.delete("approved");
   const taken = new Set(Object.keys((doc.toJS() as { projects?: Raw } | null)?.projects ?? {}));
   const names: string[] = [];
+  const neighbours = Object.entries(((doc.toJS() as { projects?: Record<string, Raw> } | null)?.projects ?? {}));
   for (const n of chosen) {
     let name = n;
     for (let k = 2; taken.has(name); k++) name = `${n}-${k}`;
     taken.add(name);
     names.push(name);
+    const from = inherit(projects[n] as Raw, neighbours);
     doc.setIn(["projects", name], doc.createNode(projects[n]));
+    const node = doc.getIn(["projects", name], true);
+    if (from && isMap(node)) node.commentBefore = ` unsure: image and install copied from ${from}`;
   }
   for (const [n, svc] of Object.entries(services ?? {})) {
     if (!doc.hasIn(["services", n])) doc.setIn(["services", n], doc.createNode(svc));
@@ -199,16 +227,62 @@ export function quickDraft(d: Detection, changed: string[], existing = ""): { ya
     const had = ((doc.toJS() as { allow_env_names?: string[] } | null)?.allow_env_names ?? []);
     doc.set("allow_env_names", doc.createNode([...new Set([...had, ...allow])].sort()));
   }
-  const roots = new Set(chosen.map((n) => `/${String((projects[n] as Raw).root)}/`));
+  // A chosen project's entries under uncovered go (not set up yet, out of time, any reason a setup can answer); those
+  // for arnx's own reasons (browser tests, scripts) stay.
+  const roots = chosen.map((n) => String((projects[n] as Raw).root)).filter((r) => r !== ".").map((r) => `/${r}/`);
   const unc = doc.get("uncovered");
   if (isSeq(unc)) {
     unc.items = unc.items.filter((it) => {
       const u = isMap(it) ? it.toJSON() as Raw : null;
-      return !(u && u.reason === NOT_SET_UP && roots.has(String(u.path)));
+      return !(u && roots.some((r) => String(u.path).startsWith(r)) && !keptOut(String(u.reason)));
     });
     if (!unc.items.length) doc.delete("uncovered");
   }
   return { yaml: doc.toString({ lineWidth: 0 }), names };
+}
+
+/** A first setup's last attempt (review.yaml as setup left it, never proven) in place of the draft: each of its
+ * projects replaces the drafted one with its root (or joins), with the services it uses and its allowed env names, so
+ * what the attempt fixed (an install line, an image) is kept and its cached image layers serve again. */
+function fromAttempt(draft: { doc: Raw; marks: Mark[] }, attempt: string): void {
+  const plain = (v: unknown): v is Raw => typeof v === "object" && v !== null && !Array.isArray(v);
+  const doc = parseDocument(attempt);
+  if (doc.errors.length) return;
+  const tried = doc.toJS() as { projects?: unknown; services?: unknown; allow_env_names?: unknown } | null;
+  if (!plain(tried?.projects)) return;
+  const projects = (draft.doc.projects ??= {}) as Raw;
+  const services = plain(tried.services) ? tried.services : {};
+  for (const [name, p] of Object.entries(tried.projects)) {
+    if (!plain(p)) continue;
+    const root = String(p.root ?? ".");
+    const gone = Object.keys(projects).filter((n) => n === name || String((projects[n] as Raw).root) === root);
+    for (const n of gone) delete projects[n];
+    draft.marks = draft.marks.filter((m) => !(m.path[0] === "projects" && gone.includes(String(m.path[1]))));
+    projects[name] = { ...p };
+    for (const svc of Array.isArray(p.services) ? p.services : []) {
+      if (typeof svc === "string" && plain(services[svc])) {
+        draft.doc.services = { ...(draft.doc.services as Raw | undefined), [svc]: services[svc] };
+      }
+    }
+  }
+  if (Array.isArray(tried.allow_env_names)) {
+    const had = (draft.doc.allow_env_names ?? []) as string[];
+    const names = tried.allow_env_names.filter((x): x is string => typeof x === "string");
+    draft.doc.allow_env_names = [...new Set([...had, ...names])].sort();
+  }
+}
+
+/** Where a project's install runs: its install_root, or its own root. */
+const installAt = (p: Raw) => String(p.install_root ?? p.root ?? ".");
+
+/** A drafted project takes the install of a project already in the file with its language and install root: the
+ * install built there is the one it needs. Its test_command stays the draft's own: a runner's project name (`--project`)
+ * is not something detection knows, and a wrong one can run another project's tests. Returns the neighbour's name. */
+function inherit(p: Raw, existing: [string, Raw][]): string | null {
+  const next = existing.find(([, e]) => e.language === p.language && installAt(e) === installAt(p) && e.root !== p.root);
+  if (!next) return null;
+  for (const key of ["image", "install", "deps_dir"]) if (next[1][key] !== undefined) p[key] = next[1][key];
+  return next[0];
 }
 
 /** The project roots a review.yaml has. */
@@ -261,6 +335,17 @@ function image(f: ProjectFacts, tool: "node" | "python" | "rust" | "bun", mark: 
 const aptLine = (pkgs: string[]) =>
   `apt-get update && apt-get install -y --no-install-recommends ${pkgs.join(" ")} && rm -rf /var/lib/apt/lists/*`;
 
+/** Node 25 and later images ship without corepack: it is installed before it is enabled. */
+export function corepackStep(image: string): string {
+  const major = Number(/^node:(\d+)/.exec(image)?.[1] ?? 0);
+  return `${major >= 25 ? "npm install -g corepack && " : ""}corepack enable && `;
+}
+
+/** A path as one shell word: left as it is when it holds only safe characters, else in single quotes. */
+export function shellQuote(path: string): string {
+  return /^[\w@%+=:,./-]+$/.test(path) ? path : `'${path.replaceAll("'", `'\\''`)}'`;
+}
+
 function jsProject(c: Candidate, f: ProjectFacts, d: Detection, mark: MarkFn): Raw {
   const manager = f.manager?.value ?? "npm";
   let runner = c.runner && ["vitest", "jest", "node", "bun"].includes(c.runner) ? c.runner : null;
@@ -276,19 +361,22 @@ function jsProject(c: Candidate, f: ProjectFacts, d: Detection, mark: MarkFn): R
     : manager === "yarn" ? "yarn install --frozen-lockfile"
     : manager === "yarn-berry" ? "yarn install --immutable"
     : manager === "bun" ? "bun install --frozen-lockfile" : "npm ci";
-  const corepack = !bun && (manager === "pnpm" || manager === "yarn-berry") ? "corepack enable && " : "";
+  const corepack = !bun && (manager === "pnpm" || manager === "yarn-berry") ? corepackStep(p.image as string) : "";
   if (!f.lockfile) mark("install", "no lockfile found");
   const workspace = f.installRoot !== c.root || d.workspaces.includes(c.root);
   // Dependencies install outside /src, which the code hides at run time; deps_dir links their node_modules back
   // before each run (depsLink in sandbox.ts). A workspace installs whole, so each package's node_modules is there.
+  // A generated client is made where the network is: install runs while the image builds, test runs have none.
+  const generate = f.prisma ? ` && npx ${f.prismaCli} generate --schema=${shellQuote(f.prisma)}` : "";
   if (workspace) {
     if (f.installRoot !== c.root) p.install_root = f.installRoot;
-    p.install = [`${corepack}mkdir -p /opt/ws && cp -a . /opt/ws/ && cd /opt/ws && ${ci}`];
+    p.install = [`${corepack}mkdir -p /opt/ws && cp -a . /opt/ws/ && cd /opt/ws && ${ci}${generate}`];
     p.deps_dir = "/opt/ws";
     mark(["install", 0], "one install for the workspace; check that its packages resolve");
   } else {
-    const files = f.needsTree ? "-a ." : ["package.json", ...f.lockfile ? [f.lockfile] : [], ...f.copy].join(" ");
-    p.install = [`${corepack}mkdir -p /opt/deps && cp ${f.copy.includes(".yarn") && !f.needsTree ? "-r " : ""}${files} /opt/deps/ && cd /opt/deps && ${ci}`];
+    const files = f.needsTree ? "-a ." : ["package.json", ...f.lockfile ? [f.lockfile] : [], ...f.copy].map(shellQuote).join(" ");
+    const schema = f.prisma && !f.needsTree ? `cp --parents ${shellQuote(f.prisma)} /opt/deps/ && ` : "";
+    p.install = [`${corepack}mkdir -p /opt/deps && ${schema}cp ${f.copy.includes(".yarn") && !f.needsTree ? "-r " : ""}${files} /opt/deps/ && cd /opt/deps && ${ci}${generate}`];
     p.deps_dir = "/opt/deps";
   }
   const loader = f.deps.includes("tsx") ? " --import tsx" : f.deps.includes("ts-node")
@@ -321,10 +409,18 @@ function pythonProject(f: ProjectFacts, mark: MarkFn): Raw {
     install.push(`pip install ${[reqs, f.installable ? `-e '.${extras}'` : ""].filter(Boolean).join(" ")}`);
   } else mark("install", "no requirements found");
   install.push(`pip install ${PYTEST}`);
+  if (f.nativeBuild) {
+    // The mount over /src hides what install built there: the files are saved outside it, and test runs (no network,
+    // no compiler) only copy them back.
+    const into = posix.relative(f.installRoot, f.root);
+    install.push(`${into ? `cd ${shellQuote(into)} && ` : ""}python setup.py build_ext --inplace && ` +
+      "find . -name '*.so' | tar czf /opt/ext.tgz -T -");
+    p.notes = ["Compiled extensions are built when the image is built: a change to a .pyx or C source is not rebuilt, so tests run the extensions built from the code at setup."];
+  }
   if (f.apt.length) mark(["install", 0], `system packages ${f.jobs[0] ?? "CI"} installs`);
   if (f.installRoot !== f.root) p.install_root = f.installRoot;
   p.install = install;
-  p.test_command = "python -m pytest {targets}";
+  p.test_command = `${f.nativeBuild ? "tar xzf /opt/ext.tgz && " : ""}python -m pytest {targets}`;
   return p;
 }
 

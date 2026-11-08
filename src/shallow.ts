@@ -6,10 +6,11 @@
 // fix unproven (before.ts `textBefore`, `textFix`).
 import { lstatSync } from "node:fs";
 import { join, posix } from "node:path";
+import { codeText } from "./codetext";
 
 export type Shallow = "source-text" | "existence";
 
-const CODE_EXT = String.raw`\.(?:[cm]?[jt]sx?|py|rs|go|java|kt|rb|php|cs)`;
+const CODE_EXT = String.raw`\.(?:[cm]?[jt]sx?|py|rs|go|java|kt|rb|php|cs|less|css|scss|html|vue|svelte)`;
 const CODE_FILE = new RegExp(String.raw`['"\`]([^'"\`\n]*${CODE_EXT})['"\`]`);
 const CODE_NAME = new RegExp(`${CODE_EXT}$`);
 /** A call that reads a file by its path: Node's readFile, Python's open (not Popen, urlopen or a method named open),
@@ -30,6 +31,8 @@ const EXISTS_JS = /^expect\s*\(\s*typeof\b[^\n]*\)\s*\.toBe\s*\(\s*['"]function[
 const EXISTS_PY = /^assert\s+(?:hasattr|callable)\s*\(/;
 /** A name given a value at the start of a line: `const src = …`, `SOURCE = …`. */
 const ASSIGNS = /^\s*(?:export\s+)?(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*(?::[^=\n]*)?=(?!=)/;
+/** Python's `for p in …:`. */
+const FOR_IN = /^\s*for\s+([A-Za-z_]\w*)\s+in\b/;
 /** Python's `with open(...) as f:`: the file it names is read through `f.read()`. */
 const WITH_OPEN = /\bwith\b[^\n]*\bas\s+([A-Za-z_]\w*)\s*:/;
 
@@ -59,7 +62,42 @@ function testSpan(source: string, func: string): { at: number; end: number } | n
   if (!Number.isFinite(at)) return null;
   const rest = source.slice(at + name.length);
   const next = /\n\s*(?:it|test)(?:\.\w+)?\s*\(|\n\s*(?:async\s+)?def\s+test|\n\s*#\[test\]|\n\s*(?:class|describe)\b/.exec(rest);
-  return { at, end: at + name.length + (next ? next.index : rest.length) };
+  return { at, end: at + name.length + (next ? withoutDecorators(rest, next.index) : rest.length) };
+}
+
+/** Where the next test's own lines start: its decorators or attributes (`@x(…)`, `#[x]`, over several lines too) are
+ * above its name, but they are not this test's. `end`: the offset in `text` of the line break before the next test. */
+function withoutDecorators(text: string, end: number): number {
+  const lines = text.slice(0, end).split("\n");
+  let cut = lines.length, open = 0;
+  const net = (l: string) => (l.match(/[)\]]/g)?.length ?? 0) - (l.match(/[([]/g)?.length ?? 0);
+  for (let k = lines.length - 1; k >= 1; k--) {
+    const l = lines[k]!.trim();
+    const starts = l.startsWith("@") || l.startsWith("#[");
+    if (open === 0 && starts && net(l) <= 0) cut = k;
+    else if (open === 0 && !starts && net(l) > 0) open = net(l);
+    else if (open > 0) {
+      open += net(l);
+      if (open <= 0) {
+        if (!starts) break;
+        [cut, open] = [k, 0];
+      }
+    } else break;
+  }
+  return lines.slice(0, cut).join("\n").length;
+}
+
+/** The lines that decorate the test `func` (`@x(…)`, `#[x]`, over several lines too) and, for a JS test, what comes
+ * before its name on its own line (`it.each([…])(`), without comments; null when the test is not found. */
+export function testDecorators(source: string, func: string, path = ""): string | null {
+  const span = testSpan(source, func);
+  if (!span) return null;
+  const lineStart = source.lastIndexOf("\n", span.at - 1) + 1;
+  const own = source.slice(lineStart, span.at);
+  // A leading line break stands for the line before the file, so the first real line can be a decorator.
+  const above = "\n" + source.slice(0, Math.max(0, lineStart - 1));
+  const first = lineStart === 0 ? above.length : withoutDecorators(above, above.length);
+  return codeText(`${lineStart === 0 ? "" : above.slice(first)}\n${own}`, path);
 }
 
 /** The test's body: from its name to the next test, or the end of the file. */
@@ -89,6 +127,16 @@ function readPath(line: string): string | null {
     if (CODE_NAME.test(m[1]!)) break;
   }
   return posix.join(...parts);
+}
+
+/** The code file a line names in its quoted parts, joined (`join(dir, "..", "app.ts")` is "../app.ts"); null if none. */
+function codePathIn(line: string): string | null {
+  const parts: string[] = [];
+  for (const m of line.matchAll(/['"`]([^'"`\n]*)['"`]/g)) {
+    parts.push(m[1]!);
+    if (CODE_NAME.test(m[1]!)) return posix.join(...parts);
+  }
+  return null;
 }
 
 /** Whether an expression or line reads one of the project's source files: a code file outside a fixtures folder
@@ -161,8 +209,11 @@ function checked(line: string): string[] {
   }
   if (/^\s*assert\b|\bassert(?:True|False)\s*\(/.test(line)) {
     const plain = line.replace(/\bnot\s+in\b/g, "in").replace(/\s+#.*$/, "");
-    const m = /\bin\s+/.exec(plain);
-    if (m) out.push(callArgs(`(${plain.slice(m.index + m[0].length)})`, 0).args[0]!);
+    // Each side of an `or` / `and` is its own check: `"a" in t or "b" in t` looks at `t` twice, not at `t or "b" in t`.
+    for (const part of plain.split(/\s+(?:or|and)\s+/)) {
+      const m = /\bin\s+/.exec(part);
+      if (m) out.push(callArgs(`(${part.slice(m.index + m[0].length)})`, 0).args[0]!);
+    }
   }
   return out;
 }
@@ -180,21 +231,35 @@ export function shallowKind(source: string | undefined, func: string, isSource?:
   const depth = indent(before.at(-1)!);
   const scope = [...before.slice(0, -1).filter((l) => indent(l) <= depth), ...lines];
   // Names given the text: assigned from a read, or from `f.read()` of a `with open(...) as f`.
-  const names: string[] = [], handles: string[] = [];
+  const names: string[] = [], handles: string[] = [], paths: string[] = [];
   const readOf = (h: string) => new RegExp(String.raw`^${esc(h)}\s*\.\s*read\s*\(\s*\)$`);
+  // A read of a path held in a name (`const file = join(dir, "app.ts"); readFileSync(file)`) reads code too.
+  const reads = (l: string) => readsCode(l, isSource) ||
+    (paths.some((n) => word(n).test(l)) && (READ_CALL.test(l) || READ_AFTER.test(l)));
+  // A name given part of a text name (`src.slice(0, 80)`, `src.split("\n")`) is text too.
+  const derived = (rhs: string) => names.some((n) => new RegExp(String.raw`^${esc(n)}(?![\w$])(?:\s*\.\s*\w+\s*\([^()]*\))+$`).test(rhs));
   for (const l of scope) {
+    // A loop variable over code paths (`for p in Path("web").glob("*.less")`) is a path.
+    const loop = FOR_IN.exec(l);
+    if (loop && !READ_CALL.test(l) && !FIXTURE_DIR.test(l)) {
+      const p = codePathIn(l);
+      if (p !== null && (isSource ? isSource(p) : true)) paths.push(loop[1]!);
+    }
     const w = WITH_OPEN.exec(l);
-    if (w && readsCode(l, isSource)) handles.push(w[1]!);
+    if (w && reads(l)) handles.push(w[1]!);
     const m = ASSIGNS.exec(l);
-    if (m && (readsCode(l, isSource) || handles.some((h) => readOf(h).test(l.slice(l.indexOf("=") + 1).trim())))) {
-      names.push(m[1]!);
+    const rhs = m ? l.slice(l.indexOf("=") + 1).trim().replace(/;$/, "") : "";
+    if (m && (reads(l) || handles.some((h) => readOf(h).test(rhs)) || derived(rhs))) names.push(m[1]!);
+    else if (m && !READ_CALL.test(l) && !FIXTURE_DIR.test(l)) {
+      const p = codePathIn(l);
+      if (p !== null && (isSource ? isSource(p) : true)) paths.push(m[1]!);
     }
   }
   const run = scope.filter((l) => RUNS.test(l));
   const text = names.filter((n) => !run.some((l) => word(n).test(l)));
   const isText = (s: string) => {
     const t = s.trim();
-    if (readsCode(t, isSource)) return !RUNS.test(t);
+    if (reads(t)) return !RUNS.test(t);
     return handles.some((h) => readOf(h).test(t)) ||
       text.some((n) => new RegExp(String.raw`^${esc(n)}(?![\w$])(?:\s*\.\s*\w+\s*\([^()]*\))*$`).test(t));
   };

@@ -7,16 +7,21 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeF
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { Boundary, maskedJson } from "../src/boundary";
-import { CONCURRENCY, inPool } from "../src/challenge";
-import { sliceDiff } from "../src/change";
+import { applyOrigin, CONCURRENCY, type Gate, GATES, inPool, judgeUser, newJudgeInput, settleVerdict } from "../src/challenge";
+import { changeMessage, sliceDiff } from "../src/change";
 import { loadReviewFile } from "../src/config";
 import { ArnxError, survivable } from "../src/errors";
 import { allPrices, costUsd, type JsonModel, makeChallenger, unpricedModels } from "../src/llm";
 import { baseName } from "../src/outcomes";
+import { commitEvidence } from "../src/evidence";
+import { JUDGE_SCHEMA, NEW_SYSTEM } from "../src/judgeprompt";
 import { CHALLENGE_SCHEMA, DEFAULT_PROMPTS, elsewhereNote } from "../src/prompts";
-import { confirmed, type Finding, load, notChecked, parseReports, type Review } from "../src/report";
+import { confirmed, type DisputeKind, type Finding, load, notChecked, type Origin, parseReports, type Review } from "../src/report";
 import { route } from "../src/route";
-import { defaultSettings, type Env, loadSettings, parseModelRef, settingsPath } from "../src/settings";
+import { defaultSettings, type Env, KNOWN_PROVIDERS, loadSettings, parseModelRef, settingsPath } from "../src/settings";
+
+/** The known providers' tables, so a ref like kimi:<model> resolves without a config file. */
+const KNOWN_TABLES = Object.fromEntries(KNOWN_PROVIDERS.map((k) => [k.name, k.table]));
 
 const USAGE = `usage: bun scripts/replay-judge.ts --grades FILE --root DIR --model REF --out DIR [options]
        bun scripts/replay-judge.ts --grades FILE --root DIR --dump-prompts DIR
@@ -25,7 +30,10 @@ const USAGE = `usage: bun scripts/replay-judge.ts --grades FILE --root DIR --mod
   --root DIR           holds <repo>/.arnx/reviews/<review>/
   --model REF          provider:model, called through arnx's own factory, with no fallback
   --out DIR            writes <model>-<prompt>-<pass>.jsonl; finished rows are not sent again, errors are
-  --prompt NAME        prompt to replay (default current)
+  --prompt NAME        prompt to replay: current (default) or new, which sends each finding's evidence pack built
+                       from the reviewed commit in the clone and asks for the structured reply
+  --gates on|off|LIST  for the new prompt: settle its replies by the gates (default on), or by those named
+                       (${GATES.join(",")}); rows keep the reply, so any setting scores the same rows and sends nothing again
   --repeat N           passes (default 1)
   --concurrency N      calls at once (default ${CONCURRENCY})
   --compare NAME       agreement with the stored verdicts file of that name in each review, e.g. verdicts.json
@@ -43,9 +51,11 @@ export interface Graded { repo: string; commit: string; review: string; finding:
 /** One replayed call, a line of the pass's file. */
 export interface Row {
   repo: string; commit: string; review: string; finding: string;
-  verdict: "confirmed" | "disputed" | null; reason: string; seconds: number; cost_usd: number;
+  verdict: "confirmed" | "disputed" | "open" | null; reason: string; seconds: number; cost_usd: number;
   error?: string;
   depends_on?: string;
+  /** The new prompt: the structured reply as given (`reply`), the verdict it said, and what the gates made of it. */
+  reply?: Record<string, unknown>; said?: string | null; kind?: DisputeKind; origin?: Origin; gate?: Gate;
   /** The stored review never sent this finding to a second opinion. */
   never_judged?: true;
   /** Attempts cut off before the provider reported usage: cost_usd is short by those. */
@@ -63,17 +73,52 @@ export interface ReviewContext {
   /** Findings a question of the reviewer already named before any verdict: these wait, whatever the verdict. */
   waiting: Set<string>;
   head: string | null;
+  /** The clone, and the change as the review's event log names it. */
+  clone: string; base: string | null; kind: string | null;
 }
 
-interface Built { system: string; user: string }
+interface Built { system: string; user: string; schema: Record<string, unknown>;
+  /** The new prompt: the finding's evidence pack and its project's diff, which the gates read. */
+  evidence?: string; diff?: string }
+
+/** The filter a review's own values make, as the review held it when the second opinion was asked. */
+const boundaries = new WeakMap<ReviewContext, Boundary>();
+function boundaryFor(c: ReviewContext): Boundary {
+  let b = boundaries.get(c);
+  if (!b) boundaries.set(c, b = new Boundary()), b.addDiff(c.diff);
+  return b;
+}
+
+/** Each review's evidence packs, read from the reviewed commit in the clone (git objects only, nothing checked out). */
+const packers = new WeakMap<ReviewContext, ReturnType<typeof commitEvidence>>();
+function packOf(f: Finding, c: ReviewContext, suspect: string | undefined): string {
+  if (!c.head) throw new ArnxError("the review's event log names no commit: its evidence cannot be read");
+  let packer = packers.get(c);
+  if (!packer) packers.set(c, packer = commitEvidence(c.clone, c.head, c.diff));
+  const message = c.kind && c.base ? changeMessage(c.clone, { kind: c.kind as never, base: c.base, head: c.head }) : "";
+  return packer({ diff: c.diffs[f.project] ?? c.diff, testSource: c.sources[f.file ?? ""] ?? "", func: f.func,
+    ...(f.file ? { testFile: f.file } : {}), ...(suspect ? { suspectFile: suspect } : {}), commitMessage: message,
+    ...(f.before ? { before: f.before } : {}), ...(f.shallow ? { shallow: f.shallow } : {}),
+    writeDir: c.review.writeDirs?.[f.project] ?? c.review.writeDir, generated: Object.keys(c.sources) });
+}
+
+const suspectOf = (f: Finding, c: ReviewContext) =>
+  (c.review.suspects ?? []).find((x) => x.id === f.suspect && x.project === f.project)?.file;
 
 /** The prompts --prompt can replay. A new version is one more entry: it gets the finding and its review, no grade. */
 export const PROMPTS: Record<string, (f: Finding, c: ReviewContext) => Built> = {
   // As src/challenge.ts builds it for each finding.
   current: (f, c) => {
     const p = DEFAULT_PROMPTS;
-    return { system: p.challengeSystem(), user: p.challengeUser(c.diffs[f.project] ?? c.diff, f.file || "(unknown file)",
-      c.sources[f.file ?? ""] ?? "", f.testId, f.message, f.explanation, c.questions) };
+    return { system: p.challengeSystem(), schema: CHALLENGE_SCHEMA, user: judgeUser(p, c, c.diffs[f.project] ?? c.diff, f,
+      c.sources[f.file ?? ""] ?? "", suspectOf(f, c), c.questions, boundaryFor(c)) };
+  },
+  // As src/challenge.ts builds it with the variant "new", the pack built as a round builds it, from the commit.
+  new: (f, c) => {
+    const suspect = suspectOf(f, c), diff = c.diffs[f.project] ?? c.diff;
+    const evidence = packOf(f, c, suspect);
+    return { system: NEW_SYSTEM, schema: JUDGE_SCHEMA, evidence, diff, user: newJudgeInput(c, diff, f,
+      c.sources[f.file ?? ""] ?? "", suspect, c.questions, evidence, boundaryFor(c)) };
   },
 };
 
@@ -153,19 +198,22 @@ export function loadContext(clone: string, reviewId: string): ReviewContext {
     Object.assign(sources, round.files);
     reports.push({ project: cfg.name, questions: parseReports([...round.agent.earlierTexts ?? [], round.agent.finalText]).questions });
   }
-  return { rdir, review, questions: review.questions, diff, diffs, sources, head: headOf(rdir),
+  return { rdir, review, questions: review.questions, diff, diffs, sources, ...startOf(rdir), clone,
     waiting: linked(reports, review.findings, s.maxQuestions) };
 }
 
-/** The commit the review looked at, when its event log says. */
-function headOf(rdir: string): string | null {
+/** The commit the review looked at, its base and the change's kind, when its event log says. */
+function startOf(rdir: string): { head: string | null; base: string | null; kind: string | null } {
+  const none = { head: null, base: null, kind: null };
   const path = join(rdir, "events.jsonl");
-  if (!existsSync(path)) return null;
+  if (!existsSync(path)) return none;
   try {
-    const first = JSON.parse(readFileSync(path, "utf8").split("\n", 1)[0]!) as { type?: string; data?: { head?: string } };
-    return first.type === "review.started" ? first.data?.head ?? null : null;
+    const first = JSON.parse(readFileSync(path, "utf8").split("\n", 1)[0]!) as { type?: string;
+      data?: { head?: string; base?: string; change_kind?: string } };
+    return first.type !== "review.started" ? none
+      : { head: first.data?.head ?? null, base: first.data?.base ?? null, kind: first.data?.change_kind ?? null };
   } catch {
-    return null;
+    return none;
   }
 }
 
@@ -207,11 +255,30 @@ function gather(grades: Graded[], root: string, prompt: string): { ready: Ready[
     else if (c.head && !c.head.startsWith(g.commit)) fail(`the review looked at ${c.head}`);
     else if (f.file && !(f.file in c.sources)) fail(`no test source for ${f.file}`);
     else {
-      ready.push({ g, f, c, prompt: PROMPTS[prompt]!(f, c),
-        neverJudged: !storedVerdicts(c.rdir, "verdicts.json")[storedKey(f)] });
+      let built: Built;
+      try {
+        built = PROMPTS[prompt]!(f, c);
+      } catch (e) {
+        if (!(e instanceof Error) || !survivableBuild(e)) throw e;
+        fail(e.message);
+        continue;
+      }
+      ready.push({ g, f, c, prompt: built, neverJudged: !storedVerdicts(c.rdir, "verdicts.json")[storedKey(f)] });
     }
   }
   return { ready, failed };
+}
+
+/** A prompt that cannot be built for a reason of the data (no commit, no git objects), not of the code. */
+const survivableBuild = (e: Error) => e instanceof ArnxError || /\bgit\b|not a git repository|bad object|unknown revision/i.test(e.message);
+
+/** What the gates make of a structured reply on disk: rows keep the reply, so the gates can be turned off after. */
+function settleRow(row: Row, r: Ready, gates: ReadonlySet<Gate>): Row {
+  if (!row.reply || row.error) return row;
+  const s = settleVerdict(row.reply, r.prompt.evidence ?? "", r.prompt.diff ?? "", r.c.questions, gates);
+  const { kind: _k, origin: _o, gate: _g, depends_on: _d, ...rest } = row;
+  return { ...rest, verdict: s.verdict, said: s.said, reason: s.reason, ...(s.kind ? { kind: s.kind } : {}),
+    ...(s.origin ? { origin: s.origin } : {}), ...(s.gate ? { gate: s.gate } : {}), ...(s.dependsOn ? { depends_on: s.dependsOn } : {}) };
 }
 
 function dump(ready: Ready[], total: number, failed: string[], dir: string, log: (l: string) => void): number {
@@ -277,20 +344,22 @@ const overLimit = (s: Spend) => s.max !== null && (s.unreadable > 0 || s.spent +
 const promptChars = (r: Ready) => r.prompt.system.length + r.prompt.user.length;
 
 /** Sends what is not finished. Rows go to disk as they arrive, so a stopped run loses no paid call. */
-async function runPass(ready: Ready[], model: JsonModel, path: string, concurrency: number, spend: Spend): Promise<Map<string, Row>> {
+async function runPass(ready: Ready[], model: JsonModel, path: string, concurrency: number, spend: Spend,
+  gates: ReadonlySet<Gate>): Promise<Map<string, Row>> {
   const rows = readRows(path);
   if (existsSync(path)) writeRows(path, rows); // Drops a half-written last line before anything is added after it.
   const pending = ready.filter((r) => !rows.has(rowKey(r.g)) || rows.get(rowKey(r.g))!.error);
-  const record = (r: Ready, seconds: number, cost: number, fields: Pick<Row, "verdict" | "reason" | "error" | "depends_on">, unknown = 0) => {
+  const record = (r: Ready, seconds: number, cost: number, fields: Pick<Row, "verdict" | "reason" | "error" | "depends_on" | "reply">, unknown = 0) => {
     const { repo, commit, review, finding } = r.g;
     const before = rows.get(rowKey(r.g));
     const unknowns = (before?.unknown_calls ?? 0) + unknown;
     const row: Row = { repo, commit, review, finding, ...fields, seconds,
       cost_usd: (Number.isFinite(before?.cost_usd) ? before!.cost_usd : 0) + cost,
       ...(r.neverJudged ? { never_judged: true as const } : {}), ...(unknowns ? { unknown_calls: unknowns } : {}) };
-    rows.set(rowKey(r.g), row);
+    const settled = settleRow(row, r, gates);
+    rows.set(rowKey(r.g), settled);
     addCost(spend, cost, unknown, promptChars(r));
-    appendFileSync(path, JSON.stringify(row) + "\n");
+    appendFileSync(path, JSON.stringify(settled) + "\n");
   };
   if (pending.length) mkdirSync(dirname(path), { recursive: true });
   await inPool(pending, concurrency, async (r) => {
@@ -301,8 +370,17 @@ async function runPass(ready: Ready[], model: JsonModel, path: string, concurren
     const t0 = performance.now();
     const secs = () => Math.round((performance.now() - t0) / 100) / 10;
     try {
-      const [data, cost, , unknown] = await model.completeJson(r.prompt.system, r.prompt.user, CHALLENGE_SCHEMA);
+      const [data, cost, , unknown] = await model.completeJson(r.prompt.system, r.prompt.user, r.prompt.schema);
       const { verdict } = data;
+      if (r.prompt.schema === JUDGE_SCHEMA) {
+        const said = typeof verdict === "string" ? verdict : null;
+        if (said === "confirmed" || said === "disputed" || said === "open") {
+          record(r, secs(), cost, { verdict: null, reason: "", reply: data }, unknown);
+        } else {
+          record(r, secs(), cost, { verdict: null, reason: "", error: `unexpected verdict ${JSON.stringify(verdict ?? null)}` }, unknown);
+        }
+        return;
+      }
       const dep = String(data.depends_on ?? "").trim();
       const valid = /^Q\d+$/.test(dep) && Number(dep.slice(1)) <= r.c.questions.length;
       if (verdict === "confirmed" || verdict === "disputed") {
@@ -316,6 +394,12 @@ async function runPass(ready: Ready[], model: JsonModel, path: string, concurren
     }
   });
   if (rows.size) writeRows(path, rows);
+  // Rows on disk from before are scored with the gates as asked now.
+  const byKey = new Map(ready.map((r) => [rowKey(r.g), r]));
+  for (const [k, row] of rows) {
+    const r = byKey.get(k);
+    if (r) rows.set(k, settleRow(row, r, gates));
+  }
   return rows;
 }
 
@@ -344,7 +428,10 @@ export function scorePass(rows: Map<string, Row>, ready: Ready[]): Score {
     const mine = new Map(ready.filter((r) => r.c === c).map((r) => [r.f.id, r]));
     const replayed: Review = { ...c.review, findings: c.review.findings.map((f) => {
       const r = mine.get(f.id), row = r ? rows.get(rowKey(r.g)) : undefined;
-      return { ...f, verdict: row?.verdict ?? null, dependsOn: c.waiting.has(f.id) ? "linked" : row?.depends_on };
+      const out = { ...f, verdict: row?.verdict ?? null, dependsOn: c.waiting.has(f.id) ? "linked" : row?.depends_on };
+      // The structured reply's origin moves a same-message failure into the change, as a review applies it.
+      if (row?.verdict && row.origin) applyOrigin(out, row.origin, row.reason);
+      return out;
     }) as Finding[] };
     const firing = confirmed(replayed);
     if (firing.length && firing.every((f) => !REAL.has(mine.get(f.id)?.g.grade ?? ""))) score.runsFailingNoDefect++;
@@ -393,6 +480,10 @@ function printScores(scores: Score[], ready: Ready[], rows: Map<string, Row>[], 
     for (const r of changed) log(`  ${place(r.g)}: ${rows.map((p) => p.get(rowKey(r.g))?.verdict ?? "-").join(" ")}`);
   }
   const all = rows.flatMap((p) => [...p.values()]);
+  if (all.some((r) => r.reply)) {
+    const fired = (gate: Gate) => all.filter((r) => r.gate === gate).length / rows.length;
+    log(`gates fired: ${GATES.map((g) => `${g} ${+fired(g).toFixed(1)}`).join(", ")} (mean per pass)`);
+  }
   if (all.length) log(`mean seconds per call ${(all.reduce((n, r) => n + r.seconds, 0) / all.length).toFixed(1)}`);
   log(`total cost $${all.reduce((n, r) => n + (Number.isFinite(r.cost_usd) ? r.cost_usd : 0), 0).toFixed(2)}`);
   const unknown = all.reduce((n, r) => n + (r.unknown_calls ?? 0), 0);
@@ -442,7 +533,7 @@ function printAgreement(name: string, ready: Ready[], rows: Map<string, Row>[], 
  * the model has no price. */
 function promptCostOf(ref: string, env: Env): (chars: number) => number | null {
   try {
-    const { model } = parseModelRef(ref);
+    const { model } = parseModelRef(ref, KNOWN_TABLES);
     const s = defaultSettings(env), prices = allPrices(s);
     const tiered = `${model}@${s.openaiTier}`;
     const name = s.openaiTier && prices[tiered] ? tiered : model;
@@ -455,7 +546,7 @@ function promptCostOf(ref: string, env: Env): (chars: number) => number | null {
 /** The model, through arnx's own factory: shipped timeouts and prices, the named model alone. */
 export function defaultModel(ref: string, env: Env): JsonModel {
   const { challengerFallback: _none, ...s } = defaultSettings(env);
-  const settings = { ...s, challenger: parseModelRef(ref) };
+  const settings = { ...s, providers: KNOWN_TABLES, challenger: parseModelRef(ref, KNOWN_TABLES) };
   const unpriced = unpricedModels(settings, [settings.challenger]);
   if (unpriced.length) throw new ArnxError(`no price for ${unpriced[0]!.name}: its cost and --max-usd would be wrong`);
   return makeChallenger(settings, env, new Boundary());
@@ -476,7 +567,7 @@ export async function main(argv: string[], deps: Deps = { env: process.env, make
     try {
       ({ values } = parseArgs({ args: argv, strict: true, options: {
         grades: { type: "string" }, root: { type: "string" }, model: { type: "string" }, out: { type: "string" },
-        prompt: { type: "string" }, repeat: { type: "string" }, concurrency: { type: "string" },
+        prompt: { type: "string" }, gates: { type: "string" }, repeat: { type: "string" }, concurrency: { type: "string" },
         compare: { type: "string" }, "max-usd": { type: "string" }, "dump-prompts": { type: "string" },
         help: { type: "boolean" } } }));
     } catch (e) {
@@ -489,6 +580,11 @@ export async function main(argv: string[], deps: Deps = { env: process.env, make
     const prompt = values.prompt ?? "current";
     if (!Object.hasOwn(PROMPTS, prompt)) throw new ArnxError(`unknown prompt: ${prompt} (have: ${Object.keys(PROMPTS).join(", ")})`);
     if (!values.grades || !values.root) throw new ArnxError(`--grades and --root are needed\n${USAGE}`);
+    const named = values.gates === undefined || values.gates === "on" ? [...GATES] : values.gates === "off" ? []
+      : values.gates.split(",").map((g) => g.trim());
+    const unknownGate = named.find((g) => !(GATES as readonly string[]).includes(g));
+    if (unknownGate !== undefined) throw new ArnxError(`--gates is on, off or some of ${GATES.join(",")}: not ${unknownGate}`);
+    const gates: ReadonlySet<Gate> = new Set(named as Gate[]);
     const dumpDir = values["dump-prompts"];
     if (!dumpDir && (!values.model || !values.out)) throw new ArnxError(`--model and --out are needed\n${USAGE}`);
     const repeat = positive("--repeat", values.repeat, 1);
@@ -522,7 +618,7 @@ export async function main(argv: string[], deps: Deps = { env: process.env, make
     }
     const rows: Map<string, Row>[] = [];
     for (const path of paths) {
-      const pass = await runPass(ready, model, path, concurrency, spend);
+      const pass = await runPass(ready, model, path, concurrency, spend, gates);
       if (pass.size) rows.push(pass);
     }
     printScores(rows.map((r) => scorePass(r, ready)), ready, rows, { ...(values.compare ? { compare: values.compare } : {}), spend, log });

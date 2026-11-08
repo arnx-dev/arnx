@@ -17,7 +17,7 @@ const asParam = (b: Block) => b.type === "tool_use"
   ? { type: "tool_use", id: b.id, name: b.name, input: b.input }
   : { type: "text", text: b.text };
 
-export interface Call { system: string; tools: string[]; messages: Message[] }
+export interface Call { system: string; tools: string[]; messages: Message[]; maxTokens?: number }
 
 /** Replies with the given steps in order; each step is the list of blocks of one reply. */
 export class ScriptedAgent implements AgentModel {
@@ -29,12 +29,41 @@ export class ScriptedAgent implements AgentModel {
     this.steps = [...steps];
   }
 
-  async create({ system, tools, messages }: { system: string; tools: Tool[]; messages: Message[] }): Promise<Reply> {
-    this.calls.push({ system, tools: tools.map((t) => t.name), messages: [...messages] });
+  async create({ system, tools, messages, maxTokens }: { system: string; tools: Tool[]; messages: Message[];
+    maxTokens?: number }): Promise<Reply> {
+    this.calls.push({ system, tools: tools.map((t) => t.name), messages: [...messages], maxTokens });
     const blocks = this.steps.shift();
     if (!blocks) throw new Error("ScriptedAgent ran out of steps");
     const stop = blocks.some((b) => b.type === "tool_use") ? "tool_use" : "end_turn";
     return { content: blocks, stopReason: stop, usage: this.usage, raw: blocks.map(asParam) };
+  }
+}
+
+/** Works through `steps`, then keeps asking for `idle` (it is never done on its own). Asked for its report (a text block
+ * after the tool results), it replies with `report`, or fails with it when it is an error. `usage` may give each
+ * reply's usage in turn. */
+export class BusyAgent extends ScriptedAgent {
+  constructor(steps: Block[][], readonly idle: Block[], readonly report: Block[] | Error,
+              readonly usages?: Usage | Usage[]) {
+    super(steps, Array.isArray(usages) ? undefined : usages);
+  }
+
+  override async create(a: { system: string; tools: Tool[]; messages: Message[]; maxTokens?: number }): Promise<Reply> {
+    const reply = await this.reply(a);
+    return Array.isArray(this.usages) ? { ...reply, usage: this.usages[this.calls.length - 1]! } : reply;
+  }
+
+  private async reply(a: { system: string; tools: Tool[]; messages: Message[]; maxTokens?: number }): Promise<Reply> {
+    const last = a.messages.at(-1)?.content;
+    const asked = Array.isArray(last) && last.some((b) => (b as { type?: string }).type === "text");
+    if (asked && this.report instanceof Error) {
+      this.calls.push({ system: a.system, tools: a.tools.map((t) => t.name), messages: [...a.messages],
+        maxTokens: a.maxTokens });
+      throw this.report;
+    }
+    if (asked) this.steps.unshift(this.report as Block[]);
+    else if (!this.steps.length) this.steps.push(this.idle);
+    return super.create(a);
   }
 }
 
@@ -56,7 +85,8 @@ export class FakeJson implements JsonModel {
   }
 }
 
-export type Script = (command: string, n: number) => [string | null, string, boolean];
+/** `dir`: the folder the run sees at /src (the snapshot, or the throwaway copy a real-key rerun runs in). */
+export type Script = (command: string, n: number, dir: string) => [string | null, string, boolean];
 
 /** How a fake runner treats arnx's probe test: "pass" reports it (the default), "ignore" runs the script as for any
  * other command, like a runner whose configuration leaves the tests folder out; "with-suite" reports it along with
@@ -68,7 +98,22 @@ const PROBE = /\S*test_arnx_probe\.py/;
  * written where the runner would write it. */
 export class FakeSession implements Runner {
   commands: string[] = [];
+  /** The real-key reruns: each command and the folder it saw at /src. */
+  sealedRuns: { command: string; src: string }[] = [];
   constructor(readonly snap: string, readonly script: Script, readonly options: FakeOptions = {}) {}
+
+  /** As a real session's: the script's output is dropped here, as Docker's is never read. */
+  sealed(command: string, _timeout: number, src: string): { exitCode: number | null; timedOut: boolean } {
+    this.sealedRuns.push({ command, src });
+    const [xml, , timedOut] = this.script(command, this.commands.length + this.sealedRuns.length, src);
+    const m = /--junitxml=\/src\/(\S+)/.exec(command);
+    if (xml !== null && m) {
+      const path = join(src, m[1]!);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, xml);
+    }
+    return { exitCode: timedOut ? null : 0, timedOut };
+  }
 
   run(command: string): RunResult {
     this.commands.push(command);
@@ -79,7 +124,7 @@ export class FakeSession implements Runner {
     let [xml, output, timedOut] = probe && mode === "pass"
       ? [`<?xml version="1.0"?><testsuites><testsuite name="pytest">${probeCase}</testsuite></testsuites>`, "1 passed",
         false]
-      : this.script(command, this.commands.length);
+      : this.script(command, this.commands.length, this.snap);
     if (probe && mode === "with-suite" && xml !== null) xml = xml.replace("</testsuite>", `${probeCase}</testsuite>`);
     const m = /--junitxml=\/src\/(\S+)/.exec(command);
     if (xml !== null && m) {

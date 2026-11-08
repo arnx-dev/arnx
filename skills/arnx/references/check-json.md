@@ -25,6 +25,7 @@ the path each test runs from; `files` are where they are kept.
 | `exit_code` | number | 0, 1, 2, 3 or 4, the same as the process exit code. |
 | `projects` | array | One entry per project with accepted tests: see [Each project](#each-project). Empty when nothing ran. |
 | `changed` | array | Accepted test files edited or deleted since `arnx accept` recorded them, or whose entry in `.arnx/accepted-tests.json` was changed or removed: see [Each changed file](#each-changed-file). Non-empty only with `tests-changed`. |
+| `stand_ins_shown` | boolean | A message holds a stand-in for a value that looks like a secret: go by the test's file and line. |
 | `may_contradict` | array | Pairs of an answer's test and an accepted test that may ask for opposite things: see [Each possible contradiction](#each-possible-contradiction). Empty when none. Never changes `result` or the exit code. |
 
 ## Each project
@@ -40,6 +41,8 @@ the path each test runs from; `files` are where they are kept.
 | `accepted` | array of strings | The ids, of those that passed or failed, that are accepted tests: the tests behind findings marked real (and answers the code disagrees with). The rest are other tests the review wrote into the same files. Read from `.arnx/accepted-tests.json` (committed, so a fresh clone or CI tells them apart too); for a file recorded by an older arnx, from its review in `.arnx/reviews/`; with neither, every test in the file counts as accepted. |
 | `failed` | array | Tests that failed: see [Each failed test](#each-failed-test). |
 | `skipped` | number | Tests skipped: one accept could not cut out of a kept file, or (accepted by an arnx before 0.1.2) not confirmed, marked intended or noise, or set aside. |
+| `could_not_run`, `left_out`, `faked_keys` | array | Optional. `{ test_id, needs, faked_key? }`: unproven tests, which failed for a file left out as secret-looking or (`faked_key`) for a private key the sandbox holds as a fake: no failure of the code (exit 2). `needs` is the file, or `a faked file` when the failure does not show which. `{ path, line, label }`: the files left out; `line` 0 when the whole file counts (its name, its size). `faked_keys`: paths of the files holding a fake. |
+| `not_run` | array of strings | Optional. Kept test files the runner reported nothing for (its configuration leaves their name or folder out), as the paths they run from. The text says so too; the files stay in `files`. A run with any is exit 2, never `pass`. |
 
 ## Each failed test
 
@@ -81,7 +84,7 @@ passes and F3's fails: they may contradict`. Which one holds is the user's call.
 |---|---|---|
 | `pass` | 0 | Every accepted test passes: the bugs they lock are fixed. |
 | `fail` | 1 | Some accepted tests fail: a bug not fixed yet, or a change that broke what they lock. Fix the code. A test that is wrong about a real bug is the user's call: they mark its finding `rewrite` with a reason in review.md, then `arnx accept --again <id>`. |
-| `no-report` | 2 | Some tests did not report. |
+| `no-report` | 2 | Some tests did not report, are unproven, or a kept test file was not run (`not_run`). |
 | `nothing-accepted` | 3 | No accepted tests yet (nothing has been through `arnx accept`). |
 | `tests-changed` | 4 | Accepted test files changed since accept, so nothing ran: a test edited until it passes proves nothing. The user restores them (`arnx accept --again <id>`, or `git checkout` when the committed copy is the accepted one: `arnx check` without `--json` names it then), or records an intended edit with `arnx accept --keep-edits`. |
 
@@ -114,6 +117,7 @@ counts only when its test passes in every run (3 by default, `runs` in `.arnx/co
 | `schema_version` | number | 1. |
 | `command` | string | `check`. |
 | `review` | string | The review id. |
+| `stand_ins_shown` | boolean | A message holds a stand-in for a value that looks like a secret: go by the test's file and line. |
 | `result` | string | `pass`, `fail`, `no-report` or `nothing-confirmed` (see below). |
 | `exit_code` | number | 0, 1 or 2, the same as the process exit code. |
 | `findings` | array | One entry per confirmed finding: see [Each rechecked finding](#each-rechecked-finding). |

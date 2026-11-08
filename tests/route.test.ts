@@ -25,8 +25,8 @@ test("owned files go to their owner, most-changed project first", () => {
 test("files no project covers are listed with the recorded reason", () => {
   const f = parseReviewFile(PROJECTS);
   const r = route(f, ["infra/main.tf", "README.md", "services/pay/x.py"], 4);
-  expect(r.uncovered).toEqual([{ path: "infra/main.tf", reason: "Terraform; no adapter" },
-    { path: "README.md", reason: "no project covers it" }]);
+  // a doc no project covers is not uncovered (route-docs.test.ts)
+  expect(r.uncovered).toEqual([{ path: "infra/main.tf", reason: "Terraform; no adapter" }]);
   expect(names(r)).toEqual([["pay", ["services/pay/x.py"], []]]);
 });
 
@@ -181,4 +181,46 @@ test("an entry naming a project's root stays a dependency even when that root ho
   const r = route(f, ["packages/api/src/a.ts"], 4);
   expect(routed(r)).toEqual(["api", "top"]);
   expect(r.checkOnly).toEqual([]);
+});
+
+// A root project that owns everything (`**`) while review.yaml lists a path as uncovered (its tests do not run there):
+// the file is still routed, but the report must not call it tested.
+const broad = (extra: string) => parseReviewFile([
+  "version: 1", "projects:", "  top:", "    root: .", "    language: typescript", "    image: i",
+  "    test_command: npx vitest run {targets}", "    owns:", "      - \"**\"", extra,
+  "uncovered:", "  - {path: /packages/, reason: needs several services}", ""].join("\n"));
+
+test("a file a root project owns only by ** stays listed when review.yaml lists it as uncovered", () => {
+  const f = broad("");
+  const r = route(f, ["packages/db/index.ts", "tools/x.ts"], 4);
+  expect(r.routed.map((x) => [x.project.name, x.owned])).toEqual([["top", ["packages/db/index.ts", "tools/x.ts"]]]);
+  expect(r.declared).toEqual([{ path: "packages/db/index.ts", reason: "needs several services" }]);
+  expect(r.uncovered).toEqual([]);
+});
+
+test("a project's own root beats a broad uncovered entry", () => {
+  const f = broad("  env:\n    root: packages/env\n    language: typescript\n    image: i\n" +
+    "    test_command: npx vitest run {targets}\n    owns: [packages/env/]");
+  const r = route(f, ["packages/env/src/a.ts", "packages/db/index.ts"], 4);
+  expect(r.declared).toEqual([{ path: "packages/db/index.ts", reason: "needs several services" }]);
+});
+
+test("an uncovered path wins over another project's uses only when it is in another language", () => {
+  const f = parseReviewFile([
+    "version: 1", "projects:", "  engine:", "    root: engine", "    language: python", "    image: i",
+    "    test_command: python -m pytest {targets}", "    owns: [engine/]", "    uses: [web/]",
+    "  app:", "    root: app", "    language: typescript", "    image: i",
+    "    test_command: npx vitest run {targets}", "    owns: [app/]", "    uses: [lib/]",
+    "uncovered:", "  - {path: /web/, reason: its tests are another language}",
+    "  - {path: /lib/, reason: no tests}", ""].join("\n"));
+  const r = route(f, ["web/src/App.tsx", "engine/a.py", "lib/x.ts"], 4);
+  expect(r.routed.map((x) => [x.project.name, x.owned, x.used]).sort()).toEqual([["app", [], ["lib/x.ts"]],
+    ["engine", ["engine/a.py"], []]]);
+  expect(r.uncovered).toEqual([{ path: "web/src/App.tsx", reason: "its tests are another language" }]);
+  // A file the project owns is routed to it even when listed.
+  const own = parseReviewFile([
+    "version: 1", "projects:", "  web:", "    root: web", "    language: typescript", "    image: i",
+    "    test_command: npx vitest run {targets}", "    owns: [web/]",
+    "uncovered:", "  - {path: /web/vendor/, reason: copied code}", ""].join("\n"));
+  expect(route(own, ["web/vendor/a.ts"], 4).routed.map((x) => x.owned)).toEqual([["web/vendor/a.ts"]]);
 });

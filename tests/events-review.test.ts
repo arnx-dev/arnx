@@ -187,16 +187,17 @@ test("a review whose environment runs no test makes no model call and costs $0",
   const { spend } = await import("../src/spend");
   const before = spend.total;
   const broken = (): [string | null, string, boolean] => [null, "error: failed to build `dep`", false];
-  await expect(runReview(repo, { settings: SETTINGS, agentModel: agent, challenger, hunter, ranker,
-    secondHunter: second, hunt: true, sessionFactory: fakeFactory(broken, [], { probe: "ignore" }), now: NOW }))
-    .rejects.toThrow(/the test environment runs no test at this commit/);
+  // the project is reported not tested; the review is written
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger, hunter, ranker,
+    secondHunter: second, hunt: true, sessionFactory: fakeFactory(broken, [], { probe: "ignore" }), now: NOW });
+  expect(review.projectStats[0]).toMatchObject({ stop: "env_failed: probe", env: { state: "failed", kind: "probe" } });
   expect([agent.calls, challenger.calls, hunter.calls, ranker.calls, second.calls].map((c) => c.length))
     .toEqual([0, 0, 0, 0, 0]);
   expect(spend.total).toBe(before);
   const [rid] = readdirSync(join(repo, ".arnx/reviews"));
   const es = events(join(repo, ".arnx/reviews", rid!));
   expect(ofType(es, "model.call")).toEqual([]);
-  expect(es.at(-1)!.type).toBe("review.failed");
+  expect(es.at(-1)!.type).toBe("review.completed");
 });
 
 describe("a resumed review", () => {
@@ -216,7 +217,7 @@ describe("a resumed review", () => {
 
   const steps = (p: string) => [
     [tool("write_file", { path: `services/${p}/${GEN}`, content: `import ${p}\ndef test_bad(): assert 0\n` })],
-    [text(JSON.stringify({ tests: [], suspected_defects: [], questions: [] }))]];
+    [text(JSON.stringify({ tests: [{ test: `${GEN}::test_bad`, expects: "x" }], suspected_defects: [], questions: [] }))]];
   const failing = (snap: string) => new FakeSession(snap, () => [junitXml([[GEN, "test_bad", "failed", "boom"]]),
     "1 failed", false]);
 
@@ -352,11 +353,15 @@ test("a final run without a report is recorded as missing", async () => {
     .toBe(true);
 });
 
-test("a final run that timed out is recorded as missing with timed_out and no exit code", async () => {
+test("a final run in which a file does not finish is recorded as that file's error, and the file is not run again", async () => {
   const { es } = await twoFiles((n) => n === 2 ? null : junitXml([
     ["tests/arnx_generated/test_bad.py", "test_bad", "failed", "x"]]), 2);
-  expect(ofType(es, "test.run_missing").map((e) => [e.data.repeat, e.data.timed_out, e.data.exit_code, e.data.skipped]))
-    .toEqual([[2, true, null, undefined], [3, false, null, true]]); // the run after it is skipped
+  expect(ofType(es, "test.run_missing")).toHaveLength(0);
+  // the file is one error in the run it did not finish in, and in the next one, which does not run it
+  const bad = (n: number) => ofType(es, "test.run").filter((e) => e.data.repeat === n && String(e.data.file).endsWith("test_bad.py"))
+    .map((e) => [e.data.outcome, e.data.carried]);
+  expect(bad(2)).toEqual([["error", false]]);
+  expect(bad(3)).toEqual([["error", false]]);
 });
 
 test("a test message that looks like a secret is withheld from test.run and test.classified", async () => {

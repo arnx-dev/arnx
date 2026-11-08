@@ -7,8 +7,9 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { join } from "node:path";
 import { addToSandbox, SANDBOX_MARK, sandboxDir, stripSandbox, takeSnapshot, withSandboxFiles } from "../src/change";
 import { parseReviewConfig, parseReviewFile, sandboxOnlyOf } from "../src/config";
-import { DEFAULT_LIMITS, runArgv } from "../src/sandbox";
-import { envValue, hasSecretContent, secretPins, standIn, suspects } from "../src/secrets";
+import { buildContextOf, DEFAULT_LIMITS, runArgv } from "../src/sandbox";
+import { envValue, hasSecretContent, secretPins, suspects } from "../src/secrets";
+import { standIn } from "./helpers/standin";
 import { defaultSettings, loadSettings, writeSettings } from "../src/settings";
 import { approvalWarnings } from "../src/setupview";
 import { AWS_KEY, AWS_KEY_2, PRIVATE_KEY, PRIVATE_KEY_BLOCK, SLACK_TOKEN } from "./helpers/fakekeys";
@@ -83,14 +84,8 @@ test("an allowed (pinned) key stays as it is; only the others get stand-ins", ()
   expect(r.text).not.toContain(SK);
 });
 
-test("a private key with a body gets no stand-in; a header with no body anywhere is a placeholder, kept", () => {
-  expect(standIn(`K = """${PRIVATE_KEY_BLOCK}"""\n`, [])).toBeNull();
-  // A body elsewhere in the file may be the key's.
-  expect(standIn(`H = "${PRIVATE_KEY}"\nB = "${AWS_SECRET}"\n`, [])).toBeNull();
-  const hint = `placeholder = "${PRIVATE_KEY}\\n...\\n"\nT = '${AWS_KEY}'\n`;
-  const r = standIn(hint, [])!;
-  expect(r.text).toContain(PRIVATE_KEY);
-  expect(r.text).not.toContain(AWS_KEY);
+test("a private key gets no stand-in of its own: its fake is another thing", () => {
+  expect(standIn(`K = """${PRIVATE_KEY_BLOCK}"""\n`, []).count).toBe(0);
 });
 
 test("a snapshot keeps a file with stand-ins and says so; the real key reaches neither the snapshot nor its sandbox " +
@@ -105,11 +100,12 @@ test("a snapshot keeps a file with stand-ins and says so; the real key reaches n
   const snap = join(tmp(), "snap");
   const r = takeSnapshot(repo, null, snap, [], { sandbox: ["rates.csv"] });
   expect(r.standIns).toEqual(["rates.csv", "tests/test_mask.py"]);
-  expect(r.withheld.map((w) => w.path)).toEqual(["key.py"]);
+  expect(r.withheld).toEqual([]);
+  expect(r.fakedKeys).toEqual(["key.py"]);
   expect(r.sandboxed).toEqual(["rates.csv"]);
   expect(existsSync(join(snap, "rates.csv"))).toBe(false);
   for (const text of [allText(snap), allText(sandboxDir(snap))]) {
-    for (const real of [SLACK_TOKEN, AWS_KEY, PRIVATE_KEY]) expect(text).not.toContain(real);
+    for (const real of [SLACK_TOKEN, AWS_KEY, PRIVATE_KEY_BLOCK.split("\n")[1]!]) expect(text).not.toContain(real);
   }
   expect(readFileSync(join(sandboxDir(snap), "rates.csv"), "utf8")).toMatch(/^fee,AKIA[0-9A-Z]{16}\n$/);
   // The same snapshot of a commit.
@@ -148,7 +144,7 @@ test("a file .arnxignore leaves out moves beside the snapshot, also from a folde
     expect(existsSync(join(snap, "dump.csv"))).toBe(false);
   });
 
-test("sandbox-only files are in the snapshot only while a run runs, then gone with the folders made for them", () => {
+test("sandbox-only files are in the snapshot only while a run runs, then gone with the folders made for them", async () => {
   const repo = gitRepo(tmp());
   mkdirSync(join(repo, "i18n"), { recursive: true });
   writeFileSync(join(repo, "i18n/ar.json"), "{\"a\": 1}\n");
@@ -161,15 +157,15 @@ test("sandbox-only files are in the snapshot only while a run runs, then gone wi
     during.push(readFileSync(join(snap, "i18n/ar.json"), "utf8"));
     return { exitCode: 0, output: "", timedOut: false, seconds: 0 };
   } }, snap);
-  runner.run("pytest", 10);
-  runner.run("pytest", 10);
+  await runner.run("pytest", 10);
+  await runner.run("pytest", 10);
   expect(during).toEqual(["{\"a\": 1}\n", "{\"a\": 1}\n"]);
   expect(existsSync(join(snap, "i18n"))).toBe(false);
   // A run that throws takes them out too.
   const failing = withSandboxFiles({ run: () => {
     throw new Error("docker went away");
   } }, snap);
-  expect(() => failing.run("pytest", 10)).toThrow("docker went away");
+  await expect(failing.run("pytest", 10)).rejects.toThrow("docker went away");
   expect(existsSync(join(snap, "i18n"))).toBe(false);
 });
 
@@ -181,9 +177,10 @@ test("setup's copy of a needed file is scrubbed like the snapshot: secret files 
   const snap = join(tmp(), "snap");
   mkdirSync(snap);
   const r = addToSandbox(repo, snap, ["rates.csv", "big.csv", ".env", "missing.csv"]);
-  expect([r.sandboxed, r.standIns, r.withheld.map((w) => w.path)]).toEqual([["rates.csv"], ["rates.csv"],
-    ["big.csv"]]);
+  expect([r.sandboxed, r.standIns, r.fakedKeys, r.withheld.map((w) => w.path)]).toEqual([["big.csv", "rates.csv"], ["rates.csv"],
+    ["big.csv"], [".env"]]);
   expect(allText(sandboxDir(snap))).not.toContain(AWS_KEY);
+  expect(allText(sandboxDir(snap))).not.toContain(PRIVATE_KEY_BLOCK.split("\n")[1]!);
   expect(existsSync(join(sandboxDir(snap), ".env"))).toBe(false);
 });
 
@@ -320,30 +317,47 @@ test("a name marks a secret only when the secret word is what it names: its last
   expect(suspects("x.py", `TOKEN_PROGRAM = "${AWS_KEY}"\n`, [])).toEqual([AWS_KEY]);
 });
 
-test("a value one file marks secret gets the same stand-in in every file, also where nothing marks it", () => {
+test("a certain value one file holds gets the same stand-in in every file, also where nothing marks it", () => {
   const repo = gitRepo(tmp());
   mkdirSync(join(repo, "tests"), { recursive: true });
-  writeFileSync(join(repo, "settings.py"), `API_TOKEN = "Qx7mK2pL9zR4wT8v"\n`);
+  writeFileSync(join(repo, "settings.py"), `API_TOKEN = "${AWS_KEY}"\n`);
   writeFileSync(join(repo, "tests/test_auth.py"), `def test_login(client):\n    assert client.get("/", ` +
-    `headers=hdr("Qx7mK2pL9zR4wT8v")).ok\n`);
-  writeFileSync(join(repo, "package-lock.json"), `{"x": "Qx7mK2pL9zR4wT8v"}\n`);
-  writeFileSync(join(repo, "logo.bin"), Buffer.from([0, 1, 2, ...Buffer.from(`API_TOKEN = "Qx7mK2pL9zR4wT8v"`)]));
+    `headers=hdr("${AWS_KEY}")).ok\n`);
+  writeFileSync(join(repo, "logo.bin"), Buffer.from([0, 1, 2, 3]));
   commit(repo, "auth");
   const snap = join(tmp(), "snap");
   const r = takeSnapshot(repo, null, snap);
   expect(r.standIns).toEqual(["settings.py", "tests/test_auth.py"]);
   const fake = /API_TOKEN = "(\w+)"/.exec(readFileSync(join(snap, "settings.py"), "utf8"))![1]!;
-  expect(fake).not.toBe("Qx7mK2pL9zR4wT8v");
+  expect(fake).not.toBe(AWS_KEY);
   expect(readFileSync(join(snap, "tests/test_auth.py"), "utf8")).toContain(`hdr("${fake}")`);
-  // A lockfile is generated, and a binary file is not text: neither is rewritten.
-  expect(readFileSync(join(snap, "package-lock.json"), "utf8")).toContain("Qx7mK2pL9zR4wT8v");
   expect(readFileSync(join(snap, "logo.bin"))).toEqual(readFileSync(join(repo, "logo.bin")));
+});
+
+test("a guess one file marks stays real where tests run, and gets one stand-in in every file of the build", () => {
+  const repo = gitRepo(tmp());
+  mkdirSync(join(repo, "tests"), { recursive: true });
+  writeFileSync(join(repo, "settings.py"), `API_TOKEN = "Qx7mK2pL9zR4wT8v"\n`);
+  writeFileSync(join(repo, "tests/test_auth.py"), `def test_login(client):\n    assert client.get("/", ` +
+    `headers=hdr("Qx7mK2pL9zR4wT8v")).ok\n`);
+  writeFileSync(join(repo, "logo.bin"), Buffer.from([0, 1, 2, ...Buffer.from(`API_TOKEN = "Qx7mK2pL9zR4wT8v"`)]));
+  commit(repo, "auth");
+  const snap = join(tmp(), "snap");
+  const r = takeSnapshot(repo, null, snap);
+  expect(r.standIns).toEqual([]);
+  expect(readFileSync(join(snap, "tests/test_auth.py"), "utf8")).toContain(`hdr("Qx7mK2pL9zR4wT8v")`);
+  const ctx = buildContextOf(snap);
+  const fake = /API_TOKEN = "(\w+)"/.exec(readFileSync(join(ctx, "settings.py"), "utf8"))![1]!;
+  expect(fake).not.toBe("Qx7mK2pL9zR4wT8v");
+  expect(readFileSync(join(ctx, "tests/test_auth.py"), "utf8")).toContain(`hdr("${fake}")`);
+  // A binary file is not text: it is not rewritten.
+  expect(readFileSync(join(ctx, "logo.bin"))).toEqual(readFileSync(join(repo, "logo.bin")));
 });
 
 test("a sandbox copy gets the stand-ins the snapshot gave, for values nothing in it marks", () => {
   const repo = gitRepo(tmp());
-  writeFileSync(join(repo, "settings.py"), `API_TOKEN = "Qx7mK2pL9zR4wT8v"\n`);
-  writeFileSync(join(repo, "users.csv"), "alice,Qx7mK2pL9zR4wT8v\n");
+  writeFileSync(join(repo, "settings.py"), `API_TOKEN = "${AWS_KEY}"\n`);
+  writeFileSync(join(repo, "users.csv"), `alice,${AWS_KEY}\n`);
   writeFileSync(join(repo, ".arnxignore"), "*.csv\n");
   commit(repo, "data");
   const snap = join(tmp(), "snap");
@@ -354,7 +368,7 @@ test("a sandbox copy gets the stand-ins the snapshot gave, for values nothing in
 });
 
 test("what a run quotes of a sandbox-only file is taken out of its output and its report; a line naming it stays",
-  () => {
+  async () => {
     const repo = gitRepo(tmp());
     writeFileSync(join(repo, "fees.csv"), "country,fee\nGermany,0.0125\nFrance,0.0175 \"intl\"\n");
     writeFileSync(join(repo, ".arnxignore"), "*.csv\n");
@@ -368,7 +382,7 @@ test("what a run quotes of a sandbox-only file is taken out of its output and it
       return { exitCode: 1, output: "FileNotFoundError: '/src/fees.csv'\nE   assert row == 'Germany,0.0125'\n" +
         "Germany,0.0125\nFrance,0.0175 \"intl\"\n1 failed\n", timedOut: false, seconds: 1 };
     } }, snap);
-    const r = runner.run("pytest", 10);
+    const r = await runner.run("pytest", 10);
     expect(r.output).toBe(`FileNotFoundError: '/src/fees.csv'\nE   assert row == '${SANDBOX_MARK}'\n${SANDBOX_MARK}\n` +
       "1 failed\n");
     expect(readFileSync(join(snap, ".arnx-run/suite.xml"), "utf8")).toBe(`<failure message="expected ` +

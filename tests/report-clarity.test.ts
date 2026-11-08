@@ -2,11 +2,16 @@
 // that share one cause, labels the second opinion, and records severity with the marks. Report only: finding rules,
 // verdicts and exit codes are unchanged.
 import { expect, test } from "bun:test";
-import { defaultMarks, exitCode, neededQuestions, nextSteps, parseMarks, rankGroups, render, sameCause, summary,
+import { rmSync } from "node:fs";
+import { join } from "node:path";
+import { useTmp } from "./helpers/tmp";
+import { load, save, defaultMarks, exitCode, neededQuestions, nextSteps, parseMarks, rankGroups, render, sameCause, summary,
+  summaryStatus,
   type SuspectOutcome, yourCall }
   from "../src/report";
 import { finding, sampleReview, blankMarks } from "./helpers/review";
 
+const tmp = useTmp();
 const stat = (name: string, over: Record<string, unknown> = {}) => ({ name, tests: 3, passed: 3, missingRuns: 0,
   testFiles: 1, sawResults: true, stop: "end_turn", ...over });
 
@@ -16,7 +21,7 @@ test("the report opens with a status: complete when every project was tested and
   expect(md).toContain("## Status\n\nComplete: 2 projects tested (`api`, `web`); every run reported its tests.");
   expect(md.indexOf("## Status")).toBeLessThan(md.indexOf("## Findings"));
   // complete: no status line, the count then the findings first
-  expect(summary(r, "review.md").split("\n").slice(1, 3)).toEqual(["1 issue confirmed, 1 disputed (2 findings).",
+  expect(summary(r, "review.md").split("\n").slice(1, 3)).toEqual(["1 issue worth a look, 1 disputed (2 findings).",
     "  ✗ 1  Any member can invite.  F1 (main)"]);
 });
 
@@ -65,7 +70,7 @@ test("findings that share one cause are grouped and explained as input, actual, 
     ],
   });
   const md = render(r);
-  expect(md).toContain("2 issues from 3 failing tests, most severe first.");
+  expect(md).toContain("2 issues from 3 findings, most severe first.");
   expect(md).toContain("### Issue 1 · mount() strips the wrong number of characters when the path has a parameter\n\n" +
     "- Input: a request to /users/12345/profile under mount('/users/:id', app)\n- Actual: the app sees /45/profile\n" +
     "- Expected: the app sees /profile\n- Why it matters: routes under a parameterised mount get the wrong path\n" +
@@ -77,7 +82,7 @@ test("findings that share one cause are grouped and explained as input, actual, 
   expect(parseMarks(blankMarks(md), ["F1", "F2", "F3"]).findings).toEqual({ F1: null, F2: null, F3: null });
   expect(md.indexOf("### Issue 1")).toBeLessThan(md.indexOf("### F1"));
   expect(md.indexOf("### F2")).toBeLessThan(md.indexOf("### Issue 2"));
-  expect(exitCode(r)).toBe(1); // exit code still counts findings, not issues
+  expect(exitCode(r, true)).toBe(1); // exit code still counts findings, not issues
   const s = summary(r, "review.md");
   expect(s).toContain("  ✗ 1  mount() strips the wrong number of characters when the path has a parameter  F1, F2");
   expect(s).toContain("  · 2  wildcard in the middle of a mount path                                       F3 disputed");
@@ -111,12 +116,12 @@ test("an issue's one mark covers its disputed tests and those that assumed an an
   const one = md.replace("- Test: `t.js::b`", "Mark: [ ] real  [ ] intended  [x] noise\n- Test: `t.js::b`");
   expect(parseMarks(one, ["F1", "F2", "F3", "F4"]).findings.F2).toBe("noise");
   expect([...neededQuestions(r)]).toEqual(["Q2"]);
-  expect(md).toContain("400 or 500?\n\nOptional: no issue waits on it.");
+  expect(md).toContain("400 or 500?\n\nOptional: Issue 1's mark covers F3, which assumed an answer.");
   expect(md).not.toContain("Should d hold?\n\nOptional");
   expect(defaultMarks(r)).toEqual({ F1: "real", F2: "real", F3: "real", F4: null });
   const s = summary(r, "review.md");
   expect(s).toContain("  ✗ 1  errors become 500  F1, F2, F3\n  Minor:\n  ? 2  debug log left in  ");
-  expect(s).toContain("  ? Q2  Should d hold?\n  1 optional question in review.md (no issue waits on it)");
+  expect(s).toContain("  ? Q2  Should d hold?\n  1 optional question in review.md (a proven issue's mark covers the findings that assumed it)");
   expect(s).toContain("Your call: issue 2 (waits on a question), Q2.");
   expect(nextSteps(r)).toEqual(["arnx triage", "arnx accept"]);
   // every issue proven and no question an issue waits on: straight to accept
@@ -213,4 +218,111 @@ test("a suspect proven only by tests grouped under another suspect's cause is 's
   const md = render(sampleReview({ findings, groups, suspects: sus }));
   expect(md).toContain("proven only together with S3: its tests fail for the same cause (one fix makes both pass)");
   expect(md).toContain("4 suspected · 3 proven · 1 same cause");
+});
+
+const SRC = (n: number) => Array.from({ length: n }, (_, i) => `src/m${i}.py`);
+
+test("the status never says complete above changed source files nobody tested", () => {
+  // Declared under uncovered (a root project reviewed them, but review.yaml says its tests do not run there).
+  const declared = sampleReview({ sourceFiles: 3, uncovered: [{ path: "src/a.py", reason: "needs several services" }] });
+  const md = render(declared);
+  expect(md).not.toContain("Complete:");
+  expect(md).toContain("Partly covered: arnx saw no test reach 1 of the 3 changed source files below, so finding " +
+    "nothing there says nothing about them. Check them yourself, or review them on their own with `arnx review --range`.");
+  expect(md).toContain("Not covered (needs several services): `src/a.py`.");
+  expect(summary(declared, "review.md")).toContain("Partly covered: no test seen reaching 1 of 3 changed source files, " +
+    "so finding nothing there says nothing about them.");
+  expect(summary(declared, "review.md")).toContain("  Not tested (needs several services): src/a.py");
+  // A file that is not source (a README, a manifest) leaves the status as it was.
+  const doc = sampleReview({ sourceFiles: 1, uncovered: [{ path: "README.md", reason: "no project covers it" }] });
+  expect(render(doc)).toContain("Complete:");
+  // Listed by the text match and uncovered at once: counted once each.
+  const both = sampleReview({ sourceFiles: 3, uncovered: [{ path: "src/a.py", reason: "r" }],
+    untested: [{ project: "main", files: ["src/b.py", "src/a.py"], of: 2 }] });
+  expect(render(both)).toContain("reach 2 of the 3 changed");
+  // A test file in an older review's list is not a source file.
+  const old = sampleReview({ sourceFiles: 3, untested: [{ project: "main", files: ["src/b.py", "tests/test_b.py"], of: 3 }] });
+  expect(render(old)).toContain("reach 1 of the 3 changed");
+  // The terminal list is capped.
+  const many = sampleReview({ sourceFiles: 20, uncovered: SRC(10).map((path) => ({ path, reason: "web UI tests" })) });
+  expect(summary(many, "x")).toContain("  Not tested (web UI tests): " + SRC(10).slice(0, 8).join(", ") + ", … (+2 more)");
+});
+
+test("no changed source file reached reads not tested", () => {
+  const none = sampleReview({ findings: [], passed: 0, sourceFiles: 2, untested: [{ project: "main", files: ["a.py", "b.py"], of: 2 }] });
+  expect(render(none)).toContain("Not tested: arnx saw no test reach any of the 2 changed source files, so finding " +
+    "nothing says nothing about this change.");
+  expect(render(none)).not.toContain("Complete:");
+  expect(summary(none, "x")).toContain("Not tested: no test seen reaching any of 2 changed source files, so finding " +
+    "nothing says nothing.");
+  expect(summaryStatus(none)).toMatchObject({ problems: [], untested: 2, of: 2, none: true });
+  expect(exitCode(none)).toBe(0);
+  // A real fix proof means a test reached the change: partly covered.
+  const proof = sampleReview({ sourceFiles: 2, untested: [{ project: "main", files: ["a.py", "b.py"], of: 2 }],
+    fixProof: [{ testId: "t::x", project: "main", file: "t.py", beforeStatus: "fixed", beforeRuns: ["failed"],
+      beforeDetail: "d" }] });
+  expect(render(proof)).toContain("Partly covered: arnx saw no test reach 2 of the 2");
+  // Incomplete stays first and says its own thing.
+  const inc = sampleReview({ sourceFiles: 1, stop: "budget", untested: [{ project: "main", files: ["a.py"], of: 1 }] });
+  expect(render(inc)).toContain("Incomplete:");
+  expect(render(inc)).not.toContain("Not tested: arnx");
+  // Reviews saved before sourceFiles existed: the total comes from the files changed, so it never reads as none.
+  const older = sampleReview({ filesChanged: 4, uncovered: [{ path: "a.py", reason: "r" }] });
+  expect(render(older)).toContain("Partly covered: arnx saw no test reach 1 of the 4");
+});
+
+test("a change reached only through imports is partly covered, never not tested", () => {
+  // A passing test imports pkg.main, which uses the changed pkg/helper.py: the text match cannot see that.
+  const r = sampleReview({ findings: [], passed: 1, sourceFiles: 1,
+    untested: [{ project: "main", files: ["pkg/helper.py"], of: 1 }] });
+  expect(render(r)).toContain("Partly covered: arnx saw no test reach 1 of the 1 changed source file below");
+  expect(render(r)).not.toContain("Not tested: arnx");
+  expect(summary(r, "x")).toContain("Partly covered: no test seen reaching 1 of 1 changed source file, so");
+  expect(summaryStatus(r).none).toBe(false);
+});
+
+test("the count of changed source files says file when it is one", () => {
+  const none = sampleReview({ findings: [], passed: 0, sourceFiles: 1, untested: [{ project: "main", files: ["a.py"], of: 1 }] });
+  expect(render(none)).toContain("reach any of the 1 changed source file, so");
+  expect(summary(none, "x")).toContain("reaching any of 1 changed source file, so");
+});
+
+test("a saved review counts its changed source files from change.diff", () => {
+  const rdir = join(tmp(), "r");
+  const r = sampleReview({ findings: [], filesChanged: 30, sourceFiles: 11, uncovered: [{ path: "src/a.py", reason: "x" }] });
+  const diff = ["src/a.py", "src/b.py", "tests/test_b.py", "docs/a.md", "web/c.ts", "web/c.test.ts"]
+    .map((f) => `diff --git a/${f} b/${f}\n--- a/${f}\n+++ b/${f}\n`).join("");
+  save(r, rdir, diff);
+  const back = load(rdir);
+  expect(back.sourceFiles).toBe(3);
+  expect(render(back)).toContain("reach 1 of the 3 changed");
+  // Without the diff file, the review's own count stands.
+  rmSync(join(rdir, "change.diff"));
+  expect(load(rdir).sourceFiles).toBe(11);
+});
+
+test("the minor heading does not describe what its issues are", () => {
+  const r = sampleReview({
+    findings: [finding("F1", "t.js::a", "a", "t.js", "500", "", "confirmed", "yes"),
+      finding("F2", "t.js::d", "d", "t.js", "x", "", "confirmed", "yes")],
+    questions: [], questionProjects: [], flaky: [],
+    groups: [
+      { findings: ["F1"], title: "errors become 500", input: "", actual: "", expected: "", consequence: "", severity: "high" },
+      { findings: ["F2"], title: "odd name", input: "", actual: "", expected: "", consequence: "", severity: "low" }],
+  });
+  const md = render(r);
+  expect(md).toContain("## Also found (minor)\n\nLower severity, not urgent.");
+  expect(md).not.toContain("Leftover debug output");
+});
+
+test("a lone low issue has no 'also found' heading", () => {
+  const r = sampleReview({
+    findings: [finding("F1", "t.js::d", "d", "t.js", "x", "", "confirmed", "yes")],
+    questions: [], questionProjects: [], flaky: [],
+    groups: [{ findings: ["F1"], title: "odd name", input: "", actual: "", expected: "", consequence: "", severity: "low" }],
+  });
+  const md = render(r);
+  expect(md).not.toContain("Also found");
+  expect(md).not.toContain("Lower severity");
+  expect(summary(r, "review.md")).not.toContain("Minor:");
 });

@@ -207,3 +207,22 @@ test("setup sends the map's path hints back to the agent once, without a code in
   expect(replies[1]).toContain("accepted:");
   expect(progress).toContain("1 uses entry too wide; asking the agent");
 });
+
+test("a uses entry whose source files are all in another language than the project's is hinted", async () => {
+  const { mapHints } = await import("../src/usescheck");
+  const file = parseReviewFile(`version: 1
+projects:
+  engine:
+    root: engine
+    language: python
+    image: python:3.12
+    test_command: python -m pytest {targets}
+    uses: [web/, /docs/, /shared/]
+`);
+  const files = ["engine/a.py", "web/src/App.tsx", "web/src/util.ts", "web/README.md", "docs/guide.md",
+    "shared/types.py", "shared/index.ts"];
+  const hints = mapHints(file, files);
+  expect(hints.map((h) => [h.project, h.kind, h.entry])).toEqual([["engine", "other-language", "web/"]]);
+  expect(hints[0]!.text).toBe("engine: uses web/ matches only JavaScript/TypeScript files, and engine is Python; if " +
+    "its tests do not reach them, drop it, or list web/ under uncovered");
+});

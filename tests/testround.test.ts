@@ -15,6 +15,7 @@ import { ROUND_CFG } from "./helpers/yaml";
 const CFG = parseReviewConfig(ROUND_CFG);
 const PLAIN = parseReviewConfig("version: 1\nimage: i\ntest_command: pytest {targets}\n");
 const GEN = "tests/arnx_generated/test_x.py";
+const PYTHONPATH_HOOK = "export PYTHONPATH=/src/.arnx-run/py${PYTHONPATH:+:$PYTHONPATH}; ";
 const tmp = useTmp();
 
 test("test_prompts_carry_config", () => {
@@ -59,7 +60,10 @@ test("test_round_end_to_end_with_fakes", async () => {
   expect(r.agent.stop).toBe("end_turn");
   expect(Object.keys(r.files)).toEqual(["app/" + GEN]); // the stale file was cleared before the agent ran
   expect(existsSync(join(out, "tests", "app", GEN + COPY_SUFFIX)) && existsSync(join(out, "transcript.jsonl"))).toBe(true);
-  expect(r.classified.missingRuns).toBe(2); // one run timed out, the last was skipped after it
+  // the file did not finish in the second run: it is one error, and its tests have one result, so none is a finding
+  expect(r.classified.missingRuns).toBe(0);
+  expect(r.hungFiles).toEqual([GEN]); // as the runner is told it
+  expect(r.classified.errors.map((t) => t.fileAttr)).toEqual([GEN]);
   expect(r.classified.findings).toEqual([]);
   expect(r.classified.flaky.map((t) => t.name)).toEqual(["test_x"]);
   const commands = sessions[0]!.commands;
@@ -70,7 +74,7 @@ test("test_round_end_to_end_with_fakes", async () => {
 });
 
 // One hanging test made every final run wait the whole timeout: three runs, three times RUN_TIMEOUT.
-test("after a final run times out the other final runs are skipped, counted as runs without a report", async () => {
+test("after a file does not finish the other final runs do not run it again; it is one error in every run", async () => {
   const repo = gitRepo(tmp());
   const model = new ScriptedAgent([
     [tool("write_file", { path: "app/" + GEN, content: "def test_x(): pass\n" })],
@@ -85,11 +89,12 @@ test("after a final run times out the other final runs are skipped, counted as r
     writeDir: writeDirOf(CFG), budgetUsd: 1.0, runs: 3, outDir: join(tmp(), "o"), progress: (m) => said.push(m),
     sessionFactory: fakeFactory(hangs, sessions) }));
   expect(sessions[0]!.commands.filter((c) => c.includes("final-"))).toHaveLength(1);
-  expect([r.classified.missingRuns, r.classified.totalRuns]).toEqual([3, 3]); // as when all three timed out
-  expect(said).toContain("main: final run 1/3 timed out; the other runs skipped");
+  expect([r.classified.missingRuns, r.classified.totalRuns]).toEqual([0, 3]);
+  expect(r.classified.errors).toHaveLength(1);
+  expect(said).toContain("main: a test file did not finish");
   const missing = readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
     .filter((e) => e.type === "test.run_missing").map((e) => [e.data.repeat, e.data.timed_out, e.data.skipped]);
-  expect(missing).toEqual([[1, true, undefined], [2, false, true], [3, false, true]]);
+  expect(missing).toEqual([]);
 });
 
 test("test_round_without_tests_skips_runs", async () => {
@@ -175,7 +180,7 @@ test("runs target the generated test files, never the whole tests directory", as
     budgetUsd: 1.0, runs: 3, outDir: join(tmp(), "o"), sessionFactory: fakeFactory(script, sessions) });
   const commands = sessions[0]!.commands.slice(1); // after the probe
   expect(commands).toHaveLength(3); // one agent run, two final runs (the second timed out)
-  for (const c of commands) expect(c.startsWith("pytest tests/test_new.py ")).toBe(true);
+  for (const c of commands) expect(c.startsWith(`${PYTHONPATH_HOOK}pytest tests/test_new.py `)).toBe(true);
 });
 
 test("only generated tests count; a run without them counts as missing", async () => {
@@ -213,9 +218,13 @@ test("final runs: everything once, then only the files with a failing test", asy
       ...(command.includes("test_a.py") ? [["tests/arnx_generated/test_a.py", "test_a", "passed", ""]] : []),
       ["tests/arnx_generated/test_b.py", "test_b", "failed", "assert 0"]] as [string, string, string, string][]), "", false];
   };
+  const said: string[] = [];
   const r = await testRound(repo, null, PLAIN, {
     ...answerRound(model, PLAIN), writeDir: "tests/arnx_generated", budgetUsd: 1.0,
-    runs: 3, outDir: join(tmp(), "o"), sessionFactory: fakeFactory(scripted) });
+    runs: 3, outDir: join(tmp(), "o"), sessionFactory: fakeFactory(scripted), progress: (m: string) => said.push(m) });
+  // The count is of files run again, which is true before any claim: a failing test may still be a scratch probe.
+  expect(said.filter((m) => m.includes("final run"))).toEqual([
+    "main: final run 1/3", "main: final run 2/3 (1 file to run again)", "main: final run 3/3 (1 file to run again)"]);
   const finals = commands.filter((c) => c.includes("final-"));
   expect(finals).toHaveLength(3);
   expect(finals[0]).toContain("test_a.py");
@@ -273,4 +282,77 @@ test("the project's own files a round would clear from tests_dir are found, outs
   expect(writeDirOf(rs)).toBe("tests");
   expect(ownTestsInWriteDir(rs, ["tests/basic.rs", "tests/common/mod.rs", "tests/arnx_20261012_ab_calc.rs",
     "src/lib.rs"])).toEqual([]);
+});
+
+test("a review names an install sed whose search text no file holds, and lists stand-ins", async () => {
+  const repo = gitRepo(tmp());
+  writeFileSync(join(repo, "svc.py"), "X = 1\nAWS = '" + "AKIA" + "IOSFODNN7EXAMPLE'\n");
+  commit(repo, "svc");
+  const cfg = parseReviewConfig("version: 1\nimage: i\ninstall: [\"sed -i 's/oldhost.example/new/' svc.py\"]\n" +
+    "test_command: pytest {targets}\n");
+  const said: string[] = [];
+  const model = new ScriptedAgent([[text('{"tests": []}')]]);
+  await testRound(repo, null, cfg, { ...answerRound(model, cfg), writeDir: writeDirOf(cfg), budgetUsd: 1.0, runs: 1,
+    outDir: join(tmp(), "out"), sessionFactory: fakeFactory(script), progress: (l) => said.push(l) });
+  expect(said.find((l) => l.includes("oldhost.example"))).toContain("arnx setup --project");
+  expect(said.find((l) => l.includes("stand-ins in 1 file"))).toContain("stand-ins.md");
+});
+
+test("a round reports the changed files its final runs reached, less what the probe's run showed, without the agent's runs", async () => {
+  const repo = gitRepo(tmp());
+  const model = new ScriptedAgent([
+    [tool("write_file", { path: "app/" + GEN, content: "def test_x(): pass\n" })],
+    [tool("run_tests")],
+    [text('{"tests": []}')],
+  ]);
+  let pid = 0;
+  const notes = (snap: string, body: string) => {
+    mkdirSync(join(snap, ".arnx-run"), { recursive: true });
+    writeFileSync(join(snap, ".arnx-run", `reached-${++pid}.txt`), body);
+  };
+  const passed = (): [string, string, boolean] => [junitXml([[GEN, "test_x", "passed", ""]]), "1 passed", false];
+  const factory: SessionFactory = async (_cfg, snap, _log, body) => {
+    const fake = new FakeSession(snap, (command) => {
+      notes(snap, command.includes("agent-") ? "ran /src/app/agent_only.py\n"
+        : "ran /src/app/svc.py\nloaded /src/app/base.py\nran /src/app/conf.py\nloaded /src/app/lib/x.py\n");
+      return passed();
+    });
+    return body({ run: async (command) => {
+      if (command.includes("test_arnx_probe")) notes(snap, "loaded /src/app/base.py\nran /src/app/conf.py\n");
+      return fake.run(command);
+    } });
+  };
+  const coverage = ["app/svc.py", "app/base.py", "app/conf.py", "app/agent_only.py", "app/none.py"];
+  const r = await testRound(repo, null, CFG, { ...answerRound(model, CFG), coverage,
+    writeDir: writeDirOf(CFG), budgetUsd: 1.0, runs: 2, outDir: join(tmp(), "out"), sessionFactory: factory });
+  expect(r.reached).toEqual(["app/svc.py"]);
+});
+
+test("a round whose runs left no notes says nothing of what they reached", async () => {
+  const repo = gitRepo(tmp());
+  const model = new ScriptedAgent([[tool("write_file", { path: "app/" + GEN, content: "def test_x(): pass\n" })],
+    [text('{"tests": []}')]]);
+  const r = await testRound(repo, null, CFG, { ...answerRound(model, CFG), coverage: ["app/svc.py"],
+    writeDir: writeDirOf(CFG), budgetUsd: 1.0, runs: 1, outDir: join(tmp(), "out"),
+    sessionFactory: fakeFactory(() => [junitXml([[GEN, "test_x", "passed", ""]]), "1 passed", false]) });
+  expect(r.reached).toBeUndefined();
+});
+
+test("a final run whose test file errored or hung makes its loaded notes count for nothing, its ran notes still count", async () => {
+  const repo = gitRepo(tmp());
+  const GEN_B = "tests/arnx_generated/test_broken.py";
+  const model = new ScriptedAgent([[tool("write_file", { path: "app/" + GEN, content: "def test_x(): pass\n" }),
+    tool("write_file", { path: "app/" + GEN_B, content: "import nowhere\n" })], [text('{"tests": []}')]]);
+  let pid = 0;
+  const factory: SessionFactory = async (_cfg, snap, _log, body) => {
+    const fake = new FakeSession(snap, () => {
+      mkdirSync(join(snap, ".arnx-run"), { recursive: true });
+      writeFileSync(join(snap, ".arnx-run", `reached-${++pid}.txt`), "loaded /src/app/mod.py\n");
+      return [junitXml([[GEN, "test_x", "passed", ""], [GEN_B, "test_broken", "error", "ModuleNotFoundError"]]), "", false];
+    });
+    return body(fake);
+  };
+  const r = await testRound(repo, null, CFG, { ...answerRound(model, CFG), coverage: ["app/mod.py"],
+    writeDir: writeDirOf(CFG), budgetUsd: 1.0, runs: 2, outDir: join(tmp(), "out"), sessionFactory: factory });
+  expect(r.reached).toEqual([]);
 });

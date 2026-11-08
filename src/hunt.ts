@@ -8,7 +8,7 @@ import { changedDefinitions, CONTEXT_LIMIT, contextPack } from "./context";
 import { sliceDiff } from "./change";
 import { adapterFor } from "./adapters";
 import { changedSources } from "./untested";
-import { survivable } from "./errors";
+import { NoCredits, survivable } from "./errors";
 import { withRole } from "./events";
 import { type JsonModel, type ModelUse, newUse, tally } from "./llm";
 import { DEFAULT_PROMPTS, HUNT_SCHEMA, MAX_SUSPECTS, type Prompts, RANK_SCHEMA, type Scope, type Suspect }
@@ -53,11 +53,15 @@ export function mergeSuspects(first: Suspect[], second: Suspect[]): Suspect[] {
 /** The second hunter's suspects and what it cost; an API error is reported and gives none. The changed definitions
  * are `o.changedDefinitions` when given, else read from the snapshot at `root` (none without either). Its attempts
  * are logged to hunt-second.jsonl in `o.outDir`, when given. */
+/** Second hunters whose key ran out of credits in this run: skipped from then on, said once. */
+const noCredits = new WeakSet<JsonModel>();
+
 export async function secondHunt(root: string | null, cfg: ReviewConfig, o: { model: JsonModel; diff: string;
-  context: string; scope: Scope; outDir?: string; progress?: Say; changedDefinitions?: string; prompts?: Prompts })
-  : Promise<{ suspects: Suspect[]; use: ModelUse }> {
+  context: string; scope: Scope; outDir?: string; progress?: Say; changedDefinitions?: string; prompts?: Prompts;
+  signal?: AbortSignal }): Promise<{ suspects: Suspect[]; use: ModelUse; failed?: true }> {
   const say = (m: string) => o.progress?.(`${cfg.name}: ${m}`);
   const use = newUse(o.model.ref);
+  if (noCredits.has(o.model)) return { suspects: [], use, failed: true };
   if (o.outDir) {
     mkdirSync(o.outDir, { recursive: true });
     const log = join(o.outDir, "hunt-second.jsonl");
@@ -68,15 +72,22 @@ export async function secondHunt(root: string | null, cfg: ReviewConfig, o: { mo
     const p = o.prompts ?? DEFAULT_PROMPTS;
     const user = p.secondHuntTask(cfg, o.diff, o.context, defs, o.scope);
     const [reply, cost, usage, unknown] = await withRole("second-hunt",
-      () => o.model.completeJson(p.huntSystem(), user, HUNT_SCHEMA));
+      () => o.model.completeJson(p.huntSystem(), user, HUNT_SCHEMA, o.signal));
     tally(use, cost, usage, unknown);
     return { suspects: parseSuspects(reply, o.model.ref.replace(/^[a-z]+:/, "")), use };
   } catch (e) {
+    // An optional role: a key with no credits skips it for the rest of the run instead of stopping the review.
+    if (e instanceof NoCredits) {
+      // Calls run side by side: only the first to meet it says so.
+      if (!noCredits.has(o.model)) say(`second hunter skipped: ${e.provider} has no credits left on this key`);
+      noCredits.add(o.model);
+      return { suspects: [], use, failed: true };
+    }
     if (!survivable(e)) throw e;
     if (e.costUsd > 0 || e.usage) tally(use, e.costUsd, e.usage, e.unknownCalls);
     else use.unknownCalls += e.unknownCalls;
     say(`second hunter failed: ${e.message.slice(0, 300)}`);
-    return { suspects: [], use };
+    return { suspects: [], use, failed: true };
   } finally {
     if (o.outDir) o.model.trace = undefined;
   }
@@ -126,8 +137,9 @@ export function huntParts(root: string, cfg: ReviewConfig, diff: string, owned: 
 export async function partHunts(root: string | null, cfg: ReviewConfig, o: { model: JsonModel; diff: string;
   owned: string[]; searchDirs: string[]; scope: Scope; outDir?: string; progress?: Say; parts?: HuntPart[];
   prompts?: Prompts })
-  : Promise<{ lists: Suspect[][]; use: ModelUse }> {
+  : Promise<{ lists: Suspect[][]; use: ModelUse; failed?: true }> {
   const use = newUse(o.model.ref);
+  let failed = false;
   const parts = o.parts ?? (root === null ? [] : huntParts(root, cfg, o.diff, o.owned, o.searchDirs));
   if (!parts.length) return { lists: [], use };
   o.progress?.(`${cfg.name}: hunting the change in ${parts.length} parts`);
@@ -147,9 +159,10 @@ export async function partHunts(root: string | null, cfg: ReviewConfig, o: { mod
       if (e.costUsd > 0 || e.usage) tally(use, e.costUsd, e.usage, e.unknownCalls);
       else use.unknownCalls += e.unknownCalls;
       o.progress?.(`${cfg.name}: a part hunter failed: ${e.message.slice(0, 200)}`);
+      failed = true;
     }
   });
-  return { lists, use };
+  return { lists, use, ...(failed ? { failed: true as const } : {}) };
 }
 
 /** Lists merged in turn (the first of each list, then the second of each, …), the same claim at the same place kept

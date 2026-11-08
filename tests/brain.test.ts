@@ -40,7 +40,10 @@ function cli(facts: Facts[], log: Logged[]): RoundTools {
   };
 }
 
-const input = (over: Record<string, unknown> = {}) => ({ cfg: CFG, diff: "diff --git a/a.py b/a.py\n", scoped: false,
+/** A change that adds 20 code lines to b.py: enough for the coverage follow-up to ask about it. */
+const BIG_B = "diff --git a/a.py b/a.py\n" + "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -0,0 +1,20 @@\n" +
+  Array.from({ length: 20 }, (_, i) => `+value_${i} = compute(${i})\n`).join("");
+const input = (over: Record<string, unknown> = {}) => ({ cfg: CFG, diff: BIG_B, scoped: false,
   scope: { owned: ["a.py", "b.py"], used: [] }, envTests: [], maxQuestions: 3, dbNames: [], budgetUsd: 5,
   outDir: tmp(), ...over });
 
@@ -140,7 +143,8 @@ test("a report that reaches the budget is still the round's final, before done",
     [text(report)],
   ]);
   const log: Logged[] = [];
-  // The first reply is under the budget; the report crosses it, so no follow-up is asked.
+  // The first reply is under the budget; the report crosses it, so no follow-up is asked. (The first reply writes the
+  // cache, so its cost does not make the next call a last word.)
   const tools = cli([{ untestedFiles: ["b.py"], dbUntested: [], generatedFiles: [GEN] }], log);
   const r = await new LocalBrain({ agentModel: model, prices: PRICES }).agentRound("review",
     input({ budgetUsd: 0.005 }), Promise.resolve(tools));
@@ -184,12 +188,14 @@ test("facts given as a promise are awaited: a remote CLI's facts word the follow
 
 test("during the hunt a step lists only the calls that reach the CLI; the refusal the model reads is unchanged",
   async () => {
-    const hunt = JSON.stringify({ suspects: [], questions: [] });
+    const hunt = JSON.stringify({ suspects: [{ file: "b.py", line: 1, claim: "c", why: "w", input: "i", expected: "e",
+      actual: "a" }], questions: [] });
     const model = new ScriptedAgent([
       [tool("read_file", { path: "a.py" }), tool("write_file", { path: GEN, content: "x" }), tool("run_tests")],
       [text(hunt)],
       [tool("write_file", { path: GEN, content: "def test_a(): pass\n" }), tool("run_tests")],
-      [text(JSON.stringify({ tests: [], suspected_defects: [], questions: [] }))],
+      [text(JSON.stringify({ tests: [{ test: `${GEN}::test_a`, expects: "e", suspect: "S1" }], suspected_defects: [],
+        questions: [] }))],
     ]);
     const log: Logged[] = [];
     await new LocalBrain({ agentModel: model, prices: PRICES }).agentRound("review",

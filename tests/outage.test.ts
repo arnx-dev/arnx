@@ -9,7 +9,7 @@ import { CloudClient } from "../src/cloud";
 import { CloudBrain } from "../src/cloudbrain";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { ModelError } from "../src/errors";
-import { AnthropicAgent, PRICES, ResponsesAgent, ResponsesJson } from "../src/llm";
+import { AnthropicAgent, PRICES, resetOutageWaits, ResponsesAgent, ResponsesJson } from "../src/llm";
 import { exitCode, failureLine, load, summary } from "../src/report";
 import { runReview } from "../src/reviewer";
 import { defaultSettings, parseModelRef } from "../src/settings";
@@ -46,7 +46,7 @@ test("a call answered 503 on every attempt is the provider's outage; a refused k
   const down = await remote(() => status(503)).completeJson("s", "u", SCHEMA).catch((e: unknown) => e);
   expect(down).toBeInstanceOf(ModelError);
   expect((down as ModelError).fault).toEqual({ kind: "unavailable", detail: "HTTP 503" });
-  expect((down as ModelError).tries).toBe(4);
+  expect((down as ModelError).tries).toBe(7);
   const auth = await remote(() => status(401, "bad key")).completeJson("s", "u", SCHEMA).catch((e: unknown) => e);
   expect((auth as ModelError).fault).toEqual({ kind: "auth", detail: "HTTP 401" });
   // A 400 is the request's fault, a 503 then a 400 no outage: neither is the provider's.
@@ -85,12 +85,14 @@ test("Anthropic: 529 on every attempt is an outage, 401 a refused key", async ()
 
 const YAML = "version: 1\nimage: python:3.12-slim\ntest_command: python -m pytest -q {targets}\n";
 const GEN = "tests/arnx_generated/test_add.py";
-const REPORT = '{"tests": [{"test": "tests/arnx_generated/test_add.py::test_add", "expects": "add sums"}],' +
+const REPORT = '{"tests": [{"test": "tests/arnx_generated/test_add.py::test_add", "expects": "add sums"},' +
+  ' {"test": "tests/arnx_generated/test_add.py::test_more", "expects": "one and one"}],' +
   ' "suspected_defects": [], "questions": []}';
 const SETTINGS = { ...defaultSettings(), providers: TABLES, beforeCheck: false, consentAt: "2026-10-20T00:00:00Z" };
 const tmp = useTmp();
 let repo = "";
 beforeEach(() => {
+  resetOutageWaits();
   repo = gitRepo(tmp());
   mkdirSync(dirname(reviewConfigPath(repo)));
   writeFileSync(reviewConfigPath(repo), stamp(parseReviewConfig(YAML), "Dev", "2026-10-20"));
@@ -110,12 +112,12 @@ test("the challenger down on every call: the status names the provider, the outa
   const { review, rdir } = await reviewWith(remote(() => status(503)));
   const line = summary(review, "review.md").split("\n")[1]!;
   // The second opinion, then the grouping of the findings: both calls fail, so both are missing.
-  expect(line).toBe("myprovider (llm.example.com) unavailable: HTTP 503 on every call (2 calls, 4 attempts each); " +
+  expect(line).toBe("myprovider (llm.example.com) unavailable: HTTP 503 on every call (2 calls, 7 attempts each); " +
     "missing: the second opinions, the grouping of findings. Run `arnx review --resume` when it is back.");
   expect(readFileSync(join(rdir, "review.md"), "utf8")).toContain("myprovider (llm.example.com) unavailable: HTTP 503 on every call");
   const json = JSON.parse(readFileSync(join(rdir, "review.json"), "utf8"));
   expect(json.provider_failures).toEqual([{ provider: "myprovider", name: "myprovider (llm.example.com)", kind: "unavailable", detail: "HTTP 503",
-    calls: 2, failed: 2, attempts: 8, roles: ["challenge", "explain"], missing: ["challenge", "explain"] }]);
+    calls: 2, failed: 2, attempts: 14, roles: ["challenge", "explain"], missing: ["challenge", "explain"] }]);
   expect(load(rdir).providerFailures).toEqual(review.providerFailures!);
   // The exit code is what it was: an unchallenged finding counts as confirmed.
   const plain = await reviewWith(new FakeJson([new ModelError("no reply")]));
@@ -160,7 +162,7 @@ test("the reviewer's provider down: incomplete, and the reviewer's tests are wha
   expect(md).not.toContain("again to cover it");
   expect(md.match(/arnx review --resume/g)).toHaveLength(1);
   expect(summary(review, "").split("\n")[1]).toBe("Incomplete: `main` produced no tests: the reviewer's model " +
-    "call failed. myprovider (llm.example.com) unavailable: HTTP 503 on every call (1 call, 4 attempts); missing: the reviewer's tests. Run " +
+    "call failed. myprovider (llm.example.com) unavailable: HTTP 503 on every call (1 call, 7 attempts); missing: the reviewer's tests. Run " +
     "`arnx review --resume` when it is back.");
 });
 

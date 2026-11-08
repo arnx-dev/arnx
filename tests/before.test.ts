@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CopyDiffers } from "../src/baked";
-import { type BeforeRun, judgeBefore } from "../src/before";
+import { type Before, type BeforeRun, judgeBefore, judgeFix, missingName, namesAdded, newNames, sharedFailure, sharedInGroups, usesNew, vacuousBefore, vacuousPass } from "../src/before";
+import { testBody } from "../src/shallow";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { EVENTS_FILE, type TraceEvent } from "../src/events";
 import type { TestResult } from "../src/outcomes";
@@ -181,7 +182,7 @@ test("a regression is marked; a pre-existing failure is reported apart, not chal
   // only the regression went to the second model (the second call is the grouping step)
   expect(judge.calls.filter((c) => c.includes("The failing test:"))).toHaveLength(1);
   expect(judge.calls[0]).toContain("test_add");
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review, true)).toBe(1);
   // the check ran in a second session on the base, in the change's image, the failing file only, `runs` times
   expect(seen).toHaveLength(2);
   expect(seen[1]!.envFrom).toBe(seen[0]!.snap);
@@ -229,7 +230,7 @@ test("before_check = false: one session, no before fields, no timings", async ()
   expect(raw).not.toContain("before");
   expect(raw).not.toContain("timings");
   expect(events(rdir).some((e) => e.type.startsWith("before."))).toBe(false);
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review, true)).toBe(1);
 });
 
 test("the setting is written with a comment and read back", () => {
@@ -257,7 +258,7 @@ test("a change with no earlier commit is not checked, and says why", async () =>
     detail: "not checked: the change has no earlier commit to compare with", runs: [] })));
   const done = events(rdir).find((e) => e.type === "before.done")!;
   expect(done.data.skipped_reason).toBe("no-base");
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review, true)).toBe(1);
   // said once, above the findings, instead of on each one
   expect(review.beforeBaseEmpty).toBe("first-commit");
   expect(JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")).before_base_empty).toBe("first-commit");
@@ -281,7 +282,7 @@ test("a base that holds none of the changed files: said once above the findings,
     challenger: new FakeJson([{ verdict: "confirmed", reason: "a" }, { verdict: "confirmed", reason: "b" }]),
     sessionFactory: sessions(before) });
   expect(review.findings.map((f) => f.before!.status)).toEqual(["new-code", "new-code"]);
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review, true)).toBe(1);
   expect(review.beforeBaseEmpty).toBe("new-files");
   expect(load(rdir).beforeBaseEmpty).toBe("new-files");
   const md = readFileSync(join(rdir, "review.md"), "utf8");
@@ -418,4 +419,249 @@ test("a finding that fails the same way but uses what the change adds is judged,
   expect(add.before!.detail).toContain("the test uses `helper`, which the change adds");
   expect(add.verdict).toBe("disputed");
   expect(old.before!.status).toBe("pre-existing");
+});
+
+// Names, not words: what the change brings is read from the code of its source files, and a test uses it only in code.
+const diffOf = (path: string, added: string[]) => [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`,
+  `@@ -1 +1,${added.length + 1} @@`, " keep", ...added.map((l) => `+${l}`), ""].join("\n");
+const notTest = (n: string) => n.startsWith("test_");
+
+describe("names, not words", () => {
+  test("a word the change adds only in a comment is not a name it brings", () => {
+    const diff = diffOf("app.py", ["# SHOW the totals, then AGGREGATE them", 'MSG = "region indicated"',
+      "def total():", '    """generation of the total"""', "    return realname(1)  # trailing remark"]);
+    expect([...namesAdded(diff, notTest)].sort()).toEqual(["MSG", "def", "realname", "return", "total"].sort());
+    const block = diffOf("lib.rs", ["/* AGGREGATE", " SHOW */", 'fn go() { let s = "indicated"; run_it(s); } // region']);
+    expect([...namesAdded(block, notTest)]).not.toContain("AGGREGATE");
+    expect([...namesAdded(block, notTest)]).toContain("run_it");
+  });
+
+  test("a word from a data file in the change is not a name it brings", () => {
+    const docs = diffOf("docs/notes.md", ["AGGREGATE the region"]);
+    const data = diffOf("data/rows.json", ['{"indicated": 1}']);
+    const fixture = diffOf("tests/fixtures/sample.py", ["def generation(): pass"]);
+    const inTests = diffOf("tests/helpers.py", ["def shown(): pass"]);
+    for (const d of [docs, data, fixture, inTests]) expect([...newNames(d, notTest, () => null)]).toEqual([]);
+    expect([...newNames(diffOf("src/app.py", ["def generation(): pass"]), notTest, () => null)]).toContain("generation");
+  });
+
+  test("an assert message does not make a test use what the change adds", () => {
+    const source = 'def test_a():\n    assert total() == 3, "SHOW the region indicated"\n    # AGGREGATE later\n';
+    expect(usesNew(source, "test_a", new Set(["SHOW", "AGGREGATE", "region", "indicated"]))).toBeNull();
+    expect(usesNew(source, "test_a", new Set(["total"]))).toBe("total");
+    // A string that looks like a name (a patch target, a key) still counts.
+    const target = 'def test_b():\n    mocker.patch("app.new_helper")\n';
+    expect(usesNew(target, "test_b", new Set(["new_helper"]))).toBe("new_helper");
+    const same: Before = { status: "pre-existing", detail: "d", runs: ["failed"], message: "x" };
+    expect(vacuousBefore(same, source, "test_a", new Set(["SHOW"]))).toBe(same);
+    // No whole-file fallback: a test that cannot be found uses nothing.
+    expect(usesNew(source, "test_missing", new Set(["total"]))).toBeNull();
+  });
+
+  test("the next test's decorator is not part of this test", () => {
+    const py = 'def test_a():\n    assert 1\n\n@pytest.mark.parametrize(\n    "x",\n    [AGGREGATE],\n)\n@other\ndef test_b(x):\n    pass\n';
+    expect(testBody(py, "test_a")).not.toContain("AGGREGATE");
+    expect(testBody(py, "test_a")).not.toContain("@");
+    expect(testBody(py, "test_b")).toContain("def test_b");
+    const rs = "#[test]\nfn one() {\n    assert!(true);\n}\n\n#[should_panic]\n#[test]\nfn two() {}\n";
+    expect(testBody(rs, "one")).not.toContain("should_panic");
+  });
+
+  test("a message shared with tests the change fixes does not make a failure pre-existing", () => {
+    const fail = (name: string, message: string) => ({ testId: `t.py::${name}`, fileAttr: "t.py", name, outcome: "failed", message });
+    const same: Before = { status: "pre-existing", detail: "fails the same way", runs: ["failed"], message: "AssertionError: assert False" };
+    const base = [0, 1, 2].map(() => run(fail("test_p", "AssertionError: assert False"), fail("test_q", "AssertionError: assert False"),
+      fail("test_r", "AssertionError: other")));
+    const b = sharedFailure(same, "AssertionError: assert False", base, new Set(["t.py::test_p", "t.py::test_q", "t.py::test_r"]));
+    expect(b.status).toBe("unknown");
+    expect(b.detail).toBe("fails with the same message there, but so do 2 tests that pass with the change");
+    // Another message, or no passing test failing there: the verdict stands.
+    expect(sharedFailure(same, "AssertionError: assert False", base, new Set(["t.py::test_r"]))).toBe(same);
+    expect(sharedFailure(same, "AssertionError: assert False", base, new Set())).toBe(same);
+    // A test that failed in only some runs, or errored, settles nothing.
+    const mixed = [run(fail("test_p", "AssertionError: assert False")), run({ ...fail("test_p", ""), outcome: "passed" }), base[0]!];
+    expect(sharedFailure(same, "AssertionError: assert False", mixed, new Set(["t.py::test_p"]))).toBe(same);
+    // Only a pre-existing verdict is touched.
+    const other: Before = { status: "changed", detail: "d", runs: [] };
+    expect(sharedFailure(other, "AssertionError: assert False", base, new Set(["t.py::test_p"]))).toBe(other);
+  });
+});
+
+describe("fix round: whole files, shared messages", () => {
+  const HEAD = ["def a():", '    """Docs that', "    mention AGGREGATE and SHOW", "    go on and on", '    """', "    return brand_new(1)", ""].join("\n");
+  const BASE = ["def a():", '    """Docs that', "    go on and on", '    """', "    return 1", ""].join("\n");
+  const hunkDiff = (hunks: string[]) => ["diff --git a/lib/a.py b/lib/a.py", "--- a/lib/a.py", "+++ b/lib/a.py", ...hunks, ""].join("\n");
+  const read = (_path: string, side: "new" | "old") => side === "new" ? HEAD : BASE;
+
+  test("a hunk that starts inside a docstring is read with the whole file around it", () => {
+    // Lines 3-6 of the head: the docstring's inside, its end, then a line of code.
+    const code = hunkDiff(["@@ -3,3 +3,4 @@", "+    mention AGGREGATE and SHOW", "     go on and on", '     """', "-    return 1", "+    return brand_new(1)"]);
+    const names = [...namesAdded(code, notTest, read)];
+    expect(names).toContain("brand_new");
+    expect(names).not.toContain("AGGREGATE");
+    expect(names).not.toContain("SHOW");
+    // Without the file, the hunk alone gets both wrong (the fallback keeps working, with that limit).
+    expect([...namesAdded(code, notTest)]).toContain("AGGREGATE");
+    // A file that cannot be read falls back to its hunks.
+    expect([...namesAdded(code, notTest, () => null)]).toContain("AGGREGATE");
+    expect([...newNames(code, notTest, () => BASE, read)]).toEqual(["brand_new"]);
+  });
+
+  const fail = (name: string, message: string) => ({ testId: `t.py::${name}`, fileAttr: "t.py", name, outcome: "failed", message });
+  test("shared messages are counted across the finding files' runs and the fix proof's own, however many runs each has", () => {
+    const same: Before = { status: "pre-existing", detail: "d", runs: ["failed"], message: "x" };
+    const m = "AssertionError: assert False";
+    const own = [0, 1, 2].map(() => run(fail("test_q", m)));
+    const proofRuns = [run(fail("test_p", m))]; // cut after one run
+    const b = sharedInGroups(same, m, [own, proofRuns], new Set(["t.py::test_p"]));
+    expect(b.status).toBe("unknown");
+    expect(b.detail).toBe("fails with the same message there, but so does 1 test that passes with the change");
+    expect(sharedInGroups(same, m, [own, []], new Set(["t.py::test_p"]))).toBe(same);
+    expect(sharedInGroups(same, m, [own, proofRuns], new Set(["t.py::test_z"]))).toBe(same);
+  });
+
+  const SHARED = junitXml([[GEN, "test_add", "passed", ""], [GEN, "test_old", "failed", "assert 0 == 1"],
+    [GEN, "test_ok", "failed", "assert 0 == 1"], [GEN, "test_aaa", "passed", ""]]);
+  const writes = () => new ScriptedAgent([
+    [tool("write_file", { path: GEN, content: "from app import add, old\n\ndef test_aaa():\n    pass\n\ndef test_add():\n    assert add(2, 3) == 5\n" +
+      "\ndef test_old():\n    assert old() == 1\n\ndef test_ok():\n    pass\n" })],
+    [text(REPORT.replace("}]", "}, { \"test\": \"" + GEN + "::test_aaa\", \"expects\": \"a\" }]"))]]);
+  const AFTER_SHARED = junitXml([[GEN, "test_add", "failed", "assert -1 == 5"], [GEN, "test_old", "failed", "assert 0 == 1"],
+    [GEN, "test_ok", "passed", ""], [GEN, "test_aaa", "passed", ""]]);
+  const factory: SessionFactory = async (_cfg, snap, _log, body) =>
+    body(new FakeSession(snap, () => [snap.endsWith("/before") ? SHARED : AFTER_SHARED, "", false]));
+  for (const [name, fixProofMax] of [["with the fix proof on", 20], ["with the fix proof off", 0], ["past the fix proof's cap", 1]] as const) {
+    test(`a message shared with a test that passes with the change settles nothing, ${name}`, async () => {
+      const { review } = await runReview(repo, { settings: { ...SETTINGS, fixProofMax }, agentModel: writes(),
+        challenger: new FakeJson([{ verdict: "confirmed", reason: "x" }]), sessionFactory: factory });
+      const old = review.findings.find((f) => f.func === "test_old")!;
+      expect(old.before!.status).toBe("unknown");
+      expect(old.before!.detail).toBe("fails with the same message there, but so does 1 test that passes with the change");
+    });
+  }
+});
+
+describe("fix round 2: reading the diff against the files", () => {
+  const diffFor = (hunks: string[], from = "lib/a.py", to = "lib/a.py") =>
+    [`diff --git a/${from} b/${to}`, `--- a/${from}`, `+++ b/${to}`, ...hunks, ""].join("\n");
+
+  test("a mapped line that is not the row's text falls back to the hunk", () => {
+    const diff = diffFor(["@@ -1,1 +1,2 @@", " keep", "+brand_new(1)"]);
+    // The head text is not the file the diff was made from: its line 2 differs.
+    const names = [...namesAdded(diff, notTest, () => "something\nelse_entirely(2)\n")];
+    expect(names).toContain("brand_new");
+    expect(names).not.toContain("else_entirely");
+  });
+
+  test("a renamed file's old side is read by its old path", () => {
+    const diff = diffFor(["@@ -1,2 +1,2 @@", " keep", "-def old_one(): pass", "+def new_one(): pass"], "lib/old.py", "lib/new.py");
+    const seen: string[] = [];
+    const names = [...namesAdded(diff, notTest, (path, side) => {
+      seen.push(`${side}:${path}`);
+      return side === "new" ? "keep\ndef new_one(): pass\n" : "keep\ndef old_one(): pass\n";
+    })];
+    expect(seen.sort()).toEqual(["new:lib/new.py", "old:lib/old.py"]);
+    expect(names).toContain("new_one");
+    expect([...newNames(diff, notTest, (path) => path === "lib/old.py" ? "def new_one(): pass\n" : null)]).not.toContain("new_one");
+  });
+
+  test("an unreadable file whose hunk starts after a closing docstring keeps the code", () => {
+    const diff = diffFor(["@@ -3,2 +3,3 @@", '     """', "-    return 1", "+    return brand_new(1)"]);
+    expect([...namesAdded(diff, notTest, () => null)]).toContain("brand_new");
+    expect([...namesAdded(diff, notTest)]).toContain("brand_new");
+    const block = diffFor(["@@ -3,2 +3,3 @@", "     */", "+  run_new(1);"], "lib/a.js", "lib/a.js");
+    expect([...namesAdded(block, notTest)]).toContain("run_new");
+  });
+});
+
+describe("a pass and a failure say only what the runs show", () => {
+  const passed: Before = { status: "regression", detail: "passes on the code before the change (3 runs), fails with it",
+    runs: ["passed", "passed", "passed"] };
+  const o = (source: string, names: string[], baseOutput: string[] = []) =>
+    ({ source, func: "test_a", names: new Set(names), baseOutput });
+
+  test("a pass that uses a name the change adds is no regression", () => {
+    const b = vacuousPass(passed, o("def test_a():\n    assert cell_ran_at_or_after(1)\n", ["cell_ran_at_or_after"]));
+    expect(b.status).toBe("unknown");
+    expect(b.vacuous).toBe("new-name");
+    expect(b.detail).toContain("`cell_ran_at_or_after`");
+    expect(b.detail).toContain("no proof of a regression");
+  });
+
+  test("a pass whose helper thread died is no regression", () => {
+    const out = ["tests/x.py::test_a\n  PytestUnhandledThreadExceptionWarning: Exception in thread\n" +
+      "  AttributeError: module 'app' has no attribute 'add'\n"];
+    const b = vacuousPass(passed, o("def test_a():\n    assert add(1, 2) == 3\n", ["other_name"], out));
+    expect(b.status).toBe("unknown");
+    expect(b.vacuous).toBe("background-error");
+    // a warning with nothing missing in it, or missing code with no background error, proves nothing either way
+    expect(vacuousPass(passed, o("def test_a():\n    assert 1\n", [], ["PytestUnraisableExceptionWarning: x"]))).toBe(passed);
+    expect(vacuousPass(passed, o("def test_a():\n    assert 1\n", [], ["NameError: name 'x' is not defined"]))).toBe(passed);
+  });
+
+  test("a background error of another thread, and a sibling's missing name, leave a regression", () => {
+    const out = ["== warnings summary ==\ntests/x.py::test_other\n  threadexception.py: PytestUnhandledThreadExceptionWarning: Exception in thread\n\n" +
+      "== short test summary ==\nFAILED tests/x.py::test_new - ImportError: cannot import name 'fresh' from 'app'\n"];
+    expect(vacuousPass(passed, o("def test_a():\n    assert add(1, 2) == 3\n", [], out))).toBe(passed);
+    // the same lines in another test's block, or in one run the test's block is not in
+    const mine = ["tests/x.py::test_a\n  PytestUnhandledThreadExceptionWarning: died\n  NameError: name 'fresh' is not defined\n"];
+    expect(vacuousPass(passed, o("def test_a():\n    assert 1\n", [], mine)).vacuous).toBe("background-error");
+    expect(vacuousPass(passed, { ...o("def test_ab():\n    assert 1\n", [], mine), func: "test_ab" })).toBe(passed);
+  });
+
+  test("a pass that uses only old names stays a regression", () => {
+    expect(vacuousPass(passed, o("def test_a():\n    assert add(1, 2) == 3  # cell_ran_at_or_after\n", ["cell_ran_at_or_after"]))).toBe(passed);
+    // only a regression is set aside
+    const same: Before = { status: "pre-existing", detail: "d", runs: [] };
+    expect(vacuousPass(same, o("def test_a():\n    cell_ran_at_or_after()\n", ["cell_ran_at_or_after"]))).toBe(same);
+  });
+
+  test("a clipped import failure is new code", () => {
+    const clipped = "TypeError: __vite_ssr_import_2__.assertNever is not a function";
+    for (const m of ["…__vite_ssr_import_2__.assertNeve…", clipped, "x.__vi_import_0__.helper(…)"]) {
+      expect(judgeBefore(failing, GEN, three(run(t("test_add", "failed", m)))).status).toBe("new-code");
+    }
+  });
+
+  test("an unknown keyword on the code before is new code", () => {
+    const m = "TypeError: connect() got an unexpected keyword argument 'timeout'";
+    expect(judgeBefore(failing, GEN, three(run(t("test_add", "failed", m)))).status).toBe("new-code");
+  });
+
+  const loadFail = (m: string): TestResult => ({ testId: GEN, fileAttr: GEN, name: GEN, outcome: "failed", message: m });
+  const source = "def test_add():\n    assert add(2, 3) == 5\n\ndef test_uses():\n    assert Gadget() == 1\n";
+  const body = (func: string) => ({ source, func });
+
+  test("a file that cannot load for a name this test does not use settles nothing", () => {
+    const err = loadFail("ImportError: cannot import name 'Gadget' from 'app'");
+    const b = judgeBefore(failing, GEN, three(run(err)), false, body("test_add"));
+    expect(b.status).toBe("unknown");
+    expect(b.detail).toBe("its file cannot load there because `Gadget` is missing, which this test does not use");
+    // the same for a passing test's fix proof
+    const f = judgeFix(t("test_add", "passed"), GEN, three(run(err)), false, body("test_add"));
+    expect(f.status).toBe("unknown");
+    expect(f.detail).toContain("`Gadget` is missing");
+  });
+
+  test("a load failure for a name the test uses is new code", () => {
+    const err = loadFail("ImportError: cannot import name 'Gadget' from 'app'");
+    expect(judgeBefore(failing, GEN, three(run(err)), false, body("test_uses")).status).toBe("new-code");
+    // a module that is missing altogether: the file's imports from it are the tests' to use
+    const mod = loadFail("ModuleNotFoundError: No module named 'app.gadgets'");
+    expect(judgeBefore(failing, GEN, three(run(mod)), false, body("test_add")).status).toBe("new-code");
+    expect(judgeFix(t("test_uses", "passed"), GEN, three(run(err)), false, body("test_uses")).status).toBe("new-code");
+    // without the test's source, nothing is known about it: the old reading stands
+    expect(judgeBefore(failing, GEN, three(run(err))).status).toBe("new-code");
+  });
+
+  test("missingName reads the name out of the usual messages", () => {
+    expect(missingName("ImportError: cannot import name 'Gadget' from 'app'")).toBe("Gadget");
+    expect(missingName("AttributeError: module 'app' has no attribute 'add'")).toBe("add");
+    expect(missingName("NameError: name 'frob' is not defined")).toBe("frob");
+    expect(missingName("ReferenceError: frob is not defined")).toBe("frob");
+    // a whole module missing names no single thing: what the file imports from it, its tests use
+    expect(missingName("ModuleNotFoundError: No module named 'app.thing'")).toBeNull();
+    expect(missingName("Cannot find module './thing' from 'a.test.ts'")).toBeNull();
+    expect(missingName("assert 1 == 2")).toBeNull();
+  });
 });

@@ -10,7 +10,10 @@ import { parse as parseToml } from "smol-toml";
 import DEFAULT_TOML from "./prompts.toml" with { type: "text" };
 import { adapterFor } from "./adapters";
 import type { Words } from "./adapters/types";
+import type { Withheld } from "./change";
 import type { ReviewConfig } from "./config";
+import { DIFF_SECTION } from "./util";
+import { KEY_SHOWN, KEY_SHOWN_MEANS, maskPrivateKeys } from "./secrets";
 
 // The reviewer sees its project's whole part of the change: arnx refuses changes over MAX_DIFF_BYTES instead of
 // cutting them (a cut diff once hid two thirds of a branch while the review said "Complete").
@@ -25,6 +28,7 @@ export const PLACEHOLDERS = {
   "review.task": ["diff", "scope", "property", "tests_dir", "runner", "test_files", "max_questions"],
   "review.coverage": ["files"],
   "review.coverage_db": ["files", "names"],
+  "review.last_word": [],
   "hunt.system": [],
   "hunt.opening": ["diff", "scope", "context"],
   "hunt.task": ["no_tests", "max_suspects"],
@@ -106,6 +110,60 @@ function clip(diff: string): string {
   return diff.slice(0, DIFF_LIMIT) + "\n[diff truncated; read the changed files with the tools]\n";
 }
 
+/** The path a diff section is about: the new one, or the old one for a deletion. */
+function sectionPath(part: string): string {
+  const unquote = (p: string) => p.replace(/^"|"$/g, "").replace(/^[ab]\//, "");
+  const plus = /^\+\+\+ (.+)$/m.exec(part)?.[1], minus = /^--- (.+)$/m.exec(part)?.[1];
+  const path = [plus, minus].find((p) => !!p && p !== "/dev/null");
+  if (path) return unquote(path);
+  return /^diff --git a\/(.+?) b\/(.+)$/m.exec(part)?.[2] ?? "";
+}
+
+const NOTES = /\n\n(?=This change also edits files not shown here|These files look like secrets and are left out)/;
+const DOC_FILE = /\.(md|mdx|rst|txt|adoc)$|(^|\/)(docs?|documentation)\//i;
+const TEST_FILE = /(^|\/)(tests?|__tests__|spec|specs)\/|(^|[._-])(test|tests|spec)(?=[._-]|$)|_test\.|\.test\.|\.spec\./i;
+/** Whether a path looks like a test file or sits in a test folder. */
+export const isTestPath = (path: string) => TEST_FILE.test(path);
+
+/** The diff for a model that reads at most `limit` characters of it. A diff within the limit is returned as it is. A longer
+ * one is put in the order of what the reader needs: the file `first` (the suspect's), the files the test names, other
+ * source, tests, then docs; files that no longer fit are left out and named at the end. The first file is cut to fit
+ * when it alone is longer than the limit. */
+export function orderDiff(whole: string, first = "", limit = 30_000, test = ""): string {
+  // The notes a round appends (other files, files left out) are not a file's text: they stay at the end, always.
+  const at = whole.search(NOTES);
+  const diff = at < 0 ? whole : whole.slice(0, at), notes = at < 0 ? "" : whole.slice(at + 2);
+  if (diff.length <= limit) return whole;
+  const parts = diff.split(DIFF_SECTION).filter(Boolean).map((text) => ({ text, path: sectionPath(text) }));
+  const names = (path: string) => {
+    if (!path || !test) return false;
+    const stem = path.replace(/\.[^./]*$/, "");
+    const base = stem.slice(stem.lastIndexOf("/") + 1);
+    return test.includes(path) || test.includes(stem.replaceAll("/", ".")) || test.includes(stem) ||
+      (base.length >= 4 && new RegExp(`\\b${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(test));
+  };
+  const rank = (path: string) => first && path === first ? 0 : names(path) ? 1 : DOC_FILE.test(path) ? 4
+    : TEST_FILE.test(path) ? 3 : 2;
+  const ordered = parts.map((p, i) => ({ ...p, i, r: rank(p.path) })).sort((a, b) => a.r - b.r || a.i - b.i);
+  const out: string[] = [], left: string[] = [];
+  let used = 0;
+  for (const p of ordered) {
+    if (used + p.text.length <= limit) {
+      out.push(p.text);
+      used += p.text.length;
+    } else if (!out.length) {
+      out.push(p.text.slice(0, limit));
+      used = limit;
+    } else left.push(p.path || "(unnamed)");
+  }
+  const end = notes ? `\n${notes}` : "";
+  if (!left.length) return !notes ? out.join("") : out.join("") + (out.join("").endsWith("\n") ? "" : "\n") + end;
+  const shown = left.slice(0, 20).join(", ") + (left.length > 20 ? `, and ${left.length - 20} more` : "");
+  const tail = `[${left.length} more file${left.length === 1 ? "" : "s"} changed: ${shown}; not shown]\n`;
+  const body = out.join("");
+  return (body.endsWith("\n") ? body : body + "\n") + tail + end;
+}
+
 const wordsOf = (cfg: ReviewConfig) => adapterFor(cfg).words(cfg.runner);
 const join = (...parts: string[]) => posix.normalize(posix.join(...parts)).replace(/\/$/, "");
 
@@ -123,7 +181,9 @@ export interface Suspect { id: string; file: string; line: number; claim: string
 
 /** What a project's round covers: the changed files it owns and the ones it only uses; `elsewhere`, the change's
  * other files, which its diff leaves out. */
-export interface Scope { owned: string[]; used: string[]; elsewhere?: string[] }
+export interface Scope { owned: string[]; used: string[]; elsewhere?: string[];
+  /** Files of the change left out for what they hold. */
+  leftOut?: readonly Withheld[] }
 
 /** The most files of the change's other parts a prompt names. */
 const ELSEWHERE_MAX = 40;
@@ -137,13 +197,33 @@ export function elsewhereNote(files: readonly string[]): string {
     "diff above: never conclude that something is missing from the change because the diff does not show it.";
 }
 
+/** Files left out as secret-looking, named with what they hold so a round never takes them for absent. */
+export function leftOutNote(files: readonly Withheld[]): string {
+  if (!files.length) return "";
+  const named = files.slice(0, ELSEWHERE_MAX).map((x) => `\`${x.path}\` (${x.label})`).join(", ");
+  return "These files look like secrets and are left out: a copy holding the secret is in neither this diff, the code you can " +
+    "read nor the sandbox, so never conclude that an edit to one is missing or that its absence is a defect, and a test that " +
+    "needs one cannot run: " + named +
+    `${files.length > ELSEWHERE_MAX ? `, and ${files.length - ELSEWHERE_MAX} more` : ""}.`;
+}
+
+/** The scope a round's task names: a repository of one project says only what is left out. */
+export const scopeTold = (scoped: boolean, scope: Scope): Scope | undefined =>
+  scoped ? scope : scope.leftOut?.length ? { owned: [], used: [], leftOut: scope.leftOut } : undefined;
+
+/** Said when a diff shows what the filter hides. In code, and absent otherwise, so the prompts' templates stand. */
+export const keyShownNote = (diff: string) => diff.includes(KEY_SHOWN) || maskPrivateKeys(diff) !== diff ? KEY_SHOWN_MEANS : "";
+const withKeyNote = (scope: string, diff: string) => keyShownNote(diff) ? `${scope}\n${keyShownNote(diff)}\n` : scope;
+
 function scopeText(cfg: ReviewConfig, scope: Scope | undefined): string {
   if (!scope) return "";
+  const left = leftOutNote(scope.leftOut ?? []);
+  if (left && !scope.owned.length && !scope.used.length) return `\n${left}\n`;
   const list = (xs: string[]) => xs.length ? xs.map((x) => `\`${x}\``).join(", ") : "none";
   const others = elsewhereNote(scope.elsewhere ?? []);
   return `\nThis review covers the project \`${cfg.name}\` (root \`${cfg.workdir}\`). Files of this change it owns: ` +
     `${list(scope.owned)}. Files it only uses: ${list(scope.used)}. Test the behaviour this project gets from the ` +
-    `change.${others ? ` ${others}` : ""}\n`;
+    `change.${others ? ` ${others}` : ""}${left ? ` ${left}` : ""}\n`;
 }
 
 /** The prompts built from one set of templates: arnx's defaults, or with a repository's overrides (`overridden`). */
@@ -175,20 +255,25 @@ export class Prompts {
     return base ? base + extra : extra.trimStart() + " Then reply with the JSON again, listing every test.";
   }
 
+  /** The reviewer's last turn when its budget runs out: its report on the tests it wrote. */
+  lastWordTask(): string {
+    return literal(this.t["review.last_word"]);
+  }
+
   huntSystem(): string {
     return literal(this.t["hunt.system"]);
   }
 
   /** The first message of a hunted review: the change, then the hunt. */
   huntTask(cfg: ReviewConfig, diff: string, context: string, scope?: Scope): string {
-    return substitute(this.t["hunt.opening"], { diff: clip(diff), scope: scopeText(cfg, scope),
+    return substitute(this.t["hunt.opening"], { diff: clip(diff), scope: withKeyNote(scopeText(cfg, scope), diff),
       context: context || "(none found)" }) +
       substitute(this.t["hunt.task"], { no_tests: literal(this.t["hunt.no_tests"]), max_suspects: MAX_SUSPECTS });
   }
 
   /** The second hunter's task: the same opening and hunt, without tools, with the changed definitions whole. */
   secondHuntTask(cfg: ReviewConfig, diff: string, context: string, definitions: string, scope?: Scope): string {
-    return substitute(this.t["hunt.opening"], { diff: clip(diff), scope: scopeText(cfg, scope),
+    return substitute(this.t["hunt.opening"], { diff: clip(diff), scope: withKeyNote(scopeText(cfg, scope), diff),
       context: context || "(none found)" }) +
       substitute(this.t["hunt.task"], { no_tests: "", max_suspects: MAX_SUSPECTS }) +
       (definitions ? substitute(this.t["hunt.second_files"], { files: definitions }) : "");
@@ -239,7 +324,7 @@ export class Prompts {
 
   reviewTask(cfg: ReviewConfig, diff: string, maxQuestions: number, scope?: Scope): string {
     const w = wordsOf(cfg);
-    return substitute(this.t["review.task"], { diff: clip(diff), scope: scopeText(cfg, scope), property: property(w),
+    return substitute(this.t["review.task"], { diff: clip(diff), scope: withKeyNote(scopeText(cfg, scope), diff), property: property(w),
       tests_dir: join(cfg.workdir, cfg.testsDir), runner: w.runner, test_files: w.testFiles,
       max_questions: maxQuestions });
   }
@@ -260,8 +345,8 @@ export class Prompts {
   }
 
   challengeUser(diff: string, testFile: string, testSource: string, testId: string, failure: string,
-                explanation: string, questions: string[] = []): string {
-    const body = substitute(this.t["challenge.task"], { diff: clip(diff).slice(0, 30_000), test_file: testFile,
+                explanation: string, questions: string[] = [], suspectFile = ""): string {
+    const body = substitute(this.t["challenge.task"], { diff: orderDiff(diff, suspectFile, 30_000, testSource), test_file: testFile,
       test_source: testSource.slice(0, 40_000), test_id: testId, failure: failure.slice(0, 4000),
       explanation: explanation || "(none given)" });
     if (!questions.length) return body;
@@ -363,7 +448,7 @@ export function explainUser(diff: string, findings: { id: string; testId: string
   const list = findings.map((f) => `<finding id="${f.id}">\nTest: ${f.testId}\nFailure:\n${f.message.slice(0, 2000)}\n` +
     `Reviewer's explanation: ${f.explanation || "(none given)"}\n` +
     `Second opinion: ${f.verdict ?? "not given"}${f.reason ? `: ${f.reason}` : ""}\n</finding>`).join("\n");
-  return `The change:\n<diff>\n${clip(diff).slice(0, 30_000)}\n</diff>\n\nThe test files:\n${tests}\n\n` +
+  return `The change:\n<diff>\n${orderDiff(diff, "", 30_000, files.map((p) => sources[p] ?? "").join("\n"))}\n</diff>\n\nThe test files:\n${tests}\n\n` +
     `The findings:\n${list}\n\nPut every finding id in exactly one group.`;
 }
 
@@ -372,7 +457,8 @@ export function explainUser(diff: string, findings: { id: string; testId: string
 const VERSIONED: PromptKey[] = ["review.system", "review.task", "setup.system", "setup.task", "challenge.system",
   "challenge.task", "answer.task", "review.env_hint", "review.coverage", "hunt.system", "hunt.opening", "hunt.task",
   "hunt.no_tests", "hunt.second_files", "prove.task", "review.coverage_db", "prove.untested", "rank.system",
-  "rank.task", "challenge.depends", "questions.asked", "questions.system", "questions.task", "setup.draft"];
+  "rank.task", "challenge.depends", "questions.asked", "questions.system", "questions.task", "setup.draft",
+  "review.last_word"];
 
 export const PROMPT_VERSION = createHash("sha256").update(VERSIONED.map((k) => DEFAULTS[k]).join("\0"))
   .digest("hex").slice(0, 12);

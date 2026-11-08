@@ -3,18 +3,20 @@
 // "no report", never the exit code. No model or Docker: the sandbox is a fake that type checks like tsc.
 import { COPY_SUFFIX } from "../src/testround";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
 import { typescript } from "../src/adapters/typescript";
+import { GITIGNORE } from "../src/cli";
 import { parseReviewConfig, parseReviewFile, reviewConfigPath, stamp, stampFile } from "../src/config";
-import { detect, typeCheckable } from "../src/detect";
+import { ciTypeChecker, detect, typeCheckable } from "../src/detect";
 import { EVENTS_FILE, type TraceEvent } from "../src/events";
 import { exitCode, load, render, summary } from "../src/report";
 import { runReview } from "../src/reviewer";
-import type { RunResult, Runner, SessionFactory } from "../src/sandbox";
+import { OutOfTime, type RunResult, type Runner, type SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
-import { runSetup, runSuite } from "../src/setup";
-import { describeTypecheck, markNew, parseTsc } from "../src/typecheck";
+import { runSetup, runSuite, typecheckNote } from "../src/setup";
+import { approvalChecks, pythonTypeGap, typecheckGaps } from "../src/setupview";
+import { describeTypecheck, markNew, parseTsc, QUICK_TYPECHECK_TIMEOUT, TYPECHECK_TIMEOUT, typeGaps, workspaceNames } from "../src/typecheck";
 import { FakeJson, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
@@ -60,6 +62,14 @@ describe("parseTsc", () => {
     expect(markNew([e("a.ts", 9), e("a.ts", 12), e("b.ts", 1), e("a.ts", 3, "other")], [e("a.ts", 4)]))
       .toEqual([false, true, true, true]);
   });
+
+  test("an error that differs only in tsc's '... N more ...' is not new", () => {
+    const e = (message: string) => ({ file: "a.ts", line: 1, column: 1, code: "TS2322", message });
+    const before = [e("Type '{ a: 1; ... 3 more ...; }' is not assignable to type 'T'.")];
+    const after = [e("Type '{ a: 1; ... 4 more ...; }' is not assignable to type 'T'.")];
+    expect(markNew(after, before)).toEqual([false]);
+    expect(markNew([e("Type '{ a: 1; ... 4 more ...; }' is not assignable to type 'U'.")], before)).toEqual([true]);
+  });
 });
 
 describe("review.yaml", () => {
@@ -93,6 +103,14 @@ function tsc(snap: string, workdir: string): [string, number] {
       if (statSync(p).isDirectory()) walk(p);
       else if (name.endsWith(".ts")) {
         readFileSync(p, "utf8").split("\n").forEach((l, i) => {
+          if (l.includes("GAP-ERROR")) {
+            lines.push(`${posix.relative(join(snap, workdir), p)}(${i + 1},7): error TS2307: Cannot find module ` +
+              "'@prisma/client' or its corresponding type declarations.");
+          }
+          if (l.includes("MISSING-ERROR")) {
+            lines.push(`${posix.relative(join(snap, workdir), p)}(${i + 1},7): error TS2307: Cannot find module ` +
+              "'ghost-mod' or its corresponding type declarations.");
+          }
           if (l.includes("TYPE-ERROR")) {
             lines.push(`${posix.relative(join(snap, workdir), p)}(${i + 1},7): error TS2322: Type 'string' is not ` +
               "assignable to type 'number'.");
@@ -116,6 +134,18 @@ class FakeTs implements Runner {
       const [output, exitCode] = tsc(this.snap, this.workdir);
       return { exitCode, output, timedOut: false, seconds: 1.5 };
     }
+    if (command.startsWith("no-time-tsc")) throw new OutOfTime(10);
+    if (command.startsWith("gap-tsc")) {
+      const out = ["a", "b", "c"].map((n, i) => `src/${n}.ts(${i + 1},9): error TS2305: Module '"@prisma/client"' has ` +
+        "no exported member 'User'.").join("\n");
+      return { exitCode: 2, output: out, timedOut: false, seconds: 1 };
+    }
+    if (command.startsWith("swamp-tsc")) {
+      const out = Array.from({ length: 100 }, (_, i) => `src/a.ts(${i + 1},1): error TS2322: Type 'string' is not ` +
+        "assignable to type 'number'.").join("\n");
+      return { exitCode: 2, output: out, timedOut: false, seconds: 1 };
+    }
+    if (command.startsWith("slow-tsc")) return { exitCode: null, output: "[timed out]", timedOut: true, seconds: 600 };
     if (command.startsWith("missing-tsc")) {
       return { exitCode: 127, output: "sh: 1: missing-tsc: not found", timedOut: false, seconds: 0.1 };
     }
@@ -218,6 +248,41 @@ describe("a review", () => {
         errors: 2, in_changed_files: 1, new: 1, pre_existing: 1, before: "compared", secs: 3 });
     });
 
+  test("errors about one module the type check cannot see are kept as a gap, and the report says they are not the change's",
+    async () => {
+      writeFileSync(join(repo, "src", "old.ts"), "export const n = 1;\n");
+      writeFileSync(join(repo, "src", "calc.ts"), "export const add = (a: number, b: number) => a + b;\n" +
+        "// GAP-ERROR\n// GAP-ERROR\n// GAP-ERROR\n");
+      const { review: r, rdir } = await review();
+      expect(r.typecheck![0]!.gaps).toEqual([{ kind: "generated", module: "@prisma/client", errors: 3 }]);
+      expect(readFileSync(join(rdir, "review.md"), "utf8")).toContain("the type check cannot see @prisma/client " +
+        "(3 errors); these errors say nothing about the change");
+      expect((load(rdir).typecheck![0] as { gaps?: unknown }).gaps).toEqual(r.typecheck![0]!.gaps);
+    });
+
+  test("three imports of a missing module that the change adds are the change's errors, not a gap", async () => {
+    writeFileSync(join(repo, "src", "calc.ts"), "export const add = (a: number, b: number) => a + b;\n" +
+      "// MISSING-ERROR\n// MISSING-ERROR\n// MISSING-ERROR\n");
+    const { review: r, rdir } = await review();
+    expect(r.typecheck![0]!.gaps).toBeUndefined();
+    expect(r.typecheck![0]!.new).toBe(3);
+    expect(readFileSync(join(rdir, "review.md"), "utf8")).not.toContain("say nothing about the change");
+  });
+
+  test("the same errors already in the code before the change are a gap", async () => {
+    writeFileSync(join(repo, "src", "old.ts"), "// MISSING-ERROR\n// MISSING-ERROR\n// MISSING-ERROR\n");
+    commit(repo, "missing module already there");
+    // A review is of the last commit and what is not committed: the module was missing before both.
+    writeFileSync(join(repo, "src", "extra.ts"), "export const e = 1;\n");
+    commit(repo, "another change");
+    writeFileSync(join(repo, "src", "calc.ts"), "export const add = (a: number, b: number) => a + b;\n" +
+      "export const label: number = 'sum'; // TYPE-ERROR\n");
+    const { review: r, rdir } = await review();
+    expect(r.typecheck![0]!.gaps).toEqual([{ kind: "missing", module: "ghost-mod", errors: 3 }]);
+    expect(readFileSync(join(rdir, "review.md"), "utf8")).toContain("the type check cannot see ghost-mod (3 errors); " +
+      "these errors say nothing about the change");
+  });
+
   test("an error only in a generated test is left out: no type errors", async () => {
     writeFileSync(join(repo, "src", "calc.ts"), "export const add = (a: number, b: number) => a + b;\n");
     writeFileSync(join(repo, "src", "old.ts"), "export const n = 1;\n");
@@ -264,6 +329,153 @@ describe("a review", () => {
   });
 });
 
+describe("a swamped type check", () => {
+  beforeEach(() => project(TYPED));
+  const record = () => join(repo, ".arnx", "typecheck.json");
+  const many = (n: number) => "// TYPE-ERROR\n".repeat(n);
+  const swamp = () => writeFileSync(join(repo, "src", "old.ts"), many(100));
+  /** A committed baseline that is swamped, then a small change on top of it. */
+  const swampedBaseline = () => {
+    swamp();
+    writeFileSync(join(repo, "src", "calc.ts"), "export const add = (a: number, b: number) => a + b;\n");
+    commit(repo, "swamped");
+    writeFileSync(join(repo, "src", "calc.ts"), `export const add = (a: number, b: number) => a + b;\n${many(1)}`);
+  };
+
+  test("100 errors or more before the change are recorded, counted at the baseline and not from the change's own; " +
+    "the review still compares them", async () => {
+    swampedBaseline();
+    const { review: r } = await review();
+    expect(r.typecheck![0]).toMatchObject({ status: "errors", errors: 101, new: 1, preExisting: 100, before: "compared" });
+    const rec = JSON.parse(readFileSync(record(), "utf8")) as Record<string, { command: string; errors: number; at: string }>;
+    expect(rec.main!.command).toBe(TSC);
+    expect(rec.main!.errors).toBe(100);
+    expect(Math.abs(Date.now() - Date.parse(rec.main!.at))).toBeLessThan(60_000);
+  });
+
+  test("a change that adds 100 errors to a clean baseline shows them all and does not make the project swamped", async () => {
+    writeFileSync(join(repo, "src", "old.ts"), "export const n = 1;\n");
+    writeFileSync(join(repo, "src", "calc.ts"), "export const add = (a: number, b: number) => a + b;\n");
+    commit(repo, "clean");
+    writeFileSync(join(repo, "src", "calc.ts"), many(100));
+    const { review: r } = await review();
+    expect(r.typecheck![0]).toMatchObject({ status: "errors", errors: 100, new: 100, before: "compared" });
+    const rec = existsSync(record()) ? JSON.parse(readFileSync(record(), "utf8")) as Record<string, unknown> : {};
+    expect(rec.main).toBeUndefined();
+    const again = await review();
+    expect(again.review.typecheck![0]!.status).toBe("errors");
+  });
+
+  test("a project last swamped skips its check and says so", async () => {
+    swampedBaseline();
+    await review();
+    const seen: Seen[] = [];
+    const { review: r, rdir } = await review(SETTINGS, seen);
+    expect(r.typecheck).toEqual([{ project: "main", command: TSC, status: "skipped", errors: 0, inChangedFiles: 0,
+      diagnostics: [], skippedFor: { errors: 100, at: expect.any(String) }, secs: 0 }]);
+    expect(seen.flatMap((s) => s.commands).filter((c) => c === TSC)).toEqual([]);
+    expect(seen).toHaveLength(1);
+    expect([r.passed, r.missingRuns, exitCode(r)]).toEqual([1, 0, 0]);
+    const line = "skipped: the code had 100 errors when last run, so errors this change adds are not checked; " +
+      "`arnx setup --project main` runs it again";
+    expect(describeTypecheck(r.typecheck![0]!)).toBe(line);
+    const md = readFileSync(join(rdir, "review.md"), "utf8").replace(/\n {2}|\n(?=check below)/g, " ");
+    expect(md.replace(/(?<=\w)\n(?=\w)/g, " ")).toContain(`\nType check ${line}.\n`);
+    expect(md).toContain(`- Skipped \`${TSC}\`: ${line.replace("skipped: ", "")}.\n`);
+    // Nothing above a skipped entry says the check ran on the change.
+    expect(md).not.toContain("ran once on the change");
+    const json = JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")) as Record<string, unknown>;
+    const entry = (json.typecheck as Record<string, unknown>[])[0]!;
+    expect(entry).toMatchObject({ status: "skipped", skipped_for: { errors: 100 } });
+    // No count that could read like a clean check.
+    for (const k of ["errors", "in_changed_files", "diagnostics"]) expect(k in entry).toBe(false);
+    expect(load(rdir).typecheck).toEqual(r.typecheck!);
+  });
+
+  test("a range review of an older commit neither reads nor writes the record", async () => {
+    swampedBaseline();
+    await review();
+    const before = readFileSync(record(), "utf8");
+    commit(repo, "tip with an error");
+    const { review: r } = await runReview(repo, { settings: SETTINGS, agentModel: agent(), challenger: new FakeJson([]),
+      sessionFactory: sandbox(), range: "HEAD~2..HEAD~1" });
+    expect(r.typecheck![0]!.status).not.toBe("skipped");
+    expect(readFileSync(record(), "utf8")).toBe(before);
+    rmSync(record());
+    await runReview(repo, { settings: SETTINGS, agentModel: agent(), challenger: new FakeJson([]),
+      sessionFactory: sandbox(), range: "HEAD~2..HEAD~1" });
+    expect(existsSync(record())).toBe(false);
+  });
+
+  test("the project's install and test steps are part of what a record depends on", async () => {
+    swampedBaseline();
+    await review();
+    writeFileSync(reviewConfigPath(repo), stamp(parseReviewConfig(`${TYPED}install:\n  - echo fixed\n`), "Dev", "2026-10-20"));
+    expect((await review()).review.typecheck![0]!.status).toBe("errors");
+  });
+
+  test("typecheck.json is listed in .arnx/.gitignore before a review first writes it", async () => {
+    swampedBaseline();
+    writeFileSync(join(repo, ".arnx", ".gitignore"), "reviews/\n");
+    await review();
+    expect(existsSync(record())).toBe(true);
+    expect(readFileSync(join(repo, ".arnx", ".gitignore"), "utf8").split("\n")).toContain("typecheck.json");
+  });
+
+  test("a changed command runs it again", async () => {
+    swampedBaseline();
+    await review();
+    writeFileSync(reviewConfigPath(repo), stamp(parseReviewConfig(`${YAML}typecheck: ${TSC} --incremental false\n`), "Dev",
+      "2026-10-20"));
+    const { review: r } = await review();
+    expect(r.typecheck![0]!.status).not.toBe("skipped");
+  });
+
+  test("an old record runs it again", async () => {
+    swampedBaseline();
+    await review();
+    const rec = JSON.parse(readFileSync(record(), "utf8")) as Record<string, { at: string }>;
+    rec.main!.at = new Date(Date.now() - 15 * 86_400_000).toISOString();
+    writeFileSync(record(), JSON.stringify(rec));
+    const { review: r } = await review();
+    expect(r.typecheck![0]).toMatchObject({ status: "errors", before: "compared" });
+    // The run wrote a fresh record, so the next review skips again.
+    expect((await review()).review.typecheck![0]!.status).toBe("skipped");
+    rec.main!.at = new Date(Date.now() - 13 * 86_400_000).toISOString();
+    writeFileSync(record(), JSON.stringify(rec));
+    expect((await review()).review.typecheck![0]!.status).toBe("skipped");
+  });
+
+  test("a change to the type-check config or the dependencies since the record runs it again", async () => {
+    swampedBaseline();
+    await review();
+    expect((await review()).review.typecheck![0]!.status).toBe("skipped");
+    // Committed config changes (not part of the reviewed change) invalidate the record all the same.
+    for (const [file, text] of [["tsconfig.json", '{"compilerOptions": {"strict": false}}\n'],
+      ["package-lock.json", '{"lockfileVersion": 3}\n'],
+      ["package.json", '{"devDependencies": {"typescript": "5.9.4", "vitest": "3.2.4"}}\n']] as const) {
+      swampedBaseline();
+      await review();
+      const calc = readFileSync(join(repo, "src", "calc.ts"), "utf8");
+      writeFileSync(join(repo, file), text);
+      commit(repo, `edit ${file}`);
+      writeFileSync(join(repo, "src", "calc.ts"), `${calc}// more\n`);
+      expect((await review()).review.typecheck![0]!.status).toBe("errors");
+    }
+  });
+
+  test("a change that itself edits the config runs the check", async () => {
+    swampedBaseline();
+    await review();
+    writeFileSync(join(repo, "tsconfig.json"), '{"compilerOptions": {"strict": false}}\n');
+    expect((await review()).review.typecheck![0]!.status).toBe("errors");
+  });
+
+  test("the record is local state: ignored by git, never in a snapshot", () => {
+    expect(GITIGNORE.split("\n")).toContain("typecheck.json");
+  });
+});
+
 test("a project without typecheck reviews exactly as before: no type check run, nothing in the report", async () => {
   project(YAML);
   const seen: Seen[] = [];
@@ -285,6 +497,59 @@ test("several projects: each type check is named after its project", () => {
     "check below).\n");
   expect(md).toContain("\n- `web` ran `npx tsc --noEmit -p tsconfig.json`: no type errors.\n");
   expect(summary(r, "review.md")).toContain("\n  Type check (api): timed out after 600 s\n");
+});
+
+describe("workspaceNames", () => {
+  const manifest = (dir: string, name: string) => {
+    mkdirSync(join(dir), { recursive: true });
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name }));
+  };
+  test("declared workspace folders are the siblings; examples and node_modules are not", () => {
+    const root = join(tmp(), "ws");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "top", workspaces: ["packages/*"] }));
+    manifest(join(root, "packages", "core"), "@acme/core");
+    manifest(join(root, "examples", "demo"), "left-pad");
+    manifest(join(root, "packages", "core", "node_modules", "dep"), "dep");
+    expect(workspaceNames(root)).toEqual(["@acme/core"]);
+    // Without a declaration, every manifest below the root outside node_modules counts.
+    const bare = join(tmp(), "bare");
+    manifest(join(bare, "a"), "pa");
+    manifest(join(bare, "node_modules", "x"), "nx");
+    expect(workspaceNames(bare)).toEqual(["pa"]);
+  });
+});
+
+describe("typeGaps", () => {
+  const err = (code: string, message: string, file = "src/a.ts") => ({ file, line: 1, column: 1, code, message });
+  const prisma = (file: string) => err("TS2305", `Module '"@prisma/client"' has no exported member 'User'.`, file);
+
+  test("errors about one missing module are named as a gap", () => {
+    const errors = [prisma("a.ts"), prisma("b.ts"), prisma("c.ts"),
+      err("TS2307", "Cannot find module '@acme/core' or its corresponding type declarations."),
+      err("TS2307", "Cannot find module '@acme/core' or its corresponding type declarations.", "src/b.ts"),
+      err("TS2307", "Cannot find module '@acme/core/sub' or its corresponding type declarations.", "src/c.ts"),
+      err("TS2307", "Cannot find module './local' or its corresponding type declarations.", "src/d.ts"),
+      err("TS2307", "Cannot find module './local' or its corresponding type declarations.", "src/e.ts"),
+      err("TS2307", "Cannot find module './local' or its corresponding type declarations.", "src/f.ts"),
+      err("TS2322", "Type 'string' is not assignable to type 'number'.")];
+    expect(typeGaps(errors, ["@acme/core"])).toEqual([
+      { kind: "generated", module: "@prisma/client", errors: 3 },
+      { kind: "sibling", module: "@acme/core", errors: 3 }]);
+    expect(typeGaps([...errors.slice(0, 3), ...Array.from({ length: 3 }, (_, i) =>
+      err("TS2307", "Cannot find module 'left-pad' or its corresponding type declarations.", `src/${i}.ts`))], []))
+      .toEqual([{ kind: "generated", module: "@prisma/client", errors: 3 },
+        { kind: "missing", module: "left-pad", errors: 3 }]);
+  });
+
+  test("scattered errors are not", () => {
+    const errors = [prisma("a.ts"), prisma("b.ts"),
+      err("TS2307", "Cannot find module 'x' or its corresponding type declarations."),
+      err("TS2307", "Cannot find module 'y' or its corresponding type declarations."),
+      err("TS2307", "Cannot find module 'z' or its corresponding type declarations."),
+      err("TS2322", "Type 'string' is not assignable to type 'number'.")];
+    expect(typeGaps(errors, [])).toEqual([]);
+  });
 });
 
 describe("setup", () => {
@@ -330,11 +595,157 @@ ${typecheck ? `    typecheck: ${typecheck}\n` : ""}uncovered: []
       writeFileSync(join(snap, "web", "src", "a.ts"), "export const n: number = 'x'; // TYPE-ERROR\n");
       const [ok, summary] = await runSuite(cfg(TSC), snap, join(tmp(), "b.log"), { sessionFactory: sandbox() });
       expect([ok, summary]).toEqual([true, "1 passed; type check: 1 type error"]);
+      // A command that cannot run is information too: the project's tests ran, so it stands.
       const [bad, why, tail] = await runSuite(cfg("missing-tsc"), snap, join(tmp(), "b.log"),
         { sessionFactory: sandbox() });
-      expect([bad, why, tail]).toEqual([false, "1 passed; but the type check (typecheck) failed without reporting a " +
-        "type error: it could not start, or its output is not tsc's", "sh: 1: missing-tsc: not found"]);
+      expect([bad, why, tail]).toEqual([true, "1 passed; type check: failed without reporting a type error " +
+        "(it could not start, or its output is not tsc's)", "sh: 1: missing-tsc: not found"]);
     });
+
+  test("a type check with no time left does not stop a project whose tests ran", async () => {
+    const snap = join(tmp(), "snap");
+    mkdirSync(join(snap, "web", "src"), { recursive: true });
+    writeFileSync(join(snap, "web", "src", "a.ts"), "export const n = 1;\n");
+    const file = parseReviewFile(web("no-time-tsc")).projects[0]!;
+    const [ok, summary] = await runSuite(file, snap, join(tmp(), "b.log"), { sessionFactory: sandbox() });
+    expect(ok).toBe(true);
+    expect(summary).toContain("not run");
+    expect(summary).not.toContain("failed without reporting");
+    // A type check that timed out stands too.
+    const [slow, why] = await runSuite(parseReviewFile(web("slow-tsc")).projects[0]!, snap, join(tmp(), "b.log"),
+      { sessionFactory: sandbox() });
+    expect(slow).toBe(true);
+    expect(why).toContain("timed out");
+  });
+
+  test("a quick setup's type check gets QUICK_TYPECHECK_TIMEOUT, a full one TYPECHECK_TIMEOUT", async () => {
+    const cfg = parseReviewFile(web(TSC)).projects[0]!;
+    const seen: number[] = [];
+    const runner = { run: (_c: string, t: number): RunResult => {
+      seen.push(t);
+      return { exitCode: 0, output: "", timedOut: false, seconds: 0 };
+    } };
+    await typecheckNote(runner, cfg, true);
+    await typecheckNote(runner, cfg, false);
+    expect(seen).toEqual([QUICK_TYPECHECK_TIMEOUT, TYPECHECK_TIMEOUT]);
+    expect(QUICK_TYPECHECK_TIMEOUT).toBe(180);
+  });
+
+  const twice = async (typecheck: string) => {
+    const m = new ScriptedAgent([
+      [tool("try_project", { yaml: web(typecheck) })],
+      [tool("try_project", { yaml: web(typecheck) })],
+      [tool("propose", { yaml: web(typecheck) })],
+      [text("done")],
+    ]);
+    const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: sandbox() });
+    const said = (call: number) => (m.calls[call]!.messages.at(-1)!.content as Record<string, unknown>[])
+      .map((x) => String(x.content)).join("\n");
+    return { r, said };
+  };
+
+  test("a gap goes back once, then is said under Worth a look", async () => {
+    const { r, said } = await twice("gap-tsc");
+    expect(said(1)).toContain("the type check cannot see @prisma/client (3 errors)");
+    expect(said(1)).toContain("prisma generate");
+    expect(said(1)).not.toContain("When every project runs, submit");
+    // Tried again unchanged, the run stands and the proof keeps the gap.
+    expect(said(2)).toContain("the suite of web runs");
+    expect(r.ok).toBe(true);
+    expect(r.projects[0]!.typeGaps).toEqual([{ kind: "generated", module: "@prisma/client", errors: 3 }]);
+    expect(approvalChecks(parseReviewFile(web("gap-tsc")), r.projects)).toContain(
+      "web: the type check cannot see @prisma/client (3 errors)");
+  });
+
+  test("a setup that type checks 100 errors or more records them for later reviews", async () => {
+    await twice("swamp-tsc");
+    const rec = JSON.parse(readFileSync(join(repo, ".arnx", "typecheck.json"), "utf8")) as Record<string, { errors: number }>;
+    expect(rec.web!.errors).toBe(100);
+  });
+
+  test("approve says once that sibling packages are not built", () => {
+    const proof = { name: "web", summary: "1 passed", skips: [],
+      typeGaps: [{ kind: "sibling" as const, module: "@acme/core", errors: 5 }] };
+    expect(approvalChecks(parseReviewFile(web(TSC)), [proof])).toEqual([
+      "web: the type check cannot see @acme/core (5 errors)",
+      "web: workspace packages are not built; arnx builds none of them (@acme/core)"]);
+  });
+
+  test("a type check that failed is proven, and approve names the problem in one short line", async () => {
+    const { r, said } = await twice("missing-tsc");
+    expect(said(1)).toContain("the type check of web: failed without reporting");
+    expect(said(1)).toContain("sh: 1: missing-tsc: not found");
+    expect(r.ok).toBe(true);
+    expect(r.projects[0]!.typecheckProblem).toContain("failed without reporting a type error");
+    const checks = approvalChecks(parseReviewFile(web("missing-tsc")), r.projects);
+    expect(checks).toEqual(["web: type check failed without reporting a type error"]);
+  });
+
+  // A run that went back to the agent for a note (a type check that failed, a type gap) stands when the limit cuts the
+  // agent's next try: recorded and proven as if tried again unchanged.
+  const MIN = 60_000;
+  const cutAfterHold = async (typecheck: string, o: { firstMinutes?: number; budget?: number; propose?: boolean } = {}) => {
+    const clock = { ms: 0 };
+    const m = new ScriptedAgent([
+      [tool("try_project", { yaml: web(typecheck) })],
+      // A changed image: a rebuild, which runs into the limit.
+      o.propose ? [tool("propose", { yaml: web(typecheck) })]
+        : [tool("try_project", { yaml: web(typecheck).replace("image: node:22", "image: node:24") })],
+      [text("done")],
+    ]);
+    const timed: SessionFactory = async (cfg, snap, log, body) => {
+      if (cfg.image === "node:24") {
+        clock.ms = 10 * MIN + 1;
+        throw new OutOfTime(10);
+      }
+      clock.ms += (o.firstMinutes ?? 2) * MIN;
+      return sandbox()(cfg, snap, log, body);
+    };
+    const said: string[] = [];
+    const settings = o.budget === undefined ? defaultSettings() : { ...defaultSettings(), setupBudgetUsd: o.budget };
+    const r = await runSetup(repo, settings, m, { outDir: join(tmp(), "s"), sessionFactory: timed,
+      progress: (x) => said.push(x), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+    const toAgent = (call: number) => (m.calls[call]!.messages.at(-1)!.content as Record<string, unknown>[])
+      .map((x) => String(x.content)).join("\n");
+    return { r, said, m, toAgent };
+  };
+
+  test("a type check that failed went back to the agent; the limit cuts its next try: the first try stands", async () => {
+    const { r, said } = await cutAfterHold("missing-tsc");
+    expect([r.ok, r.stop]).toEqual([true, "time"]);
+    expect(parseReviewFile(r.yamlText!).projects[0]!.image).toBe("node:22");
+    expect(r.projects[0]!.typecheckProblem).toContain("failed without reporting a type error");
+    expect(r.runs.map((x) => x.name)).toEqual(["web"]);
+    expect(approvalChecks(parseReviewFile(web("missing-tsc")), r.projects))
+      .toEqual(["web: type check failed without reporting a type error"]);
+    // The line carries the note, as the gap and type-gap lines do.
+    expect(said.find((l) => l.startsWith("web: ✓ try 1 stands"))).toEndWith(" · the type check of web: failed " +
+      "without reporting a type error (it could not start, or its output is not tsc's)");
+  });
+
+  test("a type gap went back to the agent; the limit cuts its next try: the first try stands with the gap", async () => {
+    const { r } = await cutAfterHold("gap-tsc");
+    expect([r.ok, r.stop]).toEqual([true, "time"]);
+    expect(parseReviewFile(r.yamlText!).projects[0]!.image).toBe("node:22");
+    expect(r.projects[0]!.typeGaps).toEqual([{ kind: "generated", module: "@prisma/client", errors: 3 }]);
+  });
+
+  test("the agent's budget ends setup after a type check went back to it: the first try stands", async () => {
+    const { r, m } = await cutAfterHold("missing-tsc", { budget: 0.000001 });
+    expect(m.calls).toHaveLength(1);
+    expect([r.ok, r.stop]).toEqual([true, "budget"]);
+    expect(r.projects[0]!.typecheckProblem).toContain("failed without reporting a type error");
+  });
+
+  test("a try that took longer than the time left is not sent back: its note is said and it is proven", async () => {
+    const { r, said, toAgent } = await cutAfterHold("missing-tsc", { firstMinutes: 6, propose: true });
+    expect(toAgent(1)).toContain("the suite of web runs:");
+    expect(toAgent(1)).not.toContain("It is information, not a failed proof");
+    expect(said).toContain("web: runs, but its type check: failed without reporting a type error (it could " +
+      "not start, or its output is not tsc's); too little time left to ask the agent");
+    expect([r.ok, r.stop]).toEqual([true, "end_turn"]);
+    expect(r.projects[0]!.typecheckProblem).toContain("failed without reporting a type error");
+  });
 
   test("try_project tells the agent to add typecheck to a TypeScript project that can be type checked", async () => {
     const m = new ScriptedAgent([
@@ -441,7 +852,7 @@ test("a project with no type check that routing passes over is named as having n
     "other projects, and `api` reviewed those files.");
 });
 
-test("a web UI app whose tests run is no lost cause: a type check that cannot run goes back to the agent", async () => {
+test("a web UI app whose tests run is no lost cause: a type check that cannot run does not stop it", async () => {
   const repo = initRepo(join(tmp(), "ui"));
   mkdirSync(join(repo, "src"), { recursive: true });
   writeFileSync(join(repo, "package.json"), JSON.stringify({ dependencies: { "react-dom": "18.3.1" }, devDependencies: { vitest: "2" } }));
@@ -455,7 +866,89 @@ test("a web UI app whose tests run is no lost cause: a type check that cannot ru
   await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: sandbox() });
   const said = (call: number) => (m.calls[call]!.messages.at(-1)!.content as Record<string, unknown>[])
     .map((r) => String(r.content)).join("\n");
-  expect(said(1)).toContain("the type check (typecheck) failed without reporting");
+  expect(said(1)).toContain("type check: failed without reporting");
+  expect(said(1)).not.toContain("does not run yet");
   expect(said(1)).not.toContain("web UI");
-  expect(said(2)).toContain("the suite of ui runs");
+});
+
+describe("python type checks", () => {
+  const pyFile = () => parseReviewFile(`version: 1
+projects:
+  api:
+    root: .
+    language: python
+    image: python:3.12-slim
+    test_command: python -m pytest -q {targets}
+uncovered: []
+`);
+  const reader = (r: string) => (rel: string) => { try { return readFileSync(join(r, rel), "utf8"); } catch { return ""; } };
+
+  test("a Python project whose CI runs a type checker says types are not checked", () => {
+    const r = initRepo(join(tmp(), "py"));
+    mkdirSync(join(r, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(r, ".github", "workflows", "main.yml"), "jobs:\n  t:\n    steps:\n      - run: mypy src\n");
+    commit(r, "ci");
+    expect(ciTypeChecker(r)).toEqual({ tool: "mypy", from: "main.yml" });
+    expect(typecheckGaps(pyFile(), reader(r), r)).toEqual([
+      "CI type checks with mypy (main.yml); arnx does not, so types are not checked for: api"]);
+  });
+
+  test("one whose CI runs none says nothing", () => {
+    const r = initRepo(join(tmp(), "py"));
+    mkdirSync(join(r, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(r, ".github", "workflows", "main.yml"), "jobs:\n  t:\n    steps:\n      - run: pytest\n");
+    commit(r, "ci");
+    expect(ciTypeChecker(r)).toBeNull();
+    expect(typecheckGaps(pyFile(), reader(r), r)).toEqual([]);
+  });
+
+  const multiFile = () => parseReviewFile(`version: 1
+projects:
+  api:
+    root: services/api
+    language: python
+    image: python:3.12-slim
+    test_command: python -m pytest -q {targets}
+  worker:
+    root: services/worker
+    language: python
+    image: python:3.12-slim
+    test_command: python -m pytest -q {targets}
+  web:
+    root: web
+    language: typescript
+    image: node:22
+    test_command: npx vitest run {targets}
+uncovered: []
+`);
+  const ciWith = (run: string) => {
+    const r = initRepo(join(tmp(), "py"));
+    mkdirSync(join(r, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(r, ".github", "workflows", "main.yml"), `jobs:\n  t:\n    steps:\n${run}`);
+    commit(r, "ci");
+    return r;
+  };
+
+  test("a repo with several Python projects gets one line naming them all", () => {
+    const r = ciWith("      - run: mypy .\n");
+    const gaps = typecheckGaps(multiFile(), reader(r), r);
+    expect(gaps).toEqual(["CI type checks with mypy (main.yml); arnx does not, so types are not checked for: api, worker"]);
+    expect(pythonTypeGap(multiFile(), r)).toEqual({ tool: "mypy", from: "main.yml", projects: ["api", "worker"] });
+    expect(pythonTypeGap(multiFile(), r, ["worker"])).toEqual({ tool: "mypy", from: "main.yml", projects: ["worker"] });
+    expect(pythonTypeGap(multiFile(), r, ["web"])).toBeNull();
+  });
+
+  test("review.md says which Python projects' types were not checked", () => {
+    const r = sampleReview({ typesUnchecked: { tool: "mypy", from: "main.yml", projects: ["api", "worker"] } });
+    expect(render(r)).toContain("- CI type checks with mypy (main.yml); arnx does not, so types are not checked for: `api`, `worker`");
+    expect(render(sampleReview())).not.toContain("types are not checked");
+  });
+
+  test("a comment or an install line is not a type check", () => {
+    const r = ciWith("      # TODO: add mypy later\n      - run: pip install mypy\n      - run: uv add --dev pyright # tools\n" +
+      "      - run: pytest\n");
+    expect(ciTypeChecker(r)).toBeNull();
+    const r2 = ciWith("      - run: pip install mypy && mypy src\n");
+    expect(ciTypeChecker(r2)).toEqual({ tool: "mypy", from: "main.yml" });
+  });
 });

@@ -3,6 +3,9 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAdapter } from "../src/adapters";
+import { parseReviewFile } from "../src/config";
+import { runTests } from "../src/outcomes";
+import type { RunResult } from "../src/sandbox";
 import { useTmp } from "./helpers/tmp";
 
 const ts = getAdapter("typescript");
@@ -162,4 +165,93 @@ test("node reporter: a file that crashes while loading is an error, a failing te
     `--test-reporter-destination=${join(dir, "out.jsonl")}`, "crash.test.cjs", "real.test.cjs"], { cwd: dir, encoding: "utf8" });
   const lines = readFileSync(join(dir, "out.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   expect(lines.map((l) => [l.name, l.outcome])).toEqual([["crash.test.cjs", "error"], ["fails", "failed"]]);
+});
+
+// bun 1.3's JUnit report and console output, as a run of one generated file writes them (the report holds no failure
+// text: only `<failure type="AssertionError" />`).
+const BUN_JUNIT = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="bun test" tests="4" assertions="3" failures="3" skipped="0" time="0.018">
+  <testsuite name="__tests__/gen/calc.test.ts" file="__tests__/gen/calc.test.ts" tests="4" assertions="3" failures="3" skipped="0" time="0" hostname="box">
+    <testcase name="adds" classname="" time="0" file="__tests__/gen/calc.test.ts" line="2" assertions="1" />
+    <testsuite name="group" file="__tests__/gen/calc.test.ts" line="3" tests="1" assertions="1" failures="1" skipped="0" time="0" hostname="box">
+      <testcase name="length" classname="group" time="0.001" file="__tests__/gen/calc.test.ts" line="4" assertions="1">
+        <failure type="AssertionError" />
+      </testcase>
+    </testsuite>
+    <testcase name="equal" classname="" time="0" file="__tests__/gen/calc.test.ts" line="6" assertions="1">
+      <failure type="AssertionError" />
+    </testcase>
+    <testcase name="throws" classname="" time="0" file="__tests__/gen/calc.test.ts" line="7" assertions="0">
+      <failure type="AssertionError" />
+    </testcase>
+  </testsuite>
+</testsuites>
+`;
+const BUN_OUTPUT = `bun test v1.3.9 (cf6cdbbb)
+
+__tests__/gen/calc.test.ts:
+(pass) adds [0.20ms]
+3 | describe("group", () => {
+4 |   test("length", () => { expect([] as number[]).toHaveLength(1); });
+                                                    ^
+error: expect(received).toHaveLength(expected)
+
+Expected length: 1
+Received length: 0
+
+      at <anonymous> (/src/web/__tests__/gen/calc.test.ts:4:49)
+(fail) group > length [1.00ms]
+5 | });
+6 | test("equal", () => { expect({ a: 1 }).toEqual({ a: 2 }); });
+                                           ^
+error: expect(received).toEqual(expected)
+
+  {
+-   "a": 2,
++   "a": 1,
+  }
+
+- Expected  - 1
++ Received  + 1
+
+      at <anonymous> (/src/web/__tests__/gen/calc.test.ts:6:40)
+(fail) equal
+7 | test("throws", () => { throw new Error("boom here"); });
+                                                      ^
+error: boom here
+      at <anonymous> (/src/web/__tests__/gen/calc.test.ts:7:51)
+(fail) throws
+
+ 1 pass
+ 3 fail
+ 3 expect() calls
+Ran 4 tests across 1 file. [18.00ms]
+`;
+
+test("bun: a failing test's message comes from the run's output, which its JUnit report leaves out", async () => {
+  const cfg = parseReviewFile(`version: 1
+projects:
+  web:
+    root: web
+    language: typescript
+    runner: bun
+    image: oven/bun:1
+    test_command: bun test {targets}
+`).projects[0]!;
+  const snap = tmp();
+  const session = { run: (command: string): RunResult => {
+    const out = /--reporter-outfile=\/src\/(\S+)/.exec(command)![1]!;
+    mkdirSync(join(snap, out, ".."), { recursive: true });
+    writeFileSync(join(snap, out), BUN_JUNIT);
+    return { exitCode: 1, output: BUN_OUTPUT, timedOut: false, seconds: 0.1 };
+  } };
+  const [, results] = await runTests(session, snap, cfg, ["__tests__/gen/calc.test.ts"], "r.xml", 60);
+  const by = Object.fromEntries(results!.map((t) => [t.name, t]));
+  expect(by.adds!.message).toBe("");
+  expect(by["group > length"]!.message.split("\n")[0]).toBe("error: expect(received).toHaveLength(expected)");
+  expect(by["group > length"]!.message).toContain("Received length: 0");
+  expect(by["group > length"]!.message).toContain("at <anonymous> (/src/web/__tests__/gen/calc.test.ts:4:49)");
+  expect(by["group > length"]!.message).not.toContain("toHaveLength(1); });"); // the source excerpt is not the failure
+  expect(by.equal!.message.split("\n")[0]).toBe("error: expect(received).toEqual(expected)");
+  expect(by.throws!.message.split("\n")[0]).toBe("error: boom here");
 });

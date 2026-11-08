@@ -6,12 +6,12 @@ import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { ArnxError, ModelError, SetupRequired } from "../src/errors";
 import { closeOpen, closers } from "../src/interrupt";
 import { LocalBrain } from "../src/localbrain";
-import { exitCode } from "../src/report";
-import { newReviewId, runReview } from "../src/reviewer";
+import { exitCode, incomplete, render, summary } from "../src/report";
+import { AGENT_SHARE, claimed, newReviewId, runReview, suspectOutcomes } from "../src/reviewer";
 import { defaultSettings, type Settings } from "../src/settings";
-import { PRICES, type Reply } from "../src/llm";
+import { type Block, PRICES, type Reply } from "../src/llm";
 import type { SessionFactory } from "../src/sandbox";
-import { FakeJson, fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
+import { BusyAgent, FakeJson, fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { gitRepo, runGit } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
@@ -48,7 +48,7 @@ test("test_review_produces_a_challenged_finding", async () => {
   const judge = new FakeJson([{ verdict: "confirmed", reason: "add subtracts." }]);
   const { review, rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent(), challenger: judge,
     sessionFactory: fakeFactory(runs) });
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review)).toBe(0);
   expect(review.stop).toBe("end_turn");
   expect(review.findings).toHaveLength(1);
   const f = review.findings[0]!;
@@ -70,7 +70,10 @@ test("test_hanging_tests_make_the_review_incomplete", async () => {
   const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent(), challenger: new FakeJson([]),
     sessionFactory: hang });
   expect(review.findings).toEqual([]);
-  expect(review.missingRuns).toBe(3);
+  expect(review.missingRuns).toBe(0);
+  expect(review.projectStats[0]!.hungFiles).toEqual([GEN]);
+  expect(incomplete(review)).toBe(true);
+  expect(summary(review, "review.md")).toContain("did not finish");
   expect(exitCode(review)).toBe(2);
 });
 
@@ -156,7 +159,7 @@ test("after the challenge, the second model groups the findings for the report",
   expect(review.groups).toEqual([{ findings: ["F1"], title: "add subtracts", input: "add(2, 3)", actual: "-1",
     expected: "5", consequence: "every sum is wrong" }]);
   expect(review.findings[0]!.verdict).toBe("confirmed");
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review)).toBe(0);
   expect(review.usage[1]!.calls).toBe(2);
   expect(readFileSync(join(rdir, "review.md"), "utf8")).toContain("### Issue 1 · add subtracts");
 });
@@ -242,4 +245,254 @@ test("a completed review closes its brain with the agent's stop", async () => {
     reason: "add subtracts." }]), sessionFactory: fakeFactory(runs), brain: finishSpy(stops) });
   expect(stops).toEqual([{ stop: "end_turn", projectsReviewed: 1 }]);
   expect(closers.size).toBe(0);
+});
+
+test("no report at all is incomplete", async () => {
+  const silent = new ScriptedAgent([[text("looked around, nothing to say")], [text("still nothing")]]);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: silent, challenger: new FakeJson([]),
+    sessionFactory: fakeFactory(runs) });
+  expect(review.stop).toBe("end_turn");
+  expect(review.projectStats[0]!.noReport).toBe(true);
+  expect(exitCode(review)).toBe(2);
+  const said = summary(review, "review.md");
+  expect(said).toContain("the reviewer gave no report");
+  expect(said).not.toContain("0 runs gave no report");
+  expect(render(review)).toContain("- `main`: the reviewer gave no report");
+});
+
+test("tests that ran, then a reply in prose: not incomplete", async () => {
+  const prose = new ScriptedAgent([
+    [tool("write_file", { path: GEN, content: "from app import add\n\ndef test_zero():\n    assert add(0, 0) == 0\n" })],
+    [text("all done, tests written")], [text("nothing more")]]);
+  const ok = (): [string | null, string, boolean] => [junitXml([[GEN, "test_zero", "passed", ""]]), "", false];
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: prose, challenger: new FakeJson([]),
+    sessionFactory: fakeFactory(ok) });
+  expect(review.projectStats[0]!.tests).toBe(1);
+  expect(review.projectStats[0]!.noReport).toBeUndefined();
+  expect(exitCode(review)).toBe(0);
+});
+
+const GEN2 = "tests/arnx_generated/test_load.py";
+const reportFor = (...tests: string[]) => JSON.stringify({ tests: tests.map((t) => ({ test: t, expects: "x" })),
+  suspected_defects: [], questions: [] });
+
+test("a file a failing stack trace goes through is not listed", async () => {
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a + b\n");
+  runGit(repo, "add", "other.py");
+  runGit(repo, "commit", "-q", "-m", "other");
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a - b\n");
+  // Neither source is named in code: the test reads text only.
+  const body = "def test_add():\n    # covers app and other\n    assert open('x').read() == 'app other'\n";
+  const go = async (message: string) => {
+    const model = new ScriptedAgent([[tool("write_file", { path: GEN, content: body })],
+      [text(reportFor(`${GEN}::test_add`))]]);
+    const sess = fakeFactory(() => [junitXml([[GEN, "test_add", "failed", message]]), "", false]);
+    return (await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([{ verdict: "confirmed",
+      reason: "r" }]), sessionFactory: sess })).review;
+  };
+  const without = await go("assert failed");
+  expect(without.untested![0]!.files.sort()).toEqual(["app.py", "other.py"]);
+  expect(without.untested![0]!.reasons).toEqual({ "app.py": "a test only mentions it as text",
+    "other.py": "a test only mentions it as text" });
+  const through = await go("app.py:2: in add\n    return a - b\n/src/vendor/x.py:1 [private key]:3");
+  expect(through.untested![0]!.files).toEqual(["other.py"]);
+});
+
+test("a file a test run reached is not listed, though no test names it", async () => {
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a + b\n");
+  runGit(repo, "add", "other.py");
+  runGit(repo, "commit", "-q", "-m", "other");
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a - b\n");
+  const body = "def test_add():\n    # covers app and other\n    assert open('x').read() == 'app other'\n";
+  const model = new ScriptedAgent([[tool("write_file", { path: GEN, content: body })],
+    [text(reportFor(`${GEN}::test_add`))]]);
+  // What arnx's Python hook notes in the report folder: code under /src that ran.
+  const sess: SessionFactory = (cfg, snap, log, run) => fakeFactory((command) => {
+    if (command.includes("final-")) writeFileSync(join(snap, ".arnx-run", "reached-41.txt"), "ran /src/other.py\n");
+    return [junitXml([[GEN, "test_add", "passed", ""]]), "", false];
+  })(cfg, snap, log, run);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
+    sessionFactory: sess });
+  expect(review.untested![0]!.files).toEqual(["app.py"]);
+});
+
+test("a file named only by a test that could not load is not reached", async () => {
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a + b\n");
+  runGit(repo, "add", "other.py");
+  runGit(repo, "commit", "-q", "-m", "other");
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a - b\n");
+  const model = new ScriptedAgent([[
+    tool("write_file", { path: GEN2, content: "from app import add\nfrom other import sub\n\ndef test_load():\n    add(1, 2)\n    sub(1, 2)\n" }),
+    tool("write_file", { path: GEN, content: "def test_add():\n    assert 1 == 1\n" })],
+    [text(reportFor(`${GEN}::test_add`))]]);
+  const sess = fakeFactory(() => [junitXml([[GEN2, "test_load", "error", "ImportError: boom"], [GEN, "test_add", "passed", ""]]),
+    "", false]);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
+    sessionFactory: sess });
+  expect(review.untested![0]!.files.sort()).toEqual(["app.py", "other.py"]);
+});
+
+// A test file that cannot be collected may still import a changed module before it fails: the run notes the module as
+// loaded, which is no evidence a test reached it.
+test("a changed module only a test file that fails to collect imports stays listed, though the run loaded it", async () => {
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a + b\n");
+  runGit(repo, "add", "other.py");
+  runGit(repo, "commit", "-q", "-m", "other");
+  writeFileSync(join(repo, "other.py"), "def sub(a, b):\n    return a - b\n");
+  const go = async (broken: boolean) => {
+    const model = new ScriptedAgent([[
+      tool("write_file", { path: GEN2, content: "import other\nimport missing_module\n\ndef test_load():\n    pass\n" }),
+      tool("write_file", { path: GEN, content: "def test_add():\n    assert 1 == 1\n" })],
+      [text(reportFor(`${GEN}::test_add`))], [text(reportFor(`${GEN}::test_add`))]]); // and a follow-up, if asked
+    // Notes as an older Python leaves them: imports only.
+    const sess: SessionFactory = (cfg, snap, log, run) => fakeFactory((command) => {
+      if (command.includes("final-")) writeFileSync(join(snap, ".arnx-run", "reached-41.txt"), "loaded /src/other.py\n");
+      return [junitXml([[GEN2, "test_load", broken ? "error" : "passed", broken ? "ModuleNotFoundError: missing_module" : ""],
+        [GEN, "test_add", "passed", ""]]), "", false];
+    })(cfg, snap, log, run);
+    return (await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
+      sessionFactory: sess })).review;
+  };
+  expect((await go(true)).untested![0]!.files.sort()).toEqual(["app.py", "other.py"]);
+  expect((await go(false)).untested![0]!.files).toEqual(["app.py"]);
+});
+
+const suspectOf = (id: string) => ({ id, file: "a.py", line: 1, claim: "c", by: "x" });
+const result = (testId: string, outcome: string) => ({ testId, fileAttr: "", name: testId, outcome, message: "" });
+const roundWith = (c: Record<string, unknown>) => ({ classified: { findings: [], flaky: [], errors: [], passed: [], skipped: 0,
+  missingRuns: 0, totalRuns: 1, ...c } }) as never;
+const reportOf = (tests: unknown[], notTested: unknown[] = []) => ({ tests, suspected_defects: [], questions: [],
+  suspects_not_tested: notTested });
+
+test("a parametrised case with :: in its value still links to its suspect", () => {
+  const id = "tests/t.py::test_ip[2001:0db8::1]";
+  const f = { id: "F1", testId: id, func: "test_ip", suspect: undefined as string | undefined };
+  const out = suspectOutcomes("main", [suspectOf("S1")], roundWith({ findings: [result(id, "failed")] }),
+    reportOf([{ suspect: "S1", test: "tests/t.py::test_ip" }]), [f] as never);
+  expect(out[0]!.outcome).toBe("failed");
+  expect(out[0]!.tests).toEqual([id]);
+});
+
+test("a reported title links to its describe > title result", () => {
+  const id = "tests/a.test.ts::pays > charges once";
+  const out = suspectOutcomes("main", [suspectOf("S1")], roundWith({ passed: [result(id, "passed")] }),
+    reportOf([{ suspect: "S1", test: "charges once" }]), []);
+  expect(out[0]!.outcome).toBe("not reproduced");
+  expect(out[0]!.tests).toEqual([id]);
+});
+
+test("a suspect whose test was skipped says so", () => {
+  const id = "tests/t.py::test_db";
+  const out = suspectOutcomes("main", [suspectOf("S1")], roundWith({ skippedTests: [result(id, "skipped")] }),
+    reportOf([{ suspect: "S1", test: id }]), []);
+  expect(out[0]!.outcome).toBe("not tested");
+  expect(out[0]!.reason).toBe("its test was skipped");
+});
+
+const SCRATCH = "def test_add():\n    assert add(2, 3) == 5\n\ndef test_scratch():\n    assert add(1, 1) == 3\n";
+const failing = (...names: string[]) => (): [string | null, string, boolean] =>
+  [junitXml(names.map((n) => [GEN, n, "failed", `assert in ${n}`] as [string, string, string, string])), "", false];
+
+test("a failing test the last report leaves out is not a finding", async () => {
+  const model = new ScriptedAgent([[tool("write_file", { path: GEN, content: SCRATCH })],
+    [text(reportFor(`${GEN}::test_add`))], [text(reportFor(`${GEN}::test_add`))]]);
+  const judge = new FakeJson([{ verdict: "confirmed", reason: "r" }]);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: judge,
+    sessionFactory: fakeFactory(failing("test_add", "test_scratch")) });
+  expect(review.findings.map((f) => f.func)).toEqual(["test_add"]);
+  expect(judge.calls.join("\n")).not.toContain("::test_scratch");
+  expect(review.unclaimed).toEqual([{ project: "main", testId: `${GEN}::test_scratch`, message: "assert in test_scratch\ntrace" }]);
+  expect(review.projectStats[0]!.noReport).toBeUndefined();
+  expect(render(review)).toContain(`- Failing tests the reviewer did not report (scratch or replaced): \`${GEN}::test_scratch\``);
+  expect(summary(review, "review.md")).toContain("1 unreported failing test");
+});
+
+test("same name in a newer file: only the reported file counts", async () => {
+  const NEWER = "tests/arnx_generated/test_add_v2.py";
+  const body = "from app import add\n\ndef test_add():\n    assert add(2, 3) == 5\n";
+  const model = new ScriptedAgent([[tool("write_file", { path: GEN, content: body }),
+    tool("write_file", { path: NEWER, content: body })], [text(reportFor(`${NEWER}::test_add`))]]);
+  const both = (): [string | null, string, boolean] =>
+    [junitXml([[GEN, "test_add", "failed", "old"], [NEWER, "test_add", "failed", "new"]]), "", false];
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model,
+    challenger: new FakeJson([{ verdict: "confirmed", reason: "r" }]), sessionFactory: fakeFactory(both) });
+  expect(review.findings.map((f) => f.file)).toEqual([NEWER]);
+  expect(review.unclaimed!.map((u) => u.testId)).toEqual([`${GEN}::test_add`]);
+});
+
+test("a failing test with no report at all is unclaimed, and the round is incomplete", async () => {
+  const model = new ScriptedAgent([[tool("write_file", { path: GEN, content: SCRATCH })], [text("done")], [text("done")]]);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
+    sessionFactory: fakeFactory(failing("test_add")) });
+  expect(review.findings).toEqual([]);
+  expect(review.unclaimed!.map((u) => u.testId)).toEqual([`${GEN}::test_add`]);
+  expect(review.projectStats[0]!.noReport).toBe(true);
+  expect(exitCode(review)).toBe(2);
+});
+
+// Each reply costs $0.004; of a $0.012 review the round has $0.0102 (AGENT_SHARE): after a write and a read, the next
+// call would cross it.
+const BUSY_BUDGET = { ...SETTINGS, reviewBudgetUsd: 0.012 };
+const ADD_ONLY = "from app import add\n\ndef test_add():\n    assert add(2, 3) == 5\n";
+const busy = (report: Block[] | Error) => new BusyAgent([[tool("write_file", { path: GEN, content: ADD_ONLY })]],
+  [tool("read_file", { path: "app.py" })], report);
+const reviewerCost = (review: { usage: { model: string; costUsd: number }[] }) =>
+  review.usage.find((u) => u.model.includes("sonnet"))!.costUsd;
+
+test("a budget cut gives the reviewer one last turn, with no tool run, to report the tests it wrote", async () => {
+  const OTHER = "tests/arnx_generated/test_more.py";
+  const model = busy([text(reportFor(`${GEN}::test_add`)), tool("write_file", { path: OTHER, content: ADD_ONLY })]);
+  const { review, rdir } = await runReview(repo, { settings: BUSY_BUDGET, agentModel: model,
+    challenger: new FakeJson([{ verdict: "confirmed", reason: "r" }]), sessionFactory: fakeFactory(failing("test_add")) });
+  expect(model.calls).toHaveLength(3); // the write, a read, then the report turn
+  const asked = model.calls[2]!.messages.at(-1)!.content as { type: string; text?: string }[];
+  expect(asked.at(-1)!.type).toBe("text");
+  expect(review.findings.map((f) => f.func)).toEqual(["test_add"]);
+  expect(review.unclaimed ?? []).toEqual([]);
+  expect(review.projectStats[0]!.noReport).toBeUndefined();
+  expect(review.stop).toBe("budget");
+  expect(incomplete(review)).toBe(true);
+  // The tool the report turn asked for never ran.
+  expect(existsSync(join(rdir, "tests", OTHER + COPY_SUFFIX))).toBe(false);
+  // Spend: the round's budget and at most one call more.
+  expect(reviewerCost(review)).toBeLessThanOrEqual(0.012 * AGENT_SHARE + 0.004 + 1e-9);
+});
+
+test("a report turn that fails leaves the failing tests unreported, as before", async () => {
+  const model = busy(new ModelError("claude-sonnet-5-5: HTTP 529: overloaded"));
+  const { review } = await runReview(repo, { settings: BUSY_BUDGET, agentModel: model, challenger: new FakeJson([]),
+    sessionFactory: fakeFactory(failing("test_add")) });
+  expect(model.calls).toHaveLength(3);
+  expect(review.findings).toEqual([]);
+  expect(review.unclaimed!.map((u) => u.testId)).toEqual([`${GEN}::test_add`]);
+  expect(review.projectStats[0]!.noReport).toBe(true);
+  expect(review.stop).toBe("budget");
+});
+
+const failedAt = (testId: string, fileAttr = "") => ({ testId, fileAttr, name: testId.split("::").at(-1)!, outcome: "failed", message: "m" });
+
+test("a failing result with a classname id is claimed by a report that names its file", () => {
+  const t = failedAt("com.shop.AddTest::testAdd");
+  expect(claimed(t, [{ file: "src/test/java/com/shop/AddTest.java", name: "testAdd" }])).toBe(true);
+  expect(claimed(t, [{ file: "src/test/java/com/shop/AddTest.java", name: "testOther" }])).toBe(false);
+  // with a file attribute the file still has to match
+  expect(claimed(failedAt(`${GEN}::test_add`, GEN), [{ file: "tests/other/test_zz.py", name: "test_add" }])).toBe(false);
+});
+
+test("a class name keeps another class's test from being claimed", () => {
+  const t = failedAt(`${GEN}::TestA::test_x`, GEN);
+  expect(claimed(t, [{ file: GEN, name: "TestB::test_x" }])).toBe(false);
+  expect(claimed(t, [{ file: GEN, name: "TestA::test_x" }])).toBe(true);
+  expect(claimed(t, [{ file: GEN, name: "test_x" }])).toBe(true);
+});
+
+test("a report that claims nothing while a test fails is incomplete; a partial claim is not", async () => {
+  const empty = JSON.stringify({ tests: [], suspected_defects: [], questions: [] });
+  const model = new ScriptedAgent([[tool("write_file", { path: GEN, content: SCRATCH })], [text(empty)], [text(empty)]]);
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]),
+    sessionFactory: fakeFactory(failing("test_add")) });
+  expect(review.findings).toEqual([]);
+  expect(review.unclaimed!.map((u) => u.testId)).toEqual([`${GEN}::test_add`]);
+  expect(review.projectStats[0]!.noReport).toBe(true);
+  expect(exitCode(review)).toBe(2);
 });

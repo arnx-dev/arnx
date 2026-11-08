@@ -46,3 +46,16 @@ export function mergeBy(questions: string[], same: unknown[]): Merged {
   const index = new Map(kept.map((k, n) => [k, n]));
   return { questions: kept.map((k) => questions[k]!), into: questions.map((_q, i) => index.get(find(i))!) };
 }
+
+const DISCLAIMER = /^(I|We) (have not|haven['’]t|did not|didn['’]t|could not|couldn['’]t|can['’]t|cannot)\b[^.?!]*[.!]\s+/;
+
+const LONE_DISCLAIMER = new RegExp(DISCLAIMER.source.replace(/\[\.!\]\\s\+$/, "[.!]?\\s*$"));
+
+/** A question as asked: without opening sentences about what the model did not read or find ("I have not seen the
+ * docs. Should ...?"). Empty when nothing or only a disclaimer is left, and then it is not asked. */
+export function plainQuestion(q: string): string {
+  let out = q.trim();
+  for (let m = DISCLAIMER.exec(out); m; m = DISCLAIMER.exec(out)) out = out.slice(m[0].length);
+  // No question mark: kept (a request such as "Confirm whether X is intended."), unless nothing is left or all that is left is a disclaimer.
+  return out.includes("?") || (out && !LONE_DISCLAIMER.test(out)) ? out : "";
+}

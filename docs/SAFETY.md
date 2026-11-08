@@ -24,50 +24,134 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   with the build cache of the images made from your code (as `arnx env prune` removes it).
   Files you committed are left for the `git rm` it prints, so the removal shows in a commit. Accepted tests are your
   tests by then: kept unless `--tests`. Your arnx cloud login and the arnx program itself are not touched.
-- Your model keys stay in the arnx process. Files that usually hold secrets, and text that looks like a key, are
-  not sent to a model, except the forms listed below. A file left out this way is named at setup and in each review.
-  When every key-shaped
-  string in a JavaScript, TypeScript, Python or Rust file is inside a comment that has its lines to itself (a doc
-  example), the file is sent with those comment lines blanked instead (a private key's whole block too, when it lies
-  in the comment), and setup names the file and its lines. Everything else that may be a secret gets a stand-in, a
-  fake of the same shape (its prefix such as `sk-`, `whsec_` or `AKIA` kept, then the same length and kinds of
-  characters, hex staying hex), and the tests run with the fake: key-shaped text; a literal given to a secret-looking
-  name (token, secret, password, credential, private, authorization, API key; also key, auth, salt or cookie when
-  the value looks random; the word must be what the name is, its last one: `AUTH_TOKEN`, `secret_key`, not
-  `TOKEN_PROGRAM` or `account_key`) in code, JSON, YAML, TOML, INI or env files, as an assignment, a keyword argument
-  or a `("NAME", "value")` pair, unless it is words or a name (`password123`, `PublicKey`), a placeholder, a URL or a
-  path, or the name says hash, signature, public, id or label. A random-looking string (hex or base64) is faked only where
-  such a name marks it: unnamed, it is a hash, a commit id, an address or a signature that tests compare. Lockfiles
-  and binary files are left alone. Each value is then
-  replaced wherever it appears in the snapshot, so no file keeps it and every file gets the same fake; the real
-  values never leave your machine. Setup names these files once. A test that checks a signature made with the real
-  value (a signed license key) fails with the fake. A private key with a body cannot get a stand-in: its file is
-  still left out (a header with no body anywhere in the file, such as a form's placeholder, is kept as it is).
-  `[review] stand_ins = false` in `.arnx/config.toml` turns stand-ins off: files with key-shaped text in code are left
-  out, and other values are sent as they are. A review's diff blanks comment lines the same
-  way and names them; a key in code in the diff still stops the review. When its key-shaped text
-  is test fixtures (a secret detector's own tests), `arnx allow-secret PATH` pins each such string in
-  `.arnx/review.yaml`, which is then proven again before the next review; a new key-shaped string in that file
-  withholds it again, and `arnx allow-secret --remove PATH` takes a file off the list (proven again too). Setup lists
-  allowed files under "Worth a look".
+- Your model keys stay in the arnx process. Files named like secrets are not sent to a model, a key file with a key in it aside
+  (below). A file left out is named at setup and in each review. When every key-shaped string in a JavaScript, TypeScript, Python or Rust file,
+  a private key aside, is inside a comment that has its lines to itself (a doc example), the file is sent with those comment
+  lines blanked instead, and setup names the file and its lines. Everything else that may be a secret reaches a model as a
+  stand-in, a fake of the same shape (its prefix such as `sk-`, `whsec_` or `AKIA` kept, then the same length and kinds
+  of characters, hex staying hex), in every request, whatever it holds: a file read, a search, a test's output. The same
+  goes for its JSON and URL forms, its upper and lower case, its hex (a dump's hex column too) and its base64, also inside
+  the base64 of a longer text (`Basic base64(user:value)`), and for what arnx writes or prints for you and your coding agent:
+  `review.md`, `review.json`, `round.json`, `fix-prompt.md`, and the output of `arnx prompt`, `arnx check` and
+  `arnx check --review`. These say so, and name the test's file and line, which hold the real code.
+  **No filter is complete.** arnx hides a value and its common encodings; a test or a command that prints a cut or
+  transformed form can get past it, and tests run on the real guesses (below). A cut goes only where it keeps the value's start
+  or end up to a word's edge, from 12 characters: `cut -c3-30`, a start cut running into a letter and `fold -w16` show the rest
+  raw. A lower-case hex dump (`xxd`, `od -tx1`) leaves a run of at most 4 bytes of a 16-byte value, and up to 20 of 32 on a longer
+  one, as its middle lines show. `hexdump -C`'s gap leaves more: 8 to 11 of 16 bytes unless the value starts at offset 0 or 8,
+  up to 28 of 32 on a longer one. A dump's text column shows pieces. Nothing recognises a value reversed (`rev`), in rot13,
+  base32, wrapped base64 (`base64 -w8`), a dump of swapped words (plain `hexdump`, `od -x`), an upper-case dump (`xxd -u`),
+  `xxd -i`, `od -c`, `%XX` of every byte, `list()`, compressed or hashed, nor one written with escapes in the source
+  (`"ab\x55c"`).
+  Local files arnx writes for itself keep what they saw: `change.diff` (minus the files left out, a private key's tokens as fakes) and image build logs,
+  neither of which `arnx init`'s `.arnx/.gitignore` lets git take. What a commit of `.arnx/` takes (`review.yaml`, `baseline.json`, accepted tests) holds
+  stand-ins, apart from a value you wrote into `review.yaml` yourself.
+  What the tests run depends on how sure arnx is. Key-shaped text and a password in an address get the stand-in in the
+  snapshot too, wherever they appear, so no file keeps them and every file gets the same fake; the tests run with the
+  fake, and one that checks a signature made with the real value (a signed license key) fails. A guess stays as it is
+  in the snapshot, since a wrong guess must not change code that runs, and those runs have no network beyond the services
+  you declared (see the Docker version above). A guess is a literal given to a secret-looking name (token, secret, password, credential, private,
+  authorization, API key; also key, auth, salt or cookie when the value looks random; the word must be what the name is,
+  its last one: `AUTH_TOKEN`, `secret_key`, not `TOKEN_PROGRAM` or `account_key`) in code, JSON, YAML, TOML, INI or env
+  files, as an assignment, a keyword argument or a `("NAME", "value")` pair; on a command line or in a build file
+  (`export NAME=value`, `docker run -e`, `ENV`, a Makefile's `:=`, `Authorization: Bearer value`); or in a URL's query
+  (`?api_key=value`). Words or a name (`password123`, `PublicKey`), a placeholder, a URL or a path don't count, nor does a
+  value the name says is a hash, signature, public, id or label. A value in a `.env*` file at the top of the repository
+  counts wherever it appears: those files are read for this and copied nowhere. A random-looking string (hex or base64)
+  is a guess only where such a name marks it: unnamed, it is a hash, a commit id, an address or a signature that tests
+  compare.
+  Building an image has network, so it gets a second copy of the snapshot in which each guess is a stand-in too. The
+  project's own manifests (the files that key its image, by its adapter and folder) and lockfiles are the exception: they
+  keep their own values in both copies, as a stand-in there can break an install, so an install step can read those. No other
+  file keeps them. An install that copies the project elsewhere (`cp -a . /opt/app`, `pip install .`) copies that second copy, so tests
+  that run there see stand-ins for guesses. Binary files are left alone. The real values never leave your machine,
+  beyond what a manifest or a lockfile holds and what the limits above let through. Setup names the files whose snapshot has stand-ins once. The setup agent is told which files hold them, and a file it proposes that names one is refused. `stand-ins.md`, beside the setup and review output, lists each place by file, line and rule, never a value.
+  A model works among stand-ins, so what it writes holds them. When its text meets real files, arnx swaps each guess's
+  stand-in back, in memory and at the last moment: a test as it goes into the throwaway copy, an accepted test too (the file
+  under `.arnx/` keeps the stand-in); a search pattern and a path; a command of setup's `exec`; and the env and commands of
+  `review.yaml` when they run, inside the run's network. `review.yaml` itself keeps the stand-in, and `install` is never
+  swapped, since a build has network. Whatever a run prints then goes out through the filter again. A key-shaped value's
+  stand-in stays, as it is what the code holds. A project whose tests run on an install's copy stays among stand-ins, as that
+  copy does: nothing is swapped for its runs, so a test there that reads a project file by any path, `/src` or relative, and
+  compares with a stand-in fails.
+  Only a plain stand-in comes back. One a model encoded, re-cased or cut itself stays as written, and a test holding it fails
+  on the real value; a test that encodes a plain stand-in when it runs is fine. A stand-in a real file holds, by chance or
+  because a coding agent copied it into tracked code, stays as written everywhere, since there it means itself.
+  While a run lasts, a test holding a real guess sits on disk in the temporary snapshot, and real values appear in
+  `docker run -e` and `sh -c` arguments, which `ps` on this machine shows.
+  `[review] stand_ins = false` in `.arnx/config.toml` turns stand-ins off in both copies: files with key-shaped text in code
+  are left out, and requests still hold stand-ins for the other values.
+  A review's diff blanks comment lines the same way and names them.
+  **Private keys.** A key with an intact header and END (PEM, PGP's block, SSH2's four dashes, a label of capitals, digits, blanks and `%+-` up to 64 characters) does not reach a
+  model, however it is wrapped. What is only read (a diff, `read_file`, `grep`, the context a hunter gets) shows a fake of every token
+  between the two, computed on the whole file before any page or search; and the filter replaces all from header to END with
+  `[private key]` in what leaves arnx, test and `exec` output too, before arnx cuts it. A run of 64 or more base64 characters in
+  either alphabet that starts as a key's encoding (a whole PEM in base64, an OpenSSH body, private DER) is hidden the same way; it
+  ends at a later piece under 16 characters that padding does not close. The filter also hides an END with no header, and the
+  base64-only lines before it.
+  The file stays in the diff and the sandbox, whether code, fixture, `.pem`, `.key` or `id_rsa`. In the sandbox, between a header
+  and its END, each token of 8 or more base64 characters gets a fake: base64 characters from a hash of the token, of its length, so
+  it keeps no character's kind, only line ends, quotes and marks. The same token has the same fake on both sides of a change and in
+  what is read. The header and END stay, so code that looks for them runs. Tokens inside `${...}`, `{...}`, `<...>` stay, and so do,
+  in the sandbox alone, tokens under 8 characters and tokens of 32 or fewer with no digit, `+` or `/` (a name). With no END, the
+  header line stays and the run after it gets the fake, tokens of 8 or more separated only by blanks, `\n` or `\r` written out, quotes,
+  commas, `+` or `.`. It stops at a name unless a token of 8 or more with a digit, `+` or `/` follows, as a wrapped line of a key can read as a name by
+  chance; a name in the run gets the fake too, and the filter hides that much.
+  A test that parses or hashes a key can fail or skip on its fake. In a review, `arnx accept`'s answer rounds, setup's suite runs
+  and `arnx check`, each such test runs once more with the real key, read from the file on this machine for that run only, in a
+  throwaway copy of the sandbox, in a container of its own with `--network none` and `--log-driver none`. The copy leaves out every
+  link that leads out of it and every FIFO, socket or device; the key goes in only as a new file in a real folder of the copy,
+  and if a check fails nothing is rerun. Only each test's outcome is kept: its output is never read, its report is read only as a
+  regular file in the copy, and the copy is removed before anything else reads it, the owner's bits put back first on any folder
+  the test locked; so none of it reaches a model, a log, `.arnx` or `review.json`. A test that then passes, or a skip that then
+  runs, needs the real key: unproven, never a finding; a review and `arnx check` exit as incomplete (2), and setup keeps it out of
+  `baseline.json`. One that fails again stands. At most 20 tests run with the real key per arnx command, all its steps together
+  (a re-prove, the review, answer rounds, a closing check), every test of a file it reruns counted; past that, or when no rerun can run (no report, the test missing from
+  it, out of time, an image holding its own copy of the code), a failure reads as unproven, not rerun, and a skip stays a skip.
+  **Limits:** the outcomes themselves go on, at most 20 per command, into what a model reads; a test that also needs the network
+  or a service fails again and stands; with two faked files it says "a faked file"; the copy holds the real key while the run
+  lasts, and one an arnx killed outright leaves in the temp folder stays until the next review, setup or check removes it.
+  Setup and each review name the files holding a fake, with `arnx allow-secret PATH`, and where a fake exists and a test fails
+  or is skipped, the terminal and `arnx check` say so: `Fix the code; if this test needs a real key: arnx allow-secret PATH`.
+  **What still leaves.** A file named like a secret and holding no key: `.key`, `.p12`, a `.pem` with no block arnx knows (a `.pem`
+  holding only certificates, public keys or DH parameters stays); any `.env`, `.npmrc`, `.ppk`, `credentials*.json`,
+  `service-account*.json` and the like, key or not; a file over 32 MB; a binary or UTF-16 file holding a key, which is never edited; a
+  lockfile holding a key; a file with over 2000 tokens to fake; with `stand_ins = false`, a file holding a key. Models are told, and `review.md`
+  lists each with `arnx allow-secret PATH`. The terminal names one the change touches or a failure names, and counts the rest. A
+  missing-file or open-failure line naming one is unproven, and setup goes on unless no test can run. **A limit:** a test that fails because
+  of one with no such line reads as any other failure, and one passing on a fallback reads as a pass; `review.md` says so once. A path
+  that cannot be read counts as left out. A change of only such files with a key stops, naming what can free it; one of only files left out
+  by name is nothing to review.
+  A model told to write `[private key]` is refused, and so is a `review.yaml` holding it. A model's own test keeps what it wrote
+  where it is saved to run.
+  **These get past it:** a no-END key with a broken body (a comment mark on each line, tokens under 8, a line of other text in it, or two
+  wrapped lines in a row that read as names, or one as its last line, a matter of chance at 32 columns or fewer); a stray END inside a
+  body, for what follows it; JWK; hex; PKCS12 and PBES1 encrypted keys; lower-case or altered armour; a header broken up in the source
+  (`"...PRIV" + "ATE KEY"`) over a body with another start; a word glued to a key's start (`rsaMII...`); with no header, a body with
+  another start, one with spaces or other marks inside its lines, or one wrapped too short to hold the start; a key in a file name; a test that prints a piece of what the sandbox keeps (a token
+  under 8 or a name) or transforms a pinned key (prints a line of it, or its base64); a line a tool cuts at 200 columns, which can leave
+  under 64 characters of a no-header run. Other text that may be a secret goes through the filter below, and a value it does not recognise
+  goes out.
+  **Allowing a file.** `arnx allow-secret PATH` pins it in `.arnx/review.yaml`, which is then proven again before the next review.
+  A private key is pinned by the hash of the whole file: as it stands, as committed, before the last commit and where its branch
+  left, beside those pinned before. The sandbox then keeps the real key, so tests that parse it run. A pin changes nothing a
+  model sees: the same fake in a diff, a read or a search, and `[private key]` over an intact key. Any edit puts the fake back. A file
+  left out by its name or size is pinned the same way and stays as it is, and any edit leaves it out again. A binary file over 1 MB stays
+  in the diff as a binary; a text file over 32 MB holding a key cannot go in a diff, allowed or not. Other key-shaped strings are pinned one by
+  one, and a new one gets a stand-in. Models' `read_file` and `grep` skip files named like secrets, allowed or not. `arnx allow-secret` takes
+  only the working tree's file: one deleted cannot be allowed. `arnx allow-secret --remove PATH` takes a file off the list (proven again
+  too). Setup lists allowed files under "Worth a look".
   When a setup run fails on a file left out this way, setup stops and names it: only you can let it in. When it
   fails on a file `.arnxignore` leaves out, setup copies that file into the sandbox (scrubbed the same way, never sent
   to a model; it is in the snapshot only while a test runs), says so in one line, runs the project again, and lists
   the file under `sandbox_only` in `.arnx/review.yaml` and under "Worth a look". This holds for every line of
   `.arnxignore`, arnx's defaults and yours alike: `init` writes data files it finds there by name, so the file does
   not tell them apart. A test's output still goes to the model, and may quote such a file.
-- Everything sent to a model, arnx cloud, the second-opinion model or telemetry goes through one filter, in every
-  string of the request: a value arnx took for a secret is replaced by its stand-in there too, and so is a piece of
-  one at the edge of a word, unless the value is proven a name or words. What is still imperfect: a secret arnx does
+- The same filter covers what goes to arnx cloud, the second-opinion model and telemetry, and also masks a piece of a
+  secret at the edge of a word, unless the value is proven a name or words. What is still imperfect: a secret arnx does
   not pick as a secret is not masked; a cut piece of a word-like value can still leave; a dotted username with a
   1-5 digit address password (`user.name:12345@host`) reads as a host and is not masked; a file over 32 MB is not
   scanned and is left out.
-- A private key is found by its header: OpenSSL and OpenSSH blocks, PGP's `PRIVATE KEY BLOCK`, SSH2's four dashes,
-  and a label with digits or hyphens (`ED25519`, `RSA-PSS`). A `.ppk` file is a secret file by its name. A key header
-  in code in a diff stops the review. A key with no header is not found as a key. A key whose lines are under 40
-  characters is not found as a body, so beside a header it reads as a placeholder and the file is kept. What can still
-  reach a model: a key a test prints (the output of the tests goes to the model), a key whose lines are under 40
-  characters, a key as a JWK, a key as hex, and any other form without a header.
 - A variable whose name looks like a secret (KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL, …) is refused in
   `.arnx/review.yaml` unless listed under `allow_env_names` or set to `arnx:generated` (64 hex digits arnx makes) or
   `arnx:generated:base64` (32 bytes, URL-safe base64): throwaway values, the same in every run.
@@ -82,6 +166,16 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   writes: patterns for them, the test fixture folders (`tests/`, `fixtures/`, `testdata/`, …) kept with `!` lines,
   and any other data-like file the repository has, by name. An existing `.arnxignore` is left as it is. A `!` line
   keeps what it matches again; the last line that matches a path decides.
+- The second opinion still confirms some findings that are not real, so confirmed findings are worth a look and do not
+  fail the run.
+
+## What arnx covers
+
+arnx works best on single-package Python and TypeScript repositories. A repository with several packages is set up one part at a time: a review
+waits up to 10 minutes for the part its change touches, and `arnx setup` stops at 40 minutes overall (`setup_minutes`
+under `[budget]`). Parts it did not reach are listed under `uncovered`, for `arnx setup --add`. Tests that run only in a
+browser (Playwright, Cypress, Storybook, vitest's browser mode) are not run, and a web UI app gets two counted runs at its unit
+tests.
 
 ## What a review sends
 
@@ -90,8 +184,9 @@ Uncommitted work means tracked files only: staged and unstaged changes, and new 
 files are in neither the diff, the copy the reviewer reads nor the sandbox, and the review says how many it left out.
 `--untracked` sends them too and names each one (`untracked = true` under `[review]` in `.arnx/config.toml` does it
 always; `--no-untracked` overrides that); `arnx setup` reads the same way. With no commits yet every file is sent, and
-the review says so first. Paths in `.arnxignore`, secret files and files with key-shaped text are never sent (see [What
-runs where](#what-runs-where)). review.json records `untracked_included` or `untracked_left_out`.
+the review says so first. Paths in `.arnxignore` and secret files (`.env`, `.ppk`, a `.pem` with no key and the like) are not sent, a private key goes as `[private key]` and other
+key-shaped text as a stand-in (see [What runs where](#what-runs-where)). review.json records `untracked_included` or
+`untracked_left_out`, and `not_sent` the files left out.
 
 The diff is git's plain text form. arnx turns off textconv drivers, external diff tools and the diff form of a
 submodule (`diff.submodule`) for every diff it reads. A driver that decrypts a file cannot put its text in the diff.

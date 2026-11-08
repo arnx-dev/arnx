@@ -171,8 +171,18 @@ test("review payload: counts only, providers not models, before/after counts", a
   expect(data).toEqual({ languages: ["python", "typescript"], projects: 2, files_changed: 4, diff_kb: 5,
     effort: "high", providers: ["anthropic", "openai", "other"], findings: 4, confirmed: 2, disputed: 1, unjudged: 1,
     questions: 1, tests_written: 6, passed: 3, flaky: 1, errors: 0, suspects: 1, cost_micro_usd: 340000,
-    unknown_calls: 3, seconds: 171, exit_code: 1,
+    unknown_calls: 3, seconds: 171, exit_code: 0,
     before: { regression: 1, pre_existing: 1, new_code: 1, changed: 0, unknown: 0 } });
+});
+
+test("review payload: an open verdict, which waits on an answer, is not counted as unjudged", () => {
+  const review = sampleReview({ findings: [
+    { ...finding("F1", "t::a", "a", "f.py", "m", "e", "open"), dependsOn: "Q1" },
+    finding("F2", "t::b", "b", "f.py", "m", "e", "confirmed"),
+    finding("F3", "t::c", "c", "f.py", "m", "e", null),
+  ] });
+  const data = reviewData(review, { settings: defaultSettings(), languages: ["python"], diffBytes: 10 });
+  expect([data.findings, data.confirmed, data.disputed, data.unjudged]).toEqual([3, 1, 0, 1]);
 });
 
 test("review payload: an effort or provider outside the schema is folded into it, never sent as text", () => {

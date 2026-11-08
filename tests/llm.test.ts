@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { ModelError } from "../src/errors";
 import {
   AnthropicAgent, AnthropicJson, CANCEL_SECONDS, cancelInFlight, costUsd, FallbackJson, makeAgentModel, makeJsonModel,
-  makeChallenger, makeSecondHunter, parseJsonObject, PRICES, ResponsesAgent,
+  makeChallenger, makeSecondHunter, VERDICT_ATTEMPT_TIMEOUT, VERDICT_IDLE_TIMEOUT, OUTAGE_DELAYS, OUTAGE_WAIT_MAX_SECONDS, parseJsonObject, PRICES, resetOutageWaits, ResponsesAgent,
   responsesInput, ResponsesJson, unpricedModels, unpricedNote,
 } from "../src/llm";
 import { exitCodeAfter, finalExitCode, onInterrupt, startInterrupt } from "../src/interrupt";
@@ -199,6 +199,17 @@ test("a JSON call to a model with no price costs 0 and counts as billed with unk
       { status: 200, headers: { "content-type": "text/event-stream" } })) });
   const r = await m.completeJson("s", "u", SCHEMA);
   expect([r[0], r[1], r[3]]).toEqual([{ verdict: "disputed" }, 0, 1]);
+});
+
+test("anthropic: an aborted signal stops the stream and the retries", async () => {
+  const messages = new FakeMessages([null, "hello"]);
+  const agent = new AnthropicAgent("claude-sonnet-5-5", "medium", "k", { messages }, { idleSeconds: 30, sleep: noSleep });
+  const m = new AnthropicJson(parseModelRef("anthropic:claude-sonnet-5-5"), agent, PRICES);
+  const stop = new AbortController();
+  const call = m.completeJson("sys", "user", SCHEMA, stop.signal);
+  setTimeout(() => stop.abort(), 20);
+  await expect(call).rejects.toThrow("request cancelled");
+  expect(messages.kwargs).toHaveLength(1);
 });
 
 test("anthropic: a stream that goes silent is retried", async () => {
@@ -469,7 +480,7 @@ async function retryWaits(status: number, headers: Record<string, string>): Prom
   const waits: number[] = [];
   let n = 0;
   const m = new ResponsesJson(GPT, "https://api.example/v1", "k", "medium", PRICES, {
-    sleep: async (s) => { waits.push(s); },
+    random: () => 0.5, sleep: async (s) => { waits.push(s); },
     fetch: fakeFetch(() => (++n === 1 ? new Response("busy", { status, headers })
       : new Response(sse(responsesBody('{"verdict": "confirmed"}')), { status: 200 }))) });
   await m.completeJson("s", "u", SCHEMA);
@@ -504,7 +515,7 @@ test("responses: a backoff that would pass the total deadline is a timed-out Mod
   let n = 0;
   const m = new ResponsesJson(GPT, "https://api.example/v1", "k", "medium", PRICES, { totalSeconds: 1,
     sleep: async (s) => { waits.push(s); },
-    fetch: fakeFetch(() => { n++; return new Response("busy", { status: 429, headers: { "retry-after": "100" } }); }) });
+    fetch: fakeFetch(() => { n++; return new Response("busy", { status: 408, headers: { "retry-after": "100" } }); }) });
   const err = await m.completeJson("s", "u", SCHEMA).catch((e: unknown) => e) as ModelError;
   expect(err).toBeInstanceOf(ModelError);
   expect(err.timedOut).toBe(true);
@@ -567,7 +578,7 @@ test("anthropic: HTTP 529 overloaded_error is retried after the local backoff, t
   const notes: string[] = [];
   let n = 0;
   const agent = new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, {
-    sleep: async (s) => { waits.push(s); },
+    random: () => 0.5, sleep: async (s) => { waits.push(s); },
     fetch: fakeFetch(() => (++n === 1 ? errorResponse(529, "overloaded_error") : sseResponse(anthropicEvents("hi")))) });
   agent.notice = (x) => notes.push(x);
   const reply = await ask(agent);
@@ -1239,11 +1250,11 @@ test("makeChallenger: timeoutAttempts 1 on the first model only, and only with a
   expect(withFallback).toBeInstanceOf(FallbackJson);
   const [first, second] = [(withFallback as unknown as { first: unknown }).first,
     (withFallback as unknown as { second: unknown }).second];
-  expect([limit(first), attempt(first)]).toEqual([1, 60]);
-  expect([limit(second), attempt(second)]).toEqual([Infinity, 60]);
+  expect([limit(first), attempt(first)]).toEqual([1, 150]);
+  expect([limit(second), attempt(second)]).toEqual([Infinity, 150]);
   const alone = makeChallenger({ ...s, challengerFallback: undefined }, env, noValues);
   expect(alone).not.toBeInstanceOf(FallbackJson);
-  expect([limit(alone), attempt(alone)]).toEqual([Infinity, 60]);
+  expect([limit(alone), attempt(alone)]).toEqual([Infinity, 150]);
 });
 
 test("main's exit waits for an interrupt in progress, so its cancel calls are not cut off", async () => {
@@ -1269,3 +1280,315 @@ test("a retry's progress line gives the HTTP status, never the body the provider
   expect(brief("HTTP 503: No ready deployment")).toBe("HTTP 503");
   expect(brief("no reply within 300s")).toBe("no reply within 300s");
 });
+
+// --- outages: a provider that answers "down" is waited for, with the wait shown ----------------------------------------
+
+const outageAgent = (waits: number[], answer: (n: number) => Response, opts: Record<string, unknown> = {}) => {
+  let n = 0;
+  return new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, { random: () => 0.5,
+    sleep: async (s) => { waits.push(s); }, fetch: fakeFetch(() => answer(++n)), ...opts });
+};
+
+test("a provider answering 503 follows the outage schedule until it answers", async () => {
+  resetOutageWaits();
+  const waits: number[] = [];
+  const agent = outageAgent(waits, (n) => (n <= 5 ? errorResponse(503, "api_error") : sseResponse(anthropicEvents("hi"))));
+  const reply = await ask(agent);
+  expect(reply.content[0]!.text).toBe("hi");
+  expect(waits).toEqual([2, 8, 30, 60, 60]);
+  expect(OUTAGE_DELAYS).toEqual([2, 8, 30, 60, 60, 60]);
+});
+
+test("the outage schedule has 20% jitter either way", async () => {
+  resetOutageWaits();
+  const at = async (random: number) => {
+    const waits: number[] = [];
+    await ask(outageAgent(waits, (n) => (n <= 2 ? errorResponse(503, "api_error") : sseResponse(anthropicEvents("hi"))),
+      { random: () => random }));
+    return waits;
+  };
+  expect(await at(0)).toEqual([1.6, 6.4]);
+  expect(await at(1)).toEqual([2.4, 9.6]);
+});
+
+test("a stream cut after it started keeps three attempts", async () => {
+  resetOutageWaits();
+  const waits: number[] = [];
+  const cut = () => new Response(new ReadableStream({ start(c) {
+    c.enqueue(enc.encode(anthropicEvents("x")[0]!));
+    setTimeout(() => c.error(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" })), 1);
+  } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  const err = await ask(outageAgent(waits, cut)).catch((e: unknown) => e) as ModelError;
+  expect(err).toBeInstanceOf(ModelError);
+  expect(err.attempts).toHaveLength(3);
+  expect(waits).toEqual([2, 8]);
+  // An outage before the cut ends the outage schedule too: 503, then a cut stream, is no longer "every attempt down".
+  resetOutageWaits();
+  const mixed: number[] = [];
+  const e2 = await ask(outageAgent(mixed, (n) => (n === 1 ? errorResponse(503, "api_error") : cut())))
+    .catch((e: unknown) => e) as ModelError;
+  expect([e2.attempts!.length, e2.fault]).toEqual([3, undefined]);
+});
+
+/** A clock the sleeps move: `sleep` waits until the clock reaches its wake time, and `run` moves the clock to the earliest
+ * wake whenever every caller is waiting. */
+function virtualTime() {
+  let now = 0;
+  const pending: { at: number; wake: () => void }[] = [];
+  return {
+    clock: () => now * 1000,
+    sleep: (s: number) => new Promise<void>((resolve) => { pending.push({ at: now + s, wake: resolve }); }),
+    async run<T>(work: Promise<T>): Promise<T> {
+      let done = false;
+      work.then(() => { done = true; }, () => { done = true; });
+      while (!done) {
+        for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+        if (done || !pending.length) continue;
+        pending.sort((x, y) => x.at - y.at);
+        const next = pending.shift()!;
+        now = Math.max(now, next.at);
+        next.wake();
+      }
+      return work;
+    },
+  };
+}
+const downAgent = (t: ReturnType<typeof virtualTime>, answer: (n: number) => Response) => {
+  let n = 0;
+  return new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, { random: () => 0.5, clock: t.clock,
+    sleep: t.sleep, fetch: fakeFetch(() => answer(++n)) });
+};
+const alwaysDown = () => errorResponse(503, "api_error");
+const attemptsOf = async (work: Promise<unknown>) => ((await work.catch((e: unknown) => e)) as ModelError).attempts!.length;
+
+test("waiting stops growing once a provider has cost 10 minutes of wall clock", async () => {
+  resetOutageWaits();
+  expect(OUTAGE_WAIT_MAX_SECONDS).toBe(600);
+  const t = virtualTime();
+  const counts: number[] = [];
+  for (let i = 0; i < 5; i++) counts.push(await t.run(attemptsOf(ask(downAgent(t, alwaysDown)))));
+  expect(counts).toEqual([7, 7, 6, 3, 3]); // 220, 440, 600 reached before the last wait, then [2, 8]
+});
+
+test("overlapping waits of parallel callers count once", async () => {
+  resetOutageWaits();
+  const t = virtualTime();
+  const together = await t.run(Promise.all([1, 2, 3].map(() => attemptsOf(ask(downAgent(t, alwaysDown))))));
+  expect(together).toEqual([7, 7, 7]); // 220 s of wall clock, not 660
+  expect(await t.run(attemptsOf(ask(downAgent(t, alwaysDown))))).toBe(7); // 440 s so far
+});
+
+test("an answer from a provider clears what its outage cost", async () => {
+  resetOutageWaits();
+  const t = virtualTime();
+  expect(await t.run(attemptsOf(ask(downAgent(t, alwaysDown))))).toBe(7);
+  expect(await t.run(attemptsOf(ask(downAgent(t, alwaysDown))))).toBe(7); // 440 s
+  await t.run(ask(downAgent(t, (n) => (n <= 3 ? alwaysDown() : sseResponse(anthropicEvents("hi")))))); // 480 s, answered
+  expect(await t.run(attemptsOf(ask(downAgent(t, alwaysDown))))).toBe(7); // it would be 6 with 480 s on the books
+});
+
+test("a retry-after is honoured but not past what remains of the cap", async () => {
+  resetOutageWaits();
+  const t = virtualTime();
+  const waits: number[] = [];
+  const agent = (answer: (n: number) => Response) => {
+    let n = 0;
+    return new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, { random: () => 0.5, clock: t.clock,
+      sleep: (s) => { waits.push(s); return t.sleep(s); }, fetch: fakeFetch(() => answer(++n)) });
+  };
+  const limited = (after: string) => new Response(JSON.stringify({ type: "error",
+    error: { type: "rate_limit_error", message: "slow" } }),
+  { status: 429, headers: { "content-type": "application/json", "retry-after": after } });
+  await t.run(ask(agent((n) => (n === 1 ? limited("20") : sseResponse(anthropicEvents("hi"))))));
+  expect(waits).toEqual([20]); // well under the cap: honoured
+  resetOutageWaits();
+  await t.run(attemptsOf(ask(agent(alwaysDown)))); // 220 s
+  await t.run(attemptsOf(ask(agent(alwaysDown)))); // 440 s
+  waits.length = 0;
+  const err = await t.run(ask(agent((n) => (n <= 3 ? alwaysDown() : limited("3600")))).catch((e: unknown) => e)) as ModelError;
+  expect(waits).toEqual([2, 8, 30, 120]); // 480 s spent: the hour is cut to the 120 s left
+  expect(err.attempts).toHaveLength(5); // then the cap is reached: [2, 8] only
+});
+
+test("a slow failing provider still gets the whole schedule: the waits are not the call's time", async () => {
+  resetOutageWaits();
+  const waits: number[] = [];
+  let n = 0;
+  const slow = async (answer: (n: number) => Response) => { await new Promise((r) => setTimeout(r, 20)); return answer(++n); };
+  const agent = new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, { random: () => 0.5, totalSeconds: 0.5,
+    sleep: async (s) => { waits.push(s); },
+    fetch: (async () => slow((i) => (i <= 6 ? errorResponse(504, "api_error") : sseResponse(anthropicEvents("hi"))))) as unknown as typeof fetch });
+  expect((await ask(agent)).content[0]!.text).toBe("hi");
+  expect(waits).toEqual([2, 8, 30, 60, 60, 60]);
+  resetOutageWaits();
+  n = 0;
+  const json = new ResponsesJson(GPT, "https://api.example/v1", "k", "medium", PRICES, { random: () => 0.5, totalSeconds: 0.5,
+    sleep: async (s) => { waits.push(s); },
+    fetch: (async () => slow((i) => (i <= 6 ? new Response("down", { status: 504 }) : okReply()))) as unknown as typeof fetch });
+  expect((await json.completeJson("s", "u", SCHEMA))[0]).toEqual({ verdict: "confirmed" });
+});
+
+test("a call that really hangs still times out while outage waits are extending its deadline", async () => {
+  resetOutageWaits();
+  const agent = new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, { random: () => 0.5, idleSeconds: 0.1,
+    attemptSeconds: 0.1, totalSeconds: 0.5, sleep: noSleep,
+    fetch: fakeFetch((_u, init) => stalledResponse(init)) });
+  const err = await ask(agent).catch((e: unknown) => e) as ModelError;
+  expect(err.timedOut).toBe(true);
+});
+
+test("a second opinion with a fallback goes to it after 2 and 8 s", async () => {
+  resetOutageWaits();
+  const waits: number[] = [];
+  const first = new ResponsesJson(GPT, "https://api.example/v1", "k", "medium", PRICES, { random: () => 0.5,
+    sleep: async (s) => { waits.push(s); }, downDelays: [2, 8], fetch: fakeFetch(() => new Response("down", { status: 503 })) });
+  const second = new ResponsesJson(STALL, "https://api.example/v1", "k", "medium", PRICES, { sleep: noSleep,
+    fetch: fakeFetch(() => okReply()) });
+  const reply = await new FallbackJson(first, second).completeJson("s", "u", SCHEMA);
+  expect([waits, reply[4]]).toEqual([[2, 8], "openai:gpt-6.1-sol"]);
+});
+
+test("makeChallenger and the other roles: the outage schedule each is given", () => {
+  const env = { ...COMPAT_ENV, OPENAI_API_KEY: "o" };
+  const s = { ...defaultSettings(), providers: TABLES, prices: PRICED, secondHunter: parseModelRef("openai:gpt-6.1-sol"),
+    challenger: parseModelRef("compat:some-model", TABLES), challengerFallback: parseModelRef("openai:gpt-6.1-sol") };
+  const delays = (m: unknown) => (m as { downDelays: number[] }).downDelays;
+  const fb = makeChallenger(s, env, noValues) as unknown as { first: unknown; second: unknown };
+  expect([delays(fb.first), delays(fb.second)]).toEqual([[2, 8], OUTAGE_DELAYS]);
+  expect(delays(makeChallenger({ ...s, challengerFallback: undefined }, env, noValues))).toEqual(OUTAGE_DELAYS);
+  expect(delays(makeSecondHunter(s, env, noValues))).toEqual([2, 8, 30]);
+  expect(delays(makeJsonModel(s.secondHunter!, s, env, noValues))).toEqual([2, 8, 30]);
+});
+
+test("the wait shows in the terminal and costs no budget", async () => {
+  resetOutageWaits();
+  const waits: number[] = [], notes: string[] = [];
+  const agent = outageAgent(waits, (n) => (n <= 4 ? errorResponse(503, "api_error") : sseResponse(anthropicEvents("hi"))));
+  agent.notice = (x) => notes.push(x);
+  const reply = await ask(agent);
+  expect(notes[3]).toBe("Anthropic overloaded (HTTP 503); waiting 60 s, try 5 of 7");
+  expect(notes[0]).toBe("Anthropic overloaded (HTTP 503); waiting 2 s, try 2 of 7");
+  // The four error replies were never billed or counted as billed with unknown usage; only the answer is.
+  expect(reply.unknownCalls ?? 0).toBe(0);
+  expect(reply.attempts!.filter((a) => a.outcome === "ok")).toHaveLength(1);
+});
+
+// A verdict call is cut by silence (VERDICT_IDLE_TIMEOUT), not by a short wall clock: a stream still sending lives to
+// VERDICT_ATTEMPT_TIMEOUT.
+const limitsOf = (m: object) => {
+  const j = m as { attemptLimit?: number; idle?: number; agent?: object };
+  const t = (j.agent ?? j) as { attemptLimit: number; idle: number };
+  return [t.attemptLimit, t.idle];
+};
+const verdictLimits = (challenger = "compat:some-model") => {
+  const env = { ...COMPAT_ENV, OPENAI_API_KEY: "o", ANTHROPIC_API_KEY: "a" };
+  const s = { ...defaultSettings(), providers: TABLES, prices: PRICED,
+    challenger: parseModelRef(challenger, TABLES), challengerFallback: parseModelRef("openai:gpt-6.1-sol") };
+  const fb = makeChallenger(s, env, noValues) as unknown as { first: object; second: object };
+  return [limitsOf(fb.first), limitsOf(fb.second)];
+};
+
+test("a verdict call still streaming past the old limit is not cut", async () => {
+  expect([VERDICT_ATTEMPT_TIMEOUT, VERDICT_IDLE_TIMEOUT]).toEqual([150, 30]);
+  expect(verdictLimits()).toEqual([[150, 30], [150, 30]]);
+  expect(verdictLimits("anthropic:claude-sonnet-5-5")).toEqual([[150, 30], [150, 30]]);
+  // Alive for 0.3 s, past a 0.2 s attempt limit's worth of the old kind, never silent for 0.1 s.
+  const slow = (init: RequestInit) => {
+    let timer: ReturnType<typeof setInterval>;
+    const [head, ...rest] = anthropicEvents("hi");
+    return new Response(new ReadableStream({ start(c) {
+      c.enqueue(enc.encode(head!));
+      timer = setInterval(() => { try { c.enqueue(enc.encode(sseEvent("ping", {}))); } catch { clearInterval(timer); } }, 10);
+      setTimeout(() => { clearInterval(timer); for (const e of rest) c.enqueue(enc.encode(e)); c.close(); }, 300);
+      init.signal?.addEventListener("abort", () => { clearInterval(timer); c.error(new DOMException("aborted", "AbortError")); });
+    } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  let n = 0;
+  const agent = new AnthropicAgent("claude-sonnet-5-5", "medium", "k", undefined, { idleSeconds: 0.1, attemptSeconds: 2,
+    totalSeconds: 5, timeoutAttempts: 1, sleep: noSleep, fetch: fakeFetch((_u, init) => { n++; return slow(init); }) });
+  expect((await ask(agent)).content[0]!.text).toBe("hi");
+  expect(n).toBe(1);
+}, 10_000);
+
+test("a silent verdict call is cut at the idle limit and falls back", async () => {
+  const first = { n: 0 }, second = { n: 0 };
+  const quiet = new ResponsesJson(GPT, "https://api.example/v1", "k", "medium", PRICES, { sleep: noSleep,
+    idleSeconds: 0.05, attemptSeconds: 5, totalSeconds: 5, timeoutAttempts: 1,
+    fetch: fakeFetch((_u, init) => { first.n++; return stalledStream(init); }) });
+  const fallback = new ResponsesJson(STALL, "https://api.example/v1", "k", "medium", PRICES, { sleep: noSleep,
+    fetch: fakeFetch(() => { second.n++; return okReply(); }) });
+  const t0 = performance.now();
+  const reply = await new FallbackJson(quiet, fallback).completeJson("s", "u", SCHEMA);
+  expect(performance.now() - t0).toBeLessThan(2000);
+  expect([first.n, second.n]).toEqual([1, 1]);
+  expect(reply[4]).toBe("openai:gpt-6.1-sol");
+  expect(verdictLimits()[0]![1]).toBe(30);
+}, 10_000);
+
+// makeChallenger with a stand-in fetch and scaled limits (attempt 0.6 s, idle 0.1 s), on each API path.
+const SCALED = { attemptSeconds: 0.6, idleSeconds: 0.1 };
+const JSON_OK = '{"verdict": "confirmed"}';
+const withFetch = async (h: (url: string, init: RequestInit) => Response, run: () => Promise<void>) => {
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (u: string | URL | Request, init?: RequestInit) => h(String(u), init ?? {})) as typeof fetch;
+  try { await run(); } finally { globalThis.fetch = real; }
+};
+/** Bytes every 10 ms for `ms`, then the whole reply: a slow stream that is never silent. */
+const trickle = (init: RequestInit, head: string, ping: string, rest: string[], ms: number) => {
+  let timer: ReturnType<typeof setInterval>;
+  return new Response(new ReadableStream({ start(c) {
+    c.enqueue(enc.encode(head));
+    timer = setInterval(() => { try { c.enqueue(enc.encode(ping)); } catch { clearInterval(timer); } }, 10);
+    setTimeout(() => { clearInterval(timer); try { for (const e of rest) c.enqueue(enc.encode(e)); c.close(); } catch { /* aborted */ } }, ms);
+    init.signal?.addEventListener("abort", () => { clearInterval(timer); try { c.error(new DOMException("aborted", "AbortError")); } catch { /* done */ } });
+  }, cancel() { clearInterval(timer); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+};
+const PATHS = [
+  { name: "messages", challenger: "anthropic:claude-sonnet-5-5", host: "api.anthropic.com",
+    silent: (init: RequestInit) => stalledResponse(init), endless: (init: RequestInit) => { const [h] = anthropicEvents(JSON_OK);
+      return trickle(init, h!, sseEvent("ping", {}), [], 60_000); },
+    slow: (init: RequestInit) => { const [h, ...r] = anthropicEvents(JSON_OK);
+      return trickle(init, h!, sseEvent("ping", {}), r, 300); } },
+  { name: "responses", challenger: "compat:some-model", host: "llm.example.com",
+    silent: (init: RequestInit) => stalledStream(init), endless: (init: RequestInit) => trickle(init,
+      "event: response.created\ndata: " + JSON.stringify({ type: "response.created", response: { status: "in_progress" } }) + "\n\n",
+      ": keepalive\n\n", [], 60_000),
+    slow: (init: RequestInit) => trickle(init, "event: response.created\ndata: " + JSON.stringify({ type: "response.created",
+      response: { status: "in_progress" } }) + "\n\n", ": keepalive\n\n", [sse(responsesBody(JSON_OK))], 300) },
+];
+const scaled = (challenger: string, fallback: boolean) => makeChallenger({ ...defaultSettings(), providers: TABLES,
+  prices: PRICED, openaiTransport: "stream", challenger: parseModelRef(challenger, TABLES),
+  ...(fallback ? { challengerFallback: parseModelRef("openai:gpt-6.1-sol") } : {}) },
+  { ...COMPAT_ENV, OPENAI_API_KEY: "o", ANTHROPIC_API_KEY: "a" }, noValues, SCALED);
+
+for (const path of PATHS) {
+  test(`${path.name}: a silent verdict call fails over to the fallback well before the attempt limit`, async () => {
+    let first = 0, second = 0;
+    await withFetch((url, init) => url.includes(path.host) ? (first++, path.silent(init)) : (second++, okReply()), async () => {
+      const t0 = performance.now();
+      const reply = await scaled(path.challenger, true).completeJson("s", "u", SCHEMA);
+      expect(performance.now() - t0).toBeLessThan(450);
+      expect([first, second]).toEqual([1, 1]);
+      expect(reply[4]).toBe("openai:gpt-6.1-sol");
+    });
+  }, 10_000);
+
+  test(`${path.name}: a stream that keeps sending but never finishes is cut at the attempt limit`, async () => {
+    await withFetch((url, init) => url.includes(path.host) ? path.endless(init) : okReply(), async () => {
+      const t0 = performance.now(), reply = await scaled(path.challenger, true).completeJson("s", "u", SCHEMA);
+      const took = performance.now() - t0;
+      expect(took).toBeGreaterThan(500);
+      expect(took).toBeLessThan(1500);
+      expect(reply[4]).toBe("openai:gpt-6.1-sol");
+    });
+  }, 10_000);
+
+  test(`${path.name}: a stream quiet for less than the idle limit survives past it, under the attempt limit`, async () => {
+    let calls = 0;
+    await withFetch((_url, init) => (calls++, path.slow(init)), async () => {
+      const reply = await scaled(path.challenger, false).completeJson("s", "u", SCHEMA);
+      expect(reply[0]).toEqual({ verdict: "confirmed" });
+      expect(calls).toBe(1);
+    });
+  }, 10_000);
+}

@@ -3,15 +3,19 @@
 // last test fails until it is named.
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { makeAnswerRunner } from "../src/accept";
 import { agreements, selfAgreement } from "../src/valueindex";
-import { Boundary, boundaryOf, diffSuspects, isMasked, maskedAgent, maskedJson, piecesAllowed } from "../src/boundary";
+import { accept } from "../src/accept";
+import { Boundary, boundaryOf, diffSuspects, isMasked, maskedAgent, maskedJson, piecesAllowed, STAND_INS_NOTE }
+  from "../src/boundary";
+import { check, checkJson, checkSummary } from "../src/check";
+import { recheckJson, recheckReview, recheckSummary } from "../src/recheck";
 import { CloudClient } from "../src/cloud";
 import { clipOutput as cutForBrain, CloudBrain } from "../src/cloudbrain";
 import { loadReviewFile, parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
-import { BIG_KEYS_MOST, changeLimits, takeSnapshot, tooLargeText } from "../src/change";
+import { BIG_KEYS_MOST, changeLimits, takeSnapshot } from "../src/change";
 import { ModelError } from "../src/errors";
 import { EventLog } from "../src/events";
 import { classify, describeHints, errorLine, firstLine } from "../src/diagnose";
@@ -183,6 +187,281 @@ test("with stand-ins on, as by default, a value on a changed line still never re
     sessionFactory: fakeFactory(leakyRun) });
   expectClean("the diff", agent.bodies.join("\n"));
   expect(agent.bodies[0]).toContain("+api_token");
+});
+
+test("a guess stays real in the run snapshot, and reaches no model through read_file, grep or run output", async () => {
+  const repo = leakyRepo({ standIns: true });
+  const agent = new RecordingAgent(TURNS());
+  let seen = "";
+  // A run sees the snapshot as it is: what it prints holds the real values of every file it read.
+  const realRun = (snap: () => string) => (): [string | null, string, boolean] => {
+    seen = ["settings.py", "other.py"].map((f) => readFileSync(join(snap(), f), "utf8")).join("");
+    return [junitXml([[GEN, "test_add", "failed", `assert "${seen}" == 5`]]), `E   ${seen}\n1 failed\n`, false];
+  };
+  const made: FakeSession[] = [];
+  const factory = fakeFactory(realRun(() => made[0]!.snap), made);
+  const judge = new RecordingJson("openai:x", VERDICT);
+  await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: judge, sessionFactory: factory });
+  // The snapshot held the real values, so this is the filter's work.
+  expect(seen).toContain(CANARY);
+  expect(seen).toContain(UNCHANGED);
+  const sent = agent.bodies.join("\n");
+  expectClean("every tool's result", sent);
+  expectClean("the second opinion", judge.bodies.join("\n"));
+  const faked = new Boundary(ALL);
+  // Each tool came back, with the stand-in where the value was.
+  expect(sent).toContain(`api_token = \\\"${faked.mask(CANARY)}`);
+  expect(sent).toContain(`db_password = \\\"${faked.mask(UNCHANGED)}`);
+  expect(sent).toContain(`E   api_token = \\\"${faked.mask(CANARY)}`);
+});
+
+// --- what a test can make of a real value --------------------------------------------------------------------------
+
+const b64 = (t: string) => Buffer.from(t).toString("base64");
+const url64 = (t: string) => b64(t).replaceAll("+", "-").replaceAll("/", "_");
+/** A value whose base64 holds both the signs base64 and its URL form differ on. */
+const SIGNS_VALUE = "Zq~7x?K2>mP9vR4tY1wA";
+
+test("each encoded form of a value is masked, and each stand-in is the stand-in's own encoding", () => {
+  expect(b64(SIGNS_VALUE)).toMatch(/[+/]/);
+  expect(b64(SIGNS_VALUE)).toMatch(/=$/);
+  for (const value of [CANARY, SIGNS_VALUE]) {
+    const b = new Boundary([value]);
+    const fake = b.mask(value);
+    expect(fake).not.toBe(value);
+    for (const [name, encode] of Object.entries({
+      "base64": b64, "base64 unpadded": (t: string) => b64(t).replace(/=+$/, ""), "base64url": url64,
+      "base64url unpadded": (t: string) => url64(t).replace(/=+$/, ""),
+      "hex": (t: string) => Buffer.from(t).toString("hex"), "HEX": (t: string) => Buffer.from(t).toString("hex").toUpperCase(),
+      "upper": (t: string) => t.toUpperCase(), "lower": (t: string) => t.toLowerCase() })) {
+      const form = encode(value);
+      const out = b.mask(`x = "${form}";`);
+      expect([name, out.includes(form)]).toEqual([name, false]);
+      if (!name.includes("padded")) expect([name, out]).toEqual([name, `x = "${encode(fake)}";`]);
+    }
+  }
+});
+
+test("a value in the base64 of a longer text is masked, whatever stands around it", () => {
+  const b = new Boundary([CANARY]);
+  for (const text of [`app:${CANARY}`, `a:${CANARY}`, `someone@example.com:${CANARY}`, `${CANARY}:suffix`, `x${CANARY}yz`]) {
+    for (const encode of [b64, url64]) {
+      const whole = encode(text);
+      const out = b.mask(`Authorization: Basic ${whole}`);
+      expect([text, out.includes(whole)]).toEqual([text, false]);
+      // What is left is what stands around it, and at most the bits it shares with those characters.
+      const decoded = Buffer.from(out.slice("Authorization: Basic ".length), "base64").toString("latin1");
+      expect([text, decoded.includes(CANARY)]).toEqual([text, false]);
+      for (let i = 0; i + 4 <= CANARY.length; i++) {
+        expect([text, i, decoded.includes(CANARY.slice(i, i + 4))]).toEqual([text, i, false]);
+      }
+    }
+  }
+});
+
+test("a runner's cut of that base64 leaves no long tail of it", () => {
+  const b = new Boundary([CANARY]);
+  for (const user of ["app", "ab", "a"]) {
+    const whole = b64(`${user}:${CANARY}`);
+    const tail = whole.replace(/=+$/, "").slice(-12);
+    const out = b.mask(`assert 'Basic ${whole.slice(0, 6)}...${tail}${whole.slice(whole.replace(/=+$/, "").length)}' == 'x'`);
+    expect([user, out.includes(tail)]).toEqual([user, false]);
+  }
+});
+
+test("a word-like address password keeps its case: its other case is a name, and its encodings are not", () => {
+  const value = "access_token@";
+  const b = new Boundary([value]);
+  expect(b.mask("ACCESS_TOKEN = 1; access_token = 2")).toBe("ACCESS_TOKEN = 1; access_token = 2");
+  const encoded = b64("access_token").replace(/=+$/, "");
+  expect(b.mask(`x ${encoded} y`)).not.toContain(encoded);
+});
+
+test("short values have no encoded forms: short text turns up by chance", () => {
+  const b = new Boundary(["abc@"]);
+  expect(b.mask(`${b64("abc")} ABC`)).toBe(`${b64("abc")} ABC`);
+});
+
+// What a dump prints, as the tools lay it out: 16 bytes a line, in pairs (xxd) or apart (hexdump -C, with a gap in the middle).
+const bytesOf = (t: string) => [...Buffer.from(t)].map((n) => n.toString(16).padStart(2, "0"));
+const xxdOf = (t: string) => bytesOf(t).reduce<string[][]>((lines, h, i) => {
+  if (i % 16 === 0) lines.push([]);
+  lines.at(-1)!.push(h);
+  return lines;
+}, []).map((l, n) => `${(n * 16).toString(16).padStart(8, "0")}: ${l.map((h, i) => i % 2 ? h : ` ${h}`).join("").trim()}`).join("\n") + "\n";
+const hexdumpOf = (t: string) => bytesOf(t).reduce<string[][]>((lines, h, i) => {
+  if (i % 16 === 0) lines.push([]);
+  lines.at(-1)!.push(h);
+  return lines;
+}, []).map((l, n) => `${(n * 16).toString(16).padStart(8, "0")}  ${l.slice(0, 8).join(" ")}  ${l.slice(8).join(" ")}`).join("\n") + "\n";
+
+test("the hex column of a dump goes: spaced, in pairs at either start, whole or split across lines", () => {
+  const b = new Boundary([CANARY]);
+  const fake = b.mask(CANARY);
+  const inner = bytesOf(CANARY);
+  expect(b.mask(`x ${inner.join(" ")} y`)).toBe(`x ${bytesOf(fake).join(" ")} y`);
+  /** Whether `text` shows six bytes running of the value, in any of the layouts. */
+  const shows = (text: string) => Array.from({ length: inner.length - 5 }, (_, i) => inner.slice(i, i + 6))
+    .some((run) => text.includes(run.join(" ")) || text.includes(run.join("")) ||
+      text.includes(run.join("").match(/.{1,4}/g)!.join(" ")) || text.includes(`${run[0]} ${run.slice(1).join("").match(/.{1,4}/g)!.join(" ")}`));
+  expect(shows(xxdOf(CANARY))).toBe(true);
+  // Aligned to a line, off by one, two or three bytes: then it runs over two lines.
+  for (const before of ["", "a", "ab", "abc"]) {
+    expect([before, shows(b.mask(xxdOf(`${before}${CANARY}`)))]).toEqual([before, false]);
+  }
+  expect(shows(b.mask(hexdumpOf(CANARY)))).toBe(false);
+});
+
+test("what hexdump's gap leaves between a value's two ends stays, as SAFETY.md says", () => {
+  const b = new Boundary([CANARY]);
+  const out = b.mask(hexdumpOf(`abc${CANARY}`));
+  const inner = bytesOf(CANARY);
+  // Its start is gone; the eight bytes after the gap are a piece from the middle.
+  expect(out).not.toContain(inner.slice(0, 5).join(" "));
+  expect(out).toContain(inner.slice(5, 13).join(" "));
+});
+
+test("hex that only looks alike stays: a dump of other bytes, a checksum, a list of numbers", () => {
+  const b = new Boundary([CANARY]);
+  const other = xxdOf("nothing to see in this file at all\n") + hexdumpOf("nothing to see in this file at all\n");
+  expect(b.mask(other)).toBe(other);
+  expect(b.mask("5a 71 37 78")).toBe("5a 71 37 78");
+  const text = "ff 00 ff 00 de ad be ef 12 34\n0123 4567 89ab cdef\n";
+  expect(b.mask(text)).toBe(text);
+});
+
+test("only the value's plain forms come back from unmask: an encoded form's stand-in has no one place to go", () => {
+  const b = new Boundary([CANARY]);
+  expect(b.unmask(b.mask(CANARY))).toBe(CANARY);
+});
+
+test("many values with their forms stay quick to add and to mask with", () => {
+  const values = Array.from({ length: 5000 }, (_, i) => `Zq7xK2mP9vR4tY${i}w`);
+  const t0 = performance.now();
+  const b = new Boundary(values);
+  const text = "lorem ipsum dolor sit amet ".repeat(40_000);
+  expect(b.mask(text)).toBe(text);
+  expect(performance.now() - t0).toBeLessThan(1500);
+});
+
+// --- what a coding agent reads next -----------------------------------------------------------------------------------
+
+/** A review whose failing test prints the real values, as the code holds them. */
+async function reviewedCanary() {
+  const repo = leakyRepo({ standIns: true });
+  const out = `E  token=${CANARY} ${b64(`app:${CANARY}`)} ${CANARY.toUpperCase()}\n1 failed\n`;
+  const run = (): [string | null, string, boolean] => [junitXml([[GEN, "test_add", "failed",
+    `assert "${CANARY}" == "${b64(`app:${UNCHANGED}`)}"`]]), out, false];
+  const settings: Settings = { ...SETTINGS, standIns: true };
+  writeSettings(repo, settings);
+  const r = await runReview(repo, { settings, agentModel: new RecordingAgent(TURNS()),
+    challenger: new RecordingJson("openai:x", VERDICT), sessionFactory: fakeFactory(run) });
+  return { repo, settings, run, ...r };
+}
+/** Fails on the value in any form a test here makes of it. */
+function expectNoForm(what: string, text: string): void {
+  const encoded = [CANARY, UNCHANGED].flatMap((v) => [v, v.toUpperCase(), b64(`app:${v}`)]);
+  for (const form of encoded) if (text.includes(form)) throw new Error(`${what} holds a real value: ${form}`);
+}
+
+test("review.json, review.md, round.json and the review returned hold no real value, and say so", async () => {
+  const { review, rdir } = await reviewedCanary();
+  expect(review.findings.length).toBeGreaterThan(0);
+  expectNoForm("the review returned", JSON.stringify(review));
+  for (const f of ["review.json", "review.md"]) expectNoForm(f, readFileSync(join(rdir, f), "utf8"));
+  const rounds = (readdirSync(rdir, { recursive: true }) as string[]).filter((f) => f.endsWith("round.json"));
+  expect(rounds.length).toBeGreaterThan(0);
+  for (const f of rounds) expectNoForm(f, readFileSync(join(rdir, f), "utf8"));
+  expect(readFileSync(join(rdir, "review.md"), "utf8").replace(/\s+/g, " ")).toContain(STAND_INS_NOTE);
+  expect(JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")).stand_ins_shown).toBe(true);
+});
+
+test("what a model's report quotes is masked in the saved review too", async () => {
+  const repo = leakyRepo({ standIns: true });
+  const report = JSON.stringify({ tests: [{ test: `${GEN}::test_add`, expects: "add sums" }], questions: [],
+    suspected_defects: [{ test: `${GEN}::test_add`, explanation: `It sends ${UNCHANGED}.` }] });
+  // The judge's reply goes straight into the review: no round's mask covers it.
+  const judge = new RecordingJson("openai:x", { ...VERDICT, reason: `It holds ${UNCHANGED}.` });
+  const { review, rdir } = await runReview(repo, { settings: { ...SETTINGS, standIns: true },
+    agentModel: new RecordingAgent(TURNS(), report), challenger: judge, sessionFactory: fakeFactory(leakyRun) });
+  expect(review.findings[0]!.explanation).toContain("It sends ");
+  expect(review.findings[0]!.reason).toContain("It holds ");
+  expectNoForm("the review returned", JSON.stringify(review));
+  for (const f of ["review.json", "review.md"]) expectNoForm(f, readFileSync(join(rdir, f), "utf8"));
+});
+
+test("the fix prompt holds no real value, whatever the review on disk quotes", async () => {
+  const { repo, rdir, settings } = await reviewedCanary();
+  const md = readFileSync(join(rdir, "review.md"), "utf8");
+  writeFileSync(join(rdir, "review.md"), md.replace(/Mark: \[[^\]]*\] real/g, "Mark: [x] real"));
+  const saved = JSON.parse(readFileSync(join(rdir, "review.json"), "utf8"));
+  saved.findings[0].explanation = `It sends ${UNCHANGED}.`;
+  writeFileSync(join(rdir, "review.json"), JSON.stringify(saved));
+  await accept(repo, rdir, settings, { answerRunner: null });
+  expect(readFileSync(join(rdir, "fix-prompt.md"), "utf8")).toContain("It sends");
+  const prompt = readFileSync(join(rdir, "fix-prompt.md"), "utf8");
+  expectNoForm("fix-prompt.md", prompt);
+  expect(prompt.replace(/\s+/g, " ")).toContain(STAND_INS_NOTE);
+});
+
+test("arnx check says no real value: its results, its JSON, its summary and its log", async () => {
+  const repo = leakyRepo({ standIns: true });
+  mkdirSync(join(repo, ".arnx/tests/tests/arnx/r1"), { recursive: true });
+  writeFileSync(join(repo, ".arnx/tests/tests/arnx/r1/test_kept.py"), "def test_kept():\n    assert False\n");
+  const failing = () => [junitXml([["tests/arnx/r1/test_kept.py", "test_kept", "failed",
+    `assert "${UNCHANGED}" == "${b64(`app:${UNCHANGED}`)}"`]]), `E  ${UNCHANGED}\n`, false] as [string, string, boolean];
+  const results = await check(repo, SETTINGS, { sessionFactory: fakeFactory(failing) });
+  expect(results[0]!.failed.length).toBe(1);
+  const [summary, code] = checkSummary(results);
+  expectNoForm("check", JSON.stringify(results));
+  expectNoForm("check --json", checkJson(results, code));
+  expect(JSON.parse(checkJson(results, code)).stand_ins_shown).toBe(true);
+  expect(summary).toContain(STAND_INS_NOTE);
+  // A run that gave no report: its output goes to a log a coding agent is pointed at.
+  const none = () => [null, `E  ${UNCHANGED}\n`, false] as [null, string, boolean];
+  const [gone] = await check(repo, SETTINGS, { sessionFactory: fakeFactory(none) });
+  expect(gone!.log).toBeTruthy();
+  expectNoForm("the check's log", readFileSync(join(repo, gone!.log!), "utf8"));
+});
+
+test("arnx check --review says no real value", async () => {
+  const { repo, rdir, settings, run } = await reviewedCanary();
+  const r = await recheckReview(repo, rdir, settings, { sessionFactory: fakeFactory(run) });
+  expect(r.findings.some((f) => f.message)).toBe(true);
+  expectNoForm("the recheck", JSON.stringify(r));
+  expectNoForm("check --review --json", recheckJson(r));
+  expect(recheckSummary(r)[0]).toContain(STAND_INS_NOTE);
+  expect(JSON.parse(recheckJson(r)).stand_ins_shown).toBe(true);
+});
+
+test("the before-snapshot's values reach the filter: a value only the code before the change holds", async () => {
+  const onlyBefore = "Mn6bV1cX8zL3kJ9h";
+  const repo = gitRepo(tmp());
+  mkdirSync(dirname(reviewConfigPath(repo)));
+  writeFileSync(reviewConfigPath(repo), stamp(parseReviewConfig(YAML), "Dev", "2026-11-04"));
+  const settings: Settings = { ...SETTINGS, standIns: true, beforeCheck: true };
+  writeSettings(repo, settings);
+  // A lockfile: no diff shows it, so only that snapshot can name the value.
+  writeFileSync(join(repo, "composer.lock"), `auth_token = "${onlyBefore}"\n`);
+  commit(repo, "old");
+  rmSync(join(repo, "composer.lock"));
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a - b\n");
+  commit(repo, "the change");
+  const run = (command: string): [string | null, string, boolean] => {
+    const quote = /before-\d/.test(command) ? ` ${onlyBefore}` : "";
+    return [junitXml([[GEN, "test_add", "failed", `assert 1 == 5${quote}`]]), `1 failed${quote}\n`, false];
+  };
+  const judge = new RecordingJson("openai:x", VERDICT);
+  const { review, rdir } = await runReview(repo, { settings, agentModel: new RecordingAgent(TURNS()), challenger: judge,
+    sessionFactory: fakeFactory(run) });
+  expect(review.findings[0]?.before).toBeTruthy();
+  expect(JSON.stringify(review)).not.toContain(onlyBefore);
+  expect(judge.bodies.join("\n")).not.toContain(onlyBefore);
+  for (const f of readdirSync(rdir, { recursive: true }) as string[]) {
+    if (f.endsWith(".json") && statSync(join(rdir, f)).isFile()) {
+      expect([f, readFileSync(join(rdir, f), "utf8").includes(onlyBefore)]).toEqual([f, false]);
+    }
+  }
 });
 
 // --- the review, on the user's own keys ---------------------------------------------------------------------------
@@ -677,7 +956,6 @@ test("a stand-in has the value's shape and comes back as the value", () => {
   const masked = b.mask(text);
   expect(masked).not.toContain(CANARY);
   expect(b.mask(CANARY)).toHaveLength(CANARY.length);
-  expect(b.standIns().sort()).toEqual([b.mask(CANARY), b.mask(REMOVED)].sort());
   expect(b.unmask(masked)).toBe(text);
 });
 
@@ -687,7 +965,6 @@ test("no values: the same string and the same object come back", () => {
   expect(b.mask("anything")).toBe("anything");
   expect(b.maskValue(msg)).toBe(msg);
   expect(b.unmask("anything")).toBe("anything");
-  expect(b.standIns()).toEqual([]);
   expect(new Boundary(["", ""]).mask("anything")).toBe("anything");
   const raw = new RecordingAgent([]);
   expect(maskedAgent(raw, b)).toBeDefined();
@@ -1297,8 +1574,7 @@ test("a big file's values are found: the key-shaped one gets its stand-in, a gue
   const repo = bigRepo("big.json", bigJson());
   const snap = join(tmp(), "snap");
   const r = takeSnapshot(repo, null, snap, [], { standIns: true });
-  expect(r.withheld).toEqual([]);
-  expect(r.tooLarge).toEqual([]);
+  expect(r.withheld).toEqual([{ path: ".env", line: 0, label: "named like a secret" }]);
   expect([...r.suspects]).toEqual(expect.arrayContaining([AWS, UNCHANGED]));
   const kept = readFileSync(join(snap, "big.json"), "utf8");
   expect(kept).not.toContain(AWS);
@@ -1332,20 +1608,22 @@ for (const standIns of [true, false]) {
     });
 }
 
-test("a private key with its body in a big text file leaves the file out", () => {
+test("a private key with its body in a big text file stays, with a fake", () => {
   const header = `-----BEGIN ${"PRIVATE"} KEY-----`;
-  const body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj";
+  const body = "MIIEvQIBADANBgkq" + "hkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj";
   const repo = bigRepo("dump.txt", `${header}\n${body}\n-----END ${"PRIVATE"} KEY-----\n${padding(1_100_000)}`);
-  const r = takeSnapshot(repo, null, join(tmp(), "snap"), [], { standIns: true });
-  expect(r.withheld.map((w) => w.path)).toEqual(["dump.txt"]);
-  expect(existsSync(join(tmp(), "snap", "dump.txt"))).toBe(false);
+  const snap = join(tmp(), "snap");
+  const r = takeSnapshot(repo, null, snap, [], { standIns: true });
+  expect(r.withheld).toEqual([{ path: ".env", line: 0, label: "named like a secret" }]);
+  expect(r.fakedKeys).toEqual(["dump.txt"]);
+  expect(readFileSync(join(snap, "dump.txt"), "utf8")).not.toContain(body);
 });
 
 test("a big file full of keys is left out: each stand-in takes a slow hash", () => {
   const keys = Array.from({ length: BIG_KEYS_MOST + 1 }, (_, i) => `"sk-${"a".repeat(32)}${String(i).padStart(8, "0")}"`).join("\n");
   const repo = bigRepo("keys.json", `${keys}\n${padding(1_100_000)}`);
   const r = takeSnapshot(repo, null, join(tmp(), "snap"), [], { standIns: true });
-  expect(r.withheld).toEqual([{ path: "keys.json", line: 1, label: `over ${BIG_KEYS_MOST} key-shaped strings` }]);
+  expect(r.withheld).toEqual([{ path: ".env", line: 0, label: "named like a secret" }, { path: "keys.json", line: 1, label: `over ${BIG_KEYS_MOST} key-shaped strings` }]);
   expect(existsSync(join(tmp(), "snap", "keys.json"))).toBe(false);
   // Its values still count wherever else they stand.
   expect(r.suspects.size).toBeGreaterThan(BIG_KEYS_MOST);
@@ -1355,7 +1633,7 @@ test("a big file full of keys is left out: each stand-in takes a slow hash", () 
 test("a big binary file stays and is not scanned: no model can read it, and its bytes are not text", () => {
   const repo = bigRepo("data.bin", `\0binary\n"api_token": "${AWS}"\n${padding(1_100_000)}`);
   const r = takeSnapshot(repo, null, join(tmp(), "snap"), [], { standIns: true });
-  expect([r.withheld, r.tooLarge]).toEqual([[], []]);
+  expect(r.withheld).toEqual([{ path: ".env", line: 0, label: "named like a secret" }]);
   expect(existsSync(join(tmp(), "snap", "data.bin"))).toBe(true);
   expect(r.suspects.has(AWS)).toBe(false);
 });
@@ -1372,20 +1650,18 @@ test("a text file past the higher cap is left out with a clear line; a binary on
     commit(repo, "more big files");
     const snap = join(tmp(), "snap");
     const r = takeSnapshot(repo, null, snap, [], { standIns: true, sandbox: ["aside/seed.json"] });
-    expect(r.tooLarge).toEqual(["huge.json"]);
+    expect(r.withheld).toEqual([{ path: ".env", line: 0, label: "named like a secret" }, { path: "huge.json", line: 0, label: "too large to scan" }]);
     expect(existsSync(join(snap, "huge.json"))).toBe(false);
     expect(existsSync(join(snap, "huge.bin"))).toBe(true);
     expect(r.sandboxed).toEqual(["aside/seed.json"]);
     expect(existsSync(join(`${snap}.sandbox`, "aside/seed.json"))).toBe(true);
-    expect(tooLargeText(r.tooLarge)).toBe("left out, too large to scan (over 1 MB): huge.json; if tests need one, list it in " +
-      ".arnxignore and sandbox_only");
 
     writeFileSync(join(repo, "settings.py"), `api_token = "${REMOVED}"\n`);
-    const said: string[] = [];
     const agent = new RecordingAgent([[tool("read_file", { path: "huge.json" })]]);
-    await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson("openai:x", VERDICT),
-      sessionFactory: fakeFactory(leakyRun), progress: (m) => said.push(m) });
-    expect(said.join("\n")).toContain("too large to scan");
+    const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson("openai:x", VERDICT),
+      sessionFactory: fakeFactory(leakyRun), progress: () => {} });
+    expect(review.leftOutFiles).toEqual([{ path: ".env", line: 0, label: "named like a secret" }, { path: "huge.json", line: 0, label: "too large to scan" }]);
+    expect(agent.bodies[0]).toContain("`huge.json` (too large to scan)");
     expect(agent.bodies.join("\n")).not.toContain(AWS);
   } finally {
     changeLimits.maxScanBytes = saved;
@@ -1429,4 +1705,62 @@ test("a capitals key behind a short kind prefix is judged as its body is, whatev
     }
     expect(differ).toBe(0);
   }
+});
+
+// --- a model's stand-in meets real files (S3) ------------------------------------------------------------------------
+
+/** A test the fake sandbox runs as a test would: it passes when the value it names is what settings.py holds, and its
+ * failure quotes what the code holds. */
+const VALUE_TEST = (held: string) => `from settings import api_token\n\ndef test_add():\n    assert api_token == "${held}"\n`;
+const valueRun = (snap: () => string, ran: string[]) => (command: string): [string | null, string, boolean] => {
+  void command;
+  const test = readFileSync(join(snap(), GEN), "utf8");
+  const code = readFileSync(join(snap(), "settings.py"), "utf8");
+  const named = /== "([^"]*)"/.exec(test)![1]!;
+  ran.push(test);
+  return code.includes(`"${named}"`) ? [junitXml([[GEN, "test_add", "passed", ""]]), "1 passed\n", false]
+    : [junitXml([[GEN, "test_add", "failed", `assert ${code.trim()} == "${named}"`]]), `E   ${code}\n1 failed\n`, false];
+};
+const valueRound = (held: string) => (): Block[][] => [[tool("read_file", { path: "settings.py" })],
+  [tool("write_file", { path: GEN, content: VALUE_TEST(held) }), tool("run_tests", {})]];
+
+test("a test holding a stand-in passes against the real value in the snapshot", async () => {
+  const repo = leakyRepo({ standIns: true });
+  const agent = new RecordingAgent(valueRound(FAKED)(), JSON.stringify({
+    tests: [{ test: `${GEN}::test_add`, expects: "the token" }], suspected_defects: [], questions: [] }));
+  const made: FakeSession[] = [];
+  const ran: string[] = [];
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: agent,
+    challenger: new RecordingJson("openai:x", VERDICT), sessionFactory: fakeFactory(valueRun(() => made[0]!.snap, ran), made) });
+  // The run was on the real value, and the test said it.
+  expect(ran.length).toBeGreaterThan(0);
+  expect(ran.every((t) => t.includes(CANARY) && !t.includes(FAKED))).toBe(true);
+  expect(review.findings).toEqual([]);
+  expect(review.projectStats?.[0]?.passed ?? 1).toBeGreaterThan(0);
+});
+
+test("the saved test file keeps the stand-in", async () => {
+  const repo = leakyRepo({ standIns: true });
+  const agent = new RecordingAgent(valueRound(FAKED)(), JSON.stringify({
+    tests: [{ test: `${GEN}::test_add`, expects: "the token" }], suspected_defects: [], questions: [] }));
+  const made: FakeSession[] = [];
+  const { rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent,
+    challenger: new RecordingJson("openai:x", VERDICT), sessionFactory: fakeFactory(valueRun(() => made[0]!.snap, []), made) });
+  const saved = (readdirSync(rdir, { recursive: true }) as string[]).filter((f) => f.endsWith(".arnx-copy"));
+  expect(saved.length).toBe(1);
+  const text = readFileSync(join(rdir, saved[0]!), "utf8");
+  expect(text).toContain(FAKED);
+  expect(text).not.toContain(CANARY);
+});
+
+test("a failure message quoting the real value is masked before a model sees it", async () => {
+  const repo = leakyRepo({ standIns: true });
+  // The test names something else, so it fails, and the failure quotes the code.
+  const agent = new RecordingAgent(valueRound("not the value")());
+  const made: FakeSession[] = [];
+  await runReview(repo, { settings: SETTINGS, agentModel: agent, challenger: new RecordingJson("openai:x", VERDICT),
+    sessionFactory: fakeFactory(valueRun(() => made[0]!.snap, []), made) });
+  const sent = agent.bodies.join("\n");
+  expectClean("the failure", sent);
+  expect(sent).toContain(`E   api_token = \\"${FAKED}`);
 });

@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { clip } from "./events";
 import { repoLanguages } from "./detect";
 import { unsupportedText } from "./languages";
-// arnx command line. Exit codes: 0 no confirmed findings, 1 confirmed findings, 2 incomplete or failed, 3 setup
+// arnx command line. Exit codes: 0 fine (confirmed findings are worth a look, not a failure), 1 a finding no second opinion saw, 2 incomplete or failed, 3 setup
 // required, 4 (check only) accepted tests changed since accept, 130 interrupted.
 import BANNER_ANSI from "../assets/banner.ans" with { type: "text" };
 import BANNER_TEXT from "../assets/banner.txt" with { type: "text" };
@@ -27,18 +27,19 @@ import { type Account, byokHint, CloudClient, credentialsPath, deleteCredentials
   type Fetch, tokenFor, usd } from "./cloud";
 import { dockerSession, suffixReviewCopies } from "./testround";
 import type { SessionFactory } from "./sandbox";
-import { describe, describeBlanked, git, repoRoot, resolveChange } from "./change";
-import { NOT_SET_UP } from "./draft";
-import { route } from "./route";
+import { branchBase, changeLimits, describe, describeBlanked, fakedKeysText, git, hasCommits, leftOutBrief, pinOfFile, repoRoot, resolveChange } from "./change";
+import { docsFilter, route, setupParts, uncoveredChange } from "./route";
+import { SOURCE } from "./untested";
 import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, readSecretPins, type ReviewFile,
-  projectDigest, restDigest, reviewConfigPath, stampedBaseline, stampedQuick, withoutSecretPins, withSecretPins } from "./config";
+  projectDigest, restDigest, reviewConfigPath, secretPinsOf, stampedBaseline, stampedQuick, withoutSecretPins,
+  withSecretPins } from "./config";
 import { getAdapter } from "./adapters";
-import { ArnxError, internalError, SetupRequired } from "./errors";
+import { ArnxError, EnvFailed, internalError, OnlyDocs, SetupRequired } from "./errors";
 import { type Baseline, baselinePath, parseBaseline, readBaseline, writeBaseline } from "./baseline";
 import { FILE as IGNORE_FILE, initialIgnore } from "./ignore";
 import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter, unpricedModels,
   unpricedNote } from "./llm";
-import { exitCode, failureLine, findingStatus, groupsOf, load, neededQuestions, nextSteps, parseMarks, type Review,
+import { confirmed, exitCode, failureLine, findingStatus, groupsOf, load, neededQuestions, nextSteps, parseMarks, type Review,
   summary, summaryRows, summaryStatus, wrapMarkdown, yourCall } from "./report";
 import { acceptData, checkData, reportTelemetry, reviewData, type Sender, setupData,
   TELEMETRY_OPEN, telemetryLine, telemetryStatus }
@@ -55,18 +56,20 @@ import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSetting
 import { type ModelRef, providerLines, providerName, refString, setupRef, setupSettings, unusedKeysNote }
   from "./settings";
 import { providerHost, resolveProvider } from "./providers";
-import { isSecretPath, secretHits, secretPins } from "./secrets";
-import { approveFile, coverageMap, describeCoverage, describeWithheld, type NeededFile, type ProjectProof,
+import { filePin, isSecretPath, secretHits, secretPins } from "./secrets";
+import { approveFile, coverageFiles, coverageMap, describeCoverage, entryHoldsTests, type NeededFile, type ProjectProof,
   NOTHING_TO_TEST, proofBefore, type ProofBefore, rerecordBaseline, runSetup, type SetupResult, type SetupRun, stillRed,
   WEB_UI_STOP } from "./setup";
+import { withRepoHolds } from "./standins";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, notTestedRecord, PROVEN_BASELINE,
-  PROVEN_COPY, proofState, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
+  PROVEN_COPY, proofState, quickCoverageLine, repoTypecheckGaps, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
 import { isoSeconds } from "./util";
 import { spend } from "./spend";
 import { installSkills, SKILL_DIRS, skillDirsShown, skillStates, userSkillRoot } from "./skill";
 import { DEFAULTS, isModelKey, PLACEHOLDERS, PROMPT_KEYS, type PromptKey, textHash } from "./prompts";
 import { CLOUD_PROMPTS, copyDefault, hasOverrides, type Override, overrideWarnings, PROMPTS_FILE, promptsPath,
   readOverrides } from "./userprompts";
+import { withCommandReruns } from "./realkey";
 import { recheckJson, recheckReview, recheckSummary } from "./recheck";
 import { applyRemove, planRemove } from "./remove";
 import { versionLine } from "./version";
@@ -100,7 +103,7 @@ export const ownKeysLine = (providers: string[]) =>
   `Sends your change and the files arnx reads to ${providers.join(", ")}, with your keys. ${DOCKER_LINE}`;
 /** A path as one shell word: as is when it is plain, else single-quoted. */
 const shellWord = (p: string) => /^[\w@%+=:,./-]+$/.test(p) ? p : `'${p.replace(/'/g, "'\\''")}'`;
-export const GITIGNORE = "reviews/\nrun/\nsetup/\nusage.jsonl\nprecision.jsonl\n";
+export const GITIGNORE = "reviews/\nrun/\nsetup/\nusage.jsonl\nprecision.jsonl\ntypecheck.json\n";
 export const USAGE = `usage: arnx <command> [options]
 
 Tests every change your coding agent makes.
@@ -125,7 +128,7 @@ Prepare, once per repository (the first review sets up what it needs)
   remove [--yes] [--tests]              what arnx put in this repository: listed, deleted with --yes
 
 Review, after each change
-  review [--range A..B] [--untracked] [--no-hunt] [--resume]
+  review [--range A..B] [--untracked] [--no-hunt] [--docs] [--resume]
                                         test the change: branch commits, uncommitted work, or the last commit
 
 Decide
@@ -157,6 +160,8 @@ export interface CliDeps {
   /** setup's agent and its suites (tests): a scripted model, and suites outside Docker. */
   setupModel?: AgentModel;
   setupSessions?: SessionFactory;
+  /** The review itself (default: reviewer's runReview); tests replace it to see what runs before it. */
+  runReview?: typeof runReview;
   /** Interactive marking: keys from the terminal and a full-screen draw (absent when not a terminal). */
   keys?: () => AsyncIterator<Key> & { close?(): void };
   draw?: (lines: string[]) => void;
@@ -201,6 +206,7 @@ const COMMANDS: Record<string, { options: Options; positionals: number }> = Obje
   approve: { options: { yes: { type: "boolean" }, project: { type: "string" }, quiet: { type: "boolean" } },
     positionals: 0 },
   review: { options: { range: { type: "string" }, quiet: { type: "boolean" }, "no-hunt": { type: "boolean" },
+    docs: { type: "boolean" },
     resume: { type: "boolean" }, untracked: { type: "boolean" }, "no-untracked": { type: "boolean" }, ...MODELS },
     positionals: 0 },
   accept: { options: { again: { type: "boolean" }, "no-answers": { type: "boolean" }, quiet: { type: "boolean" },
@@ -296,7 +302,9 @@ class Commands {
 
   /** With --json, the error that stopped the command: result "error", its message and exit code. */
   fail(message: string, exitCode: number): void {
-    this.emit("error", exitCode, { error: message });
+    // Documentation alone is nothing to test, not an error.
+    if (exitCode === 0) this.emit("clean", 0, { status: "docs-only", message });
+    else this.emit("error", exitCode, { error: message });
   }
 
   /** With --json, an object written whole (a command with its own schema); without it, nothing. */
@@ -888,9 +896,10 @@ class Commands {
   }
 
   /** Setup from doctor's checks to the end screen. `quick`: a first review's setup (runSetup `quick`), for the files
-   * of `what`; the review goes on after it, so it says only what it set up and what stopped it. */
+   * of `what` (from setup's unproven `attempt`, when there is one); the review goes on after it, so it says only what
+   * it set up and what stopped it. */
   private async setupFlow(repo: string, a: Args, { project, add = false, quick }: { project?: string; add?: boolean;
-    quick?: { files: string[]; what: string } }): Promise<number> {
+    quick?: { files: string[]; what: string; why?: string; attempt?: string } }): Promise<number> {
     // doctor's checks first: a missing key or a stopped Docker ends setup here, before it reads or spends anything.
     // Setup runs one model, so only its key is needed.
     const ready = await this.ready(repo, a, (s) => [setupRef(s)]);
@@ -908,7 +917,7 @@ class Commands {
     };
     // A review waits on a quick setup: it stops at QUICK_MINUTES, and `arnx setup` takes the rest.
     const cap = quick ? Math.min(s.setupMinutes, QUICK_MINUTES) : s.setupMinutes;
-    this.d.out(quick ? `${add ? "Setting up" : "First run: setting up"} just enough to test ${quick.what} (about ` +
+    this.d.out(quick ? `${add ? "Setting up" : "First run: setting up"} just enough to test ${quick.why ?? quick.what} (about ` +
       `2–6 min, stops at ${cap} min).` : setupPreview(repo, s, untracked));
     const outDir = join(repo, ".arnx", "setup");
     // JEV is asked only when the config turns it on and its key is set (the key alone does nothing).
@@ -930,13 +939,14 @@ class Commands {
       cloud ? null : maskedAgent(this.d.setupModel ?? makeAgentModel(setupSettings(s), this.d.env, this.boundary),
         this.boundary), { outDir, project, add, progress,
         failureModel, untracked, localPins: localPinsPath(this.d.env, repo), timeLimit: limit,
-        ...(quick ? { quick: { files: quick.files } } : {}),
+        ...(quick ? { quick: { files: quick.files, ...(quick.attempt ? { attempt: quick.attempt } : {}) } } : {}),
         ...(this.d.setupSessions ? { sessionFactory: this.d.setupSessions } : {}),
         ...(cloud ? { brain: cloud(progress) } : {}) }), { cost: true, since: started });
     if (result.withheld.length) {
-      this.d.out(`Left out as secret-looking (not sent, not in the sandbox): ${describeWithheld(result.withheld)}. ` +
+      this.d.out(`Left out as secret-looking (not sent, not in the sandbox): ${leftOutBrief(result.withheld)}. ` +
         "If one is a test fixture, not a secret: `arnx allow-secret PATH`, then run setup again.");
     }
+    if (result.fakedKeys.length) this.d.out(fakedKeysText(result.fakedKeys));
     if (result.blanked.length) {
       this.d.out(`Comment lines blanked as secret-looking (not sent): ${describeBlanked(result.blanked)}.`);
     }
@@ -952,6 +962,8 @@ class Commands {
     if (!result.ok && result.stop === NOTHING_TO_TEST) {
       this.d.out(`Nothing here arnx can test: no project it can set up owns a file ${quick?.what ?? "this change"} ` +
         "touches.");
+      // Inside a review, a try that failed like any other: the review says the one next step at its end.
+      if (quick && add) return finish(2, false);
       this.d.out("Next: arnx setup (sets up the whole repository)");
       report("ok", 0, setupJson({ file: null, result, approved: false, auto: false, files: null, warnings: [],
         reviewYaml: null, record: null, seconds: seconds(), failure: null, next: ["arnx setup"] }));
@@ -995,7 +1007,7 @@ class Commands {
     if (notes) writeFileSync(notes, result.notes!.trim() + "\n");
     const proposed = parseReviewFile(result.yamlText!);
     const files = filesSummary(proposed, repo, untracked);
-    const warnings = approvalWarnings(proposed, result.projects);
+    const warnings = warningsOf(repo, proposed, result.projects, untracked);
     const json = (o: { approved: boolean; record?: string | null; approval?: ApprovedProject[];
       failure?: Record<string, unknown> | null; next: string[]; stop?: "time" }) => setupJson({ file: proposed,
       result: o.stop ? { ...result, stop: o.stop } : result, approved: o.approved, auto: o.approved, files, warnings,
@@ -1034,6 +1046,9 @@ class Commands {
       // The review goes on: what was set up, and where the rest is written down.
       this.d.out(`✓ Test environment ready: ${result.runs.map((x) => x.name).join(", ")} · details: ` +
         `${APPROVAL_RECORD}`);
+      const left = quickCoverageLine(proposed, quick.files, !!result.waiting?.length);
+      if (left) this.d.out(left);
+      for (const line of repoTypecheckGaps(proposed, repo)) this.d.out(line);
       if (result.waiting?.length) {
         this.d.out(`Not set up yet, though ${result.waiting.length === 1 ? "it uses" : "they use"} what this change ` +
           `edits: ${result.waiting.join(", ")}. Their tests do not run in this review; \`arnx setup\` sets them up.`);
@@ -1113,8 +1128,8 @@ class Commands {
 
   /** A review.yaml changed since its proof (or never proven) is proven again before a review, a check or accept uses
    * its sandbox: one line, the suites, the stamp. A failing proof stops the command (exit 3); `command` is the one to
-   * run again once the file is fixed. */
-  private async reprove(repo: string, a: Args, command: string, untracked?: boolean): Promise<void> {
+   * run again once the file is fixed. `limited` (a review): the proof stops at QUICK_MINUTES, naming `arnx approve`. */
+  private async reprove(repo: string, a: Args, command: string, untracked?: boolean, limited = false): Promise<void> {
     if (!existsSync(reviewConfigPath(repo)) || isSeedFile(repo)) return; // the command itself says to run setup
     const file = loadReviewFile(repo, { requireApproved: false });
     const st = proofState(repo, file);
@@ -1124,8 +1139,24 @@ class Commands {
     this.reproved = { changes: st.changes, no_copy: st.changes === null };
     const why = changes === null ? "is not proven yet" : "changed since its proof";
     const last = lastProof(repo);
-    const r = await this.approveRun(repo, a, undefined, untracked, { warnings: approvalWarnings(file), changes,
-      quick: last?.quick ?? [], ...(last ? { unchanged: last } : {}) });
+    // A review does not wait long for it (`limited`): past QUICK_MINUTES it stops, and `arnx approve` proves the file
+    // without a limit.
+    const now = () => this.clock();
+    const limit: TimeLimit | undefined = limited
+      ? { at: now() + QUICK_MINUTES * 60_000, now, minutes: QUICK_MINUTES } : undefined;
+    const late = (what: string) => new SetupRequired(`${REVIEW_FILE} ${why}: ${what} did not finish in ` +
+      `${QUICK_MINUTES} min.\nNext: arnx approve (runs it without a limit)`);
+    let r;
+    try {
+      r = await this.approveRun(repo, a, undefined, untracked, { warnings: warningsOf(repo, file, [], untracked),
+        changes, quick: last?.quick ?? [], ...(limit ? { limit } : {}), ...(last ? { unchanged: last } : {}) });
+    } catch (e) {
+      // A build Docker cut at the limit.
+      if (limit && e instanceof EnvFailed && e.kind === "build" && timeIsUp(limit)) throw late("the image build");
+      throw e;
+    }
+    // Cut during a suite, or with too little time left to start the next step.
+    if (r.outOfTime) throw late(r.projects.length ? "its suites" : "its proof");
     if (r.code !== 0) {
       throw new SetupRequired(`${REVIEW_FILE} ${why}, and its suites fail:\n${r.detail}\nNext: fix the ✗ above, then ${command}`);
     }
@@ -1142,6 +1173,8 @@ class Commands {
       return relative(repo, aside);
     }
     this.replaceFile(repo, text);
+    // Marked as setup's own: the next review sets up from it (isOwnAttempt), as a first run does.
+    writeFileSync(join(repo, ATTEMPT_HASH), sha256(text) + "\n");
     return REVIEW_FILE;
   }
 
@@ -1264,7 +1297,7 @@ class Commands {
     }
     this.d.out(changes.length ? ["Changed:", ...changes.map((c) => `  ${c}`)].join("\n") : "The baseline is unchanged.");
     const file = loadReviewFile(repo);
-    const record = this.proofRecord(repo, by, at, approvalWarnings(file),
+    const record = this.proofRecord(repo, by, at, warningsOf(repo, file, [], untracked),
       [...Array.isArray(edits) ? edits : edits === "no-copy" ? ["review.yaml: no copy of the proven file to compare"] : [],
         ...changes], untracked);
     this.provenEnd(repo, file, [], { untracked });
@@ -1282,23 +1315,32 @@ class Commands {
       const full = realpathSync(resolve(this.d.cwd, p));
       if (!full.startsWith(repo + sep)) throw new ArnxError(`${p} is outside the repository`);
       const rel = relative(repo, full).split(sep).join("/");
-      if (isSecretPath(rel)) throw new ArnxError(`${rel}: files named like this are never sent, allowed or not`);
-      const text = readFileSync(full, "utf8");
+      // A file left out whatever it holds, by its name or its size, is pinned as it stands.
+      const tooBig = statSync(full).size > changeLimits.maxScanBytes;
+      const whole = isSecretPath(rel) || tooBig || readFileSync(full).subarray(0, 8000).includes(0);
+      const text = tooBig ? "" : readFileSync(full, "utf8");
       const hits = secretHits(text);
-      if (!hits.length) throw new ArnxError(`${rel} holds nothing that looks like a key; nothing to allow`);
+      if (!hits.length && !whole) throw new ArnxError(`${rel} holds nothing that looks like a key; nothing to allow`);
       const shown = hits.slice(0, 5).map((h) => `${h.label} line ${h.line}`).join(", ") + (hits.length > 5 ? ", …" : "");
-      this.d.out(`! ${rel}: ${hits.length} key-like string${hits.length === 1 ? "" : "s"} (${shown})`);
-      return { path: rel, matches: secretPins(text), hits };
+      if (hits.length) this.d.out(`! ${rel}: ${hits.length} key-like string${hits.length === 1 ? "" : "s"} (${shown})`);
+      // Each side of a change must be allowed: the file as it stands, as committed, before the last commit, where its branch
+      // left, and as allowed before.
+      const earlier = hasCommits(repo) && !tooBig ? ["HEAD", "HEAD^", branchBase(repo)?.base].flatMap((rev) => rev
+        ? [git(repo, ["show", `${rev}:${rel}`], [0, 128])] : []) : [];
+      const before = (existsSync(reviewConfigPath(repo)) ? readSecretPins(repo) : []).find((x) => x.path === rel)?.matches ?? [];
+      const wholePins = whole ? [pinOfFile(full)!, ...earlier.filter(Boolean).map(filePin)] : [];
+      return { path: rel, matches: [...new Set([...secretPins(text), ...earlier.flatMap(secretPins), ...wholePins, ...before])].sort(), hits, whole };
     });
     const path = reviewConfigPath(repo);
     const seed = !existsSync(path) || isSeedFile(repo);
     mkdirSync(join(repo, ".arnx"), { recursive: true });
     writeFileSync(path, withSecretPins(existsSync(path) ? readFileSync(path, "utf8") : null,
       pins.map(({ path: p, matches }) => ({ path: p, matches }))));
-    // Allowing is not sending: the file goes out with the next command that calls a model or runs the sandbox.
-    this.d.out(`✓ Allowed in ${REVIEW_FILE}: from now on, model calls and the sandbox may include ` +
-      `${pins.length === 1 ? "this file" : "these files"}.`);
-    this.d.out("  A new key-like string in it withholds the file again.");
+    this.d.out(`✓ Allowed in ${REVIEW_FILE}.`);
+    this.d.out(pins.some((p) => p.hits.some((h) => h.label === "a private key"))
+      ? "  The sandbox keeps the real key, so tests that parse it run. Models still read `[private key]`. Any edit ends this."
+      : pins.some((p) => p.whole) ? "  The sandbox and model calls may hold it as it is. Any edit leaves it out again."
+      : "  Model calls and the sandbox may hold it. A new key-like string in it gets a stand-in.");
     this.d.out(`Next: ${seed ? "arnx setup" : "arnx review"}`);
     // Never the matched text, nor its pins: where each key-like string is, and what kind it looks like.
     this.emit("ok", 0, { files: pins.map((p) => ({ path: p.path, matches: p.hits.length,
@@ -1307,8 +1349,7 @@ class Commands {
     return 0;
   }
 
-  /** allow-secret --remove: the paths' pins out of review.yaml, so their files are withheld again. The files need not
-   * exist any more. A seed left with nothing allowed is removed. */
+  /** allow-secret --remove: the paths' pins out of review.yaml. The files need not exist any more. A seed left with nothing allowed is removed. */
   private disallowSecret(repo: string, paths: string[]): number {
     if (!paths.length) throw new ArnxError("name the files to stop allowing: arnx allow-secret --remove PATH...");
     const rels = paths.map((p) => {
@@ -1324,7 +1365,7 @@ class Commands {
     const text = withoutSecretPins(readFileSync(path, "utf8"), rels);
     if (seed && readSecretPins(repo).every((p) => rels.includes(p.path))) rmSync(path);
     else writeFileSync(path, text);
-    this.d.out(`✓ No longer allowed: ${rels.join(", ")} (withheld again from model calls and the sandbox).`);
+    this.d.out(`✓ No longer allowed: ${rels.join(", ")} (a key is a fake again; other text as it was before).`);
     const next = seed ? "arnx setup" : "arnx review";
     this.d.out(`Next: ${next}`);
     this.emit("ok", 0, { removed: rels, review_yaml: REVIEW_FILE, next: [next] });
@@ -1447,7 +1488,7 @@ class Commands {
     const st = proofState(repo, file);
     const changes = st.proven ? null : this.sayChanges(st);
     const r = await this.approveRun(repo, a, a.values.project as string | undefined, undefined,
-      { warnings: approvalWarnings(file), changes, quick: lastProof(repo)?.quick ?? [] });
+      { warnings: warningsOf(repo, file, [], untrackedSetting(repo)), changes, quick: lastProof(repo)?.quick ?? [] });
     if (r.code === 0) this.provenEnd(repo, file, r.projects, { untracked });
     else this.d.out(`Not proven:\n${r.detail}`);
     this.emit(r.code === 0 ? "ok" : "fail", r.code, { approved: r.code === 0, projects: r.projects,
@@ -1465,7 +1506,9 @@ class Commands {
     const s = await this.agreed(repo, ready.s, mode);
     const first = await this.setUpFor(repo, a, untracked ?? s.untracked);
     if (first !== null) return first;
-    await this.reprove(repo, a, "arnx review", untracked);
+    // A change no project covers is refused before any suite runs.
+    this.refuseUncovered(repo, a, s, untracked ?? s.untracked);
+    await this.reprove(repo, a, "arnx review", untracked, true);
     const cloud = await this.cloudBrain(repo, s, mode);
     if (cloud) {
       this.cloudPrompts(repo);
@@ -1485,21 +1528,25 @@ class Commands {
     progress.start();
     let result;
     try {
-      result = await runReview(repo, { settings: s, agentModel, challenger,
+      result = await (this.d.runReview ?? runReview)(repo, { settings: s, agentModel, challenger,
         range: (a.values.range as string | undefined) ?? null, progress: progress.say, hunt: !a.values["no-hunt"],
-        hunter, ranker, ...(secondHunter ? { secondHunter } : {}), resume: !!a.values.resume, untracked });
+        hunter, ranker, ...(secondHunter ? { secondHunter } : {}), resume: !!a.values.resume, untracked,
+        docs: !!a.values.docs });
     } finally {
       progress.stop();
     }
     return this.reviewed(repo, s, result);
   }
 
-  /** What a review sets up before it runs: with no test environment yet, the projects its change touches, quickly (a
-   * first run); with one, a project its change touches that a first run left for later (NOT_SET_UP), unless setting
-   * that one up failed before. Null when the review goes on; otherwise its exit code. */
+  /** What a review sets up before it runs: with no test environment yet (or only setup's own unproven attempt, set up
+   * from), the projects its change touches, quickly (a first run); with one, the parts its change touches that no
+   * project covers for a reason a setup can answer (setupParts: not set up yet, out of time, unlisted files), unless
+   * setting that part up failed before. Null when the review goes on; otherwise its exit code. */
   private async setUpFor(repo: string, a: Args, untracked: boolean): Promise<number | null> {
     if (a.values.resume) return null;
-    const fresh = !existsSync(reviewConfigPath(repo)) || isSeedFile(repo);
+    // Setup's own unproven attempt counts as a first run: set up from, quickly, never proven by its whole suite.
+    const own = isOwnAttempt(repo);
+    const fresh = !existsSync(reviewConfigPath(repo)) || isSeedFile(repo) || own;
     let change;
     try {
       let pins: ReturnType<typeof readSecretPins> = [];
@@ -1515,8 +1562,20 @@ class Commands {
       if (e instanceof ArnxError) return null;
       throw e;
     }
+    // Documentation alone is nothing to test: said before any environment is built or any model asked.
+    const isDoc = docsFilter(repo, change.withUntracked ? null : change.head, !!a.values.docs);
+    if (change.files.length && change.files.every(isDoc)) throw new OnlyDocs(change.files);
     if (fresh) {
-      const code = await this.setupFlow(repo, a, { quick: { files: change.files, what: describe(change) } });
+      const attempt = own ? readFileSync(reviewConfigPath(repo), "utf8") : undefined;
+      // A review tries the attempt once more (its first run was the first try); after that, `arnx setup` does.
+      const parts = attempt ? attemptParts(attempt, change.files) : [];
+      const failed = quickFailed(repo);
+      if (parts.length && parts.every((p) => failed.has(p))) {
+        throw new SetupRequired(`${parts.join(", ")} could not be set up for a review (tried twice). Next: arnx setup`);
+      }
+      const code = await this.setupFlow(repo, a, { quick: { files: change.files, what: describe(change),
+        ...(attempt ? { attempt } : {}) } });
+      if (code === 2 && parts.length) quickFailed(repo, parts);
       if (code !== 0) return code;
       return approvalStamp(repo)?.current ? null : 0;
     }
@@ -1527,17 +1586,15 @@ class Commands {
       if (e instanceof ArnxError) return null;
       throw e;
     }
-    const failed = quickFailed(repo);
-    const later = file.uncovered.filter((u) => u.reason === NOT_SET_UP && !failed.has(u.path));
-    const files = route(file, change.files, Number.MAX_SAFE_INTEGER).uncovered
-      .filter((u) => u.reason === NOT_SET_UP).map((u) => u.path)
-      .filter((f) => later.some((u) => f.startsWith(u.path.replace(/^\//, ""))));
+    // The parts of the change no project covers whose reason a setup can answer (setupParts), each tried once.
+    const all = coverageFiles(repo, untracked).files;
+    const { files, parts, why } = setupParts(file, change.files, quickFailed(repo), (p) => entryHoldsTests(p, all));
     if (!files.length) return null;
-    const parts = later.filter((u) => files.some((f) => f.startsWith(u.path.replace(/^\//, "")))).map((u) => u.path);
     // A try that fails leaves review.yaml and the baseline as they were, so the rest is reviewed as before.
     const kept = [reviewConfigPath(repo), baselinePath(repo)].map((path) =>
       [path, existsSync(path) ? readFileSync(path) : null] as const);
-    const code = await this.setupFlow(repo, a, { add: true, quick: { files, what: parts.join(", ") } });
+    const code = await this.setupFlow(repo, a, { add: true, quick: {
+      files, what: parts.join(", "), why: parts.map((p, i) => `${p} (${why[i]})`).join(", ") } });
     if (code !== 0) {
       for (const [path, bytes] of kept) {
         if (bytes) writeFileSync(path, bytes);
@@ -1545,9 +1602,31 @@ class Commands {
       }
       // Not tried again by later reviews (unless what stopped it was not this setup's): `arnx setup --add` does.
       if (code === 2) quickFailed(repo, parts);
-      this.d.out(`Reviewing the rest; ${parts.join(", ")} stays not set up (arnx setup --add tries again).`);
+      // Said only when a project reviews the rest; otherwise the refusal that follows says the next step.
+      if (!uncoveredChange(file, change.files, Number.MAX_SAFE_INTEGER, isDoc)) {
+        this.d.out(`Reviewing the rest; ${parts.join(", ")} stays not set up (arnx setup --add tries again).`);
+      }
     }
     return null;
+  }
+
+  /** Refuses a review whose change no project covers (uncoveredChange), or that cannot be reviewed at all, before
+   * anything runs. A file that does not read is the review's to say. */
+  private refuseUncovered(repo: string, a: Args, s: Settings, untracked: boolean): void {
+    if (!existsSync(reviewConfigPath(repo)) || isSeedFile(repo)) return;
+    let file: ReviewFile;
+    try {
+      file = loadReviewFile(repo, { requireApproved: false });
+    } catch (e) {
+      if (e instanceof ArnxError) return;
+      throw e;
+    }
+    // What stops the change (nothing to review, too large, a secret) is said now, before any proof runs.
+    const change = resolveChange(repo, (a.values.range as string | undefined) ?? null, secretPinsOf(file.raw),
+      { untracked });
+    const why = uncoveredChange(file, change.files, s.maxProjects,
+      docsFilter(repo, change.withUntracked ? null : change.head, !!a.values.docs));
+    if (why) throw new SetupRequired(why);
   }
 
   /** A review whose judgement is arnx cloud's: no model is made here, no key is needed. */
@@ -1558,9 +1637,9 @@ class Commands {
     progress.start();
     let result;
     try {
-      result = await runReview(repo, { settings: s, brain: cloud(progress.say),
+      result = await (this.d.runReview ?? runReview)(repo, { settings: s, brain: cloud(progress.say),
         range: (a.values.range as string | undefined) ?? null, progress: progress.say, hunt: !a.values["no-hunt"],
-        resume: !!a.values.resume, untracked });
+        resume: !!a.values.resume, untracked, docs: !!a.values.docs });
     } finally {
       progress.stop();
     }
@@ -1633,6 +1712,10 @@ class Commands {
     this.d.out(real.length ? `✓ Accepted ${n(realTests, "test")} from ${n(issues, "issue")} ` +
       `(${n(real.length, "finding")})` : aside ? "No test of a finding kept: their tests were set aside."
       : tests.length ? "No findings marked real." : "No findings marked real; nothing kept.");
+    const onFallback = real.filter((f) => f.fallback).length;
+    if (onFallback) {
+      this.d.out(`  ${n(onFallback, "finding")} ran on the image built for another commit: its dependencies may differ`);
+    }
     if (left) this.d.out(`  ${left} mark${left === 1 ? " was" : "s were"} pre-filled (not reviewed in triage)`);
     const questions = result.review.questions.length;
     const unanswered = a.values["no-answers"] ? questions
@@ -1945,6 +2028,35 @@ class Commands {
 /** Where every approval is recorded, with its warnings (a local file, under .arnx/setup/). */
 export const APPROVAL_RECORD = ".arnx/setup/approval.md";
 
+/** The parts setup's attempt (`text`) sets up for `changed`: the root of each project it routes a changed source file
+ * to, and the parts of the files it leaves uncovered (setupParts). None when the attempt does not read. */
+function attemptParts(text: string, changed: string[]): string[] {
+  let f: ReviewFile;
+  try {
+    f = parseReviewFile(text);
+  } catch (e) {
+    if (e instanceof ArnxError) return [];
+    throw e;
+  }
+  const source = changed.filter((x) => SOURCE.test(x));
+  const roots = route(f, source, Number.MAX_SAFE_INTEGER).routed.map((r) => r.project.workdir)
+    .map((w) => w === "." ? "/" : `/${w}/`);
+  return [...new Set([...roots, ...setupParts(f, source, new Set(), () => false).parts])];
+}
+
+/** The hash of the attempt a failed setup left in review.yaml (saveAttempt). */
+const ATTEMPT_HASH = ".arnx/setup/attempt.sha256";
+const sha256 = (text: string | Buffer) => createHash("sha256").update(text).digest("hex");
+
+/** Whether review.yaml is the attempt a failed setup left there, unproven and unedited since: a review sets up from it,
+ * quickly, as a first run does, instead of running its whole suite. A file edited by hand is proven as it is. */
+export function isOwnAttempt(repo: string): boolean {
+  const path = reviewConfigPath(repo);
+  const mark = join(repo, ATTEMPT_HASH);
+  if (!existsSync(path) || !existsSync(mark) || approvalStamp(repo)?.current) return false;
+  return readFileSync(mark, "utf8").trim() === sha256(readFileSync(path));
+}
+
 /** The parts (uncovered paths) a review's quick setup could not set up, which later reviews leave alone; with `add`,
  * those are recorded too. `arnx setup --add` ignores the record. */
 function quickFailed(repo: string, add: string[] = []): Set<string> {
@@ -1986,8 +2098,8 @@ const SHOWN_FAILING = 5;
 /** Why a setup failed, told apart: the environment never ran, or it runs and the current code fails tests. */
 /** What lets in the files a stopped setup needs: secret-looking ones are allowed, .arnxignore'd ones excepted. */
 export function neededSteps(needed: NeededFile[]): string[] {
-  const secret = needed.filter((f) => f.secret).map((f) => f.path);
-  const ignored = needed.filter((f) => !f.secret).map((f) => `!${f.path}`);
+  const secret = needed.filter((f) => f.secret || f.faked).map((f) => f.path);
+  const ignored = needed.filter((f) => !f.secret && !f.faked).map((f) => `!${f.path}`);
   return [...secret.length ? [`arnx allow-secret ${secret.join(" ")}`] : [],
     ...ignored.length ? [`add ${ignored.join(" ")} to .arnxignore`] : []];
 }
@@ -2080,20 +2192,27 @@ export function reviewJson(r: Review, reviewMd: string, reviewJsonPath: string)
   const st = summaryStatus(r);
   const rows = summaryRows(r);
   const needed = neededQuestions(r);
-  const problems = st.problems.length ? st.problems : st.untested ? [`no test refers to ${st.untested} of ${st.of} ` +
-    "changed source files, so finding nothing there says nothing about them"] : [];
-  return [code === 1 ? "findings" : code === 2 ? "incomplete" : "clean", code, {
+  const problems = st.problems.length ? st.problems
+    : st.nothing ? ["nothing was suspected in this change, so no test was written"]
+    : st.none ? [`no test was seen reaching any of ${st.of} changed source file${st.of === 1 ? "" : "s"}, so finding nothing says nothing`]
+    : st.untested ? [`no test was seen reaching ${st.untested} of ${st.of} changed source file${st.of === 1 ? "" : "s"}, so finding nothing ` +
+      "there says nothing about them"] : [];
+  // A confirmed finding is a finding whether or not the run finished or failed on it; `status` says how complete it is.
+  const found = code === 1 || confirmed(r).length > 0;
+  return [found ? "findings" : code === 2 ? "incomplete" : "clean", code, {
     review_id: r.id, review_md: reviewMd, review_json: reviewJsonPath, change: r.change, files_changed: r.filesChanged,
     added: r.added, removed: r.removed,
-    status: st.problems.length ? "incomplete" : st.untested ? "partly-covered" : "complete",
-    issues: rows.length, findings: rows.map((row) => ({ ids: row.ids, state: row.state, confirmed: row.mark === "✗",
-      regression: row.regression, projects: row.projects, title: row.title, severity: row.severity ?? null })),
+    status: st.problems.length ? "incomplete" : st.none ? "not-tested" : st.untested ? "partly-covered" : "complete",
+    ...(r.sourceFiles !== undefined ? { source_files: r.sourceFiles } : {}),
+    issues: rows.length, finding_count: rows.reduce((a, row) => a + row.ids.length, 0), findings: rows.map((row) => ({ ids: row.ids, state: row.state, confirmed: row.mark === "✗",
+      regression: row.regression, projects: row.projects, title: row.title, severity: row.severity ?? null,
+      ...(row.fallback ? { fallback: true } : {}) })),
     pre_existing: r.findings.filter((f) => findingStatus(f) === "pre-existing").map((f) => f.id),
     questions: r.questions.map((q, i) => ({ id: `Q${i + 1}`, question: q,
       project: r.questionProjects[i] ?? r.projects[0] ?? "main", optional: !needed.has(`Q${i + 1}`) })),
     tests_written: r.testsWritten, cost_usd: r.costUsd, seconds: r.seconds, untracked_left_out: r.untrackedLeftOut ?? 0,
     problems, provider_failures: (r.providerFailures ?? []).map(failureLine),
-    not_tested: [...(r.untested ?? []).flatMap((u) => u.files), ...r.uncovered.map((u) => u.path)],
+    not_tested: [...new Set([...(r.untested ?? []).flatMap((u) => u.files), ...r.uncovered.map((u) => u.path)])],
     your_call: yourCall(r, rows) || null, next: nextSteps(r, rows),
   }];
 }
@@ -2219,7 +2338,8 @@ export async function main(argv: string[], deps: Partial<CliDeps> = {}): Promise
   const j: JsonOut | null = p.args.values.json ? { command: p.command, write: d.out, done: false } : null;
   const human: CliDeps = j ? { ...d, out: d.err, interactive: false, banner: false, ask: async () => null, keys: undefined,
     draw: undefined, color: d.colorErr } : d;
-  const code = await run(p.command, p.args, new Commands(human, j), human);
+  // Every step of the command (a re-prove, the review, answer rounds, a closing check) shares one cap of reruns with a real key.
+  const code = await withCommandReruns(() => run(p.command, p.args, new Commands(human, j), human));
   // A command that wrote no object of its own still answers in JSON: its result and exit code.
   if (j && !j.done) j.write(jsonObject(p.command, code === 0 ? "ok" : "fail", code));
   return code;
@@ -2278,3 +2398,7 @@ export function copyToClipboard(text: string): string | null {
   }
   return null;
 }
+
+/** The warnings recorded with a proof (setupview.ts approvalWarnings), with the install lines that rewrite text no file holds. */
+const warningsOf = (repo: string, file: ReviewFile, proofs: ProjectProof[], untracked: boolean | undefined): string[] =>
+  withRepoHolds(repo, file, untracked, (holds) => [...approvalWarnings(file, proofs, holds), ...repoTypecheckGaps(file, repo)]);

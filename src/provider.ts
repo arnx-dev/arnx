@@ -16,3 +16,8 @@ export async function withProviderSlot<T>(provider: string, work: () => Promise<
     else if (--pool.active === 0) pools.delete(provider);
   }
 }
+
+/** Calls holding a slot right now, per provider: what an interrupt cuts off before its answer (billed, usage unknown). */
+export function callsInFlight(): [string, number][] {
+  return [...pools].filter(([, p]) => p.active > 0).map(([name, p]) => [name, p.active]);
+}

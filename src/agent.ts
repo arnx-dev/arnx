@@ -8,15 +8,18 @@ import { basename, dirname, join, posix, relative, resolve, sep } from "node:pat
 import { Worker } from "node:worker_threads";
 import { python } from "./adapters/python";
 import type { Adapter } from "./adapters/types";
+import type { Swap } from "./boundary";
 import { ModelError, NoCredits } from "./errors";
 import { clip, emitModelCall, emitTurn } from "./events";
 import { recordCall } from "./outage";
 import { type AgentModel, addUsage, type Block, costUsd, type Message, NO_USAGE, type Tool, type Usage } from "./llm";
-import { isSecretPath } from "./secrets";
+import { fakeKeys, isSecretPath, KEY_SHOWN, KEY_SHOWN_MEANS } from "./secrets";
 import type { Prices } from "./settings";
 import { splitLines } from "./util";
 
 export const READ_LIMIT = 400;
+/** The most characters of one line read_file gives: a bundle on one line is not sent whole. */
+export const READ_LINE_LIMIT = 2000;
 export const GREP_LIMIT = 100;
 export const GREP_PATTERN_LIMIT = 500;
 export const GREP_FILE_LIMIT = 2_000_000;
@@ -30,6 +33,15 @@ export const GREP_LINE_LIMIT = 10_000;
 const BATCH_SLACK_MS = 1000;
 export const WRITE_LIMIT = 200_000;
 export const MAX_TOKENS = 16_000;
+/** The share of a round's budget its last word (runAgent `lastWord`) may count on: with less than this left, or less
+ * than the dearest of the last LAST_REPLIES replies cost, the next call is the round's last. */
+export const REPORT_RESERVE = 0.05;
+/** How many recent replies the next one's cost is judged from (the first reply, which writes the cache, never). */
+export const LAST_REPLIES = 3;
+/** The last word's reply is capped: a report, not more work. */
+export const REPORT_MAX_TOKENS = 8_000;
+/** What the last word's cap adds for thinking (it counts toward max_tokens), so the report keeps REPORT_MAX_TOKENS. */
+export const REPORT_THINKING_TOKENS = 4_000;
 export const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv", ".arnx-run", ".mypy_cache",
   ".pytest_cache"]);
 
@@ -240,7 +252,10 @@ export function toolErrorText(e: unknown): string {
 export interface AgentResult { finalText: string; costUsd: number; turns: number; stop: string; usage: Usage;
   calls: number; unknownCalls?: number;
   /** Final replies before a follow-up message continued the conversation, oldest first. */
-  earlierTexts?: string[] }
+  earlierTexts?: string[];
+  /** Why the loop was cut short after a reply had ended a turn (a follow-up the budget, turns, time or an API error
+   * stopped), set even when the round is put down as finished on its earlier report. */
+  cut?: string }
 export type ToolFn = (args: Record<string, unknown>) => string | Promise<string>;
 
 const schema = (props: Record<string, unknown>, required: string[]) =>
@@ -288,15 +303,22 @@ export class Workspace {
   private extra: Record<string, [Tool, ToolFn]>;
   private adapter: Adapter;
   private runner: string;
+  private reads?: Swap;
+  private writes?: Swap;
 
+  /** `reads`: what a path or a search means in these files, which hold real values. `writes`: what a test's text means
+   * where it runs; absent when runs read a copy of the code that holds the stand-ins (baked.ts). */
   constructor(root: string, opts: { writeDir?: string | null; runTests?: (targets: string[]) => string | Promise<string>;
-                                    extra?: Record<string, [Tool, ToolFn]>; adapter?: Adapter; runner?: string } = {}) {
+                                    extra?: Record<string, [Tool, ToolFn]>; adapter?: Adapter; runner?: string;
+                                    reads?: Swap; writes?: Swap } = {}) {
     this.root = realpathSync(root);
     this.writeDir = opts.writeDir ? opts.writeDir.replace(/^\/+|\/+$/g, "") : null;
     this.runTestsFn = opts.runTests;
     this.extra = opts.extra ?? {};
     this.adapter = opts.adapter ?? python;
     this.runner = opts.runner ?? this.adapter.defaultRunner;
+    this.reads = opts.reads;
+    this.writes = opts.writes;
   }
 
   tools(): Tool[] {
@@ -329,8 +351,9 @@ export class Workspace {
     }
   }
 
-  private resolvePath(path: string): string {
-    const rel = path.trim().replace(/^\/+/, "") || ".";
+  /** `asWritten`: a new file's name, which is never swapped. */
+  private resolvePath(path: string, asWritten = false): string {
+    const rel = (this.reads && !asWritten ? this.reads.text(path) : path).trim().replace(/^\/+/, "") || ".";
     const full = resolveLoose(join(this.root, rel));
     if (full !== this.root && !full.startsWith(this.root + sep)) throw new ToolError(`path outside the repository: ${path}`);
     if (relative(this.root, full).split(sep).includes(".git") || isSecretPath(basename(full))) {
@@ -363,12 +386,14 @@ export class Workspace {
     if (!existsSync(full) || !statSync(full).isFile()) throw new ToolError(`not a file: ${path}`);
     const data = readFileSync(full);
     if (isBinary(data)) return `(binary file, ${data.length} bytes)`;
-    const lines = splitLines(data.toString("utf8"));
+    const lines = splitLines(fakeKeys(data.toString("utf8"), { view: true }).text);
     const n = startLine === undefined || startLine === null || startLine === 0 ? 1 : Number(startLine);
     if (!Number.isFinite(n)) throw new ToolError("start_line: a number is required");
     const start = Math.max(1, Math.trunc(n));
     const chunk = lines.slice(start - 1, start - 1 + READ_LIMIT);
-    const body = chunk.map((line, i) => `${start + i}\t${line}`).join("\n");
+    const cut = (line: string) => line.length > READ_LINE_LIMIT
+      ? `${line.slice(0, READ_LINE_LIMIT)} ... ${line.length - READ_LINE_LIMIT} more characters` : line;
+    const body = chunk.map((line, i) => `${start + i}\t${cut(line)}`).join("\n");
     const more = lines.length - (start - 1 + chunk.length);
     return body + (more > 0 ? `\n... ${more} more lines (start_line=${start + chunk.length})` : "");
   }
@@ -384,7 +409,7 @@ export class Workspace {
     }
     // Refused before any worker starts: under Bun a terminated worker keeps its core busy until arnx exits.
     if (backtracks(pattern)) throw tooSlow();
-    const matcher = new Matcher(pattern);
+    const matcher = new Matcher(this.reads ? this.reads.pattern(pattern) : pattern);
     try {
       return await this.grepFiles(matcher, path);
     } finally {
@@ -432,7 +457,7 @@ export class Workspace {
         continue;
       }
       if (isBinary(data)) continue;
-      batch.push({ fp, lines: splitLines(data.toString("utf8")) });
+      batch.push({ fp, lines: splitLines(fakeKeys(data.toString("utf8"), { view: true }).text) });
       size += data.length;
       if (size >= GREP_BATCH_BYTES && await send()) return end();
     }
@@ -464,14 +489,17 @@ export class Workspace {
   }
 
   private writeFile(path: string, content: string): string {
-    const full = this.resolvePath(path);
+    // The name goes under .arnx with the saved test, and a run's command names it.
+    if (this.reads && this.reads.text(path) !== path) throw new ToolError("name the file without that value");
+    const full = this.resolvePath(path, true);
     if (!this.inWriteDir(full) || !this.adapter.writable.test(basename(full))) {
       throw new ToolError(`writes are allowed only for ${this.adapter.words(this.runner).writableFiles} under ` +
         `${this.writeDir}/`);
     }
     if (content.length > WRITE_LIMIT) throw new ToolError("file too large");
+    if (content.includes(KEY_SHOWN)) throw new ToolError(KEY_SHOWN_MEANS);
     mkdirSync(dirname(full), { recursive: true });
-    writeFileSync(full, content);
+    writeFileSync(full, this.writes ? this.writes.text(content) : content);
     return `wrote ${this.rel(full)} (${content.length} bytes)`;
   }
 
@@ -523,7 +551,14 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
   /** Called when the model ends its turn: a message continues the conversation (within budget), null ends it. */
   followUp?: (finalText: string) => string | null | Promise<string | null>;
   /** Each reply that ends a turn, before followUp is asked (it is not asked once the budget is spent). */
-  onFinal?: (finalText: string, turn: number) => void }): Promise<AgentResult> {
+  onFinal?: (finalText: string, turn: number) => void;
+  /** Whether a reply is the round's report (default: any reply). A cut follow-up restores the reply before it only
+   * when that is a report; a hunt reply is not. */
+  isReport?: (text: string) => boolean;
+  /** The round's last word: when the next call would leave too little of the budget (under REPORT_RESERVE of it, or
+   * under what the dearest of the last LAST_REPLIES replies cost, the first reply aside), the model is sent this instead and replies once, with no tool run; its reply is
+   * the round's final and the round stops for the budget. null: nothing to ask for now. */
+  lastWord?: () => string | null }): Promise<AgentResult> {
   const tools = ws.tools();
   const messages: Message[] = [{ role: "user", content: o.user }];
   let cost = 0, stop = "max_turns", final = "", turn = 0, usage = NO_USAGE, calls = 0, unknown = 0;
@@ -534,6 +569,9 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
   };
   if (transcript) mkdirSync(dirname(transcript), { recursive: true });
   const timeUp = () => !!o.deadline && o.deadline.now() >= o.deadline.at;
+  // The recent replies' costs (not the first's), and whether the round's last word was asked for (and answered).
+  const recent: number[] = [];
+  let last = false, lastSaid = false;
   for (turn = 1; turn <= (o.maxTurns ?? 60); turn++) {
     if (cost >= o.budgetUsd) {
       stop = "budget";
@@ -543,14 +581,24 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
       stop = "time";
       break;
     }
+    const word = o.lastWord && cost + Math.max(o.budgetUsd * REPORT_RESERVE, ...recent.slice(-LAST_REPLIES)) >= o.budgetUsd
+      ? o.lastWord() : null;
+    if (word !== null) {
+      // After the tool results (or the message) the model has; a new message object, so earlier ones stay as sent.
+      const prev = messages.at(-1)!;
+      messages[messages.length - 1] = { role: "user", content: Array.isArray(prev.content)
+        ? [...prev.content, { type: "text", text: word }] : `${String(prev.content)}\n\n${word}` };
+      last = true;
+    }
     const started = performance.now();
     let reply, latency = 0;
     try {
-      reply = await model.create({ system: o.system, tools, messages, maxTokens: MAX_TOKENS });
+      reply = await model.create({ system: o.system, tools, messages, maxTokens: last ? REPORT_THINKING_TOKENS + REPORT_MAX_TOKENS : MAX_TOKENS });
       latency = Math.round(performance.now() - started);
     } catch (e) {
       if (!(e instanceof ModelError)) throw e;
-      stop = `api_error: ${e.message}`;
+      // A failed last word leaves the round as the budget left it.
+      stop = last ? "budget" : `api_error: ${e.message}`;
       unknown += e.unknownCalls;
       // What the failed call was billed (a reply cut short, a retry after a partial one) is spent all the same.
       cost += e.costUsd || 0;
@@ -571,6 +619,7 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
     const priced = costUsd(model.model, reply.usage, o.prices), replyCost = priced ?? 0;
     const unpriced = priced === null ? 1 : 0;
     cost += replyCost;
+    if (calls > 0) recent.push(replyCost);
     spend.add(replyCost);
     usage = addUsage(usage, reply.usage);
     calls += 1;
@@ -581,7 +630,8 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
       cost_usd: replyCost, latency_ms: latency, ...(tried(reply.attempts?.length ?? reply.tries)),
       unknown_usage: (reply.unknownCalls ?? 0) + unpriced, timed_out: false, turn });
     const text = reply.content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
-    const uses = reply.content.filter((b) => b.type === "tool_use");
+    // The last word runs no tool, whatever it asks for.
+    const uses = last ? [] : reply.content.filter((b) => b.type === "tool_use");
     // secs is the model's reply alone (all its attempts); the tools it asked for are timed on the line after.
     const attempts = reply.attempts && (reply.attempts.length > 1 || reply.attempts[0]?.outcome !== "ok")
       ? { attempts: reply.attempts.map((a) => ({ secs: a.secs, first_event_secs: a.firstEventSecs,
@@ -600,6 +650,15 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
     }
     if (reply.stopReason === "refusal") {
       stop = "refusal";
+      break;
+    }
+    if (last) {
+      // The round's report, as far as it got: its final, and the round stops for the budget.
+      if (text.trim()) {
+        [final, lastSaid] = [text, true];
+        o.onFinal?.(text, turn);
+      }
+      stop = "budget";
       break;
     }
     messages.push({ role: "assistant", content: reply.raw });
@@ -649,11 +708,19 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
     messages.push({ role: "user", content: results });
   }
   // A follow-up is extra work after a finished round: when it is cut short (budget, turns, an API error), the round
-  // still ended normally, with the reply it ended on.
+  // still ended normally, with the report it ended on. A reply that is no report (the hunt's) is not a finished round.
+  let cut: string | undefined;
   if (stop !== "end_turn" && stop !== "stopped" && earlier.length) {
-    final = earlier.pop()!;
-    stop = "end_turn";
+    cut = stop;
+    const isReport = o.isReport ?? (() => true);
+    // A last word that reports ends the follow-up as a report would; otherwise the report before it stands.
+    if (lastSaid && isReport(final)) stop = "end_turn";
+    else if (isReport(earlier.at(-1)!)) {
+      final = earlier.pop()!;
+      stop = "end_turn";
+    }
   }
   return { finalText: final, costUsd: round4(cost), turns: Math.min(turn, o.maxTurns ?? 60), stop, usage, calls,
-    ...(unknown ? { unknownCalls: unknown } : {}), ...(earlier.length ? { earlierTexts: earlier } : {}) };
+    ...(unknown ? { unknownCalls: unknown } : {}), ...(earlier.length ? { earlierTexts: earlier } : {}),
+    ...(cut !== undefined ? { cut } : {}) };
 }

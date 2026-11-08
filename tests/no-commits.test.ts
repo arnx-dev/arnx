@@ -166,7 +166,7 @@ test("review: findings against the empty tree, the before/after note said once; 
   expect(held).toEqual([[".arnxignore", ".gitignore", "app.py", "lib", "tests"]]);
   expect(review.change).toBe("all files (no commits yet)");
   expect(review.findings.map((f) => [f.func, f.before?.status])).toEqual([["test_add", "unknown"]]);
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review)).toBe(0);
   expect(review.beforeBaseEmpty).toBe("first-commit");
   const md = readFileSync(join(rdir, "review.md"), "utf8");
   const findings = md.slice(md.indexOf("## Findings"), md.indexOf("## Questions")).replace(/\s+/g, " ");

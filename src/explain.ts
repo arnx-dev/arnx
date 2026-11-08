@@ -9,7 +9,7 @@ import { DEFAULT_PROMPTS, EXPLAIN_SCHEMA, explainUser, type Prompts } from "./pr
 import { type Finding, type Group, rankGroups, SEVERITIES } from "./report";
 
 const FIELDS = ["title", "input", "actual", "expected", "consequence"] as const;
-const MAX = { title: 160, input: 400, actual: 400, expected: 400, consequence: 400 };
+const MAX = { title: 200, input: 2000, actual: 2000, expected: 2000, consequence: 2000 };
 
 /** `s` cut to `max` characters at the last word that fits, with an ellipsis; a cut mid-word read as a typo. */
 function clipWords(s: string, max: number): string {

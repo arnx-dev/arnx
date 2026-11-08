@@ -2,15 +2,18 @@
 // answer questions; `arnx accept` reads the marks back. review.json keeps the key names Python arnx wrote, so
 // reviews written by either version load.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { STAND_INS_NOTE } from "./boundary";
 import { join } from "node:path";
 import type { AdapterId } from "./adapters/types";
 import { type Before, type FixStatus, isPreExisting } from "./before";
-import { type Blanked, describeBlanked, someNames } from "./change";
+import { type Blanked, describeBlanked, NAMED_OUT, namesLeftOut, someNames, type Withheld } from "./change";
+import { A_FAKED_FILE, unprovenText } from "./diagnose";
 import { ArnxError } from "./errors";
 import { type ModelUse, parseJsonObject } from "./llm";
 import { type ProviderFailure, resumes } from "./outage";
 import { type Shallow, SHALLOW_NOTE } from "./shallow";
-import { describeDiagnostic, describeTypecheck, type TypeCheck } from "./typecheck";
+import { isSourcePath } from "./untested";
+import { describeDiagnostic, describeTypecheck, gapsLine, type TypeCheck } from "./typecheck";
 import { pyTruthy, splitLines } from "./util";
 
 /** rewrite: the bug is real but the test is wrong; the owner says why on a `Rewrite:` line after the Mark line, and
@@ -46,13 +49,28 @@ export interface Finding {
   suspect?: string;
   /** The model that gave the second opinion, when it was the fallback rather than the challenger. */
   judge?: string;
+  /** The finding whose second opinion this one took: its test is the same test, the cases differing by a fixture. */
+  sameAs?: string;
   /** What its test did on the code before the change (absent when the before/after check is off). A pre-existing
    * finding is not challenged and does not set the exit code. */
   before?: Before;
   /** Its test checks the code's text or only that something exists (shallow.ts); absent: it exercises behaviour, or
    * the review predates the check. Information only. */
   shallow?: Shallow;
+  /** Its project was tested on the image built for another commit (its dependencies may differ). */
+  fallback?: true;
+  /** Why the second opinion disputed it, when its reply said (the structured reply): the behaviour is meant, no real
+   * caller gives that input, the test is wrong, or it waited on a question the review did not ask. */
+  disputeKind?: DisputeKind;
+  /** Where the second opinion puts the failure (the structured reply): this change, older code, what it adds. */
+  origin?: Origin;
 }
+
+export type DisputeKind = "intended" | "unreachable" | "bad-test" | "open-question";
+export type Origin = "this-change" | "older" | "new-feature" | "unclear";
+
+/** How a finding from a fallback image is labelled wherever it is shown. */
+export const FALLBACK_LABEL = "ran on another commit's image";
 
 /** A defect the hunt suspected, and what its test showed. */
 export interface SuspectOutcome {
@@ -71,6 +89,8 @@ export interface SuspectOutcome {
   tests: string[];
   findings?: string[];
   reason?: string;
+  /** The second hunter named it after the reviewer's first report: it was not tested. */
+  late?: true;
   /** "same cause": the suspect whose cause its tests failed for (see `sameCause`). */
   sameAs?: string;
 }
@@ -82,9 +102,20 @@ export interface ProjectStat {
   tests: number;
   passed: number;
   missingRuns: number;
+  /** Test files that did not finish alone in their time; each counts as an error and leaves the review incomplete. */
+  hungFiles?: string[];
+  /** Test files the time ran out before; each counts as an error and leaves the review incomplete. */
+  notRunFiles?: string[];
   sawResults: boolean;
   /** Why this project's reviewer stopped ("end_turn", "budget", "api_error: ..."); absent in older reviews. */
   stop?: string;
+  /** The round ended with no report: no tests, no reasons, no questions (set only then). */
+  noReport?: boolean;
+  /** The hunt named no suspect and the round ended there: nothing was tested, and nothing was asked of it. */
+  noSuspects?: boolean;
+  /** This commit's own environment could not be had: `failed` (nothing was tested) or `fallback` (tested on the image
+   * built for another commit; its findings do not fail the run). `log` is a file under the review's folder. */
+  env?: { state: "failed" | "fallback"; kind: "build" | "probe"; log: string; old?: true };
 }
 
 /** Findings that share one cause, explained in plain language by the second model (report only: verdicts, marks and
@@ -115,7 +146,11 @@ export interface Checked { project: string; test: string; expects: string }
 export interface FixProof { testId: string; project: string; file: string | null; beforeStatus: FixStatus;
   beforeRuns: string[]; beforeDetail: string; asText?: true }
 
+export interface TypesUnchecked { tool: string; from: string; projects: string[] }
+
 export interface Review {
+  /** Something it quotes was masked: review.md says so. */
+  standInsShown?: boolean;
   id: string;
   change: string;
   filesChanged: number;
@@ -144,8 +179,25 @@ export interface Review {
   ignoredChanged?: string[];
   /** Changed lockfiles: in the sandbox, their text not sent. */
   lockfilesChanged?: string[];
+  /** Changed generated files: in the sandbox, their text not sent. */
+  generatedChanged?: string[];
   /** Changed source files whose diff lines held key-shaped text in comments: those lines were blanked. */
   blankedLines?: Blanked[];
+  /** Changed files left out as secret-looking: what they hold and where, never the text. */
+  leftOutFiles?: Withheld[];
+  /** Tests that failed for a file left out, or (`faked`) for a private key the sandbox holds a fake of, shown by a rerun with the
+   * real key: unproven, which leaves the review incomplete. */
+  couldNotRun?: { test: string; needs: string; faked?: boolean;
+    /** With `faked`: not rerun with the real key (realkey.ts), so it only may need it; without, the rerun showed it does. */
+    notRerun?: boolean }[];
+  /** Files whose private key the sandbox holds as a fake. */
+  fakedKeys?: string[];
+  /** Beside a fake: tests every run skipped, which may have skipped for it. */
+  skippedTests?: number;
+  /** Failing tests the reviewer's last report does not name (scratch, or replaced by a newer file): not findings. */
+  unclaimed?: { project: string; testId: string; message: string }[];
+  /** Files left out that the change touches. */
+  leftOutTouched?: string[];
   /** Untracked files the review sent because the owner opted in (--untracked); absent when none. */
   untrackedIncluded?: string[];
   /** How many untracked files the review left out (not sent, not in the sandbox); absent when none. */
@@ -161,6 +213,8 @@ export interface Review {
   /** Projects that got their type check only: the change reached them through a `uses` entry holding other projects,
    * and those projects (`by`) reviewed the files. */
   typecheckOnly?: { project: string; by: string[] }[];
+  /** Projects the change reached with documentation only: no round, no type check. */
+  docsOnly?: { project: string; files: string[] }[];
   uncovered: { path: string; reason: string }[];
   /** The project each question came from, parallel to `questions`. */
   questionProjects: string[];
@@ -177,6 +231,8 @@ export interface Review {
   /** Per project with changed source files: those no arnx test refers to, out of how many (absent when every
    * changed source file is named by a test, and in older reviews). */
   untested?: Untested[];
+  /** Unique changed source files across the whole change, tested or not (absent in older reviews). */
+  sourceFiles?: number;
   /** What the hunt suspected and what each suspect's test showed (absent when no hunt ran). */
   suspects?: SuspectOutcome[];
   /** Time spent in stages worth measuring, in seconds: the before/after check, summed over projects (absent when it
@@ -191,6 +247,8 @@ export interface Review {
   /** Each reviewed project's type check, in review order (absent when no project has one). Information only: it sets
    * no finding, status or exit code. */
   typecheck?: TypeCheck[];
+  /** Python projects whose types no review checks while the repository's CI does (the tool, the CI file); absent when none. */
+  typesUnchecked?: TypesUnchecked;
   /** Calls a model provider failed because it was down or refused the key, per provider and kind (absent when none
    * did). Information only: it sets no status or exit code; the work those calls missed does. */
   providerFailures?: ProviderFailure[];
@@ -203,8 +261,30 @@ export interface Untested { project: string; files: string[]; of: number;
 /** Passing tests that fail on the code before the change: proof the change fixes what they check. */
 export const fixed = (r: Review) => (r.fixProof ?? []).filter((x) => x.beforeStatus === "fixed");
 
-const untestedCount = (r: Review) => (r.untested ?? []).reduce((n, u) => n + u.files.length, 0);
-const untestedOf = (r: Review) => (r.untested ?? []).reduce((n, u) => n + u.of, 0);
+/** Changed source files with no sign a test reached them: those listed under `untested`, and the source files under
+ * `uncovered` (no project covers them, or review.yaml says their tests do not run), once each. */
+export function notReached(r: Review): string[] {
+  return [...new Set([...(r.untested ?? []).flatMap((u) => u.files), ...r.uncovered.map((u) => u.path)]
+    .filter(isSourcePath))];
+}
+
+const files = (n: number) => `${n} changed source file${n === 1 ? "" : "s"}`;
+
+/** The changed source files a diff names: each `diff --git a/<path> b/…` header whose path is a source file. */
+export function diffSources(diff: string): number {
+  return new Set([...diff.matchAll(/^diff --git a\/(.+?) b\//gm)].map((m) => m[1]!).filter(isSourcePath)).size;
+}
+
+/** How much of the change a test was seen reaching: `m` source files not reached, out of `n`. `none`: every changed
+ * source file is unreached and no passing test failed before the change (a real fix proof shows one reached it). */
+function coverage(r: Review): { m: number; n: number; none: boolean } {
+  const m = notReached(r).length;
+  // Older reviews have no count: the projects' own totals, else the files changed (never fewer than m).
+  const old = r.untested ? r.untested.reduce((k, u) => k + u.of, 0) + r.uncovered.filter((u) => isSourcePath(u.path)).length
+    : r.filesChanged;
+  const n = Math.max(m, r.sourceFiles ?? old);
+  return { m, n, none: m > 0 && m === n && !fixed(r).length && !(r.passed > 0) };
+}
 
 /** More than one project, or something not tested: the report names projects and lists what was left out. */
 const multi = (r: Review) => r.projects.length > 1 || r.uncovered.length > 0 || r.notReviewed.length > 0 ||
@@ -216,10 +296,20 @@ export const confirmed = (r: Review) => active(r).filter((f) => f.verdict === "c
 /** Failing tests the second opinion gave no verdict on (its budget ran out, it did not answer). */
 export const notChecked = (r: Review) => active(r).filter((f) => f.verdict !== "confirmed" && f.verdict !== "disputed" && !f.dependsOn);
 /** Suspects the hunt named when the review wrote no test at all: "nothing found" would then say nothing. */
-const neverTested = (r: Review) => r.testsWritten === 0 ? (r.suspects ?? []).filter((s) => s.outcome === "not tested")
+const neverTested = (r: Review) => r.testsWritten === 0 ? (r.suspects ?? []).filter((s) => s.outcome === "not tested" && !s.late)
   : [];
-export const incomplete = (r: Review) => r.stop !== "end_turn" || r.missingRuns > 0 || neverTested(r).length > 0;
-export const exitCode = (r: Review) => (confirmed(r).length || notChecked(r).length ? 1 : incomplete(r) ? 2 : 0);
+export const incomplete = (r: Review) => r.stop !== "end_turn" || r.missingRuns > 0 || neverTested(r).length > 0 ||
+  !!r.couldNotRun?.length || (r.projectStats ?? []).some((p) => p.noReport || !!p.env || !!p.hungFiles?.length || !!p.notRunFiles?.length);
+/** Findings from a project tested on another commit's image are shown, labelled, and do not fail the run. */
+const counts = (r: Review) => (f: Finding) => !(r.projectStats ?? []).some((p) => p.name === f.project && p.env);
+/** Whether a confirmed finding fails the run. False is the agreed fallback for a second opinion that misses its
+ * release gates: a confirmed finding then reads "worth a look" and the run exits 0 on it. */
+export const CONFIRMED_FAILS = false;
+/** What a confirmed issue is called in the summary. */
+export const confirmedWord = (fails = CONFIRMED_FAILS) => fails ? "confirmed" : "worth a look";
+export const exitCode = (r: Review, confirmedFails = CONFIRMED_FAILS) =>
+  ((confirmedFails && confirmed(r).filter(counts(r)).length) || notChecked(r).filter(counts(r)).length ? 1
+    : incomplete(r) ? 2 : 0);
 
 export interface Marks {
   findings: Record<string, string | null>;
@@ -255,7 +345,19 @@ function modelsLine(r: Review): string {
   const c = CLOUD_MODEL.exec(r.reviewer);
   const yours = r.promptOverrides?.length ? `, yours for ${r.promptOverrides.join(", ")} (${r.promptsHash})` : "";
   return c ? `- Models: arnx cloud ${c[1]}`
-    : `- Reviewer: ${r.reviewer} · Second opinion: ${r.challenger} · Prompts: ${r.promptVersion}${yours}`;
+    : `- Reviewer: ${r.reviewer} · Second opinion: ${judgesLine(r)} · Prompts: ${r.promptVersion}${yours}`;
+}
+
+/** The models that gave a verdict, the configured one first: `challenger` is the first choice, not always the judge.
+ * One judge is named alone; with several, each with its count and the others "when A did not reply in time". */
+export function judgesLine(r: Review): string {
+  const counts = new Map<string, number>();
+  for (const f of r.findings) if (f.verdict) counts.set(f.judge ?? r.challenger, (counts.get(f.judge ?? r.challenger) ?? 0) + 1);
+  if (counts.size <= 1) return [...counts.keys()][0] ?? r.challenger;
+  const first = counts.has(r.challenger) ? r.challenger : [...counts.keys()][0]!;
+  const rest = [...counts].filter(([m]) => m !== first).sort((x, y) => y[1] - x[1]);
+  return [`${first} (${plural(counts.get(first)!, "finding")})`,
+    ...rest.map(([m, n]) => `${m} (${n}, when ${first} did not reply in time)`)].join(", ");
 }
 
 /** arnx cloud's models as review.json names them: "arnx:<tier>/<harness>", and "/<role>" in usage. */
@@ -263,6 +365,10 @@ const CLOUD_MODEL = /^arnx:([^/]+)\/([^/]+)(?:\/(.+))?$/;
 
 /** "Cost $0.47 (claude-sonnet-5-5 $0.40 · gpt-5.5 $0.07)": the total, then each model's share. With arnx cloud, the
  * total alone ("Billed $0.89 by arnx cloud"): how it splits the work is its own business. */
+/** A model whose cost arnx cannot state: no price, or only calls given up on with unknown usage. */
+const costUnknown = (u: { unpriced?: boolean; costUsd: number; unknownCalls: number }): boolean =>
+  !!u.unpriced || (u.costUsd === 0 && u.unknownCalls > 0);
+
 function costLine(r: Review): string {
   const usage = r.usage ?? [];
   if (!usage.length) return `Cost $${r.costUsd.toFixed(2)}`;
@@ -270,7 +376,7 @@ function costLine(r: Review): string {
   // price is not charged, so there is no note to add.
   if (usage.every((u) => CLOUD_MODEL.test(u.model))) return `Billed $${r.costUsd.toFixed(2)} by arnx cloud`;
   const parts = usage.map((u) => `${u.model.replace(/^[^:]*:/, "")} ` +
-    (u.unpriced ? "cost unknown" : `$${u.costUsd.toFixed(2)}`)).join(" · ");
+    (costUnknown(u) ? "cost unknown" : `$${u.costUsd.toFixed(2)}`)).join(" · ");
   // A model with no price says so in its part; every one of its calls is in unknownCalls.
   const unknown = usage.reduce((a, u) => a + (u.unpriced ? 0 : u.unknownCalls), 0);
   // A call cut off mid-reply is billed, but the provider never said for how much: its cost is not in the total.
@@ -300,7 +406,8 @@ function untrackedLines(r: Review): string[] {
   return out;
 }
 
-const opinion = (f: Finding) => f.verdict ? `${f.verdict} by the second opinion` : "not challenged";
+const opinion = (f: Finding) => f.verdict
+  ? `${f.verdict}${f.verdict === "disputed" && f.disputeKind ? ` (${f.disputeKind})` : ""} by the second opinion` : "not challenged";
 
 /** Why a project's reviewer stopped, in words. A failed call the provider is known to have caused is named in the
  * provider's own line (failureLine), not here. */
@@ -319,20 +426,41 @@ function why(stop: string, r?: Review): string {
 }
 
 /** What kept the review from being complete, per project where known; then notes that do not make it incomplete. */
-function statusOf(r: Review): { problems: string[]; notes: string[] } {
+function statusOf(r: Review): { problems: string[]; notes: string[]; hasEnv: boolean } {
   const problems: string[] = [], notes: string[] = [];
+  let envProblems = 0;
   const stats = r.projectStats ?? [];
   for (const p of stats) {
+    if (p.env) {
+      const log = `.arnx/reviews/${r.id}/${p.env.log}`;
+      problems.push(p.env.state === "failed"
+        ? `\`${p.name}\` not tested: this commit's ${p.env.kind === "build" ? "install does not build" : "environment runs no test"}; that is the commit, not your setup. Review a later commit${p.env.old ? "" : `, or \`arnx setup --project ${p.name}\` from this one`}`
+        : `\`${p.name}\`: this commit's own ${p.env.kind === "build" ? "install does not build" : "environment runs no test"} (see ${log}). Tested on the image built for another commit: its dependencies may differ`);
+      envProblems++;
+      if (p.env.state === "failed") continue;
+    }
     // reviews written before per-project stops: a project with no tests is put down to the review's stop
     const stop = p.stop ?? (p.tests ? "end_turn" : r.stop);
     if (stop !== "end_turn") {
       problems.push(p.tests ? `\`${p.name}\`: ${why(stop, r)} before it finished; the tests it wrote ran`
         : `\`${p.name}\` produced no tests: ${why(stop, r)}`);
+    } else if (p.noReport) {
+      problems.push(`\`${p.name}\`: ${noReportWhy(p, r)}`);
+    } else if (p.hungFiles?.length || p.notRunFiles?.length) {
+      if (p.hungFiles?.length) {
+        problems.push(`\`${p.name}\`: ${plural(p.hungFiles.length, "test file")} did not finish (${someNames(p.hungFiles, 3)}); their tests have no result`);
+      }
+      if (p.notRunFiles?.length) {
+        problems.push(`\`${p.name}\`: ${plural(p.notRunFiles.length, "test file")} not run, out of time (${someNames(p.notRunFiles, 3)}); their tests have no result`);
+      }
     } else if (p.missingRuns) {
       problems.push(`\`${p.name}\`: ${plural(p.missingRuns, "run")} gave no report (timed out or crashed)`);
-    } else if (!p.tests) {
+    } else if (!p.tests && !p.noSuspects) {
       notes.push(p.testFiles ? `\`${p.name}\`: no run reported its tests` : `\`${p.name}\`: the reviewer wrote no tests`);
     }
+  }
+  if (r.couldNotRun?.length) {
+    problems.push(`${plural(r.couldNotRun.length, "test")} ${unprovenText(r.couldNotRun.length, r.couldNotRun, (p) => someNames(p, 5))}`);
   }
   const untried = neverTested(r);
   if (!problems.length && untried.length && r.stop === "end_turn" && !r.missingRuns) {
@@ -341,7 +469,7 @@ function statusOf(r: Review): { problems: string[]; notes: string[] } {
   } else if (!problems.length && incomplete(r)) {
     problems.push(r.stop !== "end_turn" ? why(r.stop, r) : `${plural(r.missingRuns, "run")} gave no report`);
   }
-  return { problems, notes };
+  return { problems, notes, hasEnv: envProblems > 0 };
 }
 
 /** What the work of each role is, when all of it is missing. */
@@ -372,15 +500,24 @@ export function failureLine(f: ProviderFailure): string {
     : `${f.name} unavailable: ${f.detail} ${count}${missing}. ${again} when it is back.`;
 }
 
+const FIX_WITH_FAKE = "Fix the code; if this test needs a real key: `arnx allow-secret PATH`";
+const skippedNote = (r: Review) => r.skippedTests ? `; ${plural(r.skippedTests, "test")} skipped, which may be why` : "";
+
 function statusLines(r: Review): string[] {
-  const { problems, notes } = statusOf(r);
+  const { problems, notes, hasEnv } = statusOf(r);
+  const cov = coverage(r);
   const names = r.projects.length > 1 ? ` (${ticks(r.projects)})` : "";
   // When a resume redoes what an outage cut, the outage line below says so: no fresh review here.
-  const again = (r.providerFailures ?? []).some(resumes) ? "" : " Run `arnx review` again to cover it.";
+  // The same install fails again: reviewing again covers nothing.
+  const again = (r.providerFailures ?? []).some(resumes) || hasEnv ? ""
+    : r.couldNotRun?.length ? " If it is a test fixture, allow it with `arnx allow-secret PATH`, then `arnx review` again."
+    : " Run `arnx review` again to cover it.";
   const out = [problems.length ? `Incomplete: ${problems.join("; ")}.${again}`
-    : untestedCount(r) ? `Partly covered: no arnx test refers to ${untestedCount(r)} of the ${untestedOf(r)} changed ` +
-      "source files below, so finding nothing there says nothing about them. Check them yourself, or review them " +
-      "on their own with `arnx review --range`."
+    : suspectedNothing(r) ? NOTHING_SUSPECTED
+    : cov.none ? `Not tested: arnx saw no test reach any of the ${cov.n} changed source file${cov.n === 1 ? "" : "s"}, so finding nothing says ` +
+      "nothing about this change."
+    : cov.m ? `Partly covered: arnx saw no test reach ${cov.m} of the ${cov.n} changed source file${cov.n === 1 ? "" : "s"} below, so finding ` +
+      "nothing there says nothing about them. Check them yourself, or review them on their own with `arnx review --range`."
     : `Complete: ${r.projects.length > 1 ? `${r.projects.length} projects tested${names}` : "the change was tested"}; ` +
       "every run reported its tests."];
   out.push(...(r.providerFailures ?? []).map(failureLine));
@@ -391,12 +528,14 @@ function statusLines(r: Review): string[] {
   }
   for (const u of (r.untested ?? []).filter((x) => x.files.length)) {
     const why = (f: string) => u.reasons?.[f] ? ` (reviewer: ${u.reasons[f]})` : "";
-    out.push(`Not tested by arnx${multi(r) ? ` in \`${u.project}\`` : ""}: ` +
+    out.push(`No test seen reaching${multi(r) ? ` in \`${u.project}\`` : ""}: ` +
       `${u.files.map((f) => `\`${f}\`${why(f)}`).join(", ")}.`);
   }
   for (const n of notes) out.push(`Note: ${n}.`);
+  const docs = new Set((r.docsOnly ?? []).flatMap((d) => d.files)).size;
+  if (docs) out.push(`${plural(docs, "documentation file")} not reviewed; \`arnx review --docs\` includes ${docs === 1 ? "it" : "them"}.`);
   for (const t of r.typecheck ?? []) {
-    out.push(`Type check${multi(r) ? ` in \`${t.project}\`` : ""}: ${describeTypecheck(t)}${t.status === "clean" ? ""
+    out.push(`Type check${multi(r) ? ` in \`${t.project}\`` : ""}${t.status === "skipped" ? " " : ": "}${describeTypecheck(t)}${t.status === "clean" || t.status === "skipped" ? ""
       : " (see Type check below)"}.`);
   }
   for (const c of r.typecheckOnly ?? []) {
@@ -409,19 +548,26 @@ function statusLines(r: Review): string[] {
       `(${ticks(r.notReviewed)}): over the project limit; raise max_projects in .arnx/config.toml.`);
   }
   if (r.uncovered.length) {
-    const reasons = new Set(r.uncovered.map((u) => u.reason));
-    out.push(reasons.size === 1 && reasons.has("no project covers it")
-      ? `Not covered by any project: ${ticks(r.uncovered.map((u) => u.path))}.`
-      : `Not covered: ${r.uncovered.map((u) => `\`${u.path}\` (${u.reason})`).join(", ")}.`);
+    for (const [reason, paths] of byReason(r.uncovered)) {
+      out.push(reason === "no project covers it" ? `Not covered by any project: ${ticks(paths)}.`
+        : `Not covered (${reason}): ${ticks(paths)}.`);
+    }
   }
   return out;
+}
+
+/** Paths grouped by their reason, in the order the reasons first appear. */
+function byReason(xs: { path: string; reason: string }[]): [string, string[]][] {
+  const out = new Map<string, string[]>();
+  for (const x of xs) out.set(x.reason, [...out.get(x.reason) ?? [], x.path]);
+  return [...out];
 }
 
 /** `marked`: the finding has its own Mark line (false: its issue's Mark line covers it). */
 function findingLines(r: Review, f: Finding, marked = true): string[] {
   const state = isPreExisting(f) ? "already failing before this change"
     : f.before?.status === "regression" ? `regression · ${opinion(f)}` : opinion(f);
-  const out = [`### ${f.id} · ${state}`, "", `- Test: \`${f.testId}\``, `- Failure: \`${firstLine(f.message)}\``,
+  const out = [`### ${f.id} · ${state}${f.fallback ? ` · ${FALLBACK_LABEL}` : ""}`, "", `- Test: \`${f.testId}\``, `- Failure: \`${firstLine(f.message)}\``,
     `- Reviewer: ${f.explanation || "(no explanation)"}`];
   // Said once above the findings when the code before the change has nothing to compare against.
   const said = r.beforeBaseEmpty === "first-commit" ||
@@ -429,10 +575,11 @@ function findingLines(r: Review, f: Finding, marked = true): string[] {
   if (f.before && !said) out.push(`- Before the change (${f.before.status}): ${f.before.detail}`);
   if (multi(r)) out.push(`- Project: ${f.project}`);
   if (f.shallow) out.push(`- Note: ${SHALLOW_NOTE[f.shallow]}.`);
-  if (f.dependsOn) {
+  if (f.dependsOn && f.verdict !== "disputed") {
     out.push(marked ? `- Depends on: ${f.dependsOn} (the test assumes one answer; answer ${f.dependsOn} before marking)`
       : `- Depends on: ${f.dependsOn} (the test assumes one answer)`);
   }
+  if (f.sameAs) out.push(`- Same call as ${f.sameAs}`);
   // arnx cloud's judge goes unnamed: its label carries the harness.
   if (f.reason) out.push(billedByCloud(r) ? `- Second opinion: ${f.reason}`
     : `- Second opinion (${f.judge ?? r.challenger}): ${f.reason}`);
@@ -468,6 +615,30 @@ export function defaultMarks(r: Review): Record<string, string | null> {
   return out;
 }
 
+/** Why a question is optional: no issue waits on it, or a proven issue's mark covers the findings that assumed it. */
+function optionalWhy(c: [number, string[]][] | undefined): string {
+  if (!c) return "no issue waits on it";
+  return `${c.map(([n, ids]) => `Issue ${n}'s mark covers ${ids.join(", ")}`).join("; ")}, which assumed an answer`;
+}
+
+/** For each question a proven issue's mark covers: the issues (by number in review.md) and the findings of each that
+ * assumed an answer to it. */
+export function coveredQuestions(r: Review): Map<string, [number, string[]][]> {
+  const out = new Map<string, [number, string[]][]>();
+  if (!marksIssues(r)) return out;
+  groupsOf(r, active(r)).forEach(({ findings }, i) => {
+    if (!proven(findings)) return;
+    for (const f of findings) {
+      if (!f.dependsOn || f.verdict === "disputed" || defaultMark(f) === "real") continue;
+      const list = out.get(f.dependsOn) ?? [];
+      const entry = list.find(([n]) => n === i + 1);
+      if (entry) entry[1].push(f.id); else list.push([i + 1, [f.id]]);
+      out.set(f.dependsOn, list);
+    }
+  });
+  return out;
+}
+
 /** Questions an answer decides an issue for: a finding waits on it in an issue no other test proves. The rest are
  * optional: no issue waits on them, and an answer still lets \`arnx accept\` write a test for it. */
 export function neededQuestions(r: Review): Set<string> {
@@ -476,7 +647,7 @@ export function neededQuestions(r: Review): Set<string> {
   const out = new Set<string>();
   for (const { findings } of groupsOf(r, active(r))) {
     if (proven(findings)) continue;
-    for (const f of findings) if (f.dependsOn) out.add(f.dependsOn);
+    for (const f of findings) if (f.dependsOn && f.verdict !== "disputed") out.add(f.dependsOn);
   }
   return out;
 }
@@ -492,7 +663,12 @@ export function groupsOf(r: Review, of: Finding[] = r.findings): { group: Group 
     members.forEach((f) => seen.add(f.id));
     if (members.length) out.push({ group: g, findings: members });
   }
-  for (const f of of) if (!seen.has(f.id)) out.push({ group: null, findings: [f] });
+  // Cases of one test no group names are one issue, here and so in every count, list and mark built on this.
+  for (const f of of) {
+    if (seen.has(f.id)) continue;
+    const same = out.find((x) => !x.group && sameTest(x.findings[0]!) === sameTest(f));
+    if (same) same.findings.push(f); else out.push({ group: null, findings: [f] });
+  }
   // Most severe first, whatever order the groups were stored in; a finding left ungrouped has no estimate, so it goes
   // with the unestimated groups, never among the minor ones.
   return out.sort((a, b) => bySeverity({ severity: a.group?.severity } as Group, { severity: b.group?.severity } as Group));
@@ -534,6 +710,7 @@ export function render(r: Review): string {
     modelsLine(r),
     ...(r.promptsFileEdited ? ["- This change edits .arnx/prompts.toml; the review used its version."] : []),
     ...(r.acceptedTestsEdited ? [`- This change edits accepted tests: ${someNames(r.acceptedTestsEdited, 5)}.`] : []),
+    ...(r.standInsShown ? [`- ${STAND_INS_NOTE}`] : []),
     `- ${r.usage?.length ? costLine(r) : `Cost: $${r.costUsd.toFixed(2)}`} · ${duration(r.seconds)} · Agent stopped: ${r.stop}`, "",
     "## Status", "", ...statusLines(r), "",
     marksIssues(r)
@@ -575,15 +752,15 @@ export function render(r: Review): string {
       "failed before it (below)." : "No test failed in every run.", "");
   }
   const grouped = (r.groups ?? []).length > 0;
+  const covers = coveredQuestions(r);
   if (grouped) {
     const parts = groupsOf(r, caused);
-    if (parts.length) out.push(`${plural(parts.length, "issue")} from ${plural(caused.length, "failing test")}, most severe first.`, "");
+    // The same rows and counts as the terminal summary and `arnx review --json`.
+    const rows = summaryRows(r);
+    if (parts.length) out.push(`${plural(rows.length, "issue")} from ${plural(rows.reduce((a, row) => a + row.ids.length, 0), "finding")}, most severe first.`, "");
     const minor = parts.findIndex(({ group }) => group?.severity === "low");
     parts.forEach(({ group, findings }, i) => {
-      if (i === minor) {
-        out.push("## Also found (minor)", "", "Leftover debug output, logging, test helpers and the like: worth a look, " +
-          "not urgent.", "");
-      }
+      if (i === minor && minor > 0) out.push("## Also found (minor)", "", "Lower severity, not urgent.", "");
       const g = group ?? { findings: [], title: "", input: "", actual: "", expected: "", consequence: "" };
       const title = g.title || findings[0]!.explanation.split("\n")[0] || firstLine(findings[0]!.message);
       out.push(`### Issue ${i + 1} · ${title}`, "");
@@ -592,8 +769,8 @@ export function render(r: Review): string {
         ["Why it matters", g.consequence]] as const) if (value.trim()) out.push(`- ${label}: ${value.trim()}`);
       out.push(`${FAILING_TESTS} ${findings.map((f) => f.id).join(", ")}`);
       if (proven(findings)) {
-        const assumed = findings.filter((f) => f.dependsOn && defaultMark(f) !== "real");
-        const disputed = findings.filter((f) => !f.dependsOn && f.verdict === "disputed");
+        const assumed = findings.filter((f) => f.dependsOn && f.verdict !== "disputed" && defaultMark(f) !== "real");
+        const disputed = findings.filter((f) => f.verdict === "disputed");
         const qs = [...new Set(assumed.map((f) => f.dependsOn!))].join(", ");
         if (assumed.length) out.push(`- ${ids(assumed)} assumed an answer to ${qs}; this issue's mark covers them.`);
         if (disputed.length) out.push(`- The second opinion disputed ${ids(disputed)}; this issue's mark covers them.`);
@@ -608,7 +785,7 @@ export function render(r: Review): string {
   }
   if (already.length) {
     out.push("## Already failing before this change", "",
-      "These tests fail the same way on the code before this change, so the change did not cause them. They were " +
+      "These tests fail with the same message on the code before this change. They were " +
       "not sent to the second opinion and do not set the exit code; mark one real to keep it as a test of a bug " +
       "that was already there.", "");
     for (const f of already) out.push(...findingLines(r, f));
@@ -617,8 +794,8 @@ export function render(r: Review): string {
   if (!r.questions.length) out.push("None.", "");
   const needed = neededQuestions(r);
   r.questions.forEach((q, i) => out.push(`### Q${i + 1}`, "", ...(multi(r) ? [`Project: ${r.questionProjects[i]}`, ""] : []),
-    q, "", ...(needed.has(`Q${i + 1}`) ? [] : ["Optional: no issue waits on it. An answer lets `arnx accept` write a " +
-      "test for it.", ""]), "Answer:", ""));
+    q, "", ...(needed.has(`Q${i + 1}`) ? [] : [`Optional: ${optionalWhy(covers.get(`Q${i + 1}`))}. An answer lets ` +
+      "`arnx accept` write a test for it.", ""]), "Answer:", ""));
   const sus = r.suspects ?? [];
   if (sus.length) {
     out.push("## Suspected before testing", "",
@@ -627,29 +804,36 @@ export function render(r: Review): string {
       "not proven is still a claim worth reading; check the ones that matter to you.", "");
     for (const x of sus) {
       const where = multi(r) ? ` (${x.project})` : "";
-      const fs = (x.findings ?? []).join(", ");
-      const what = x.outcome === "proven" ? `proven: ${fs}`
+      const ids = (x.findings ?? []).join(", ");
+      const sep = ids ? `: ${ids}` : "";
+      const what = x.outcome === "proven" ? `proven${sep}`
         : x.outcome === "same cause" ? `proven only together with ${x.sameAs}: its tests fail for the same cause ` +
-          `(one fix makes both pass); whatever its claim says beyond ${x.sameAs}'s is not shown: ${fs}`
-        : x.outcome === "disputed" ? `its test failed, but the second model disputed it: ${fs}`
-        : x.outcome === "unchecked" ? `its test failed; the second model did not judge it: ${fs}`
-        : x.outcome === "pending answer" ? `its test failed; whether that is a defect depends on a question: ${fs}`
-        : x.outcome === "pre-existing" ? `its test failed, but it fails the same way before the change: ${fs}`
+          `(one fix makes both pass); whatever its claim says beyond ${x.sameAs}'s is not shown${sep}`
+        : x.outcome === "disputed" ? `its test failed, but the second model disputed it${sep}`
+        : x.outcome === "unchecked" ? `its test failed; the second model did not judge it${sep}`
+        : x.outcome === "pending answer" ? `its test failed; whether that is a defect depends on a question${sep}`
+        : x.outcome === "pre-existing" ? `its test failed, but it fails with the same message before the change${sep}`
         : x.outcome === "not reproduced" ? `not reproduced: its test passed (\`${x.tests[0]}\`), which does not ` +
           "rule it out"
         : x.outcome === "inconclusive" ? `inconclusive, flaky or errored: \`${x.tests[0]}\``
         : `not tested${x.reason ? `: ${x.reason}` : ""}`;
       out.push(`- ${x.id}${where} \`${x.file}:${x.line}\`: ${x.claim} — ${what}.`);
     }
+    const late = sus.filter((x) => x.late).length;
+    if (late) out.push("", `Second hunter, too late to test: ${late} suspect${late === 1 ? "" : "s"}.`);
     out.push("");
   }
   const checks = r.typecheck ?? [];
   if (checks.length) {
-    out.push("## Type check", "",
-      "The project's own type check (`typecheck` in .arnx/review.yaml) ran once on the change, without arnx's " +
-      "generated tests. It is information only: it changes no test, finding or exit code.", "");
+    out.push("## Type check", "");
+    if (checks.some((t) => t.status !== "skipped")) {
+      out.push("The project's own type check (`typecheck` in .arnx/review.yaml) ran once on the change, without arnx's " +
+        "generated tests. It is information only: it changes no test, finding or exit code.", "");
+    }
     for (const t of checks) {
-      out.push(`- ${multi(r) ? `\`${t.project}\` ran` : "Ran"} \`${t.command}\`: ${describeTypecheck(t)}.`);
+      const did = t.status === "skipped" ? "Skipped" : "Ran";
+      out.push(`- ${multi(r) ? `\`${t.project}\` ${did.toLowerCase()}` : did} \`${t.command}\`: ${describeTypecheck(t).replace(/^skipped: /, "")}.`);
+      if (t.gaps?.length) out.push(`  - ${gapsLine(t.gaps)}; these errors say nothing about the change.`);
       for (const d of t.diagnostics.slice(0, DIAGNOSTICS_SHOWN)) out.push(`  - ${describeDiagnostic(d)}`);
       const more = t.errors - Math.min(t.diagnostics.length, DIAGNOSTICS_SHOWN);
       if (more > 0) {
@@ -666,19 +850,38 @@ export function render(r: Review): string {
     `- Flaky or unconfirmed (failed in some runs only): ${ticks(r.flaky) || "none"}`,
     `- Errors (the test could not run): ${ticks(r.errors) || "none"}`,
     `- Runs without a report (timed out or crashed): ${r.missingRuns}`);
+  if (r.typesUnchecked) {
+    const g = r.typesUnchecked;
+    out.push(`- CI type checks with ${g.tool} (${g.from}); arnx does not, so types are not checked for: ${ticks(g.projects)}`);
+  }
+  if (r.unclaimed?.length) {
+    out.push(`- Failing tests the reviewer did not report (scratch or replaced): ${ticks(r.unclaimed.map((u) => u.testId))}`);
+  }
   if (r.ignoredChanged?.length) out.push(`- Changed files left out by .arnxignore (not reviewed): ${ticks(r.ignoredChanged)}`);
+  if (r.generatedChanged?.length) out.push(`- Changed generated files (in the sandbox, not reviewed): ${ticks(r.generatedChanged)}`);
   if (r.lockfilesChanged?.length) out.push(`- Changed lockfiles (in the sandbox, not reviewed): ${ticks(r.lockfilesChanged)}`);
   if (r.blankedLines?.length) {
     out.push(`- Comment lines blanked as secret-looking (not sent): ${describeBlanked(r.blankedLines)}`);
   }
+  for (const x of r.couldNotRun ?? []) {
+    const where = x.needs === A_FAKED_FILE ? "a faked file" : `\`${x.needs}\``;
+    out.push(x.faked && x.notRerun ? `- Unproven: \`${x.test}\` may need the real key in ${where}, a fake in the sandbox; not rerun with it.`
+      : x.faked ? `- Unproven: \`${x.test}\` needs the real key in ${where}, a fake in the sandbox.`
+      : `- Could not run: \`${x.test}\` needs \`${x.needs}\`, left out.`);
+  }
+  if (r.fakedKeys?.length) {
+    out.push(`- Private keys faked in the sandbox: ${ticks(r.fakedKeys)}. ${r.findings.length ? `${FIX_WITH_FAKE}, then \`arnx review\` again`
+      : "A test that parses one needs `arnx allow-secret PATH`, then `arnx review` again"}${skippedNote(r)}`);
+  }
   if (r.notSent.length) {
-    out.push(`- Files left out because they looked like secrets: ${ticks(r.notSent)}. If one is a test fixture, not a ` +
-      "secret: `arnx allow-secret PATH`, then `arnx review` again");
+    out.push(`- Files left out because they looked like secrets: ${namesLeftOut(r.notSent, r.leftOutFiles, (p) => `\`${p}\``)}. If one is a test fixture, not a ` +
+      "secret: `arnx allow-secret PATH`, then `arnx review` again. A test can fail for one of these with no name in its message, " +
+      "and then reads as any other failure");
   }
   const stats = r.projectStats ?? [];
   if (stats.length && (multi(r) || stats.some(troubled))) {
     out.push("", "## Projects", "");
-    for (const p of stats) out.push(`- \`${p.name}\`: ${projectLine(p)}`);
+    for (const p of stats) out.push(`- \`${p.name}\`: ${projectLine(p, r)}`);
   }
   const checked = r.checked ?? [];
   if (checked.length) {
@@ -696,11 +899,12 @@ const DIAGNOSTICS_SHOWN = 20;
 const OUTPUT_SHOWN = 15;
 
 function huntCounts(sus: SuspectOutcome[]): string {
-  const n = (o: SuspectOutcome["outcome"]) => sus.filter((x) => x.outcome === o).length;
+  const n = (o: SuspectOutcome["outcome"]) => sus.filter((x) => x.outcome === o && !x.late).length;
+  const late = sus.filter((x) => x.late).length;
   const opt = (o: SuspectOutcome["outcome"]) => n(o) ? [`${n(o)} ${o}`] : [];
   return [`${sus.length} suspected`, `${n("proven")} proven`, ...opt("same cause"), ...opt("disputed"), ...opt("unchecked"),
     ...opt("pending answer"), ...opt("pre-existing"), `${n("not reproduced")} not reproduced`, ...opt("inconclusive"),
-    `${n("not tested")} not tested`].join(" · ");
+    `${n("not tested")} not tested`, ...late ? [`${late} too late`] : []].join(" · ");
 }
 
 /** Final outcomes once the second model has judged the findings: a suspect is proven only when a finding its test
@@ -708,12 +912,13 @@ function huntCounts(sus: SuspectOutcome[]): string {
 export function adjudicate(sus: SuspectOutcome[], findings: Finding[]): void {
   for (const x of sus) {
     if (x.outcome !== "failed") continue;
-    const fs = findings.filter((f) => f.project === x.project && f.suspect === x.id);
+    // By its tests: two suspects may share one, and the finding names only the later of them.
+    const fs = findings.filter((f) => f.project === x.project && ((x.tests ?? []).includes(f.testId) || f.suspect === x.id));
     x.findings = fs.map((f) => f.id);
     x.outcome = fs.length && fs.every(isPreExisting) ? "pre-existing"
       : fs.some((f) => f.verdict === "confirmed" && !f.dependsOn && !isPreExisting(f)) ? "proven"
-      : fs.some((f) => f.dependsOn) ? "pending answer"
-      : fs.some((f) => f.verdict === "disputed") ? "disputed" : "unchecked";
+      : fs.some((f) => f.verdict === "disputed") ? "disputed"
+      : fs.some((f) => f.dependsOn) ? "pending answer" : "unchecked";
   }
 }
 
@@ -745,14 +950,21 @@ export function sameCause(sus: SuspectOutcome[], groups: Group[], findings: Find
   }
 }
 
-const troubled = (p: ProjectStat) => p.missingRuns > 0 || !p.sawResults;
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const troubled = (p: ProjectStat) => !!p.env || p.missingRuns > 0 || !!p.hungFiles?.length || !!p.notRunFiles?.length || !p.sawResults || !!p.noReport;
+export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-function projectLine(p: ProjectStat): string {
+/** Why a round has no report: a provider outage cut it, or the reviewer gave none. */
+const noReportWhy = (p: ProjectStat, r: Review) => p.stop?.startsWith("api_error") || (r.providerFailures ?? []).some(resumes)
+  ? "a model call failed before the reviewer gave its report" : "the reviewer gave no report";
+
+function projectLine(p: ProjectStat, r: Review): string {
+  if (p.env?.state === "failed") return `not tested: this commit's environment could not be had (log: .arnx/reviews/${r.id}/${p.env.log})`;
+  if (p.noReport) return noReportWhy(p, r);
   const ran = p.tests ? `${plural(p.tests, "test")}, ${p.passed} passing in every run`
     : `${plural(p.testFiles, "test file")}, no run reported its tests`;
   const missing = p.missingRuns ? ` (${plural(p.missingRuns, "run")} without a report)` : "";
-  return ran + missing + (p.sawResults ? "" : "; the reviewer never saw them run");
+  return ran + missing + (p.sawResults ? "" : "; the reviewer never saw them run") +
+    (p.env ? "; run on the image built for another commit" : "");
 }
 
 /** `reasons`: a rewrite mark without its Rewrite line is an error (accept needs the reason; triage does not). */
@@ -845,23 +1057,17 @@ export function parseMarks(md: string, findingIds: string[], o: { reasons?: bool
  * `said` the ids as the summary shows them, each finding's state after it unless it is confirmed ("F3; F4 depends on
  * Q1"). */
 export interface SummaryRow { mark: "✗" | "!" | "?" | "·"; ids: string[]; projects: string[]; state: string;
-  regression: boolean; title: string; said: string; severity?: Severity }
+  regression: boolean; fallback: boolean; title: string; said: string; severity?: Severity }
 
 /** The summary's rows, in its order (summary() and `arnx review --json` show the same). */
 export function summaryRows(r: Review): SummaryRow[] {
   const isConfirmed = new Set(confirmed(r).map((f) => f.id));
   const unjudged = new Set(notChecked(r).map((f) => f.id));
-  // Cases of one test no one grouped (the grouping needs the second opinion) are one row.
-  const rows: ReturnType<typeof groupsOf> = [];
-  for (const row of groupsOf(r, active(r))) {
-    const same = !row.group && rows.find((x) => !x.group && sameTest(x.findings[0]!) === sameTest(row.findings[0]!));
-    if (same) same.findings.push(...row.findings);
-    else rows.push({ ...row, findings: [...row.findings] });
-  }
+  const rows = groupsOf(r, active(r));
   return rows.map(({ group, findings }) => {
     const mark = findings.some((f) => isConfirmed.has(f.id)) ? "✗" : findings.some((f) => unjudged.has(f.id)) ? "!"
-      : findings.some((f) => f.dependsOn) ? "?" : "·";
-    const states = findings.map((f) => f.dependsOn ? `depends on ${f.dependsOn}` : verdictOf(f));
+      : findings.some((f) => f.dependsOn && f.verdict !== "disputed") ? "?" : "·";
+    const states = findings.map((f) => f.dependsOn && f.verdict !== "disputed" ? `depends on ${f.dependsOn}` : verdictOf(f));
     const counts = [...new Set(states)].map((st) => `${states.filter((x) => x === st).length} ${st}`);
     const f0 = findings[0]!;
     // Confirmed findings plainly, first; the others by state.
@@ -875,23 +1081,36 @@ export function summaryRows(r: Review): SummaryRow[] {
     return { mark, ids: findings.map((f) => f.id), projects: [...new Set(findings.map((f) => f.project))],
       state: counts.length === 1 ? states[0]! : counts.join(", "),
       regression: findings.some((f) => f.before?.status === "regression"),
+      fallback: findings.some((f) => f.fallback),
       title: group?.title || f0.explanation || firstLine(f0.message), said,
       ...(group?.severity ? { severity: group.severity } : {}) };
   });
 }
 
+/** The hunt named no suspect in any project's round, and the rounds ended there: nothing was tested on purpose. */
+const suspectedNothing = (r: Review) => (r.projectStats ?? []).length > 0 && (r.projectStats ?? []).every((p) => p.noSuspects);
+export const NOTHING_SUSPECTED = "Nothing suspected in this change; no tests written.";
+
 /** What the summary's status says: why the review is incomplete (`problems`), or, with none, how many of the changed
  * source files no test refers to (`untested` of `of`: partly covered when above 0). */
-export function summaryStatus(r: Review): { problems: string[]; untested: number; of: number } {
-  return { problems: statusOf(r).problems, untested: untestedCount(r), of: untestedOf(r) };
+export function summaryStatus(r: Review): { problems: string[]; untested: number; of: number; none: boolean;
+  nothing: boolean } {
+  const { problems } = statusOf(r);
+  const { m, n, none } = coverage(r);
+  const nothing = !problems.length && suspectedNothing(r);
+  // Incomplete comes first: its own lines say what is missing.
+  return { problems, untested: m, of: n, none: !problems.length && (none || nothing), nothing };
 }
 
-export function summary(r: Review, reviewMd: string): string {
+export function summary(r: Review, reviewMd: string, confirmedFails = CONFIRMED_FAILS): string {
   const { problems } = statusOf(r);
+  const st = summaryStatus(r);
   const said = problems.join("; ");
   const status = problems.length ? `Incomplete: ${said}.`
-    : untestedCount(r) ? `Partly covered: no test refers to ${untestedCount(r)} of ${untestedOf(r)} changed source ` +
-      "files, so finding nothing there says nothing about them." : "";
+    : st.nothing ? NOTHING_SUSPECTED
+    : st.none ? `Not tested: no test seen reaching any of ${files(st.of)}, so finding nothing says nothing.`
+    : st.untested ? `Partly covered: no test seen reaching ${st.untested} of ${files(st.of)}, so finding ` +
+      "nothing there says nothing about them." : "";
   const down = (r.providerFailures ?? []).map(failureLine).join(" ");
   const out = [`arnx review ${r.id} · ${r.change} · ${plural(r.filesChanged, "file")}, +${r.added} −${r.removed}`];
   const head = [status, down].filter(Boolean).join(" ");
@@ -899,7 +1118,7 @@ export function summary(r: Review, reviewMd: string): string {
   // With --quiet this is the only place that says part of the change was not sent.
   if (r.untrackedLeftOut) out.push(`${plural(r.untrackedLeftOut, "untracked file")} left out (--untracked includes them).`);
   const issues = summaryRows(r);
-  if (issues.length) out.push(issuesLine(r, issues));
+  if (issues.length) out.push(issuesLine(r, issues, confirmedFails));
   const fixes = fixed(r).length;
   if (fixes) out.push(`${plural(fixes, "test")} fail${fixes === 1 ? "s" : ""} before this change and pass${fixes === 1 ? "es" : ""} with it.`);
   const open = notChecked(r);
@@ -911,7 +1130,7 @@ export function summary(r: Review, reviewMd: string): string {
   }
   const num = String(issues.length).length;
   const rows = issues.map((row, i) => {
-    const where = multi(r) ? ` (${row.projects.join(", ")})` : "";
+    const where = (multi(r) ? ` (${row.projects.join(", ")})` : "") + (row.fallback ? ` · ${FALLBACK_LABEL}` : "");
     return [`  ${row.mark} ${String(i + 1).padStart(num)}`,
       shorten((row.regression ? "regression: " : "") + row.title, 100), row.said + where] as const;
   });
@@ -919,7 +1138,7 @@ export function summary(r: Review, reviewMd: string): string {
   const width = Math.max(0, ...rows.map(([, title]) => title.length));
   const minor = issues.findIndex((row) => row.severity === "low");
   rows.forEach(([head, title, ids], i) => {
-    if (i === minor) out.push("  Minor:");
+    if (i === minor && minor > 0) out.push("  Minor:");
     out.push(`${head}  ${title.padEnd(width)}  ${ids}`);
   });
   const already = r.findings.filter(isPreExisting);
@@ -932,26 +1151,55 @@ export function summary(r: Review, reviewMd: string): string {
   r.questions.forEach((q, i) => {
     if (needed.has(`Q${i + 1}`)) out.push(`  ? Q${i + 1}  ${q}`);
   });
+  const covered = r.questions.filter((_q, i) => !needed.has(`Q${i + 1}`) && coveredQuestions(r).has(`Q${i + 1}`)).length;
   if (optional) out.push(`  ${optional === 1 ? "1 optional question" : `${optional} optional questions`} in review.md ` +
-    `(no issue waits on ${optional === 1 ? "it" : "them"})`);
-  if (!r.findings.length && !r.questions.length) out.push("  No findings and no questions.");
+    `(${covered ? "a proven issue's mark covers the findings that assumed " + (optional === 1 ? "it" : "them")
+      : `no issue waits on ${optional === 1 ? "it" : "them"}`})`);
+  const stats = r.projectStats ?? [];
+  const where = (ps: ProjectStat[]) => multi(r) && ps.length ? ` (${ps.map((p) => p.name).join(", ")})` : "";
+  const trouble = [r.unclaimed?.length ? plural(r.unclaimed.length, "unreported failing test") : "",
+    r.flaky.length ? `${r.flaky.length} flaky` : "", r.errors.length ? plural(r.errors.length, "error") : "",
+    r.missingRuns ? `${plural(r.missingRuns, "run")} without a report${where(stats.filter((p) => p.missingRuns > 0))}`
+      : ""].filter(Boolean);
+  // With no issue row, one line says why. A status line above (Incomplete, Not tested), a provider's failure, trouble
+  // in the runs or a list of what was not tested wins: "no findings" next to them would read as reassurance.
+  const qualified = problems.length || st.none || incomplete(r) || down || trouble.length || st.untested > 0 || !!r.couldNotRun?.length ||
+    r.uncovered.some((u) => isSourcePath(u.path));
+  if (!issues.length && !qualified) {
+    out.push(already.length ? `  No issue from this change; ${already.length} already failing before it.`
+      : r.testsWritten === 0 || (stats.length > 0 && stats.every((p) => !p.tests)) ? "  No findings: no test ran."
+      : "  No findings.");
+  }
+  if (r.notSent.length) {
+    // A file the change touches or a failure names; the rest as a count, with the list in review.md.
+    const said = [...r.findings.map((f) => f.message), ...(r.couldNotRun ?? []).map((x) => x.needs)].join("\n");
+    // A run with no report may be for want of one that holds a key; one left out by its name stays in the count.
+    const held = (p: string) => (r.leftOutFiles ?? []).some((w) => w.path === p && w.label !== NAMED_OUT);
+    const named = r.notSent.filter((p) => r.leftOutTouched?.includes(p) || said.includes(p) || (r.missingRuns > 0 && held(p)));
+    const rest = r.notSent.length - named.length;
+    if (named.length) {
+      out.push(`  Left out as secret-looking: ${namesLeftOut(named.slice(0, 10), r.leftOutFiles, (p) => p)}; if one is a test fixture, ` +
+        `allow it with \`arnx allow-secret PATH\`${rest || named.length > 10 ? `; ${rest + Math.max(named.length - 10, 0)} more left out (review.md)` : ""}`);
+    } else out.push(`  ${plural(rest, "file")} left out (review.md)`);
+  }
+  if (r.fakedKeys?.length) {
+    out.push(`  Private keys faked in the sandbox: ${someNames(r.fakedKeys, 10)}${r.findings.length ? `. ${FIX_WITH_FAKE}`
+      : "; a test that parses one needs `arnx allow-secret PATH`"}${skippedNote(r)}`);
+  }
   for (const u of (r.untested ?? []).filter((x) => x.files.length)) {
     const shown = u.files.slice(0, 8).join(", ") + (u.files.length > 8 ? `, … (${u.files.length - 8} more)` : "");
-    out.push(`  Not tested${multi(r) ? ` (${u.project})` : ""}: ${shown}`);
+    out.push(`  No test seen reaching${multi(r) ? ` (${u.project})` : ""}: ${shown}`);
   }
-  if (r.uncovered.length) out.push(`  Not tested: ${r.uncovered.map((u) => u.path).join(", ")}`);
-  for (const t of r.typecheck ?? []) out.push(`  Type check${multi(r) ? ` (${t.project})` : ""}: ${describeTypecheck(t)}`);
+  for (const [reason, paths] of byReason(r.uncovered.filter((u) => isSourcePath(u.path)))) {
+    out.push(`  Not tested (${reason}): ${paths.slice(0, 8).join(", ")}${paths.length > 8 ? `, … (+${paths.length - 8} more)` : ""}`);
+  }
+  for (const t of r.typecheck ?? []) out.push(`  Type check${multi(r) ? ` (${t.project})` : ""}${t.status === "skipped" ? " " : ": "}${describeTypecheck(t)}`);
   for (const c of r.typecheckOnly ?? []) {
     const checked = (r.typecheck ?? []).some((t) => t.project === c.project);
     out.push(`  ${checked ? "Type check only" : "No round of its own"} (${c.project}): its changed files reviewed by ` +
       c.by.join(", "));
   }
   if (r.notReviewed.length) out.push(`  Not reviewed (over max_projects): ${r.notReviewed.join(", ")}`);
-  const stats = r.projectStats ?? [];
-  const where = (ps: ProjectStat[]) => multi(r) && ps.length ? ` (${ps.map((p) => p.name).join(", ")})` : "";
-  const trouble = [r.flaky.length ? `${r.flaky.length} flaky` : "", r.errors.length ? plural(r.errors.length, "error") : "",
-    r.missingRuns ? `${plural(r.missingRuns, "run")} without a report${where(stats.filter((p) => p.missingRuns > 0))}`
-      : ""].filter(Boolean);
   if (trouble.length) out.push(`  ${trouble.join(" · ")}`);
   const blind = stats.filter((p) => !p.sawResults);
   if (blind.length) out.push(`  The reviewer never saw its tests run: ${blind.map((p) => p.name).join(", ")}`);
@@ -979,6 +1227,8 @@ export function yourCall(r: Review, rows: SummaryRow[] = summaryRows(r)): string
 
 /** The commands after a review: accept straight away when nothing needs the developer, else triage first. */
 export function nextSteps(r: Review, rows: SummaryRow[] = summaryRows(r)): string[] {
+  // An outage cut the review: finishing it comes before judging what it found.
+  if ((r.providerFailures ?? []).some(resumes)) return ["arnx review --resume"];
   if (!r.findings.length && !r.questions.length) return [];
   // Findings that already failed before the change are not the change's issues: they need no mark to accept.
   const settled = marksIssues(r) && rows.length > 0 && rows.every((row) => row.mark === "✗") &&
@@ -988,26 +1238,31 @@ export function nextSteps(r: Review, rows: SummaryRow[] = summaryRows(r)): strin
 
 /** The summary's count: issues (rows) by where they stand, the findings in them, and what the code before the change
  * settles when it says the same of every confirmed finding. */
-function issuesLine(r: Review, rows: SummaryRow[]): string {
-  const kinds = ([["✗", "confirmed"], ["!", "not checked"], ["?", "waiting on a question"], ["·", "disputed"]] as const)
+function issuesLine(r: Review, rows: SummaryRow[], confirmedFails = CONFIRMED_FAILS): string {
+  const kinds = ([["✗", confirmedWord(confirmedFails)], ["!", "not checked"], ["?", "waiting on a question"], ["·", "disputed"]] as const)
     .map(([mark, word]) => [rows.filter((row) => row.mark === mark).length, word] as const).filter(([n]) => n);
-  const counted = kinds.map(([n, word], i) => `${i ? n : plural(n, "issue")} ${word}`).join(", ");
+  // What the code before the change settles describes the confirmed issues: it goes with their count.
+  const counted = kinds.map(([n, word], i) => `${i ? n : plural(n, "issue")} ${word}`);
   const findings = rows.reduce((a, row) => a + row.ids.length, 0);
   const sure = rows.filter((row) => row.mark === "✗").length;
   const before = [...new Set(confirmed(r).map((f) => f.before?.status))];
   const settled = before.length !== 1 ? ""
     : before[0] === "new-code" ? `${sure === 1 ? "" : sure === 2 ? "both " : "all "}in new code`
-    : before[0] === "regression" ? "caused by the change"
+    : before[0] === "regression" ? "their tests pass before the change"
     : before[0] === "pre-existing" ? "already failing before the change" : "";
-  return `${counted} (${plural(findings, "finding")})${settled ? `; ${settled}` : ""}.`;
+  // Confirmed comes first among the kinds.
+  if (settled && kinds[0]?.[1] === confirmedWord(confirmedFails) && kinds.length > 1) {
+    return `${counted[0]}, ${settled}; ${counted.slice(1).join(", ")} (${plural(findings, "finding")}).`;
+  }
+  return `${counted.join(", ")} (${plural(findings, "finding")})${settled ? `; ${settled}` : ""}.`;
 }
 
 /** The cost in one word, and a note when calls cut off mid-reply could not be priced, or a model has no price. */
 function costShort(r: Review): string {
   if (billedByCloud(r)) return `$${r.costUsd.toFixed(2)} billed`;
   const usage = r.usage ?? [];
-  const unknown = usage.reduce((a, u) => a + (u.unpriced ? 0 : u.unknownCalls), 0);
-  const unpriced = usage.filter((u) => u.unpriced).map((u) => u.model.replace(/^[^:]*:/, ""));
+  const unknown = usage.reduce((a, u) => a + (costUnknown(u) ? 0 : u.unknownCalls), 0);
+  const unpriced = usage.filter(costUnknown).map((u) => u.model.replace(/^[^:]*:/, ""));
   const notes = [...unknown ? ["a little more: some calls were cut off mid-reply"] : [],
     ...unpriced.length ? [`${unpriced.join(", ")}: cost unknown`] : []];
   return `$${r.costUsd.toFixed(2)}${notes.length ? ` (${notes.join("; ")})` : ""}`;
@@ -1026,7 +1281,7 @@ export const REVIEW_SCHEMA_VERSION = 1;
  * marked real; the others wait on an answer, were disputed by the second opinion, or failed before the change too. */
 export type FindingStatus = "confirmed" | "not-checked" | "waiting-on-answer" | "disputed" | "pre-existing";
 export const findingStatus = (f: Finding): FindingStatus => isPreExisting(f) ? "pre-existing"
-  : f.dependsOn ? "waiting-on-answer" : f.verdict === "disputed" ? "disputed" : f.verdict === "confirmed" ? "confirmed"
+  : f.verdict === "disputed" ? "disputed" : f.dependsOn ? "waiting-on-answer" : f.verdict === "confirmed" ? "confirmed"
   : "not-checked";
 
 export function save(r: Review, rdir: string, diff: string): void {
@@ -1038,8 +1293,14 @@ export function save(r: Review, rdir: string, diff: string): void {
     project_stats: (r.projectStats ?? []).map((p) => rekey(p, snake)),
     usage: (r.usage ?? []).map((u) => rekey(u, snake)), ...(r.timings ? { timings: rekey(r.timings, snake) } : {}),
     ...(r.fixProof ? { fix_proof: r.fixProof.map((x) => rekey(x, snake)) } : {}),
-    ...(r.typecheck ? { typecheck: r.typecheck.map((t) => rekey(t, snake)) } : {}),
+    // A skipped check counted nothing: no errors, no list, which could read like a clean one.
+    ...(r.typecheck ? { typecheck: r.typecheck.map((t) => {
+      const { errors: _e, inChangedFiles: _c, diagnostics: _d, ...rest } = t;
+      return rekey(t.status === "skipped" ? rest : t, snake);
+    }) } : {}),
+    ...(r.typesUnchecked ? { types_unchecked: r.typesUnchecked } : {}),
     ...(r.providerFailures ? { provider_failures: r.providerFailures } : {}),
+    ...(r.unclaimed ? { unclaimed: r.unclaimed.map((u) => rekey(u, snake)) } : {}),
     exit_code: exitCode(r) };
   writeFileSync(join(rdir, "review.json"), JSON.stringify(json, null, 2) + "\n");
   writeFileSync(join(rdir, "review.md"), wrapMarkdown(render(r)));
@@ -1067,11 +1328,20 @@ export function load(rdir: string): Review {
   r.writeDirs ??= { [r.projects[0] ?? "main"]: r.writeDir };
   r.projectStats = ((data.project_stats ?? []) as object[]).map((p) => rekey(p, camel) as unknown as ProjectStat);
   r.usage = ((data.usage ?? []) as object[]).map((u) => rekey(u, camel) as unknown as ModelUse);
+  if (data.unclaimed) r.unclaimed = (data.unclaimed as object[]).map((u) => rekey(u, camel) as { project: string; testId: string; message: string });
   r.groups = (data.groups ?? []) as Group[];
   r.checked = (data.checked ?? []) as Checked[];
+  // The count of changed source files is read from the diff, so old and new reviews count the same way.
+  try {
+    const diff = readFileSync(join(rdir, "change.diff"), "utf8");
+    if (/^diff --git /m.test(diff)) r.sourceFiles = diffSources(diff);
+  } catch { /* no diff kept: the review's own count stands */ }
   if (data.timings) r.timings = rekey(data.timings as object, camel) as Review["timings"];
   if (data.fix_proof) r.fixProof = (data.fix_proof as object[]).map((x) => rekey(x, camel) as unknown as FixProof);
-  if (data.typecheck) r.typecheck = (data.typecheck as object[]).map((t) => rekey(t, camel) as unknown as TypeCheck);
+  if (data.typecheck) r.typecheck = (data.typecheck as object[]).map((t) => {
+    const k = rekey(t, camel) as unknown as TypeCheck;
+    return k.status === "skipped" ? { ...k, errors: 0, inChangedFiles: 0, diagnostics: [] } : k;
+  });
   return r;
 }
 
@@ -1087,6 +1357,35 @@ export function parseReport(finalText: string): AgentReport {
   if (Array.isArray(data.suspects_not_tested)) out.suspects_not_tested = list("suspects_not_tested");
   return out;
 }
+
+/** The tests named by the last of these replies that names any: `file` is the id's file part ("" when it has none),
+ * `name` the rest. Null when no reply names a test. */
+export function lastTests(texts: string[]): { file: string; name: string }[] | null {
+  for (const t of [...texts].reverse()) {
+    const tests = parseReport(t).tests;
+    if (tests.length) return tests.map(testRef);
+  }
+  return null;
+}
+
+const testRef = (x: unknown): { file: string; name: string } => {
+  const id = typeof x === "object" && x !== null && typeof (x as { test?: unknown }).test === "string"
+    ? (x as { test: string }).test : typeof x === "string" ? x : "";
+  const at = id.indexOf("::");
+  return at < 0 ? { file: "", name: id } : { file: id.slice(0, at), name: id.slice(at + 2) };
+};
+
+/** The tests these replies stand behind: those lastTests names, and those the last reply with suspected defects names
+ * as failing (a report may list a defect's test without listing its tests). Null when no reply names any. */
+export function reportedTests(texts: string[]): { file: string; name: string }[] | null {
+  const tests = lastTests(texts);
+  const defects = [...texts].reverse().map((t) => parseReport(t).suspected_defects).find((d) => d.length) ?? [];
+  const named = defects.map(testRef).filter((x) => x.name);
+  return tests || named.length ? [...tests ?? [], ...named] : null;
+}
+
+/** Whether any of these replies is a report: a JSON object with a `tests` list (an empty one still says so). */
+export const hasReport = (texts: string[]): boolean => texts.some((t) => Array.isArray(parseJsonObject(t)?.tests));
 
 /** The text of each question in these replies, once each (a question is a string, or an object with a question). */
 export function questionTexts(texts: string[]): string[] {

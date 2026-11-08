@@ -5,12 +5,21 @@ The flow, what each step writes, and what its results mean. Start with the [READ
 
     arnx init → arnx review → arnx triage → arnx accept → arnx prompt → arnx check
 
+arnx works best on single-package Python and TypeScript repositories. A repository with several packages is set up one part at a time: a
+review waits up to 10 minutes for the part its change touches, and `arnx setup` stops at 40 minutes overall (the default
+`setup_minutes`). Tests that run only in a browser (Playwright, Cypress and the like) are not run; setup lists them
+under `uncovered`. Details are in [SAFETY.md](SAFETY.md#what-arnx-covers).
+
 Commit `.arnx/config.toml` and `.arnx/review.yaml`: the next branch, a teammate's clone and CI reuse the proven
 environment without running setup again.
 
 The first `arnx review` sets up only the projects the change touches, in a few minutes (it stops at 10), with a
-quick look as their proof: the test listing, arnx's one-line test and a few small test files. A later change in
-another project sets that one up then. `arnx setup` sets up the whole repository and runs every suite.
+quick look as their proof: the test listing, arnx's one-line test and a few small test files (a runner with no list
+form runs a few small test files all the same). A later change in another project, or in one setup left out (not set
+up yet, out of time, a file no project lists), sets that one up then, before any suite runs; one that fails is left
+to `arnx setup --add`. A first run that failed leaves its attempt in `.arnx/review.yaml`: the next review sets up
+from it, keeping its fixes, and after a second failure leaves it to `arnx setup`. A change no project covers is
+refused before anything runs. `arnx setup` sets up the whole repository and runs every suite.
 
 Lost? `arnx next` says where the repository is in this flow and the command to run now. `arnx doctor` says what is
 missing (keys, Docker, configuration); setup and review run the same checks first.
@@ -35,7 +44,9 @@ arnx's own one-line test instead of a suite, and says so in the table (`no tests
 runs`). Reviews then run only the tests arnx writes. A `test_command` that deletes or writes files (`rm`, `mv`, `cp`,
 `sed -i`, `tee`, `> file`) is refused: every run must see the repository as it is.
 
-arnx adds the runner's report options after `{targets}`, so `test_command` must call the runner itself with `{targets}` (`cd app && npx vitest run {targets}`); one wrapped in `sh -c '...'` or that hands `{targets}` to another command is refused before anything runs. A TypeScript project that installs outside `/src` (the code is mounted there and hides what install wrote) sets `deps_dir` (such as `/opt/deps`): before every run arnx links each `node_modules` under it into the same place under the install root.
+arnx adds the runner's report options after `{targets}`, so `test_command` must call the runner itself with `{targets}` (`cd app && npx vitest run {targets}`); one wrapped in `sh -c '...'` or that hands `{targets}` to another command is refused before anything runs. A TypeScript project that installs outside `/src` (the code is mounted there and hides what install wrote) sets `deps_dir` (such as `/opt/deps`): before every run arnx links each `node_modules` under it into the same place under the install root. A project whose runner collects only some folders or file names (jest `roots` and `testRegex`, vitest `include`) gets `tests_dir` and, for TypeScript, `test_files` (such as `*Spec.tsx`) from setup, so arnx writes its tests where and how the runner collects them.
+
+A run of a few generated test files uses one process: where the project configures pytest-xdist workers (`-n` or `--numprocesses` in `test_command` or in `addopts` of `pytest.ini`, `tox.ini`, `setup.cfg` or `pyproject.toml`) arnx adds `-n0`, and for jest `--runInBand`, last, so it wins. Setup's suite run and `arnx check` keep the project's own setting. A runner that refuses the flag is run as configured. `parallel: keep` on a project (or at the top of a single-project file) leaves its parallel setting alone.
 
 Before it starts, setup says what it will do and gives a rough time and cost estimate. It stops at `setup_usd`
 (default $3.00) or `setup_minutes` (default 40, the proof included) under `[budget]` in `.arnx/config.toml`. Out of
@@ -64,7 +75,9 @@ fresh clone, it says there is no copy to compare), stamp or not; a file whose st
 that copy's (a stamp recomputed by hand) counts as changed too. With `--json`, the command's object says so in
 `reproved`. Then the suites run and the file is stamped again, followed by what
 is worth a look; the changes go into `.arnx/setup/approval.md` too. When a suite fails there, the command stops and
-names the failing tests (exit 3). `arnx approve` runs the same proof on its own, saying the same.
+names the failing tests (exit 3). Before a review the proof gets 10 minutes: past that the review stops (exit 3) and
+says what ran out (the image build or the suites). `arnx approve` runs the same proof on its own, without a limit,
+saying the same.
 
 ### The baseline
 
@@ -104,6 +117,8 @@ the last commit. `arnx review --range A..B` picks any other span. In a repositor
 every file git does not ignore (less what `.arnxignore` and the secrets filter leave out), so there is no code before
 it for the before/after check; over the size limit, commit part of the files first and review the rest.
 
+A change of documentation only (files in a `docs/`, `doc/` or `documentation/` folder, top-level README, LICENSE, CHANGELOG, CONTRIBUTING or AUTHORS files, `.github/` markdown; never code, and never a file another file names, such as a Dockerfile `COPY` or a test that reads it) is not reviewed: arnx says so and exits 0, before anything is built or sent. `arnx review --docs` reviews it anyway. In a mixed change, documentation of a project with no code change is left out, and review.md says how many files. When the hunt answers with no suspect and no hunter failed, the round ends there: no test is written, the report says "Nothing suspected in this change; no tests written.", and no fix proof runs. A hunt that failed somewhere goes on to the tests.
+
 The hunter also reads where the project uses each function the change touches, two levels out, found by name. With
 `context = "precise"` under `[review]` in `.arnx/config.toml`, arnx first indexes each project's code in its test
 image (scip-python, scip-typescript or rust-analyzer; no network) and follows the function itself, so another
@@ -115,44 +130,50 @@ once: a `uses` folder with no leading `/` that matches in several places (`api/`
 one that takes in two or more other projects whole (a catch-all `services/`), would have those changes reviewed
 twice, so it goes back to the setup agent as a hint too.
 
-What a review sends, and what it leaves out (untracked files, `.arnxignore`, secrets):
-[SAFETY.md](SAFETY.md#what-a-review-sends).
+What a review sends, and what it leaves out (untracked files, `.arnxignore`, secrets, generated files):
+[SAFETY.md](SAFETY.md#what-a-review-sends). A changed file holding a private key is reviewed with a fake in the sandbox and
+`[private key]` for models; a test that needs the real key reads as unproven until `arnx allow-secret PATH`.
 
 ## Exit codes and JSON
 
-Exit codes: 0 no confirmed findings, 1 confirmed findings, 2 incomplete, 3 setup needed. `arnx check`: 0 all accepted
-tests pass, 1 some fail, 2 some did not report, 3 nothing accepted yet, 4 an accepted test changed since accept.
+Exit codes: 0 fine (confirmed findings are worth a look and do not fail the run; CI reads `result` `findings` in `review --json`, or `findings[].confirmed`), 1 a finding the second opinion did not check, 2 incomplete, 3 setup needed. `arnx check`: 0 all accepted
+tests pass, 1 some fail, 2 some did not report, are unproven or were not run, 3 nothing accepted yet, 4 an accepted test changed since accept.
+A test file that does not finish (its tests have no result) is one error, never a finding, and makes the review incomplete. Files that time out together are run apart (180 s each, 600 s in all); files the time never reached are named as not run. A failing test in a file that hangs in a later run reads as flaky.
+
+When a commit's own environment does not build or runs no test (an older commit whose install no longer works), that project is reported not tested, the other projects finish, and the review makes no model call for it and exits 2. If the image built for another commit of the project exists and holds no differing copy of the code, the tests run on it instead; the report says so, the review is never complete, and findings from it do not fail the run. A failure to reach the package index is not this: it keeps its own advice.
 Every command takes `--json`: one JSON object on stdout, the text on stderr, nothing asked (fields in
 [skills/arnx/references/json.md](../skills/arnx/references/json.md)).
 
 ## The report
 
 review.md opens with a status: what was tested, and what was not and why. Changed source files that no arnx test refers
-to are listed by name, and the review then says "partly covered" instead of "complete": finding nothing in a file no
-test touched says nothing about it. Findings that share one cause are grouped into an issue and explained as input,
+to are listed by name, and the review then says "partly covered" instead of "complete", or "not tested" when no test
+was seen reaching any changed source file: finding nothing in a file no test touched says nothing about it. Findings that share one cause are grouped into an issue and explained as input,
 actual, expected and why it matters (written by the second model after the verdicts), with a severity estimate that puts
 the most severe issues first and minor ones (leftover debug output, logging, test helpers) last. Each issue has one mark
 for all its tests: an issue backed by a confirmed test comes pre-marked real, so `arnx accept` can follow straight away
 unless you disagree. A pre-mark is arnx's default, not a verdict: review.md itself says "a confirmed test proves",
 meaning the test failed in every run and the second opinion agreed; whether that behaviour is a bug is yours to say. A
-question no issue waits on is optional. A finding the second model could not judge (review budget reached, or an API
-error) counts as confirmed for the exit code, so a review never passes silently because the check did not run.
+question no issue waits on is optional. A confirmed finding is worth a look and does not fail the run. A finding the
+second model could not judge (review budget reached, or an API error) exits 1, so a review never passes silently because the check did not run.
 
 ## Before and after the change
 
 Each test that failed in every run then runs again, as many times, on the code before the change (its base; HEAD
 for uncommitted work), in the same sandbox image, with no model call. A finding is marked a regression when it passes
-there; one that fails the same way there is listed under "Already failing before this change": it was not caused by
-the change, is not sent to the second opinion and does not set the exit code (mark it real to keep it as a test
-anyway). Tests that passed in every run also run there (up to 20 per project): one that fails there in every run
+there; one that fails with the same message there is listed under "Already failing before this change": it is not
+sent to the second opinion and does not set the exit code (mark it real to keep it as a test anyway). Neither
+outcome says why: a same message can have another cause there, and a pass can be a pass of different code. Tests that passed in every run also run there (up to 20 per project): one that fails there in every run
 shows the change fixes or adds what it checks, and review.md lists it under "Fails before the change, passes with it". `before_check = false` under
 `[review]` in `.arnx/config.toml` turns both off; `fix_proof_max = 0` turns off only the second.
 
-What each outcome means: **regression** (passes before, fails after: the change broke what the test checks, if the
-test is right); **pre-existing** (fails the same way before: not caused by the change); **new-code** (what it tests
+What each outcome means: **regression** (passes before, fails after, and nothing shows the pass was empty);
+**pre-existing** (fails with the same message before); **new-code** (what it tests
 does not exist before, so there is nothing to compare); **changed** (fails before too, differently: kept as a
 finding); **unknown** (not checked, or nothing settled: flaky, an error, no base, or the change altered the image's
-dependencies so a same failure would prove nothing). Only regression is evidence about the change itself. A test
+dependencies so a same failure would prove nothing). A same failure also settles nothing when the test uses a name
+the change adds (read from the code of its source files, not their comments or strings, and not from tests or data
+files), or when tests that pass with the change fail there with the same message. A pass settles nothing when the test uses a name the change adds, or when a background thread died there on missing code (`vacuous`: `new-name` or `background-error`); a file that cannot load for a name its test does not use settles nothing either. Only regression is evidence about the change itself. A test
 that reads one of the project's source files as text and matches it is never a regression or a fix: it shows the
 text changed, not the behaviour, so its outcome there is unknown and review.md says why.
 
@@ -163,6 +184,18 @@ tsconfig.json` beside `test_command`; setup proposes it when the project has a t
 runs it once on the change, without arnx's generated tests, and when it reports errors once on the code before the
 change, so review.md says which type errors are new with the change and which were already there. It is reported on
 its own, under "Type check": it never fails a test, turns a run into no report, or sets the exit code.
+
+When the code before the change already has 100 type errors or more, the check tells a review nothing and costs
+minutes. Setup and reviews note that in `.arnx/typecheck.json` (local, git-ignored), and for 14 days the next reviews
+skip the check and say so ("Type check skipped: N errors when last run; `arnx setup --project X` runs it again").
+The count is of the code before the change, never of the errors a change adds; the review that finds the project
+swamped shows them, but a skipped review does not check the change's own errors at all (it says so). A changed
+`typecheck` command, tsconfig, package.json, lockfile or pyproject, a change to the project's steps in review.yaml, or a change that edits one of those files, runs the check again.
+A review of another commit (`--range`) neither reads nor writes the record.
+
+arnx does not type check Python. When the repository's CI runs mypy, pyright, basedpyright or ty (a mention in a comment
+or a `pip install` line does not count), setup and review print one line naming the Python projects whose types are not
+checked, and review.md and review.json (`types_unchecked`) record it. Run your own type checker as well.
 
 ## After a review
 

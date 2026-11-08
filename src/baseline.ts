@@ -2,6 +2,7 @@
 // passes while every failing test is in it; a test that passes again leaves it at that proof. It grows only when
 // setup records it (`arnx setup`, `arnx setup --baseline`), never at a proof. It is committed next to review.yaml and
 // its hash is part of review.yaml's stamp, so a hand edit is proved again like an edit of review.yaml.
+// Being committed, it holds no value that looks like a secret: entries and the runs they are compared with are masked (setup.ts).
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -25,6 +26,10 @@ export const baselinePath = (repo: string) => join(repo, BASELINE_FILE);
 /** A test's id as the baseline compares it: memory addresses in parameter ids (`<Foo object at 0x7f3a…>`) differ from
  * run to run, so they are left out. */
 export const testKey = (id: string) => id.replace(/ at 0x[0-9a-f]+/gi, " at 0x");
+
+/** What a failing test is compared by: its id, or for a whole file that does not load its file, since the id a runner
+ * gives that failure is its own. */
+export const failKey = (id: string, file: string, load: boolean) => load ? `load:${file}` : testKey(id);
 
 /** The keys (testKey) of `tests`. */
 export const keysOf = (tests: BaselineTest[]) => new Set(tests.map((t) => testKey(t.id)));

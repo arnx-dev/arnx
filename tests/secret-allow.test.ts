@@ -9,8 +9,8 @@ import {
 } from "../src/config";
 import { ArnxError, SetupRequired } from "../src/errors";
 import type { SessionFactory } from "../src/sandbox";
-import { secretPins } from "../src/secrets";
-import { defaultSettings } from "../src/settings";
+import { filePin, secretPins } from "../src/secrets";
+import { defaultSettings, writeSettings } from "../src/settings";
 import { approveFile, runSetup } from "../src/setup";
 import { fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { Cli } from "./helpers/cli";
@@ -106,6 +106,7 @@ const firstUser = (m: ScriptedAgent) => JSON.stringify(m.calls[0]!.messages[0]!.
 
 test("setup reports the files it withheld, to the agent and in its result", async () => {
   const repo = gitRepo(tmp());
+  writeSettings(repo, { ...defaultSettings(), standIns: false });
   writeFileSync(join(repo, "detect.py"), `KEY = """${PRIVATE_KEY_BLOCK}"""\n`);
   runGit(repo, "add", "detect.py");
   const model = new ScriptedAgent([[tool("propose", { yaml: YAML })], [text("done")]]);
@@ -164,9 +165,10 @@ test("arnx allow-secret pins a file's key-shaped strings into review.yaml and se
   expect(isFileApproved(parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")))).toBe(false);
   for (const bad of ["../plain.py", "missing.py", "/etc/hostname"]) expect(await cli.run("allow-secret", bad)).toBe(2);
   expect(cli.stderr).toContain("nothing that looks like a key");
+  // A file left out by its name can be allowed too, as it stands.
   writeFileSync(join(repo, ".env"), FIXTURE);
-  expect(await cli.run("allow-secret", "../.env")).toBe(2);
-  expect(cli.stderr).toContain("never sent");
+  expect(await cli.run("allow-secret", "../.env")).toBe(0);
+  expect(readSecretPins(repo).find((p) => p.path === ".env")!.matches).toContain(filePin(FIXTURE));
 });
 
 test("arnx allow-secret --remove takes a path's pins out; review.yaml is proven again before the next review",
@@ -180,8 +182,7 @@ test("arnx allow-secret --remove takes a path's pins out; review.yaml is proven 
   expect(await cli.run("allow-secret", "detect.py", "other.py")).toBe(0);
   expect(await cli.run("allow-secret", "--remove", "other.py")).toBe(0);
   expect(readSecretPins(repo).map((p) => p.path)).toEqual(["src/detect.py"]);
-  expect(cli.out.slice(-2)).toEqual(["✓ No longer allowed: src/other.py (withheld again from model calls and the " +
-    "sandbox).", "Next: arnx setup"]);
+  expect(cli.out.slice(-2)).toEqual(["✓ No longer allowed: src/other.py (a key is a fake again; other text as it was before).", "Next: arnx setup"]);
   expect(await cli.run("allow-secret", "--remove", "detect.py")).toBe(0);
   expect(existsSync(reviewConfigPath(repo))).toBe(false);
   // After setup: the stamp no longer holds, so the next review proves the file again.

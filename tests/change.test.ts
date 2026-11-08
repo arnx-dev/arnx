@@ -4,10 +4,11 @@ import { join } from "node:path";
 import { added, changeLimits, describe as describeChange, filesAt, removed, repoRoot, resolveChange, snapshot,
   untrackedLine } from "../src/change";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "../src/errors";
+import { isLockfile } from "../src/ignore";
 import { secretPins } from "../src/secrets";
 import { commit, gitRepo, initRepo, runGit } from "./helpers/gitutil";
 import { useTmp } from "./helpers/tmp";
-import { AWS_KEY, AWS_KEY_2, PRIVATE_KEY } from "./helpers/fakekeys";
+import { AWS_KEY, AWS_KEY_2, PRIVATE_KEY, PRIVATE_KEY_BLOCK } from "./helpers/fakekeys";
 
 const tmp = useTmp();
 
@@ -137,22 +138,29 @@ test("test_arnx_dir_is_not_a_change", () => {
   expect(resolveChange(repo).kind).toBe("commit");
 });
 
-test("test_secret_content_in_diff_refused", () => {
+test("test_secret_content_in_diff_refused: no key stops a change: a private key gets its fake, the rest is the filter's", () => {
   const repo = gitRepo(tmp());
   writeFileSync(join(repo, "app.py"), `KEY = '${AWS_KEY_2}'\n`);
-  expect(() => resolveChange(repo)).toThrow(/secret/);
+  const c = resolveChange(repo);
+  expect([c.files, c.withheld]).toEqual([["app.py"], undefined]);
+  writeFileSync(join(repo, "app.py"), `KEY = """${PRIVATE_KEY_BLOCK}"""\n`);
+  const held = resolveChange(repo);
+  expect([held.files, held.withheld]).toEqual([["app.py"], undefined]);
+  expect(held.diff).not.toContain(PRIVATE_KEY_BLOCK.split("\n")[1]!);
 });
 
 test("a change to an allowed file passes the secret check only with its pinned strings", () => {
   const repo = gitRepo(tmp());
-  writeFileSync(join(repo, "detect.py"), FIXTURE);
+  const held = `KEY = """${PRIVATE_KEY_BLOCK}"""\n`;
+  writeFileSync(join(repo, "detect.py"), held);
   runGit(repo, "add", "detect.py");
-  const allow = [{ path: "detect.py", matches: secretPins(FIXTURE) }];
-  expect(() => resolveChange(repo)).toThrow("detect.py (AKIA…)");
-  expect(() => resolveChange(repo)).toThrow("arnx allow-secret detect.py");
+  const allow = [{ path: "detect.py", matches: secretPins(held) }];
+  expect(resolveChange(repo).withheld).toBeUndefined();
   expect(resolveChange(repo, null, allow).files).toEqual(["detect.py"]);
-  writeFileSync(join(repo, "app.py"), FIXTURE); // same string, another file
-  expect(() => resolveChange(repo, null, allow)).toThrow("app.py (AKIA…)");
+  writeFileSync(join(repo, "app.py"), held); // same string, another file
+  const c = resolveChange(repo, null, allow);
+  expect([c.files, c.withheld]).toEqual([["app.py", "detect.py"], undefined]);
+  expect(c.diff).not.toContain(PRIVATE_KEY_BLOCK.split("\n")[1]!);
 });
 
 test("test_empty_repo", () => {
@@ -181,10 +189,9 @@ test("test_snapshot_worktree_scrubs", () => {
   expect(readFileSync(join(dest, "app.py"), "utf8")).toBe("changed = True\n");
   expect(existsSync(join(dest, ".env")) || existsSync(join(dest, ".git")) || existsSync(join(dest, "link")))
     .toBe(false);
-  expect(removedFiles).toEqual([{ path: "conf.py", line: 1, label: "a private key" }]);
-  // With stand-ins (the default), a private key header with no body anywhere is a placeholder: kept as it is.
-  expect(snapshot(repo, null, join(tmp(), "kept"), [], { untracked: true })).toEqual([]);
-  expect(readFileSync(join(tmp(), "kept", "conf.py"), "utf8")).toBe(`K = '${PRIVATE_KEY}'\n`);
+  expect(removedFiles).toEqual([{ path: ".env", line: 0, label: "named like a secret" }, { path: "conf.py", line: 1, label: "a private key" }]);
+  // With stand-ins (the default) a private key stays, with a fake.
+  expect(snapshot(repo, null, join(tmp(), "kept"), [], { untracked: true })).toEqual([removedFiles[0]!]);
 });
 
 const FIXTURE = `AWS = '${AWS_KEY}'\n`;
@@ -358,6 +365,112 @@ test("a changed lockfile stays in the snapshot but its text is not sent; only a 
   commit(repo, "bump");
   expect(() => resolveChange(repo)).toThrow(NoChange);
   expect(() => resolveChange(repo)).toThrow("only lockfiles changed: package-lock.json");
+});
+
+test("a minified bundle stays in the snapshot, is not sent and does not count toward the limit", () => {
+  const repo = gitRepo(tmp());
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a - b\n");
+  writeFileSync(join(repo, "app.min.js"), "var a=" + "x+".repeat(150_000) + "1;\n");
+  writeFileSync(join(repo, "api.pb.go"), "package api\n".repeat(30_000));
+  commit(repo, "code and a bundle");
+  const c = resolveChange(repo);
+  expect([c.files, c.generated]).toEqual([["app.py"], ["api.pb.go", "app.min.js"]]);
+  expect(c.diff).not.toContain("x+x+");
+  expect(c.diff).not.toContain("package api");
+  const dest = join(tmp(), "snap");
+  snapshot(repo, null, dest);
+  expect(existsSync(join(dest, "app.min.js"))).toBe(true);
+  writeFileSync(join(repo, "app.min.js"), "var a=" + "y+".repeat(150_000) + "1;\n");
+  commit(repo, "only generated");
+  expect(() => resolveChange(repo)).toThrow(NoChange);
+  expect(() => resolveChange(repo)).toThrow("only generated files changed: app.min.js");
+});
+
+test("a long-line file with another name is not sent", () => {
+  const repo = gitRepo(tmp());
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a - b\n");
+  writeFileSync(join(repo, "table.js"), ("var t=[" + "1234567890,".repeat(80) + "];\n").repeat(30));
+  writeFileSync(join(repo, "stub.js"), "// @generated\nexport const a = 1;\n");
+  commit(repo, "a table");
+  const c = resolveChange(repo);
+  expect([c.files, c.generated]).toEqual([["app.py"], ["stub.js", "table.js"]]);
+  expect(c.diff).not.toContain("1234567890");
+  expect(c.diff).not.toContain("export const a");
+});
+
+test("a file marked generated is not sent", () => {
+  const repo = gitRepo(tmp());
+  writeFileSync(join(repo, ".gitattributes"), "gen/** linguist-generated\n");
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a - b\n");
+  mkdirSync(join(repo, "gen"));
+  writeFileSync(join(repo, "gen", "schema.txt"), "table one\n");
+  commit(repo, "marked");
+  const c = resolveChange(repo);
+  expect([c.files, c.generated]).toEqual([[".gitattributes", "app.py"], ["gen/schema.txt"]]);
+  expect(c.diff).not.toContain("table one");
+});
+
+test("Package.resolved is a lockfile whatever its case", () => {
+  expect(isLockfile("ios/Package.resolved")).toBe(true);
+  expect(isLockfile("go.sum")).toBe(true);
+});
+
+test("an edit deep in a hand-written file that mentions a marker is still sent", () => {
+  const repo = gitRepo(tmp());
+  const body = Array.from({ length: 20 }, (_, i) => `x${i} = ${i}`).join("\n") + "\n";
+  writeFileSync(join(repo, "mig.py"), body);
+  commit(repo, "base");
+  writeFileSync(join(repo, "mig.py"), body.replace("x10 = 10", "# DO NOT EDIT without updating the migration\nx10 = 11"));
+  const c = resolveChange(repo);
+  expect([c.files, c.generated]).toEqual([["mig.py"], undefined]);
+  // A generator's own first line is a marker.
+  writeFileSync(join(repo, "gen.go"), "// Code generated by x. DO NOT EDIT.\npackage a\n");
+  writeFileSync(join(repo, "ok.py"), "x = 'Code generated by a tool. DO NOT EDIT'\n");
+  commit(repo, "more");
+  const d = resolveChange(repo);
+  expect([d.files, d.generated]).toEqual([["mig.py", "ok.py"], ["gen.go"]]);
+});
+
+test("a long constant in a hand-written file does not hide its code", () => {
+  const repo = gitRepo(tmp());
+  const fns = Array.from({ length: 30 }, (_, i) => `def f${i}():\n    return ${i}\n`).join("");
+  writeFileSync(join(repo, "mod.py"), fns + `LOGO = "${"A".repeat(60_000)}"\n`);
+  commit(repo, "module");
+  const c = resolveChange(repo);
+  expect([c.files, c.generated]).toEqual([["mod.py"], undefined]);
+});
+
+test("an edit adding one long constant to a short-line module keeps its code in the review", () => {
+  const repo = gitRepo(tmp());
+  const fns = Array.from({ length: 30 }, (_, i) => `def f${i}():\n    return ${i}\n`).join("");
+  writeFileSync(join(repo, "mod.py"), fns);
+  commit(repo, "module");
+  writeFileSync(join(repo, "mod.py"), fns + `LOGO = "${"A".repeat(25_000)}"\nX = 1\n`);
+  const c = resolveChange(repo);
+  expect([c.files, c.generated]).toEqual([["mod.py"], undefined]);
+  expect(c.diff).toContain("+X = 1");
+});
+
+test("an attribute added after the reviewed commit does not hide its files", () => {
+  const repo = gitRepo(tmp());
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a - b\n");
+  writeFileSync(join(repo, "gen.txt"), "hand written\n");
+  commit(repo, "files");
+  writeFileSync(join(repo, ".gitattributes"), "gen.txt linguist-generated\n");
+  const c = resolveChange(repo);
+  expect([c.kind, c.files, c.generated]).toEqual(["commit", ["app.py", "gen.txt"], undefined]);
+});
+
+test("a large hand-written file still refuses and names the way out", () => {
+  const repo = initRepo(join(tmp(), "repo"));
+  writeFileSync(join(repo, "app.py"), "def add(a, b):\n    return a + b\n");
+  commit(repo, "first");
+  writeFileSync(join(repo, "big.py"), "X = 1\n".repeat(50_000));
+  commit(repo, "big");
+  const err = (() => { try { resolveChange(repo); } catch (e) { return e; } })();
+  expect(err).toBeInstanceOf(ChangeTooLarge);
+  expect((err as Error).message).toContain("leave the largest out with .arnxignore (add the file to sandbox_only if tests need it)");
+  expect(() => resolveChange(repo, `${runGit(repo, "rev-parse", "HEAD~1").trim()}..HEAD`)).toThrow("sandbox_only");
 });
 
 test("a first commit over the limit names its largest files and says --range cannot split it", () => {

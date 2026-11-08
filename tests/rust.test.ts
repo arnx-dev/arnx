@@ -180,7 +180,7 @@ test("a source file as a target runs the tests of its module; an integration fil
     "(kind(bin) & binary(tool) & test(/^args::/))"].join(" | ") + ')"');
 });
 
-test("runTests lets the report see the project's files, so inline tests name their file", () => {
+test("runTests lets the report see the project's files, so inline tests name their file", async () => {
   const snap = tmp();
   for (const p of CRATE) {
     mkdirSync(join(snap, "crates", "my", p, ".."), { recursive: true });
@@ -199,11 +199,11 @@ projects:
     image: rust:1-bookworm
     test_command: cargo nextest run {targets}
 `).projects[0]!;
-  const [, results] = runTests(runner, snap, cfg, [], "suite.xml", 60);
+  const [, results] = await runTests(runner, snap, cfg, [], "suite.xml", 60);
   expect(results!.find((t) => t.outcome === "failed")!.fileAttr).toBe("src/lib.rs");
 });
 
-test("a run whose build fails gives no report, never the previous run's junit.xml", () => {
+test("a run whose build fails gives no report, never the previous run's junit.xml", async () => {
   const snap = tmp();
   writeFileSync(join(snap, "Cargo.toml"), '[package]\nname = "calc"\nversion = "0.1.0"\n');
   const bin = join(snap, "fakebin");
@@ -229,7 +229,7 @@ projects:
     image: rust:1-bookworm
     test_command: cargo nextest run {targets}
 `).projects[0]!;
-  const [result, results] = runTests(runner, snap, cfg, [], "suite.xml", 60);
+  const [result, results] = await runTests(runner, snap, cfg, [], "suite.xml", 60);
   expect(result.exitCode).toBe(101);
   expect(results).toBeNull();
   expect(existsSync(join(old, "junit.xml"))).toBe(false);

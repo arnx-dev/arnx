@@ -85,6 +85,9 @@ export interface ReviewInput extends RoundBase {
    * given what the hunters would read from it instead: `changedDefinitions` for the second hunter and `parts` for
    * the part hunters (hunt.ts huntParts builds both); given, they are used and `root` is not read. */
   hunt?: { context: string; root?: string; searchDirs: string[]; changedDefinitions?: string; parts?: HuntPart[] };
+  /** A resumed round's suspects from the hunt a failed call cut off, and that hunt's record: no hunter runs, and the
+   * round opens with the task and these suspects. The remote brain ignores it. */
+  prior?: { suspects: Suspect[]; record: HuntRecord };
 }
 
 /** One part of a big change, as a part hunter is asked about it: its files, its context pack and its changed
@@ -113,6 +116,8 @@ export interface SetupInput extends RoundBase {
   draft?: string;
   /** Files left out of the snapshot as secret-looking, described ("" when none). */
   withheld: string;
+  /** Files kept with stand-ins for key-shaped text (the agent is told in code, standins.ts standInsText). */
+  standIns?: string[];
   /** Re-prove only this project of the current review.yaml. */
   project?: string;
   /** Cover what the current review.yaml lists as uncovered. */
@@ -142,8 +147,13 @@ export interface RoundHunt {
   /** A hunter still out when the tests started: wait for it once the round is over. Its suspects are recorded, not
    * tested; its use is returned. */
   late: (() => Promise<ModelUse>) | null;
+  /** Set once `late` returns: its suspects that were not tested, numbered after the tested ones (named in the
+   * report as too late to test). */
+  lateLeft?: Suspect[];
   /** Every hunter's list, once the reviewer replied to the hunt (`second_late` added when a late hunter returns). */
   record?: HuntRecord;
+  /** The hunt answered with an empty list, no hunter failed, and the round ended there: nothing was suspected. */
+  ended?: true;
 }
 
 export interface RoundResult { agent: AgentResult; hunt?: RoundHunt }
@@ -154,6 +164,12 @@ export interface JudgeOptions {
   diff: string;
   /** Generated test files by path. */
   sources: Record<string, string>;
+  /** The file a finding's suspect is in, when it has one: its diff comes first when the change is long. */
+  suspectFile?(f: Finding): string | undefined;
+  /** A finding's evidence pack (evidence.ts), when its round built one. */
+  evidence?(f: Finding): string | undefined;
+  /** Before each second opinion's call, what it is sent, masked as it leaves. */
+  sent?(f: Finding, input: SentInput): void;
   /** The project each question came from, in the order of `questions`. */
   questionProjects?: string[];
   maxQuestions: number;
@@ -170,6 +186,9 @@ export interface JudgeOptions {
   trace: Trace;
   progress?: Say;
 }
+
+/** What a second opinion is sent for one finding, and its evidence pack ("" when none). */
+export interface SentInput { system: string; user: string; evidence: string }
 
 /** Verdicts are written onto the findings (verdict, reason, dependsOn, judge). */
 export interface Judged {
@@ -206,6 +225,11 @@ export interface Brain {
   /** The name a remote brain's work goes by in usage lines and the report: its tier and harness, never a model name
    * (absent for the local brain, whose models are named). */
   readonly label?: string;
+  /** Whether a resumed round can be given the suspects of its cut hunt (`ReviewInput.prior`); a remote brain hunts again. */
+  readonly reusesHunt?: boolean;
+  /** Whether its second opinion says where a failure is from: findings that fail with the same message before the
+   * change are then sent too, and stay pre-existing unless its reply moves them (challenge.ts applyOrigin). */
+  readonly judgesOrigin?: boolean;
   /** The repository's own prompts this brain runs (.arnx/prompts.toml): the keys and the hash of every template in
    * use, recorded with the review. Absent when it runs arnx's defaults, or its own (arnx cloud). */
   readonly overrides?: { keys: string[]; hash: string };
@@ -215,7 +239,7 @@ export interface Brain {
    * environment cannot run costs nothing; `tools` may still arrive later. */
   agentRound<K extends RoundKind>(kind: K, input: RoundInputs[K], tools: Promise<RoundTools>): Promise<RoundResult>;
   /** Questions merged, a second opinion on each finding, findings grouped by cause. Findings that fail the same way
-   * before the change are not sent. */
+   * before the change are not sent, unless the brain judges origin. */
   judge(findings: Finding[], questions: string[], diffs: Record<string, string>, o: JudgeOptions): Promise<Judged>;
   /** The review is over. */
   finish(totals: Totals): Promise<Billed | null>;

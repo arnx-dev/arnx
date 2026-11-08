@@ -11,7 +11,7 @@ import { parseReviewFile, sandboxOnlyOf } from "../src/config";
 import type { SessionFactory } from "../src/sandbox";
 import { missingLeftOut } from "../src/diagnose";
 import { NO_USAGE } from "../src/llm";
-import { defaultSettings } from "../src/settings";
+import { defaultSettings, writeSettings } from "../src/settings";
 import { runSetup } from "../src/setup";
 import { Cli } from "./helpers/cli";
 import { AWS_KEY, PRIVATE_KEY_BLOCK } from "./helpers/fakekeys";
@@ -53,8 +53,9 @@ test("a left-out file named outside a missing-file line, or a name other files s
 });
 
 /** A Python repository whose test imports `left`, a file the snapshot leaves out. */
-function shop(left: string, content: string): string {
+function shop(left: string, content: string, standIns = true): string {
   const repo = initRepo(join(tmp(), "shop"));
+  if (!standIns) writeSettings(repo, { ...defaultSettings(), standIns });
   writeFileSync(join(repo, left), content);
   writeFileSync(join(repo, "test_shop.py"), "import detect\n\ndef test_a():\n    assert detect\n");
   commit(repo, "shop");
@@ -66,7 +67,7 @@ const needing = (message: string) => fakeFactory(() =>
 
 test("setup stops at the run that needs a secret-looking file: no more tries, the file and the way in named",
   async () => {
-    const repo = shop("detect.py", FIXTURE);
+    const repo = shop("detect.py", FIXTURE, false);
     const model = new ScriptedAgent([[tool("try_project", { yaml: YAML })], [tool("try_project", { yaml: YAML })],
       [text("done")]]);
     const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "setup"),
@@ -78,7 +79,7 @@ test("setup stops at the run that needs a secret-looking file: no more tries, th
   });
 
 test("a later try or proposal is refused once setup has stopped", async () => {
-  const repo = shop("detect.py", FIXTURE);
+  const repo = shop("detect.py", FIXTURE, false);
   // A brain that runs the CLI's tools from afar (arnx cloud) gets the stop as a tool's answer and may call again.
   const answers: string[] = [];
   const brain = { label: "", agentRound: async (_kind: string, _input: unknown, tools: Promise<RoundTools>) => {
@@ -143,9 +144,9 @@ test("the agent may not write sandbox_only: setup adds it", async () => {
   expect(JSON.stringify(model.calls[1]!.messages.at(-1)!.content)).toContain("invalid: remove sandbox_only");
 });
 
-test("a file .arnxignore leaves out that holds a private key still stops setup: no stand-in keeps the key out",
+test("with stand-ins off, a file .arnxignore leaves out that holds a private key still stops setup",
   async () => {
-    const repo = shop("fees.csv", `fee,${PRIVATE_KEY_BLOCK.replaceAll("\n", " ")}\n`);
+    const repo = shop("fees.csv", `fee,${PRIVATE_KEY_BLOCK.replaceAll("\n", " ")}\n`, false);
     writeFileSync(join(repo, ".arnxignore"), "*.csv\n");
     commit(repo, "ignore");
     const model = new ScriptedAgent([[tool("try_project", { yaml: YAML })], [text("done")]]);
@@ -172,11 +173,11 @@ test("a file with a key in code is kept with a stand-in: the tests and the agent
     expect([r.stop, r.needed, r.withheld, r.standIns]).toEqual(["end_turn", undefined, [], ["detect.py"]]);
     expect(texts[0]).not.toContain(AWS_KEY);
     expect(texts[0]).toMatch(/^AWS = 'AKIA[0-9A-Z]{16}'\n$/);
-    expect(said).toContain("stand-ins for key-shaped text, the real values kept here: detect.py");
+    expect(said.find((l) => l.startsWith("stand-ins in 1 file, real values kept here; list: "))).toContain("stand-ins.md");
   });
 
 test("arnx setup says it stopped and names the command that lets the file in", async () => {
-  const repo = shop("detect.py", FIXTURE);
+  const repo = shop("detect.py", FIXTURE, false);
   const cli = new Cli({ cwd: repo, env: ENV });
   expect(await cli.run("init")).toBe(0);
   expect(await cli.run("consent", "--yes")).toBe(0);

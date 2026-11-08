@@ -1,16 +1,16 @@
 // Setup as a developer sees it: what happens before it starts, progress while it runs, one line per project to
 // judge, the points worth checking, and what `arnx review` would test next.
 import { beforeEach, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TestResult } from "../src/adapters/types";
 import { parseReviewFile } from "../src/config";
 import { defaultSettings } from "../src/settings";
 import { approveFile, describeTool, runSetup, skipReasons, unexplainedFailing } from "../src/setup";
-import { approvalChecks, approvalScreen, nextStep, projectTable, setupPreview, worthALook } from "../src/setupview";
+import { approvalChecks, approvalScreen, nextStep, projectTable, setupPreview, typecheckGaps, worthALook } from "../src/setupview";
 import type { SessionFactory } from "../src/sandbox";
 import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
-import { commit, gitRepo } from "./helpers/gitutil";
+import { commit, gitRepo, initRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
 import { PROJECTS } from "./helpers/yaml";
@@ -175,4 +175,90 @@ test("try_project takes one project's settings by name, in place of the whole fi
   const left = parseReviewFile(r.yamlText!);
   expect(left.projects.map((p) => [p.name, p.services.map((s) => s.name)])).toEqual([["pay", ["db"]], ["feed", ["db"]]]);
   expect(left.uncovered.map((u) => u.path)).toEqual(["/app.py", "infra/"]);
+});
+
+// Stand-ins: the setup agent and the developer are told which files hold them; the list never holds a value.
+const STAND_YAML = "version: 1\nprojects:\n  shop:\n    root: .\n    language: python\n    image: python:3.12\n" +
+  "    install: [pip install pytest]\n    test_command: python -m pytest -q {targets}\n";
+const KEY = "AKIA" + "IOSFODNN7EXAMPLE";
+const passing: SessionFactory = async (_cfg, snap, _log, body) =>
+  body(new FakeSession(snap, () => [junitXml([["test_shop.py", "test_shop", "passed", ""]]), "1 passed", false]));
+function keyed(): string {
+  const dir = initRepo(join(tmp(), "shop"));
+  writeFileSync(join(dir, "detect.py"), `X = 1\nAWS = '${KEY}'\n`);
+  writeFileSync(join(dir, "test_shop.py"), "import detect\n\ndef test_a():\n    assert detect\n");
+  commit(dir, "shop");
+  return dir;
+}
+
+test("the setup agent is told which files hold stand-ins", async () => {
+  const dir = keyed();
+  const m = new ScriptedAgent([[tool("try_project", { yaml: STAND_YAML })], [text("done")]]);
+  const out = join(tmp(), "s");
+  await runSetup(dir, defaultSettings(), m, { outDir: out, sessionFactory: passing });
+  const first = JSON.stringify(m.calls[0]!.messages[0]!.content);
+  expect(first).toContain("detect.py");
+  expect(first).toContain("stand-ins");
+  expect(first).toContain("never call the repository corrupt");
+  expect(first).not.toContain(KEY);
+});
+
+test("a proposal naming a stand-in is refused", async () => {
+  const dir = keyed();
+  const seen: string[] = [];
+  const first = new ScriptedAgent([[tool("read_file", { path: "detect.py" })], [text("done")]]);
+  await runSetup(dir, defaultSettings(), first, { outDir: join(tmp(), "s0"), sessionFactory: passing });
+  const standIn = (JSON.stringify(first.calls[1]!.messages.at(-1)!.content).match(/AKIA[0-9A-Z]{16}/) ?? [""])[0]!;
+  expect(standIn).not.toBe("");
+  const m = new ScriptedAgent([
+    [tool("try_project", { yaml: `${STAND_YAML}    env: {AWS: ${standIn}}\n` })],
+    [tool("try_project", { yaml: STAND_YAML })], [text("done")]]);
+  await runSetup(dir, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: passing,
+    progress: (l) => seen.push(l) });
+  const reply = result(m, 1);
+  expect(reply).toMatch(/^invalid: .*stand-in/);
+  expect(reply).not.toContain(standIn);
+});
+
+test("the list names file and rule and never the value", async () => {
+  const { standInsMd } = await import("../src/standins");
+  const { takeSnapshot } = await import("../src/change");
+  const { existsSync, readFileSync } = await import("node:fs");
+  const dir = keyed();
+  writeFileSync(join(dir, "other.py"), "API_TOKEN = 'qT7vN2xK9mRw4Zs8'\n");
+  commit(dir, "more");
+  const taken = takeSnapshot(dir, null, join(tmp(), "snap"), [], {});
+  // Only a certain value's stand-in is a stand-in to refuse; a guess stays real in the snapshot.
+  expect(taken.standInValues.size).toBe(1);
+  expect(taken.guesses.has("qT7vN2xK9mRw4Zs8")).toBe(true);
+  const md = standInsMd(taken.standInList);
+  expect(md).toContain("detect.py");
+  expect(md).toContain("| detect.py | 2 | key-shaped |");
+  expect(md).toContain("key-shaped");
+  const made = readFileSync(join(tmp(), "snap", "detect.py"), "utf8").match(/AKIA[0-9A-Z]{16}/)![0]!;
+  expect(existsSync(join(tmp(), "snap", "detect.py"))).toBe(true);
+  for (const secret of [KEY, made]) {
+    for (let i = 0; i + 4 <= secret.length; i++) expect(md).not.toContain(secret.slice(i, i + 4));
+  }
+});
+
+test("a type-checkable project without a type check is worth a look", () => {
+  mkdirSync(join(repo, "web"), { recursive: true });
+  writeFileSync(join(repo, "web", "tsconfig.json"), "{}\n");
+  writeFileSync(join(repo, "package.json"), '{"devDependencies": {"typescript": "5.9.3"}}\n');
+  const yaml = (tc: string) => `version: 1
+projects:
+  web:
+    root: web
+    language: typescript
+    image: node:22
+    test_command: npx vitest run {targets}
+${tc}uncovered: []
+`;
+  const read = (rel: string) => { try { return readFileSync(join(repo, rel), "utf8"); } catch { return ""; } };
+  const bare = parseReviewFile(yaml(""));
+  expect(typecheckGaps(bare, read)).toEqual(["web: has a tsconfig but no type check, so reviews do not type check it"]);
+  expect(worthALook(bare, repo, {})).toContain("web: has a tsconfig but no type check, so reviews do not type check it");
+  const checked = parseReviewFile(yaml("    typecheck: npx tsc --noEmit -p tsconfig.json\n"));
+  expect(typecheckGaps(checked, read)).toEqual([]);
 });

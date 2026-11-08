@@ -63,6 +63,7 @@ export function promptCases(p: P.Prompts = P.DEFAULT_PROMPTS): Record<string, st
   out["askedTask/none"] = p.askedTask([]);
   out["mergeSystem"] = p.mergeSystem();
   out["mergeTask"] = p.mergeTask(["Is it A?", "Is it really A?", "B?"]);
+  out["lastWordTask"] = p.lastWordTask();
   out["untestedSuspectsTask"] = p.untestedSuspectsTask([{ id: "S1" }, { id: "S2", reason: "needs $NET" }]);
   out["rankSystem"] = p.rankSystem();
   out["rankTask"] = p.rankTask(SUSPECTS);

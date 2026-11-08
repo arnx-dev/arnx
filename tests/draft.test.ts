@@ -1,10 +1,11 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse } from "yaml";
 import { parseReviewFile } from "../src/config";
 import { describeDetection, detect } from "../src/detect";
-import { draftReview, draftYaml } from "../src/draft";
+import { draftReview, draftYaml, quickDraft } from "../src/draft";
 import { satisfies } from "../src/facts";
 import { defaultSettings } from "../src/settings";
 import { runSetup } from "../src/setup";
@@ -295,4 +296,203 @@ test("try_project refuses such a project while it lists three or more services",
     "services: set it up by hand, or with fewer. Do not try it: keep it under uncovered (path /server/, this reason)");
   expect(said).toContain("server: not set up: needs postgres, redis and minio; setup does not start three or more " +
     "services: set it up by hand, or with fewer");
+});
+
+const WORKSPACE = {
+  "package.json": pkg({ private: true, packageManager: "pnpm@9.12.0" }),
+  "pnpm-workspace.yaml": "packages:\n  - 'packages/*'\n",
+  "pnpm-lock.yaml": "",
+  "docs/advanced.md": "# advanced\n",
+  "scripts/release.ts": "",
+  "packages/core/package.json": pkg({ name: "@w/core", devDependencies: { vitest: "2" } }),
+  "packages/core/src/a.ts": "export const a = 1;\n",
+  "packages/core/src/a.test.ts": "",
+  "packages/ext/package.json": pkg({ name: "@w/ext", devDependencies: { vitest: "2" } }),
+  "packages/ext/src/b.ts": "export const b = 1;\n",
+  "packages/ext/src/c.ts": "export const c = 1;\n",
+  "packages/ext/src/b.test.ts": "",
+};
+
+test("a doc file alone does not choose a project; chosen projects come most changed source files first", () => {
+  const d = detect(repoWith(WORKSPACE));
+  // The root project owns docs/, but a doc file is not what a change to code is about.
+  expect(quickDraft(d, ["docs/advanced.md", "packages/core/src/a.ts"])!.names).toEqual(["core"]);
+  expect(quickDraft(d, ["packages/core/src/a.ts", "packages/ext/src/b.ts", "packages/ext/src/c.ts"])!.names)
+    .toEqual(["ext", "core"]);
+  // With no source file among them, every changed file counts as before.
+  expect(quickDraft(d, ["docs/advanced.md"])!.names).toEqual(["main"]);
+});
+
+test("a new project takes the install of its neighbour", () => {
+  const d = detect(repoWith(WORKSPACE));
+  const first = quickDraft(d, ["packages/core/src/a.ts"])!;
+  const edited = first.yaml.replace(/image: node:\S+/, "image: node:20.11")
+    .replace("npx vitest run {targets}", "npx vitest run --project @w/ext {targets}")
+    .replace(/(install:\n\s+- )(.*)/, "$1pnpm install --frozen-lockfile && pnpm -r build");
+  const next = quickDraft(d, ["packages/ext/src/b.ts"], edited)!;
+  expect(next.names).toEqual(["ext"]);
+  const f = parseReviewFile(next.yaml);
+  const [core, ext] = f.projects;
+  expect([ext!.image, ext!.install, ext!.depsDir]).toEqual([core!.image, core!.install, core!.depsDir]);
+  expect(ext!.image).toBe("node:20.11");
+  // The runner's project name is not known: the neighbour's command is not copied, the draft's own stands.
+  expect(ext!.testCommand).toBe("npx vitest run {targets}");
+  expect(next.yaml).toContain("# unsure: image and install copied from core");
+});
+
+test("an image without corepack installs it first", () => {
+  const install = (nvmrc: string, dir: string) => {
+    const repo = initRepo(join(tmp(), dir));
+    const files: Record<string, string> = {
+      "package.json": pkg({ packageManager: "pnpm@9.12.0", devDependencies: { vitest: "2" } }),
+      "pnpm-lock.yaml": "", ".nvmrc": nvmrc, "src/a.test.ts": "import { test } from 'vitest'\n" };
+    for (const [p, body] of Object.entries(files)) {
+      mkdirSync(dirname(join(repo, p)), { recursive: true });
+      writeFileSync(join(repo, p), body);
+    }
+    commit(repo, "files");
+    return (Object.values(projects(detect(repo)))[0] as any).install[0] as string;
+  };
+  expect(install("26\n", "n26")).toStartWith("npm install -g corepack && corepack enable && ");
+  expect(install("22\n", "n22")).toStartWith("corepack enable && ");
+  expect(install("22\n", "n22b")).not.toContain("npm install -g corepack");
+});
+
+test("a project with a prisma schema generates its client in install", () => {
+  const files = (extra: Record<string, string>) => ({
+    "package.json": pkg({ private: true, packageManager: "pnpm@9.12.0", workspaces: ["packages/*"] }),
+    "pnpm-workspace.yaml": "packages:\n  - 'packages/*'\n",
+    "pnpm-lock.yaml": "",
+    "packages/lib/package.json": pkg({ dependencies: { "@prisma/client": "5.0.0" }, devDependencies: { vitest: "3.0.0" } }),
+    "packages/lib/src/a.test.ts": "",
+    ...extra });
+  const withSchema = projects(detect(repoWith(files({ "packages/lib/prisma/schema.prisma": "generator client {}\n" }))));
+  const lib = Object.values(withSchema).find((p) => p.root === "packages/lib")!;
+  expect(lib.install.join("\n")).toContain("pnpm install --frozen-lockfile && npx prisma@5.0.0 generate " +
+    "--schema=packages/lib/prisma/schema.prisma");
+});
+
+test("a project that uses prisma but holds no schema adds no generate step", () => {
+  const files = (extra: Record<string, string>) => ({
+    "package.json": pkg({ private: true, packageManager: "pnpm@9.12.0", workspaces: ["packages/*"] }),
+    "pnpm-workspace.yaml": "packages:\n  - 'packages/*'\n",
+    "pnpm-lock.yaml": "",
+    "packages/lib/package.json": pkg({ dependencies: { "@prisma/client": "5.0.0" }, devDependencies: { vitest: "3.0.0" } }),
+    "packages/lib/src/a.test.ts": "",
+    ...extra });
+  const none = Object.values(projects(detect(repoWith(files({})))));
+  expect(none.map((p) => p.install.join("\n")).join("\n")).not.toContain("prisma");
+});
+
+// Runs a drafted install line in a scratch folder with the package manager and npx stood in by functions: what it
+// copies, and what npx was given.
+function runInstall(repo: string, line: string): { deps: string; npx: string; status: number | null } {
+  const deps = join(tmp(), "deps");
+  const out = join(tmp(), "npx.out");
+  const script = `corepack() { :; }\npnpm() { :; }\nnpx() { printf '%s\\n' "$@" > '${out}'; }\n` +
+    line.replaceAll("/opt/deps", deps);
+  const r = spawnSync("bash", ["-c", script], { cwd: repo, encoding: "utf8", env: { ...process.env, HOME: "/nonexistent" } });
+  return { deps, npx: existsSync(out) ? readFileSync(out, "utf8") : "", status: r.status };
+}
+
+test("a prisma schema path with a space and a $ is quoted: the right file is installed and nothing else runs", () => {
+  const path = "my app/pri$ma/schema.prisma";
+  const repo = repoWith({
+    "package.json": pkg({ packageManager: "pnpm@9.12.0", dependencies: { "@prisma/client": "5.0.0" },
+      devDependencies: { vitest: "3" } }),
+    "pnpm-lock.yaml": "", "src/a.test.ts": "", [path]: "generator client {}\n" });
+  const lib = Object.values(projects(detect(repo)))[0]!;
+  const line = lib.install.join("\n");
+  expect(line).toContain("--schema='my app/pri$ma/schema.prisma'");
+  const r = runInstall(repo, line);
+  expect(r.status).toBe(0);
+  expect(readFileSync(join(r.deps, path), "utf8")).toBe("generator client {}\n");
+  expect(r.npx).toBe(`prisma@5.0.0\ngenerate\n--schema=${path}\n`);
+});
+
+test("a project outside a workspace copies its schema next to its manifests and generates there", () => {
+  const repo = repoWith({
+    "package.json": pkg({ packageManager: "pnpm@9.12.0", dependencies: { prisma: "5.0.0" }, devDependencies: { vitest: "3" } }),
+    "pnpm-lock.yaml": "", "src/a.test.ts": "", "prisma/schema.prisma": "generator client {}\n" });
+  const lib = Object.values(projects(detect(repo)))[0]!;
+  expect(lib.install[0]).toContain("cp --parents prisma/schema.prisma /opt/deps/");
+  const r = runInstall(repo, lib.install.join("\n"));
+  expect(r.status).toBe(0);
+  expect(readFileSync(join(r.deps, "prisma/schema.prisma"), "utf8")).toBe("generator client {}\n");
+  expect(r.npx).toBe("prisma\ngenerate\n--schema=prisma/schema.prisma\n");
+});
+
+describe("the prisma CLI that generates the client", () => {
+  const install = (deps: object) => {
+    const repo = repoWith({
+      "package.json": pkg({ packageManager: "pnpm@9.12.0", ...deps }),
+      "pnpm-lock.yaml": "", "src/a.test.ts": "", "prisma/schema.prisma": "generator client {}\n" });
+    return Object.values(projects(detect(repo)))[0]!.install.join("\n");
+  };
+  const vitest = { vitest: "3" };
+
+  test("a client without the CLI pins the CLI to the client's version", () => {
+    expect(install({ dependencies: { "@prisma/client": "^5.10.2" }, devDependencies: vitest }))
+      .toContain("npx prisma@5.10.2 generate --schema=prisma/schema.prisma");
+    expect(install({ dependencies: { "@prisma/client": "~5.10.2" }, devDependencies: vitest }))
+      .toContain("npx prisma@5.10.2 generate");
+    expect(install({ dependencies: { "@prisma/client": "5.10.2" }, devDependencies: vitest }))
+      .toContain("npx prisma@5.10.2 generate");
+  });
+
+  test("a version that cannot be pinned adds no step", () => {
+    for (const v of ["*", "latest", "workspace:*", "https://example.com/c.tgz", ">=5"]) {
+      expect(install({ dependencies: { "@prisma/client": v }, devDependencies: vitest })).not.toContain("prisma");
+    }
+  });
+
+  test("the CLI among the dependencies or devDependencies runs as installed", () => {
+    expect(install({ dependencies: { "@prisma/client": "^5.10.2" }, devDependencies: { ...vitest, prisma: "^5.10.2" } }))
+      .toContain("npx prisma generate --schema=prisma/schema.prisma");
+    expect(install({ dependencies: { prisma: "*" }, devDependencies: vitest })).toContain("npx prisma generate");
+  });
+});
+
+test("a project with compiled extensions brings them back at run", () => {
+  const files = (extra: Record<string, string>) => ({
+    "pkg/setup.py": "from setuptools import setup\nsetup(name='pkg')\n",
+    "pkg/requirements.txt": "cython\n",
+    "pkg/tests/test_a.py": "def test_a():\n    pass\n", ...extra });
+  let n = 0;
+  const repoOf = (extra: Record<string, string>) => {
+    const repo = initRepo(join(tmp(), `r${n++}`));
+    for (const [p, body] of Object.entries(files(extra))) {
+      mkdirSync(dirname(join(repo, p)), { recursive: true });
+      writeFileSync(join(repo, p), body);
+    }
+    commit(repo, "files");
+    return repo;
+  };
+  const native = (extra: Record<string, string>) => Object.values(projects(detect(repoOf(extra))))[0]!;
+  // .pyx files, or ext_modules in setup.py, mean the install builds them and test runs have no compiler or network.
+  for (const extra of <Record<string, string>[]>[{ "pkg/setup.py": "from setuptools import setup\nfrom Cython.Build import cythonize\nsetup(name='pkg', ext_modules=cythonize('fast.pyx'))\n" },
+    { "pkg/setup.py": "from setuptools import setup, Extension\nsetup(name='pkg', ext_modules=[Extension('a', ['a.c'])])\n" }]) {
+    const p = native(extra);
+    expect(p.install.join("\n")).toContain("python setup.py build_ext --inplace && find . -name '*.so' | tar czf /opt/ext.tgz -T -");
+    expect(p.test_command).toBe("tar xzf /opt/ext.tgz && python -m pytest {targets}");
+  }
+  const plain = native({});
+  expect(plain.install.join("\n")).not.toContain("build_ext");
+  expect(plain.test_command).toBe("python -m pytest {targets}");
+  expect(native({ "pkg/setup.py": "from setuptools import setup, Extension\nsetup(name='pkg', ext_modules=[Extension('a', ['a.c'])])\n" })
+    .notes.join(" ")).toContain("not rebuilt");
+  expect(plain.notes).toBeUndefined();
+});
+
+test("a .pyx file with no setup.py adds no build_ext: the project's own install builds it", () => {
+  const repo = initRepo(join(tmp(), "pyx"));
+  for (const [p, body] of Object.entries({ "pkg/pyproject.toml": "[build-system]\nrequires=['meson-python']\n[project]\nname='pkg'\nversion='1'\n",
+    "pkg/fast.pyx": "def f(): pass\n", "pkg/tests/test_a.py": "def test_a():\n    pass\n" })) {
+    mkdirSync(dirname(join(repo, p)), { recursive: true });
+    writeFileSync(join(repo, p), body);
+  }
+  commit(repo, "files");
+  const p = Object.values(projects(detect(repo)))[0]!;
+  expect(p.install.join("\n")).not.toContain("build_ext");
+  expect(p.test_command).toBe("python -m pytest {targets}");
 });

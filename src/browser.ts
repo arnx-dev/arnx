@@ -1,11 +1,11 @@
 // Tests that need a browser, and web UI apps: setup never sets up Playwright, Cypress, Storybook or vitest's browser
-// mode (they are listed under uncovered as browser tests), and gives a web UI app one try at its node or jsdom unit
+// mode (they are listed under uncovered as browser tests), and gives a web UI app two counted runs at its node or jsdom unit
 // tests. Both are found from file names and a few lines of configuration, without a model.
 import { posix } from "node:path";
 
 /** What a browser suite is listed under uncovered with. */
 export const BROWSER_TESTS = "browser tests";
-/** What a web UI app whose one try failed is listed under uncovered with. */
+/** What a web UI app whose two counted runs failed is listed under uncovered with. */
 export const WEB_UI = "web UI";
 
 /** A path pattern (as in uncovered) holding a suite that runs in a browser, and the tool that runs it. */
@@ -69,3 +69,6 @@ export function uiFramework(packageJson: string): string | null {
     return null;
   }
 }
+
+/** How many counted runs a web UI app gets before it is listed as web UI. */
+export const UI_RUNS = 2;

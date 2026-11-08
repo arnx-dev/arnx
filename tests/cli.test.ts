@@ -151,7 +151,7 @@ test("usage errors say which command and how to see its options; --help after a 
   expect(commandHelp("check")).toBe("arnx check                run the accepted tests: what still fails\n" +
     "arnx check --review [id]  run a review's confirmed tests before accepting\n\n--quiet hides progress. --json prints " +
     "one JSON object.");
-  expect(commandHelp("review")).toBe("arnx review [--range A..B] [--untracked] [--no-hunt] [--resume]\n" +
+  expect(commandHelp("review")).toBe("arnx review [--range A..B] [--untracked] [--no-hunt] [--docs] [--resume]\n" +
     "     test the change: branch commits, uncommitted work, or the last commit\n\n" +
     "--quiet hides progress. --local or --cloud picks the models for one run. --json prints one JSON object.");
   expect(commandHelp("logout")).toBe("arnx login | arnx logout | arnx credits  arnx cloud: sign this machine in or " +
@@ -369,7 +369,7 @@ test("precision.jsonl stays out of git, also in a repository set up before arnx 
   writeFileSync(join(rdir, "tests", "tests", "g", "test_a.py"), "def test_F1():\n    assert False\n");
   expect(await cli.run("accept", "--no-answers")).toBe(0);
   expect(await cli.run("accept", "--no-answers", "--again")).toBe(0);
-  expect(readFileSync(gitignore, "utf8")).toBe("reviews/\nrun/\nsetup/\nusage.jsonl\nprecision.jsonl\n");
+  expect(readFileSync(gitignore, "utf8")).toBe("reviews/\nrun/\nsetup/\nusage.jsonl\nprecision.jsonl\ntypecheck.json\n");
 });
 
 test("a plain init writes [cloud] with models = false, so switching is one word", async () => {
@@ -401,8 +401,8 @@ test("allow-secret marks the file and says it may be sent from now on", async ()
   const cli = new Cli({ cwd: repo });
   expect(await cli.run("allow-secret", "detect.py")).toBe(0);
   expect(cli.stdout).toBe(["! detect.py: 1 key-like string (AKIA… line 1)",
-    "✓ Allowed in .arnx/review.yaml: from now on, model calls and the sandbox may include this file.",
-    "  A new key-like string in it withholds the file again.", "Next: arnx setup"].join("\n"));
+    "✓ Allowed in .arnx/review.yaml.",
+    "  Model calls and the sandbox may hold it. A new key-like string in it gets a stand-in.", "Next: arnx setup"].join("\n"));
 });
 
 test("init's banner: first init at a terminal only, coloured with colour; never again, in a pipe or with --json", async () => {

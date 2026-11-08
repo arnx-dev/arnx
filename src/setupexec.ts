@@ -6,6 +6,7 @@
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, type Stats,
   statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { Boundary, Swap } from "./boundary";
 import { sandboxOnly, stripSandbox } from "./change";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
@@ -127,9 +128,10 @@ export class SetupExec {
   private calls = 0;
   private seconds = 0;
 
-  /** `tried`: the environment of each project's last try_project. `dir`: where the copies of the repository go. */
+  /** `tried`: the environment of each project's last try_project. `dir`: where the copies of the repository go.
+   * `boundary`: what a command's output and log may not hold. `swapOf`: what a project's commands mean in its container. */
   constructor(private o: { snap: string; dir: string; outDir: string; factory: ExecFactory;
-    tried: Map<string, TriedEnv>; say: Say }) {}
+    tried: Map<string, TriedEnv>; say: Say; boundary?: Boundary; swapOf?: (project: string) => Swap | undefined }) {}
 
   async call(input: Record<string, unknown>): Promise<string> {
     const command = typeof input.command === "string" ? input.command : "";
@@ -159,7 +161,7 @@ export class SetupExec {
       this.o.say(`${project}: looking around in its test environment`);
       let runner: ExecRunner | null;
       try {
-        runner = await this.o.factory(tried.image, tried.cfg, src);
+        runner = await this.o.factory(tried.image, tried.cfg, src, this.o.swapOf?.(project));
       } catch (e) {
         rmSync(src, { recursive: true, force: true });
         if (!(e instanceof ArnxError) || e instanceof OutOfTime) throw e;
@@ -184,14 +186,16 @@ export class SetupExec {
     }
     const n = ++this.calls;
     const cwd = typeof input.cwd === "string" && input.cwd.trim() ? input.cwd.trim() : "";
-    const r: RunResult = box.runner.exec(cwd ? `cd -- ${shQuote(cwd)} || exit 1; ${command}` : command, timeout);
+    const r: RunResult = await box.runner.exec(cwd ? `cd -- ${shQuote(cwd)} || exit 1; ${command}` : command, timeout);
+    // A command may print the real values it was given, or that it found: neither its log nor its answer holds one.
+    const masked = (text: string) => this.o.boundary ? this.o.boundary.mask(text) : text;
     // The agent gets the output with quotes of sandbox-only files taken out; the log, which no model reads, keeps it.
-    const output = stripSandbox(r.output, prints);
+    const output = masked(stripSandbox(r.output, prints));
     this.seconds += r.seconds;
     const secs = Math.round(r.seconds * 10) / 10;
     try {
       mkdirSync(this.o.outDir, { recursive: true });
-      writeFileSync(join(this.o.outDir, `exec-${n}.log`), `$ ${command}\n${r.output}`);
+      writeFileSync(join(this.o.outDir, `exec-${n}.log`), `$ ${command}\n${masked(r.output)}`);
     } catch {
       // the log is for the person; the agent has its answer
     }

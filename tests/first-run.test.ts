@@ -13,6 +13,7 @@ import { NOT_SET_UP, quickDraft } from "../src/draft";
 import type { RunResult, Runner, SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { approveFile, NOTHING_TO_TEST, runSetup } from "../src/setup";
+import { quickCoverageLine } from "../src/setupview";
 import { ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
@@ -218,12 +219,25 @@ test("the review's last progress line says what came of the things it checked", 
   const s = (outcome: string) => ({ project: "svc", id: "S1", outcome }) as never;
   expect(checkedLine([s("proven"), s("not reproduced"), s("not tested")])).toBe("Checked 3: 1 proven, 2 dropped");
   // One thing checked that proved two issues: the count matches the two "✓ proven" lines.
-  expect(checkedLine([s("proven"), s("not tested")], 2)).toBe("Checked 2: 1 proven (2 issues), 1 dropped");
+  expect(checkedLine([s("proven"), s("not tested")], { tests: 2, issues: 1 }))
+    .toBe("Checked 2: 1 proven (2 tests, 1 issue), 1 dropped");
+  // The bracket shows only when a number differs from the proven count.
+  expect(checkedLine([s("proven"), s("proven")], { tests: 2, issues: 2 })).toBe("Checked 2: 2 proven");
+  expect(checkedLine([s("proven"), s("proven")], { tests: 2, issues: 1 })).toBe("Checked 2: 2 proven (2 tests, 1 issue)");
   // Disputed things are still in the report, for the developer to decide: never called dropped.
   expect(checkedLine([s("proven"), s("same cause"), s("pending answer"), s("pre-existing"), s("disputed")]))
     .toBe("Checked 5: 2 proven, 1 needs your answer, 1 failing before this change too, 1 disputed");
   expect(checkedLine([s("disputed"), s("disputed"), s("not reproduced")])).toBe("Checked 3: 0 proven, 2 disputed, 1 dropped");
   expect(checkedLine([s("proven")])).toBe("Checked 1: 1 proven");
+});
+
+test("suspects an outage left untested are not called dropped", async () => {
+  const { checkedLine } = await import("../src/reviewer");
+  const s = (outcome: string) => ({ project: "svc", id: "S1", outcome }) as never;
+  expect(checkedLine([s("not tested"), s("not tested"), s("not tested")], { down: "Anthropic unavailable" }))
+    .toBe("Checked 3: 0 proven, 3 not tested: Anthropic unavailable");
+  expect(checkedLine([s("proven"), s("not tested"), s("not reproduced")], { down: "Anthropic unavailable" }))
+    .toBe("Checked 3: 1 proven, 1 not tested: Anthropic unavailable, 1 dropped");
 });
 
 test("a root project in the quick draft owns what the other drafted projects leave", () => {
@@ -363,4 +377,133 @@ test("a project that only uses a changed file waits in a quick setup; only the f
   expect(sessions.flatMap((s) => s.commands).some((c) => c.includes("vitest"))).toBe(false);
   // Its tests do not run in the review: setup names it, so the review can say so.
   expect(r.waiting).toEqual(["web"]);
+});
+
+test("a first review says plainly which changed source files it will not test", () => {
+  const file = (uncovered: string) => parseReviewFile(`version: 1
+projects:
+  svc:
+    root: svc
+    language: python
+    image: python:3.12-slim
+    test_command: python -m pytest -q {targets}
+uncovered:
+${uncovered}`);
+  const f = file('  - {path: /web/, reason: "needs several services (redis, postgres, mysql); not set up"}\n' +
+    '  - {path: /ui/, reason: "web UI (React) tests; jest suite did not run in the sandbox"}\n');
+  // all: every changed source file is left out
+  expect(quickCoverageLine(f, ["ui/a.ts", "ui/b.ts"])).toBe("Not tested in this review: all 2 changed source files " +
+    "(web UI (React) tests; jest suite did not run in the sandbox).");
+  // some: tests, docs and covered files do not count
+  expect(quickCoverageLine(f, ["svc/app.py", "svc/tests/test_a.py", "README.md", "web/a.ts"]))
+    .toBe("Not tested in this review: at least 1 of 2 changed source files (needs several services (redis, postgres, mysql); " +
+      "not set up).");
+  // a project not set up yet reads "not set up"
+  expect(quickCoverageLine(file(`  - {path: /web/, reason: "${NOT_SET_UP}"}\n`), ["web/a.ts", "svc/b.py"]))
+    .toBe("Not tested in this review: at least 1 of 2 changed source files (not set up yet).");
+  // the "Not set up yet, though" line already names those files: this line leaves them out
+  expect(quickCoverageLine(file(`  - {path: /web/, reason: "${NOT_SET_UP}"}\n`), ["web/a.ts", "svc/b.py"], true)).toBeNull();
+  expect(quickCoverageLine(f, ["web/a.ts", "ui/b.ts", "svc/c.py"], true))
+    .toBe("Not tested in this review: at least 2 of 3 changed source files (needs several services (redis, postgres, mysql); not set up; " +
+      "web UI (React) tests; jest suite did not run in the sandbox).");
+  // none: no line
+  expect(quickCoverageLine(f, ["svc/app.py", "README.md"])).toBeNull();
+  expect(quickCoverageLine(f, ["README.md"])).toBeNull();
+});
+
+test("a runner with no list form still runs a few small files", async () => {
+  const { runSuite } = await import("../src/setup");
+  const r = gitRepo(tmp());
+  const specs = ["a", "b", "c", "d", "e"].map((n) => `web/tests/${n}.test.ts`);
+  mkdirSync(join(r, "web", "tests"), { recursive: true });
+  writeFileSync(join(r, "web", "package.json"), JSON.stringify({ name: "web", scripts: { test: "vitest" },
+    devDependencies: { vitest: "3.0.0" } }));
+  writeFileSync(join(r, "web", "a.ts"), "export const a = 1;\n");
+  specs.forEach((f, i) => writeFileSync(join(r, f), "import { test } from \"vitest\";\ntest(\"x\", () => {});\n" +
+    "// padding\n".repeat(i * 10)));
+  commit(r, "web");
+  // `vitest --run`, not `vitest run`: the runner's list form (`vitest list`) cannot be made from it.
+  const cfg = parseReviewFile("version: 1\nprojects:\n  web:\n    root: web\n    language: typescript\n" +
+    "    runner: vitest\n    image: node:22\n    install: [npm ci]\n    test_command: npx vitest --run {targets}\n")
+    .projects[0]!;
+  const snap = join(tmp(), "snap");
+  cpSync(r, snap, { recursive: true });
+  const commands: string[] = [];
+  const session = async <T>(_c: unknown, s: string, _l: string, body: (x: Runner) => Promise<T>) => body({
+    run(command: string): RunResult {
+      commands.push(command);
+      // arnx's one-line test, or the files named, or the whole suite.
+      const probe = /\S*arnx-probe\.test\.ts/.exec(command)?.[0];
+      const named = specs.filter((f) => command.includes(f.slice("web/".length)));
+      const ran = probe ? [`web/${probe}`] : named.length ? named : specs;
+      const m = /--outputFile=\/src\/(\S+)/.exec(command);
+      if (m) {
+        mkdirSync(dirname(join(s, m[1]!)), { recursive: true });
+        writeFileSync(join(s, m[1]!), passed(ran));
+      }
+      return { exitCode: 0, output: `${ran.length} passed`, timedOut: false, seconds: 0.1 };
+    } });
+  const [ok, summary] = await runSuite(cfg, snap, join(tmp(), "log"), { precheck: true, quick: true,
+    sessionFactory: session as SessionFactory });
+  expect(ok).toBe(true);
+  expect(summary).toStartWith("quick look: 5 test files found, 3 small files ran: 3 passed");
+  // The smallest three ran, then arnx's one-line test; the whole suite never did.
+  expect(commands).toHaveLength(2);
+  expect(commands[0]).toContain("tests/a.test.ts tests/b.test.ts tests/c.test.ts");
+  expect(commands[1]).toContain("arnx-probe");
+  expect(commands.some((c) => specs.slice(3).some((f) => c.includes(f.slice("web/".length))))).toBe(false);
+});
+
+test("a quick setup tried again unchanged runs a few small files, never the whole suite", async () => {
+  const repo = twoProjects();
+  const draft = quickDraft(detected(repo), ["svc/app.py"])!.yaml;
+  // One test file does not load: the listing says so, every time.
+  const answer = runner("svc", { exit: 1, output: TESTS.map((f) => `${f}::test_x`).join("\n") +
+    "\nERROR tests/test_e.py\n\n4 tests collected, 1 error in 0.01s" });
+  const sessions: Session[] = [];
+  const model = new ScriptedAgent([[tool("propose", { yaml: draft })], [tool("propose", { yaml: draft })],
+    [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(answer, sessions), quick: { files: ["svc/app.py"] } });
+  const runs = sessions.flatMap((s) => s.commands).filter((c) => !c.includes("--collect-only"));
+  // The second try (the same file) is not refused for the file it names, and no run lacks its files.
+  expect(runs.every((c) => c.includes("test_arnx_probe") || TESTS.slice(0, 4).some((f) => c.includes(f)))).toBe(true);
+  expect(runs.some((c) => c.includes("test_e.py"))).toBe(false);
+  expect(r.ok).toBe(true);
+  expect(r.runs[0]!.summary).toStartWith("quick look:");
+});
+
+test("a quick look records a file that does not load as a file-level entry, with the reason", async () => {
+  const repo = twoProjects();
+  const draft = quickDraft(detected(repo), ["svc/app.py"])!.yaml;
+  const output = TESTS.map((f) => `${f}::test_x`).join("\n") + "\n_____ ERROR collecting tests/test_e.py _____\n" +
+    "E   ModuleNotFoundError: No module named 'redis'\nERROR tests/test_e.py\n";
+  const model = new ScriptedAgent([[tool("propose", { yaml: draft })], [tool("propose", { yaml: draft })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(runner("svc", { exit: 1, output }), []), quick: { files: ["svc/app.py"] } });
+  expect(r.ok).toBe(true);
+  const failed = r.projects[0]!.failed!;
+  expect(failed.map((x) => [x.file, x.load, x.first])).toEqual([["tests/test_e.py", true,
+    "ModuleNotFoundError: No module named 'redis'"]]);
+});
+
+test("a quick setup whose small files fail, tried again unchanged, ends: the whole suite never runs", async () => {
+  const bad = (command: string): Answer => {
+    const a = runner("svc")(command);
+    return TESTS.slice(0, 3).some((f) => command.includes(f)) && !command.includes("--collect-only")
+      ? { xml: junitXml(TESTS.slice(0, 3).map((f) => [`svc/${f}`, "test_x", "failed", "boom"] as [string, string, string, string])),
+        output: "3 failed" } : a;
+  };
+  const repo = twoProjects();
+  const draft = quickDraft(detected(repo), ["svc/app.py"])!.yaml;
+  const sessions: Session[] = [];
+  const model = new ScriptedAgent([[tool("propose", { yaml: draft })], [tool("propose", { yaml: draft })],
+    [tool("propose", { yaml: draft })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(bad, sessions), quick: { files: ["svc/app.py"] } });
+  expect(r.ok).toBe(false);
+  expect(JSON.stringify(model.calls[0]!.messages)).toContain("Tried again unchanged, the quick setup ends here");
+  const whole = sessions.flatMap((s) => s.commands).filter((c) => !c.includes("--collect-only") &&
+    !c.includes("test_arnx_probe") && !TESTS.some((f) => c.includes(f)));
+  expect(whole).toEqual([]);
 });

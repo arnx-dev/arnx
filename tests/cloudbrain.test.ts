@@ -2,7 +2,7 @@
 // session: the same findings and report as LocalBrain gives for the same script, usage named by tier and harness and
 // never by model, the contract's requests (ids, turns, facts after a final, finish), and what each failure means.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CloudClient, UNAVAILABLE } from "../src/cloud";
 import { Boundary } from "../src/boundary";
@@ -133,7 +133,7 @@ test("a scripted review through arnx cloud: the same findings and report as the 
   // The review's id on arnx cloud is kept with the review (the local brain has none to keep).
   expect(JSON.parse(readFileSync(join(rdir, "state.json"), "utf8")).cloud_review_id).toBe("rev_test00000001");
   expect(Object.keys(JSON.parse(readFileSync(join(local.rdir, "state.json"), "utf8")))).toEqual(["change",
-    "diff_sha256"]);
+    "diff_sha256", "stamp", "seconds"]);
   expect((create.body as { resume_of: unknown }).resume_of).toBeNull();
   expect(typeof (start.body as { context_pack: string }).context_pack).toBe("string");
   const steps = c.seen.filter((x) => x.path.endsWith("/agent/steps")).map((x) => x.body as Record<string, unknown>);
@@ -168,8 +168,10 @@ test("a round the budget stopped with no final: the runs keep what they found, t
   const { review } = await runReview(repo, { settings: SETTINGS, brain: brainFor(c), sessionFactory: fakeFactory(runs) });
   expect(review.stop).toBe("budget");
   expect(review.projectStats?.[0]?.stop).toBe("budget");
-  // Its failing test is still a finding (with no explanation: there is no report).
-  expect(review.findings.map((f) => [f.func, f.explanation])).toEqual([["test_add", ""]]);
+  // Its failing test is no finding: there is no report to claim it, and the round says so.
+  expect(review.findings).toEqual([]);
+  expect(review.unclaimed!.map((u) => u.testId)).toEqual([`${GEN}::test_add`]);
+  expect(review.projectStats?.[0]?.noReport).toBe(true);
   expect(c.seen.find((x) => x.path.endsWith("/finish"))!.body).toMatchObject({ stop: "budget" });
 });
 
@@ -180,6 +182,14 @@ test("a final, then a follow-up the budget cut: a budget stop, said in the repor
   expect(c.seen.find((x) => x.path.endsWith("/finish"))!.body).toMatchObject({ stop: "budget" });
   expect(summary(review, "review.md")).toContain("the review budget ran out before the reviewer finished (raise " +
     "`review_usd` under [budget] in .arnx/config.toml, or top up: arnx credits, then run arnx review again)");
+});
+
+test("a cloud round that ends with an empty report and no test run is incomplete", async () => {
+  const c = cloud = fakeCloud({ rounds: { "*": [ROUND[0]!, { type: "final", report: {} }, { type: "done", stop: "end_turn" }] } });
+  const { review } = await runReview(repo, { settings: SETTINGS, brain: brainFor(c), sessionFactory: fakeFactory(runs) });
+  expect(review.projectStats?.[0]?.noReport).toBe(true);
+  expect(exitCode(review)).toBe(2);
+  expect(summary(review, "review.md")).toContain("the reviewer gave no report");
 });
 
 test("409 turn_conflict sends the same turn once more", async () => {
@@ -206,11 +216,11 @@ test("a review that fails is closed with stop failed", async () => {
 test("a review whose environment runs no test never starts the round: nothing billed", async () => {
   const c = cloud = fakeCloud({ rounds: { "*": ROUND.map((s) => ({ ...s })) }, billed });
   const broken = (): [string | null, string, boolean] => [null, "error: failed to build `dep`", false];
-  await expect(runReview(repo, { settings: SETTINGS, brain: brainFor(c), hunt: true,
-    sessionFactory: fakeFactory(broken, [], { probe: "ignore" }) }))
-    .rejects.toThrow(/the test environment runs no test at this commit/);
+  const { review } = await runReview(repo, { settings: SETTINGS, brain: brainFor(c), hunt: true,
+    sessionFactory: fakeFactory(broken, [], { probe: "ignore" }) });
+  expect(review.projectStats[0]).toMatchObject({ stop: "env_failed: probe" });
   expect(c.seen.some((x) => x.path.endsWith("/agent"))).toBe(false);
-  expect(c.seen.find((x) => x.path.endsWith("/finish"))!.body).toMatchObject({ stop: "failed", projects_reviewed: 0 });
+  expect(c.seen.find((x) => x.path.endsWith("/finish"))!.body).toMatchObject({ stop: "completed", projects_reviewed: 0, tests_written: 0 });
 });
 
 test("a tool call the CLI does not run is answered as an error result", async () => {
@@ -409,4 +419,52 @@ test("the steps arnx cloud streams that say the same as the line before them are
   const { cloudStepShown } = await import("../src/cloudbrain");
   for (const m of ["hunting", "looking for defects", "the agent is taking its turn"]) expect(cloudStepShown(m)).toBe(false);
   for (const m of ["writing tests", "checking 4 things in this change"]) expect(cloudStepShown(m)).toBe(true);
+});
+
+test("the stand-in sentence reaches the cloud setup agent as comment lines at the head of draft, tree unchanged", async () => {
+  const c = cloud = fakeCloud();
+  const brain = brainFor(c);
+  const setup = (input: Record<string, unknown>) => brain.agentRound("setup", { hints: "", withheld: "", current: "",
+    budgetUsd: 1, tree: "a.py\n", ...input }, Promise.resolve({ tools: () => [], call: async () => "" }));
+  await setup({ standIns: ["detect.py"] });
+  await setup({ standIns: ["detect.py"], draft: "version: 1\n" });
+  const bodies = c.seen.filter((x) => x.path === "/v1/setup").map((x) => x.body as { draft: string; tree: string });
+  expect(bodies.map((b) => b.tree)).toEqual(["a.py\n", "a.py\n"]);
+  for (const b of bodies) {
+    expect(b.draft.split("\n").filter((l) => l.startsWith("#")).join(" ")).toContain("detect.py");
+    expect(b.draft).toContain("never call the repository corrupt");
+  }
+  expect(bodies[1]!.draft.endsWith("\nversion: 1\n")).toBe(true);
+  expect(bodies[0]!.draft.split("\n").every((l) => l === "" || l.startsWith("# "))).toBe(true);
+  // A re-proof or an add has the current file: no draft, the sentence comes as comment lines ahead of it.
+  await setup({ standIns: ["detect.py"], project: "svc", current: "version: 1\n" });
+  const re = c.seen.filter((x) => x.path === "/v1/setup").at(-1)!.body as { draft: unknown; existing_yaml: string };
+  expect(re.draft).toBeNull();
+  expect(re.existing_yaml.startsWith("# ")).toBe(true);
+  expect(re.existing_yaml.endsWith("\nversion: 1\n")).toBe(true);
+});
+
+test("a cloud resume of a cut round hunts again and says that costs a new hunt; it never tests with no suspects", async () => {
+  const c = cloud = fakeCloud({ rounds: { "*": ROUND.map((s) => ({ ...s })) }, billed });
+  const first = await runReview(repo, { settings: SETTINGS, brain: brainFor(c), hunt: true, sessionFactory: fakeFactory(runs) });
+  // The review as an earlier arnx left it when a failed call cut the round: the saved hunt, a transcript ending on the
+  // failed call, no stamp, no outage in the report.
+  const fixture = join(import.meta.dir, "fixtures/cut-folder/projects/main");
+  for (const f of ["round.json", "hunt.json", "transcript.jsonl"]) copyFileSync(join(fixture, f), join(first.rdir, f));
+  rmSync(join(first.rdir, "verdicts.json"), { force: true });
+  const state = JSON.parse(readFileSync(join(first.rdir, "state.json"), "utf8"));
+  delete state.stamp;
+  writeFileSync(join(first.rdir, "state.json"), JSON.stringify(state) + "\n");
+  const second = fakeCloud({ rounds: { "*": ROUND.map((s) => ({ ...s })) }, billed });
+  cloud = second;
+  c.stop();
+  const said: string[] = [];
+  const { review } = await runReview(repo, { settings: SETTINGS, brain: brainFor(second, said), hunt: true,
+    sessionFactory: fakeFactory(runs), resume: true, progress: (m) => said.push(m) });
+  expect(review.id).toBe(first.review.id);
+  expect(said.some((m) => /hunting again, which costs a new hunt/.test(m))).toBe(true);
+  const start = second.seen.find((x) => x.path.endsWith("/agent"))!;
+  expect(start.body).toMatchObject({ hunt: true });
+  expect(typeof (start.body as { context_pack: string }).context_pack).toBe("string");
+  expect(review.suspects!.map((x) => x.id)).toEqual(["S1"]);
 });

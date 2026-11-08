@@ -5,51 +5,103 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync }
   from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, posix } from "node:path";
+import { basename, dirname, join, posix } from "node:path";
 import { type AgentResult, Workspace } from "./agent";
-import { adapterFor } from "./adapters";
-import { bakedError, bakedIn, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
+import { adapterFor, getAdapter } from "./adapters";
+import { DEFAULT_ACCEPTED_DIR } from "./adapters/types";
+import { absentFromSnapshot, bakedError, bakedIn, imageFiles, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
   from "./baked";
-import { BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
-  fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, newNames, notChecked, SKIP_REASONS, textBefore, textFix,
-  vacuousBefore } from "./before";
+import { asFallbackBefore, asFallbackFix, BEFORE_STATUSES, beforeStartText, beforeText, type BeforeCheck, type BeforeRun, FIX_STATUSES, type FixCheck,
+  fakedFix, fakedName, fixText, judgeBefore, judgeFix, namesAdded, newNames, notChecked, sharedInGroups, SKIP_REASONS, textBefore, textFix,
+  vacuousBefore, vacuousPass } from "./before";
 import type { AnswerInput, Brain, ReviewInput, RoundBase, RoundHunt, RoundTools } from "./brain";
-import { snapshot, takeSnapshot, tooLargeText, withSandboxFiles } from "./change";
+import { type Boundary, maskedCopy, type Swap } from "./boundary";
+import { holdsIn, staleLine, staleRewrites, standInsLine, writeStandIns } from "./standins";
+import { fallbackImage } from "./envprune";
+import { filesAt, snapshot, takeSnapshot, type Withheld, withSandboxFiles } from "./change";
 import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
-import { ArnxError } from "./errors";
+import { EnvFailed } from "./errors";
+import { markUnproven } from "./diagnose";
+import { type KeyReruns, keyReruns, type RealOutcomes, rerunCandidates, rerunWithRealKeys } from "./realkey";
 import { clip, emit, testMessage } from "./events";
-import { type Classified, classify, describeRun, funcOf, ownerFile, runTests, type TestResult } from "./outcomes";
-import { dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
+import { baseName, type Classified, classify, describeRun, funcOf, ownerFile, runBounded, runTests, serialFlag, type TestResult } from "./outcomes";
+import { buildContextOf, DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
   type SessionFactory } from "./sandbox";
 import type { Say } from "./progress";
-import { describeTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
-  typeCheckOf } from "./typecheck";
+import { describeTypecheck, recordTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
+  typeCheckOf, workspaceNames } from "./typecheck";
 import { databaseEnv, dbUntested, untestedFiles } from "./untested";
+import { clearReach, countable, type Reach, readReach, reachedSince } from "./reached";
 import { projectSource, shallowKind } from "./shallow";
+import { evidencePacks, snapshotTree } from "./evidence";
+import { parseReports } from "./report";
 
 export const TOOL_TIMEOUT = 300;
 export const RUN_TIMEOUT = 600;
+/** One repeat of a round's files: together within today's run limit, and only after that times out apart (outcomes.ts runBounded). */
+export const RUN_BOUNDS = { together: RUN_TIMEOUT, file: 180, total: 600 };
 
 export interface Round {
+  /** Something in it was masked (boundary.ts). */
+  standInsShown?: boolean;
   agent: AgentResult;
   files: Record<string, string>;
   classified: Classified;
   removed: string[];
+  /** Those files, with what they hold and where. */
+  leftOut?: Withheld[];
+  /** Files the snapshot holds with a fake for their private key. */
+  fakedKeys?: string[];
+  /** Test files that did not finish alone within their time (each is one error, never a finding). */
+  hungFiles?: string[];
+  /** Test files the time ran out before (each is one error; the review is incomplete). */
+  notRunFiles?: string[];
   /** True when a run_tests call showed the agent results from its own files (or it wrote no tests). */
   sawResults: boolean;
   /** Changed files with SQL that no generated test ran against the project's database (absent without one). */
   dbUntested?: string[];
+  /** Changed files (of the round's coverage) the final runs executed, by the runner's own notes (reached.ts), less what
+   * arnx's one-line test's run showed. Absent when the runs left no notes: no data, not "none reached". */
+  reached?: string[];
   /** The before/after check of the tests that failed in every run (absent when it is off or none failed). */
   before?: BeforeCheck;
   /** The fix proof: passing tests on the code before the change (absent when it is off or no test passed). */
   fixProof?: FixCheck;
   /** The project's type check (absent when it has none, and in answer rounds). */
   typecheck?: TypeCheck;
+  /** The evidence pack of each test that failed in every run, by test id (evidence.ts): built from the snapshot, for the
+   * second opinion. */
+  evidence?: Record<string, string>;
+  /** This commit's own environment could not be had: `failed` (the round is empty and made no model call) or `fallback`
+   * (the tests ran on the image built for another commit). `log` is a file in the round's folder. */
+  env?: EnvState;
 }
 
-export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, envFrom, key) => {
+export interface EnvState { state: "failed" | "fallback"; kind: "build" | "probe"; log: string;
+  /** The failing commit is not the checked-out one (a range or an older commit): setup would prove another tree. */
+  old?: true }
+
+/** What a model's text means in the snapshot `snap`, `ours` (and the runners' reports) not being real text. */
+export const swapIn = (b: Boundary, snap: string, ours: (rel: string) => boolean = () => false): Swap =>
+  b.swapFor(snap, (rel) => rel === REPORT_DIR || ours(rel));
+
+/** The files `rels` of a snapshot, as they mean there: tests kept with their stand-ins, now in place to run. */
+export function swapFiles(snap: string, rels: readonly string[], swap: Swap): void {
+  for (const rel of rels) {
+    const was = readFileSync(join(snap, rel), "utf8");
+    const now = swap.text(was);
+    if (now !== was) writeFileSync(join(snap, rel), now);
+  }
+}
+
+// `swap` reaches the session only when runs read the mounted code: a baked copy comes from the build context, so it holds
+// each guess's stand-in, and a test, an env or a command holding that stand-in agrees with it as it is. `Runner.copies` tells
+// whoever places a test. A test there that reads a project file by path and compares with a stand-in fails: /src holds the value.
+export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, envFrom, key, swap) => {
   requireDocker();
-  let image = await ensureEnv(cfg, envFrom ?? snap, buildLog, key);
+  // Another snapshot's image was built for that snapshot's session. That snapshot now holds a model's tests, with real values
+  // when there is no build context to copy instead, and a build has network: it is never built from now.
+  let image = await ensureEnv(cfg, envFrom ?? snap, buildLog, key, { built: !!envFrom });
   // An image holding an older copy of the code (baked.ts) is built again for the code in the snapshot, once per version
   // of that code (keyed on it: later sessions and reviews of the same code reuse it). The before/after check copies its
   // code in once the session is up: a copy that differs from it then refuses the first run.
@@ -60,13 +112,13 @@ export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, e
     copies = baked?.copies ?? [];
     if (baked?.differ.length) {
       dockerSteps.say?.(rebuildText(cfg, baked));
-      const own = bakedKey(image.slice(image.indexOf(":") + 1), cfg, baked.copies, snap);
+      const own = bakedKey(image.slice(image.indexOf(":") + 1), cfg, snap);
       image = await ensureEnv(cfg, snap, buildLog, own, { mark: true });
     }
   } else {
     guard = (s) => {
       let checked = false;
-      return { run: (command, timeout) => {
+      return { run: async (command, timeout) => {
         if (!checked) {
           checked = true;
           const baked = bakedIn(cfg, image, snap);
@@ -76,7 +128,7 @@ export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, e
       } };
     };
   }
-  const session = await new Session(image, cfg, snap).start();
+  const session = await new Session(image, cfg, snap, DEFAULT_LIMITS, copies.length ? undefined : swap).start();
   // Files the tests need that no model may read are in the snapshot only while a test runs.
   const placed = withSandboxFiles(session, snap);
   const runner = guard ? guard(placed) : placed;
@@ -87,6 +139,23 @@ export const dockerSession: SessionFactory = async (cfg, snap, buildLog, body, e
     session.close();
   }
 };
+
+/** The stop of a round whose environment could not be had, and what the agent of that round is: nothing, no model asked. */
+export const ENV_FAILED = "env_failed: ";
+const envFailedAgent = (kind: "build" | "probe"): AgentResult => ({ finalText: "", costUsd: 0, turns: 0,
+  stop: `${ENV_FAILED}${kind}`, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, calls: 0 });
+
+/** The key of the image built for another commit that this commit's tests may run on, or null. Null when its image holds
+ * a copy of the code that runs reach and that differs from this code: those runs would test the other commit's code. */
+export function usableFallback(cfg: ReviewConfig, snap: string): string | null {
+  const image = fallbackImage(cfg);
+  if (!image) return null;
+  const baked = existsSync(snap) && readdirSync(snap).length ? bakedIn(cfg, image.tag, snap) : null;
+  if (baked?.differ.length) return null;
+  // A copy holding files this commit removed would run (or leak) what is gone.
+  if (baked && absentFromSnapshot(cfg, baked.copies, imageFiles(image.tag), snap).length) return null;
+  return image.tag.slice(image.tag.indexOf(":") + 1);
+}
 
 /** A round and what its hunt left (not saved with the round). */
 export interface Tested extends Round { hunt?: RoundHunt }
@@ -100,10 +169,21 @@ export function writeDirOf(cfg: ReviewConfig, sub = ""): string {
   return posix.normalize(posix.join(cfg.workdir, cfg.testsDir, sub)).replace(/\/$/, "");
 }
 
+/** The folder `arnx accept` keeps a project's tests in (relative to its root): `acceptedTestsDir`, the configured one.
+ * While that is the default, a TypeScript project whose tests_dir is not the default one (its runner's roots or
+ * testRegex lead arnx's tests elsewhere) keeps them beside it, in a folder named arnx next to arnx_generated, where
+ * the runner `arnx check` starts collects them too. */
+export function acceptedDirFor(cfg: ReviewConfig, acceptedTestsDir = DEFAULT_ACCEPTED_DIR): string {
+  const parent = posix.dirname(posix.normalize(cfg.testsDir));
+  if (cfg.language !== "typescript" || acceptedTestsDir !== DEFAULT_ACCEPTED_DIR ||
+    cfg.testsDir === adapterFor(cfg).defaultTestsDir || parent === ".") return acceptedTestsDir;
+  return posix.join(parent, "arnx");
+}
+
 /** The folders `arnx accept` keeps tests in, relative to the repository: the configured one and the defaults. */
-export function acceptedRoots(cfg: ReviewConfig, acceptedTestsDir = "tests/arnx"): string[] {
+export function acceptedRoots(cfg: ReviewConfig, acceptedTestsDir = DEFAULT_ACCEPTED_DIR): string[] {
   const rel = (d: string) => posix.normalize(posix.join(cfg.workdir, d)).replace(/\/$/, "");
-  return [...new Set([acceptedTestsDir, "__tests__/arnx", "tests/arnx"].map(rel))];
+  return [...new Set([acceptedDirFor(cfg, acceptedTestsDir), "__tests__/arnx", "tests/arnx"].map(rel))];
 }
 
 /** Whether `path` (relative to the repository) is a file `arnx accept` kept for this project. */
@@ -124,8 +204,16 @@ export const DOME = ".arnx/tests";
 export const runPath = (p: string): string => p.startsWith(`${DOME}/`) ? p.slice(DOME.length + 1) : p;
 
 /** The test files `arnx accept` kept for this project that exist, relative to the repository (under DOME). */
-export function keptTestFiles(repo: string, cfg: ReviewConfig, acceptedTestsDir?: string): string[] {
-  return keptIn(join(repo, DOME), cfg, acceptedTestsDir).map((p) => `${DOME}/${p}`);
+export function keptTestFiles(repo: string, cfg: ReviewConfig, acceptedTestsDir?: string,
+                              projects: readonly ReviewConfig[] = [cfg]): string[] {
+  return keptIn(join(repo, DOME), cfg, acceptedTestsDir, false, projects).map((p) => `${DOME}/${p}`);
+}
+
+/** The project among `projects` whose folder holds `path` (repository-relative), the deepest one. */
+export function deepestHolder<T extends ReviewConfig>(projects: readonly T[], path: string): T | undefined {
+  const holds = (c: ReviewConfig) => posix.normalize(c.workdir) === "." || path.startsWith(`${posix.normalize(c.workdir)}/`);
+  return [...projects].sort((a, b) => posix.normalize(a.workdir).length - posix.normalize(b.workdir).length)
+    .filter(holds).at(-1);
 }
 
 /** Files an arnx before the DOME kept inside the project, where its own test run collects them: every file in its
@@ -134,17 +222,31 @@ export function legacyKeptFiles(repo: string, cfg: ReviewConfig, acceptedTestsDi
   return keptIn(repo, cfg, acceptedTestsDir, true);
 }
 
-function keptIn(root: string, cfg: ReviewConfig, acceptedTestsDir?: string, all = false): string[] {
+/** Kept files are collected under either name rule: the project's test_files names, or the adapter's usual ones (a
+ * file kept before test_files was set, or under another ending, is never dropped by a change of names), and from any
+ * accepted folder they sit in: the configured and default ones, and every `arnx/r<review>` folder under the project
+ * (where an earlier tests_dir had them kept). */
+function keptIn(root: string, cfg: ReviewConfig, acceptedTestsDir?: string, all = false,
+                projects: readonly ReviewConfig[] = [cfg]): string[] {
   const adapter = adapterFor(cfg);
+  const base = getAdapter(cfg.language);
+  const writable = (n: string) => adapter.writable.test(n) || base.writable.test(n);
+  const isTest = (n: string) => adapter.isTestFile(n) || base.isTestFile(n);
   const inRoots = acceptedRoots(cfg, acceptedTestsDir).filter((d) => existsSync(join(root, d)))
-    .flatMap((d) => collect(root, d, all ? /./ : adapter.writable))
-    .filter((p) => all || adapter.isTestFile(posix.basename(p)));
+    .flatMap((d) => collect(root, d, /./).filter((p) => all || writable(posix.basename(p))))
+    .filter((p) => all || isTest(posix.basename(p)));
+  const sat = !all && existsSync(join(root, cfg.workdir))
+    ? collect(root, cfg.workdir === "." ? "" : cfg.workdir, /./).filter((p) => KEPT_FOLDER.test(p) && deepestHolder(projects, p)?.name === cfg.name &&
+      (all || writable(posix.basename(p))) && (all || isTest(posix.basename(p)))) : [];
   const own = (adapter.kept?.dirs ?? []).map((d) => posix.normalize(posix.join(cfg.workdir, d)).replace(/\/$/, ""))
     .filter((d) => existsSync(join(root, d)))
     .flatMap((d) => readdirSync(join(root, d)).filter((n) => adapter.kept!.name.test(n) &&
       lstatSync(join(root, d, n)).isFile()).map((n) => posix.join(d, n)));
-  return [...new Set([...inRoots, ...own])].sort();
+  return [...new Set([...inRoots, ...sat, ...own])].sort();
 }
+
+/** A kept file's folder: `<anywhere>/arnx/r<review id>/`, as accept lays them out. */
+const KEPT_FOLDER = /(?:^|\/)arnx\/r\d+_[0-9a-f]+\//;
 
 /** The project's own files among `paths` (relative to the repository) that a round would clear from its tests
  * directory as its own: the adapter's writable names, outside the folders `arnx accept` keeps tests in. Rust's
@@ -230,16 +332,17 @@ export function suffixReviewCopies(repo: string): number {
 
 /** Runs the adapter's one-line probe tests placed in `dir` (relative to the repository), then removes them. `seen`:
  * one was reported passing. Setup proves tests_dir with it; a round first proves the environment runs a test at all. */
-export function probeRun(session: Runner, snap: string, cfg: ReviewConfig, dir: string, report: string, timeout: number)
-  : { seen: boolean; result: RunResult; results: TestResult[] | null; files: string[] } {
+export async function probeRun(session: Runner, snap: string, cfg: ReviewConfig, dir: string, report: string, timeout: number,
+                               o: { serial?: boolean } = {})
+  : Promise<{ seen: boolean; result: RunResult; results: TestResult[] | null; files: string[] }> {
   const files = adapterFor(cfg).probes(cfg.runner).map((p) => ({ ...p, rel: posix.join(dir, p.file) }));
   try {
     for (const p of files) {
       mkdirSync(join(snap, dir), { recursive: true });
       writeFileSync(join(snap, p.rel), p.source);
     }
-    const [result, results] = runTests(session, snap, cfg, files.map((p) => posix.relative(cfg.workdir, p.rel)),
-      report, timeout);
+    const [result, results] = await runTests(session, snap, cfg, files.map((p) => posix.relative(cfg.workdir, p.rel)),
+      report, timeout, o);
     const seen = (results ?? []).some((t) => t.outcome === "passed" &&
       ownerFile(t.fileAttr, files.map((p) => p.rel)) !== null);
     return { seen, result, results, files: files.map((p) => p.rel) };
@@ -251,12 +354,12 @@ export function probeRun(session: Runner, snap: string, cfg: ReviewConfig, dir: 
 /** Why a round stops before its brain writes a test: the environment runs no test at this commit (a member's
  * manifest that builds differently from the image, a build script that downloads). Every test would go without a
  * report, and the review would read as one that found nothing. */
-export function probeFailure(cfg: ReviewConfig, result: RunResult, log: string, copies?: CopyOnly): ArnxError {
+export function probeFailure(cfg: ReviewConfig, result: RunResult, log: string, copies?: CopyOnly): EnvFailed {
   const why = result.timedOut ? "timed out" : `exited ${result.exitCode ?? "?"} without a report`;
   const tail = result.output.trim().split("\n").slice(-6).map((l) => `  ${l}`).join("\n");
-  return new ArnxError(`${cfg.name}: the test environment runs no test at this commit: arnx's one-line test ` +
+  return new EnvFailed(`${cfg.name}: the test environment runs no test at this commit: arnx's one-line test ` +
     `${why}. The review stopped before writing tests (output: ${log})${tail ? `\n${tail}` : ""}` +
-    (copies ? `\n${copyStopText(cfg, copies)}` : ""));
+    (copies ? `\n${copyStopText(cfg, copies)}` : ""), "probe", basename(log));
 }
 
 export async function testRound(repo: string, head: string | null, cfg: ReviewConfig, o: {
@@ -273,35 +376,67 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
   /** Run the project's type check (`cfg.typecheck`) once after the final runs, without the generated tests:
    * `changed` are the change's files (repository paths); with errors, `base` (null: the change has none; absent: no
    * comparison) is the code before the change to compare them with. */
-  typecheck?: { changed: string[]; base?: string | null };
+  typecheck?: { changed: string[]; base?: string | null; skipped?: TypeCheck; record?: boolean };
   /** A working-tree round (head null) copies untracked files too (opted in, or no commits yet); default: tracked
    * files only, since the agent reads the snapshot and the tests' output goes to the model. */
-  untracked?: boolean }): Promise<Tested> {
+  untracked?: boolean;
+  /** A commit whose environment cannot be had ends in an empty round saying so (a review; else the error is thrown). */
+  recordEnvFailure?: boolean;
+  /** Build each failing test's evidence pack from the snapshot: `diff` is the project's part of the change, `message`
+   * its commit message. */
+  evidence?: { diff: string; message: string };
+  /** The review's reruns with a real key left (realkey.ts); default: a round's own KEY_RERUN_MOST. */
+  keyReruns?: KeyReruns }): Promise<Tested> {
   const say = (m: string) => o.progress?.(`${cfg.name}: ${m}`);
   const adapter = adapterFor(cfg);
   mkdirSync(o.outDir, { recursive: true });
   const tmp = mkdtempSync(join(tmpdir(), "arnx-"));
   let agent: AgentResult, files: Record<string, string>, results: (TestResult[] | null)[], removed: string[];
+  let leftOut: Withheld[] = [], fakedKeys: string[] = [];
   let saw = false, dbLeft: string[] | undefined, before: BeforeCheck | undefined, headKey = "";
   let hunt: RoundHunt | undefined;
+  let env: EnvState | undefined;
+  // Once a round's files have run apart, every later run goes file by file; a file that did not finish alone is not
+  // run again.
+  let apart = false;
+  // Whether this session's runs ask the runner for one process (decided at the probe).
+  let serial = false;
+  const hungLimits: Record<string, number> = {}, notRunSet = new Set<string>();
   let fixProof: FixCheck | undefined;
+  let baked = false;
   let checked: TypeCheckRun | undefined, typecheck: TypeCheck | undefined;
+  let reached: string[] | undefined;
+  let evidence: Record<string, string> | undefined;
+  let real: RealOutcomes | undefined;
   const dbNames = databaseEnv(cfg.env, cfg.services);
   try {
     const snap = join(tmp, "repo");
     const taken = takeSnapshot(repo, head, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw),
       untracked: !!o.untracked });
     removed = taken.withheld.map((w) => w.path);
+    leftOut = taken.withheld;
+    ({ fakedKeys } = taken);
+    // What the snapshot replaced, for the developer: file, line and rule, never a value; and a rewrite of text that is gone.
+    const listed = writeStandIns(o.outDir, taken.standInList);
+    if (listed) say(standInsLine(taken.standIns.length ? taken.standIns : [...new Set(taken.standInList.map((r) => r.path))], listed));
+    const stale = staleRewrites(cfg.install, holdsIn(buildContextOf(snap)));
+    if (stale.length) say(staleLine(cfg.name, stale));
     // Before the brain hears anything from this snapshot.
-    o.brain.boundary?.add(taken.suspects);
-    if (taken.tooLarge.length) say(tooLargeText(taken.tooLarge));
+    const filter = o.brain.boundary;
+    filter?.addScrubbed(taken);
+    // What the tests directory holds from here on is a model's or arnx's.
+    const swap = filter && swapIn(filter, snap, (rel) => rel === o.writeDir || rel.startsWith(`${o.writeDir}/`));
     // Clear earlier generated files only: for some languages the tests directory also holds the project's own tests.
     mkdirSync(join(snap, o.writeDir), { recursive: true });
     for (const rel of collect(snap, o.writeDir, adapter.writable)) rmSync(join(snap, rel), { force: true });
     // The image's key before any run: runs may write a manifest into the snapshot (cargo's Cargo.lock).
     headKey = envKey(cfg, snap);
     // With `context = "precise"` the hunt's context waits for the project's code index (built in its environment).
-    const ask = await o.ask(snap);
+    const asked = await o.ask(snap);
+    // A round is told what its code lacks, whether the change touches it or not.
+    const ask: RoundAsk = asked.kind === "review" && leftOut.length ? { ...asked, input: { ...asked.input,
+      scope: { ...asked.input.scope, leftOut: [...new Map([...asked.input.scope.leftOut ?? [], ...leftOut].map((w) => [w.path, w])).values()] } } }
+      : asked;
     const base = { budgetUsd: o.budgetUsd, outDir: o.outDir, ...(o.progress ? { progress: o.progress } : {}) };
     const read = (p: string) => {
       try {
@@ -312,15 +447,26 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
     };
     const generatedNow = () => Object.fromEntries(collect(snap, o.writeDir, adapter.writable)
       .map((rel) => [rel, readFileSync(join(snap, rel), "utf8")]));
-    [agent, files, results] = await (o.sessionFactory ?? dockerSession)(cfg, snap, join(o.outDir, "env-build.log"),
-      async (session) => {
+    const body = async (session: Runner) => {
         say("checking that the environment runs a test");
-        const probe = probeRun(session, snap, cfg, o.writeDir, "probe.xml", RUN_TIMEOUT);
+        // The runs of a few generated files use one process when the project configured workers; a runner that does not
+        // report the probe with that flag runs as configured, for the whole session.
+        serial = serialFlag(cfg, snap) !== null;
+        let probe = await probeRun(session, snap, cfg, o.writeDir, "probe.xml", RUN_TIMEOUT, { serial });
+        if (!probe.seen && serial && !probe.result.timedOut) {
+          serial = false;
+          say("the runner refused the single-process flag; running as configured");
+          probe = await probeRun(session, snap, cfg, o.writeDir, "probe.xml", RUN_TIMEOUT);
+        }
         if (!probe.seen) {
           const log = join(o.outDir, "probe.log");
-          writeFileSync(log, probe.result.output);
-          throw probeFailure(cfg, probe.result, log, session.copies?.(probe.result.output));
+          const said = { ...probe.result, output: filter ? filter.mask(probe.result.output) : probe.result.output };
+          writeFileSync(log, said.output);
+          throw probeFailure(cfg, said, log, session.copies?.(probe.result.output));
         }
+        // What any test of the folder loads (conftest and its imports) is no test's reach.
+        const probeReach: Reach = readReach(snap);
+        clearReach(snap);
         let counter = 0;
         // Runs name the generated test files, never the tests directory: for some languages (Rust) that directory
         // also holds the project's own tests, which are not part of the review.
@@ -329,15 +475,18 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const expand = (targets: string[]) =>
           targets.flatMap((t) => (posix.normalize(t) === posix.normalize(o.writeDir) ? generated() : [t]))
             .map((t) => posix.relative(cfg.workdir, t) || ".");
-        const run = (targets: string[]) => {
+        const run = async (targets: string[]) => {
           const rel = expand(targets);
           if (!rel.length) return `no test files under ${o.writeDir}/ yet`;
-          const [result, results] = runTests(session, snap, cfg, rel, `agent-${++counter}.xml`, TOOL_TIMEOUT);
+          const [result, results] = await runTests(session, snap, cfg, rel, `agent-${++counter}.xml`, TOOL_TIMEOUT, { serial });
           const own = generated();
           if (results?.some((t) => ownerFile(t.fileAttr, own) !== null)) saw = true;
           return describeRun(result, results, own);
         };
-        const ws = new Workspace(snap, { writeDir: o.writeDir, runTests: run, adapter, runner: cfg.runner });
+        // A copy holding the stand-ins is what tests run on, while the tools read the files here.
+        baked = !!session.copies;
+        const ws = new Workspace(snap, { writeDir: o.writeDir, runTests: run, adapter, runner: cfg.runner, reads: swap,
+          ...(baked ? {} : { writes: swap }) });
         // The facts the brain decides its follow-ups on: what the generated tests name, computed here.
         const coverage = o.coverage ?? [];
         const tools: RoundTools = { tools: () => ws.tools(), call: (name, args) => ws.call(name, args),
@@ -367,6 +516,10 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         // and a flaky test is one that fails only sometimes. A file that passed is carried into the later runs as it
         // was. A run without a report repeats everything.
         const r: (TestResult[] | null)[] = [];
+        // The agent's runs are not the final ones. Each final run's notes are read after it, with what it reported.
+        clearReach(snap);
+        const reach: Reach = new Map();
+        let noted = false;
         const ran = (repeat: number, res: TestResult[], carried: boolean, secs?: number) => res.forEach((t) =>
           emit("test.run", { project: cfg.name, repeat, test_id: t.testId, func: funcOf(t), file: t.fileAttr,
             outcome: t.outcome, message: testMessage(t.message), carried,
@@ -382,11 +535,27 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
           }
           const files = failing ? target.filter((t) => failing.some((p) => p.endsWith(t) || t.endsWith(posix.basename(p))))
             : target;
-          say(failing ? `final run ${i + 1}/${o.runs} (${files.length} file${files.length === 1 ? "" : "s"} with failures)`
+          say(failing ? `final run ${i + 1}/${o.runs} (${files.length} file${files.length === 1 ? "" : "s"} to run again)`
             : `final run ${i + 1}/${o.runs}`);
-          const [run, parsed] = runTests(session, snap, cfg, files.length ? files : target, `final-${i + 1}.xml`,
-            RUN_TIMEOUT);
+          const bounded = await runBounded(session, snap, cfg, files.length ? files : target, `final-${i + 1}.xml`,
+            { ...RUN_BOUNDS, apart, hung: hungLimits, serial });
+          const [run, parsed] = [bounded.run, bounded.results];
+          apart = bounded.apart;
+          Object.assign(hungLimits, bounded.hung);
+          // Files that ran this time are no longer unrun.
+          for (const t of files.length ? files : target) notRunSet.delete(t);
+          bounded.notRun.forEach((t) => notRunSet.add(t));
+          const nh = Object.keys(bounded.hung).length;
+          if (nh) say(`${nh === 1 ? "a test file" : `${nh} test files`} did not finish`);
+          if (bounded.notRun.length) say(`${bounded.notRun.length === 1 ? "a test file" : `${bounded.notRun.length} test files`} not run: out of time`);
+          // Masked before it is saved, as the probe's log is.
+          if (run.output) writeFileSync(join(o.outDir, `final-${i + 1}.log`), filter ? filter.mask(run.output) : run.output);
           const got = ours(parsed), secs = Math.round(run.seconds * 10) / 10;
+          const notes = readReach(snap);
+          clearReach(snap);
+          noted ||= notes.size > 0;
+          const broken = !got || got.some((t) => t.outcome === "error") || nh > 0 || bounded.notRun.length > 0;
+          for (const [p, kind] of countable(notes, broken)) if (kind === "ran" || !reach.has(p)) reach.set(p, kind);
           if (!got || !failing || !first) {
             r.push(got);
             if (got) ran(i + 1, got, false, secs);
@@ -399,42 +568,85 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
             ran(i + 1, kept, true);
             ran(i + 1, got, false, secs);
           }
-          // A test that hangs would hang again: the other runs are skipped, each a run without a report, as if it
-          // had timed out there too.
-          if (run.timedOut && i + 1 < o.runs) {
-            say(`final run ${i + 1}/${o.runs} timed out; the other runs skipped`);
-            for (let j = i + 2; j <= o.runs; j++) {
-              r.push(null);
-              emit("test.run_missing", { project: cfg.name, repeat: j, timed_out: false, exit_code: null, seconds: 0,
-                skipped: true });
-            }
-            break;
-          }
         }
-        if (o.typecheck && cfg.typecheck) checked = typecheckHere(session, snap, cfg, o.writeDir, say);
+        // A failure or a skip beside a fake runs once more with the real key, in a copy no one else reads: only outcomes come back.
+        if (fakedKeys.length) {
+          const tests = rerunCandidates(r, new Set([...Object.keys(hungLimits), ...notRunSet]));
+          if (tests.length) say("running again with the real key, no network");
+          real = await rerunWithRealKeys(session, snap, cfg, { source: { repo, head }, fakedKeys, tests, all: r,
+            target: (t) => {
+              const p = ownerFile(t.fileAttr, Object.keys(f));
+              return p ? posix.relative(cfg.workdir, p) || "." : null;
+            }, budget: o.keyReruns ?? keyReruns(), timeout: RUN_BOUNDS.together, serial });
+        }
+        // Read run by run above, before the type check clears the report folder.
+        if (o.coverage && noted) {
+          const own = new Set(o.coverage);
+          reached = reachedSince(reach, probeReach).filter((p) => own.has(p));
+        }
+        if (o.typecheck && cfg.typecheck && !o.typecheck.skipped) checked = await typecheckHere(session, snap, cfg, o.writeDir, say);
         return [a, f, r] as const;
-      });
+    };
+    const factory = o.sessionFactory ?? dockerSession;
+    const attempt = (key?: string) => factory(cfg, snap, join(o.outDir, "env-build.log"), body, key ? snap : undefined, key,
+      swap);
+    let got: Awaited<ReturnType<typeof attempt>> | null = null;
+    try {
+      got = await attempt();
+    } catch (e) {
+      // Only a review records a commit whose environment cannot be had; a connection that failed says nothing about it.
+      if (!(e instanceof EnvFailed) || e.network || !o.recordEnvFailure) throw e;
+      const fallback = usableFallback(cfg, snap);
+      say(fallback ? "this commit's own install does not build; trying the image built for another commit"
+        : "this commit's own install does not build");
+      if (fallback) {
+        try {
+          got = await attempt(fallback);
+          [headKey, env] = [fallback, { state: "fallback", kind: e.kind, log: e.log }];
+        } catch (e2) {
+          if (!(e2 instanceof EnvFailed)) throw e2;
+        }
+      }
+      if (!got) {
+        // Nothing was asked of a model: the round is empty and says why.
+        got = [envFailedAgent(e.kind), {}, []];
+        env = { state: "failed", kind: e.kind, log: e.log };
+      }
+    }
+    [agent, files, results] = got;
+    // A test failing for a file the snapshot left out, or a key it holds a fake of, says nothing about the project.
+    const tree = removed.length ? filesAt(repo, head, !!o.untracked) : [];
+    results = results.map((run) => run && markUnproven(run, { leftOut: removed, fakedKeys, all: tree, ...(real ? { real } : {}) }));
     const classes = o.before ? classify(results) : null;
     const failing = classes?.findings ?? [];
     // Chosen by test id, so the same tests are checked whatever order the runner reported them in.
     const proofs = o.before?.fixProofMax ? [...classes!.passed]
       .sort((a, b) => (a.testId < b.testId ? -1 : a.testId > b.testId ? 1 : 0)).slice(0, o.before.fixProofMax) : [];
     if (o.before && (failing.length || proofs.length)) {
-      ({ before, fixProof } = await beforeStage(repo, cfg, { ...o.before, findings: failing, proofs, files,
-        writeDir: o.writeDir, runs: o.runs, headSnap: snap, headKey, tmp, outDir: o.outDir,
-        sessionFactory: o.sessionFactory ?? dockerSession, say }));
+      ({ before, fixProof } = await beforeStage(repo, cfg, { ...o.before, findings: failing, proofs, passed: [...(classes?.passed ?? [])].map((x) => x.testId), files,
+        writeDir: o.writeDir, runs: o.runs, apart, serial, headSnap: snap, headKey, tmp, outDir: o.outDir, fallback: env?.state === "fallback",
+        sessionFactory: o.sessionFactory ?? dockerSession, say, ...(baked ? {} : { swap }),
+        ...(o.brain.boundary ? { boundary: o.brain.boundary } : {}) }));
     }
-    if (checked) {
+    // While the snapshot is here: what the second opinion is told about each failing test's code.
+    if (o.evidence) {
+      evidence = roundEvidence(snap, results, files, hunt, agent, o.writeDir, o.evidence, before, o.brain.boundary, say);
+    }
+    if (o.typecheck?.skipped) {
+      typecheck = o.typecheck.skipped;
+      say(`type check: ${describeTypecheck(typecheck)}`);
+    } else if (checked) {
       typecheck = await typecheckDone(repo, cfg, checked, { ...o.typecheck!, headSnap: snap, headKey, tmp,
-        outDir: o.outDir, sessionFactory: o.sessionFactory ?? dockerSession, say });
+        outDir: o.outDir, sessionFactory: o.sessionFactory ?? dockerSession, say, ...(baked ? {} : { swap }) });
     }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+  const b = o.brain.boundary;
   for (const [rel, source] of Object.entries(files)) {
     const dest = join(o.outDir, "tests", rel + COPY_SUFFIX);
     mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, source);
+    writeFileSync(dest, b ? b.maskValues(source) : source);
   }
   const hasTests = Object.keys(files).some((rel) => adapter.isTestFile(posix.basename(rel)));
   const classified = classify(results);
@@ -446,10 +658,50 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         message: testMessage(t.message) });
     }
   }
-  return { agent, files, classified, removed, sawResults: saw || !hasTests,
-    ...(dbLeft ? { dbUntested: dbLeft } : {}), ...(before ? { before } : {}), ...(fixProof ? { fixProof } : {}),
-    ...(typecheck ? { typecheck } : {}), ...(hunt ? { hunt } : {}) };
+  const hungFiles = Object.keys(hungLimits).sort(), notRunFiles = [...notRunSet].sort();
+  const round: Round = { agent, files, classified, removed, ...(leftOut.length ? { leftOut } : {}),
+    ...(fakedKeys.length ? { fakedKeys } : {}), ...(hungFiles.length ? { hungFiles } : {}), ...(notRunFiles.length ? { notRunFiles } : {}), sawResults: saw || !hasTests,
+    ...(dbLeft ? { dbUntested: dbLeft } : {}), ...(reached ? { reached } : {}), ...(before ? { before } : {}), ...(fixProof ? { fixProof } : {}),
+    ...(typecheck ? { typecheck } : {}), ...(env ? { env } : {}), ...(evidence ? { evidence } : {}) };
+  // All a round says from here on is saved and read by people and coding agents, none of it through a model's filter.
+  const masked = b ? maskedCopy(b, round) : { value: round, shown: false };
+  return { ...masked.value, ...(masked.shown ? { standInsShown: true } : {}), ...(hunt ? { hunt } : {}) };
 }
+
+/** The evidence pack of each test that failed in every run, read from the round's snapshot (evidence.ts), all under
+ * one time bound. A test the reviewer tied to a suspect gets the suspect's file as its own. */
+function roundEvidence(snap: string, results: (TestResult[] | null)[], files: Record<string, string>,
+  hunt: RoundHunt | undefined, agent: AgentResult, writeDir: string, o: { diff: string; message: string },
+  before: BeforeCheck | undefined, boundary: Boundary | undefined, say: Say): Record<string, string> | undefined {
+  const failing = classify(results).findings;
+  // A pack is built only through the outgoing filter.
+  if (!failing.length || !boundary) return undefined;
+  const report = parseReports([...agent.earlierTexts ?? [], agent.finalText]);
+  const suspectOf = new Map<string, string>();
+  for (const t of report.tests) {
+    if (typeof t !== "object" || t === null || Array.isArray(t)) continue;
+    const { test, suspect } = t as Record<string, unknown>;
+    if (typeof test === "string" && typeof suspect === "string") suspectOf.set(funcOfId(test), suspect.trim());
+  }
+  const t0 = performance.now();
+  const items = failing.map((t) => {
+    const file = ownerFile(t.fileAttr, Object.keys(files));
+    const source = file ? files[file] ?? "" : "";
+    const func = funcOf(t);
+    const suspect = hunt?.suspects?.find((s) => s.id === suspectOf.get(func))?.file;
+    const was = before?.tests[t.testId];
+    const shallow = shallowKind(source || undefined, func);
+    return { testSource: source, func, ...(file ? { testFile: file } : {}), ...(suspect ? { suspectFile: suspect } : {}),
+      ...(was ? { before: was } : {}), ...(shallow ? { shallow } : {}) };
+  });
+  const packs = evidencePacks({ tree: snapshotTree(snap), diff: o.diff, commitMessage: o.message, writeDir,
+    generated: Object.keys(files), boundary }, items);
+  const secs = (performance.now() - t0) / 1000;
+  if (secs >= 5) say(`evidence for the second opinion took ${Math.round(secs)}s`);
+  return Object.fromEntries(failing.map((t, i) => [t.testId, packs[i]!]));
+}
+
+const funcOfId = (test: string) => baseName(test.split("::").at(-1) ?? "").trim();
 
 /** Clears what arnx wrote into a snapshot: the generated files and the runners' reports. A type check then sees the
  * project's own files only. */
@@ -465,21 +717,31 @@ function clearArnxFiles(snap: string, cfg: ReviewConfig, writeDir: string): void
  * change as a round's is. Null when the project has no type check. A failure here is the type check's, never the
  * review's. */
 export async function typecheckRound(repo: string, head: string | null, cfg: ReviewConfig, o: { changed: string[];
-  base?: string | null; outDir: string; sessionFactory?: SessionFactory; progress?: Say; untracked?: boolean })
-  : Promise<TypeCheck | null> {
+  base?: string | null; outDir: string; sessionFactory?: SessionFactory; progress?: Say; untracked?: boolean;
+  boundary?: Boundary; skipped?: TypeCheck; record?: boolean }): Promise<TypeCheck | null> {
   if (!cfg.typecheck) return null;
+  if (o.skipped) {
+    o.progress?.(`${cfg.name}: type check: ${describeTypecheck(o.skipped)}`);
+    return o.skipped;
+  }
   const say = (m: string) => o.progress?.(`${cfg.name}: ${m}`);
   const sessionFactory = o.sessionFactory ?? dockerSession;
   mkdirSync(o.outDir, { recursive: true });
   const tmp = mkdtempSync(join(tmpdir(), "arnx-"));
   try {
     const snap = join(tmp, "repo");
-    snapshot(repo, head, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw), untracked: !!o.untracked });
+    o.boundary?.addScrubbed(takeSnapshot(repo, head, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw),
+      untracked: !!o.untracked }));
+    const swap = o.boundary && swapIn(o.boundary, snap);
     const headKey = envKey(cfg, snap);
-    const run = await sessionFactory({ ...cfg, services: [] }, snap, join(o.outDir, "env-build.log"),
-      async (session) => typecheckHere(session, snap, cfg, writeDirOf(cfg), say));
+    let baked = false;
+    const run = await sessionFactory({ ...cfg, services: [] }, snap, join(o.outDir, "env-build.log"), async (session) => {
+      baked = !!session.copies;
+      return await typecheckHere(session, snap, cfg, writeDirOf(cfg), say);
+    }, undefined, undefined, swap);
     return await typecheckDone(repo, cfg, run, { changed: o.changed, ...(o.base !== undefined ? { base: o.base } : {}),
-      headSnap: snap, headKey, tmp, outDir: o.outDir, sessionFactory, say });
+      headSnap: snap, headKey, tmp, outDir: o.outDir, sessionFactory, say, ...(baked ? {} : { swap }),
+      ...(o.record ? { record: true } : {}) });
   } catch (e) {
     const run: TypeCheckRun = { status: "failed", errors: [], output: e instanceof Error ? e.message : String(e),
       exitCode: null, timedOut: false, seconds: 0 };
@@ -492,13 +754,13 @@ export async function typecheckRound(repo: string, head: string | null, cfg: Rev
 /** The type check on the change, in the round's session after its final runs (nothing else runs in that snapshot
  * after it). arnx's generated tests are taken out of the snapshot first rather than excluded through a tsconfig of
  * arnx's: that works for any tsconfig (extends, files, project references) and any checker. */
-function typecheckHere(session: Runner, snap: string, cfg: ReviewConfig, writeDir: string, say: (m: string) => void)
-  : TypeCheckRun {
+async function typecheckHere(session: Runner, snap: string, cfg: ReviewConfig, writeDir: string, say: (m: string) => void)
+  : Promise<TypeCheckRun> {
   say("type check");
   let run: TypeCheckRun;
   try {
     clearArnxFiles(snap, cfg, writeDir);
-    run = runTypecheck(session, cfg);
+    run = await runTypecheck(session, cfg);
   } catch (e) {
     // Whatever goes wrong here is the type check's, never the round's.
     run = { status: "failed", errors: [], output: e instanceof Error ? e.message : String(e), exitCode: null,
@@ -514,7 +776,7 @@ function typecheckHere(session: Runner, snap: string, cfg: ReviewConfig, writeDi
  * what keys the image, its dependencies differ there and errors are not compared. */
 async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun, o: { changed: string[];
   base?: string | null; headSnap: string; headKey: string; tmp: string; outDir: string; sessionFactory: SessionFactory;
-  say: (m: string) => void }): Promise<TypeCheck> {
+  say: (m: string) => void; swap?: Swap; record?: boolean }): Promise<TypeCheck> {
   let secs = run.seconds;
   let before: { status: TypeCheckBefore; errors?: TscError[] } | undefined, error: string | undefined;
   if (run.status === "errors" && o.base !== undefined) {
@@ -528,7 +790,7 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
         else {
           o.say("type check on the code before the change");
           const there = await o.sessionFactory({ ...cfg, services: [] }, snap, join(o.outDir, "typecheck-env-build.log"),
-            async (session) => runTypecheck(session, cfg), o.headSnap, o.headKey);
+            async (session) => runTypecheck(session, cfg), o.headSnap, o.headKey, o.swap);
           secs += there.seconds;
           emit("typecheck.run", { project: cfg.name, on: "before", status: there.status, errors: there.errors.length,
             exit_code: there.exitCode, timed_out: there.timedOut, duration_ms: Math.round(there.seconds * 1000) });
@@ -541,7 +803,11 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
       }
     }
   }
-  const t = typeCheckOf(cfg, run, o.changed, secs, before);
+  // What the code before the change had decides whether later reviews skip the check, never what the change adds.
+  if (!o.record) { /* a change that is not on the checked-out code says nothing about it */ }
+  else if (before?.status === "compared") recordTypecheck(repo, cfg, before.errors!.length);
+  else if (run.status === "clean") recordTypecheck(repo, cfg, 0);
+  const t = typeCheckOf(cfg, run, o.changed, secs, before, workspaceNames(o.headSnap));
   emit("typecheck.done", { project: cfg.name, status: t.status, errors: t.errors, in_changed_files: t.inChangedFiles,
     ...(t.new === undefined ? {} : { new: t.new, pre_existing: t.preExisting }), ...(t.before ? { before: t.before } : {}),
     secs: t.secs, ...(error ? { error: clip(error, 500) } : {}) });
@@ -557,9 +823,9 @@ async function typecheckDone(repo: string, cfg: ReviewConfig, run: TypeCheckRun,
  * The fix proof shares its session: `proofs` (tests that passed in every run) in those files are judged from the same
  * runs; the files holding the others run `runs` times more, after the findings' runs, so they cannot change them. */
 async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | null; diff?: string; deadline?: number;
-  findings: TestResult[]; proofs: TestResult[]; files: Record<string, string>; writeDir: string; runs: number;
-  headSnap: string; headKey: string; tmp: string;
-  outDir: string; sessionFactory: SessionFactory; say: (m: string) => void })
+  findings: TestResult[]; proofs: TestResult[]; passed: string[]; files: Record<string, string>; writeDir: string; runs: number;
+  headSnap: string; headKey: string; tmp: string; fallback?: boolean;
+  apart?: boolean; serial?: boolean; outDir: string; sessionFactory: SessionFactory; say: (m: string) => void; boundary?: Boundary; swap?: Swap })
   : Promise<{ before?: BeforeCheck; fixProof?: FixCheck }> {
   const started = performance.now();
   const ms = (from: number) => Math.round(performance.now() - from);
@@ -622,7 +888,9 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
     const snap = join(o.tmp, "before");
     let late = false, proofLate = false, envChanged = false;
     const proofRuns: BeforeRun[] = [];
-    const copyCode = () => snapshot(repo, o.base!, snap, secretPinsOf(cfg.raw), { sandbox: sandboxOnlyOf(cfg.raw) });
+    // Its values may reach a model through a run's output, as the change's do.
+    const copyCode = () => o.boundary?.addScrubbed(takeSnapshot(repo, o.base!, snap, secretPinsOf(cfg.raw),
+      { sandbox: sandboxOnlyOf(cfg.raw) }));
     // Set when the code is in place before the session, for an image made from it (below).
     let inImage = false;
     const inSession = async (session: Runner) => {
@@ -641,24 +909,20 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
       envChanged = !inImage && envKey(cfg, snap) !== o.headKey;
       snapshotMs = ms(t0);
       const out: BeforeRun[] = [];
-      // As in the final runs, a test that hangs would hang again: after a run times out the others are skipped, each
-      // a run without a report.
-      const skipRest = (runs: BeforeRun[], i: number, type: "before.run" | "fix_proof.run", files: number) => {
-        o.say(`before the change: run ${i}/${o.runs}${type === "fix_proof.run" ? " of the passing tests" : ""} ` +
-          "timed out; the other runs skipped");
-        for (let j = i + 1; j <= o.runs; j++) {
-          runs.push({ results: null, output: "skipped: an earlier run timed out", timedOut: false });
-          emit(type, { project: cfg.name, run: j, files, duration_ms: 0, reported: false, timed_out: false,
-            skipped: true });
-        }
-      };
+      // Files go one at a time once the round's did; a file that hangs alone is not run again.
+      let apartNow = !!o.apart;
+      const hungBefore: Record<string, number> = {}, hungProof: Record<string, number> = {};
       for (let i = 1; ids.length && i <= o.runs; i++) {
         if (o.deadline !== undefined && performance.now() >= o.deadline) {
           late = true;
           break;
         }
         const t = performance.now();
-        const [run, parsed] = runTests(session, snap, cfg, targets, `before-${i}.xml`, RUN_TIMEOUT);
+        const bounded = await runBounded(session, snap, cfg, targets, `before-${i}.xml`,
+          { ...RUN_BOUNDS, apart: apartNow, hung: hungBefore, serial: o.serial });
+        const [run, parsed] = [bounded.run, bounded.results];
+        apartNow = bounded.apart;
+        Object.assign(hungBefore, bounded.hung);
         const took = ms(t);
         runsMs += took;
         // As in the final runs, only the generated tests count.
@@ -666,10 +930,6 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
         out.push({ results: ours.length ? ours : null, output: run.output, timedOut: run.timedOut });
         emit("before.run", { project: cfg.name, run: i, files: targets.length, duration_ms: took,
           reported: ours.length > 0, timed_out: run.timedOut });
-        if (run.timedOut && i < o.runs) {
-          skipRest(out, i, "before.run", targets.length);
-          break;
-        }
       }
       for (let i = 1; !late && proofTargets.length && i <= o.runs; i++) {
         if (o.deadline !== undefined && performance.now() >= o.deadline) {
@@ -677,24 +937,24 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
           break;
         }
         const t = performance.now();
-        const [run, parsed] = runTests(session, snap, cfg, proofTargets, `fix-proof-${i}.xml`, RUN_TIMEOUT);
+        const bounded = await runBounded(session, snap, cfg, proofTargets, `fix-proof-${i}.xml`,
+          { ...RUN_BOUNDS, apart: apartNow, hung: hungProof, serial: o.serial });
+        const [run, parsed] = [bounded.run, bounded.results];
+        apartNow = bounded.apart;
+        Object.assign(hungProof, bounded.hung);
         const took = ms(t);
         proofMs += took;
         const ours = parsed?.filter((x) => ownerFile(x.fileAttr, own) !== null) ?? [];
         proofRuns.push({ results: ours.length ? ours : null, output: run.output, timedOut: run.timedOut });
         emit("fix_proof.run", { project: cfg.name, run: i, files: proofTargets.length, duration_ms: took,
           reported: ours.length > 0, timed_out: run.timedOut });
-        if (run.timedOut && i < o.runs) {
-          skipRest(proofRuns, i, "fix_proof.run", proofTargets.length);
-          break;
-        }
       }
       return out;
     };
     const buildLog = join(o.outDir, "before-env-build.log");
     let runs: BeforeRun[];
     try {
-      runs = await o.sessionFactory(cfg, snap, buildLog, inSession, o.headSnap, o.headKey);
+      runs = await o.sessionFactory(cfg, snap, buildLog, inSession, o.headSnap, o.headKey, o.swap);
     } catch (e) {
       if (!(e instanceof CopyDiffers)) throw e;
       // The tests run the image's copy of the code, which is the change's: the code before it needs an image of its own,
@@ -704,7 +964,7 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
       proofRuns.length = 0;
       rmSync(snap, { recursive: true, force: true });
       copyCode();
-      runs = await o.sessionFactory(cfg, snap, buildLog, inSession, o.headSnap, o.headKey);
+      runs = await o.sessionFactory(cfg, snap, buildLog, inSession, o.headSnap, o.headKey, o.swap);
     }
     if (late) return skip("time");
     // A test that reads one of the project's source files as text and matches it proves no regression and no fix.
@@ -713,21 +973,36 @@ async function beforeStage(repo: string, cfg: ReviewConfig, o: { base: string | 
       shallowKind(o.files[file], funcOf(t), (p) => source(file, p)) === "source-text";
     // Nor does a test that fakes what only the change uses prove a fix.
     const isTest = (name: string) => adapterFor(cfg).isTestFile(name);
-    const added = namesAdded(o.diff ?? "", isTest);
+    // The whole files give the code its comments and strings: the change's side is the one under review, the other the base.
+    const readSide = (path: string, side: "new" | "old") => {
+      const at = join(side === "new" ? o.headSnap : snap, path);
+      return existsSync(at) ? readFileSync(at, "utf8") : null;
+    };
+    const added = namesAdded(o.diff ?? "", isTest, readSide);
     // And failing the same way there says nothing when the test uses what the change adds.
     const brought = newNames(o.diff ?? "", isTest, (path) => {
       const at = join(snap, path);
       return existsSync(at) ? readFileSync(at, "utf8") : null;
-    });
+    }, readSide);
+    const passing = new Set(o.passed);
     return result(() => done(Object.fromEntries(o.findings.map((t) => {
-      const file = ownerFile(t.fileAttr, own), b = judgeBefore(t, file, runs, envChanged);
-      return [t.testId, asText(t, file) ? textBefore(b) : file === null ? b : vacuousBefore(b, o.files[file] ?? "", funcOf(t), brought)];
+      const file = ownerFile(t.fileAttr, own);
+      const b = judgeBefore(t, file, runs, envChanged, file === null ? undefined : { source: o.files[file] ?? "", func: funcOf(t) });
+      // Tests that pass with the change and fail there with the same message: that message says nothing about this one.
+      // A pass there that used a name the change adds, or ran beside a dead background thread, proves no regression.
+      const judged = asText(t, file) ? textBefore(b) : file === null ? b : sharedInGroups(vacuousBefore(
+        vacuousPass(b, { source: o.files[file] ?? "", func: funcOf(t), names: brought, path: file,
+          baseOutput: runs.map((r) => r.output) }), o.files[file] ?? "", funcOf(t), brought, file),
+      t.message, [runs, proofRuns], passing);
+      return [t.testId, o.fallback ? asFallbackBefore(judged) : judged];
     }))),
     () => proofLate ? proved({}, "time") : proved(Object.fromEntries(o.proofs.map((t) => {
       const file = ownerFile(t.fileAttr, own);
-      const f = judgeFix(t, file, file !== null && owners.includes(file) ? runs : proofRuns, envChanged);
+      const f = judgeFix(t, file, file !== null && owners.includes(file) ? runs : proofRuns, envChanged,
+        file === null ? undefined : { source: o.files[file] ?? "", func: funcOf(t) });
       const faked = file === null ? null : fakedName(o.files[file] ?? "", added);
-      return [t.testId, asText(t, file) ? textFix(f) : faked ? fakedFix(f, faked) : f];
+      const judged = asText(t, file) ? textFix(f) : faked ? fakedFix(f, faked) : f;
+      return [t.testId, o.fallback ? asFallbackFix(judged) : judged];
     }))));
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

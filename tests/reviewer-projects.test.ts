@@ -58,7 +58,7 @@ test("a change to a shared path reviews each project that uses it", async () => 
   expect(review.questionProjects).toEqual(["feed", "pay"]);
   expect(review.writeDirs).toEqual({ feed: "services/feed/tests/arnx_generated", pay: "services/pay/tests/arnx_generated" });
   expect([review.passed, review.testsWritten]).toEqual([2, 4]);
-  expect(exitCode(review)).toBe(1);
+  expect(exitCode(review)).toBe(0);
   for (const p of ["feed", "pay"]) {
     expect(existsSync(join(rdir, "projects", p, "transcript.jsonl"))).toBe(true);
     expect(existsSync(join(rdir, "projects", p, "tests", "services", p, GEN + COPY_SUFFIX))).toBe(true);
@@ -86,7 +86,7 @@ test("a partly covered change names the rest in the status", async () => {
   expect(review.projects).toEqual(["pay"]);
   expect(review.uncovered).toEqual([{ path: "infra/main.tf", reason: "Terraform; no adapter" }]);
   const md = readFileSync(join(rdir, "review.md"), "utf8");
-  expect(md).toContain("Not covered: `infra/main.tf` (Terraform; no adapter).");
+  expect(md).toContain("Not covered (Terraform; no adapter): `infra/main.tf`.");
 });
 
 test("the review keeps per-project stats: tests, passes, runs without a report, whether the agent saw them run", async () => {
@@ -142,7 +142,8 @@ test("the same question from two projects is asked once, and both findings wait 
 
 test("each project sees only its part of the change, and files no test names are listed, not called complete",
   async () => {
-    writeFileSync(join(repo, "services/pay/pay.py"), "X = 2\n");
+    // Enough added lines for the coverage follow-up to ask about it.
+    writeFileSync(join(repo, "services/pay/pay.py"), Array.from({ length: 25 }, (_, n) => `V${n} = ${n}\n`).join(""));
     writeFileSync(join(repo, "services/feed/feed.py"), "X = 3\n");
     const agent = new ScriptedAgent([
       [tool("write_file", { path: `services/feed/${GEN}`, content: "import feed\ndef test_ok(): pass\n" })],
@@ -177,12 +178,12 @@ test("each project sees only its part of the change, and files no test names are
     expect(exitCode(review)).toBe(0);
     expect(load(rdir)).toEqual(review);
     const md = render(review);
-    expect(md).toContain("Partly covered: no arnx test refers to 1 of the 2 changed source files below");
-    expect(md).toContain("Not tested by arnx in `pay`: `services/pay/pay.py` (reviewer: needs a live payment gateway).");
+    expect(md).toContain("Partly covered: arnx saw no test reach 1 of the 2 changed source files below");
+    expect(md).toContain("No test seen reaching in `pay`: `services/pay/pay.py` (reviewer: needs a live payment gateway).");
     expect(md).not.toContain("Complete:");
     const short = summary(review, "review.md");
-    expect(short).toContain("Partly covered: no test refers to 1 of 2 changed source files");
-    expect(short).toContain("  Not tested (pay): services/pay/pay.py");
+    expect(short).toContain("Partly covered: no test seen reaching 1 of 2 changed source files");
+    expect(short).toContain("  No test seen reaching (pay): services/pay/pay.py");
   });
 
 test("projects are tested two at a time, and the report keeps review order", async () => {

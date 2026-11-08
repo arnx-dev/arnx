@@ -104,6 +104,15 @@ function step(repo: string): Omit<Next, "phase"> & { phase?: string } {
     let settled = false, cut = false;
     try {
       const r = load(latest);
+      // Nothing to mark and a project whose commit has no working install: marks are not what is waited for.
+      const broken = (r.projectStats ?? []).find((p) => p.env);
+      if (broken && nextSteps(r).length === 0) {
+        const where = `review ${id}: \`${broken.name}\` was ${broken.env!.state === "failed" ? "not tested" : "tested on another commit's image"}; ` +
+          "this commit's install does not work";
+        // Setup proves the checked-out tree: it cannot mend an older commit.
+        return broken.env!.old ? { where, command: "arnx review", why: "on a later commit" }
+          : { where, command: `arnx setup --project ${broken.name}`, why: "builds one that does, or review a later commit" };
+      }
       settled = nextSteps(r).length === 1;
       cut = (r.projectStats ?? []).some((p) => p.stop === "budget");
     } catch {

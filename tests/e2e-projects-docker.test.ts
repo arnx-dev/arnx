@@ -169,13 +169,18 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: projects", () => {
     writeFileSync(money, readFileSync(money, "utf8").replace("Math.round(amount * 100)", "Math.floor(amount * 100)"));
     commit(repo, "floor cents");
     const gen = (p: string) => `services/${p}/__tests__/arnx_generated/${p}.test.js`;
-    const agent = new ScriptedAgent([
+    // One script each: the two rounds run side by side, and read in turn one would hand a project the other's reply.
+    const feedScript = new ScriptedAgent([
       [tool("write_file", { path: gen("feed"), content: FEED_TEST })], [tool("run_tests")],
       [text('{"tests": [], "suspected_defects": [], "questions": []}')],
+    ]);
+    const payScript = new ScriptedAgent([
       [tool("write_file", { path: gen("pay"), content: PAY_TEST })], [tool("run_tests")],
       [text(`{"tests": [], "suspected_defects": [{"test": "${gen("pay")}::charges cents exactly", ` +
         '"explanation": "floor drops a cent"}], "questions": []}')],
     ]);
+    const agent = new ScriptedAgent([]);
+    agent.create = (q) => (JSON.stringify(q.messages[0]).includes("services/pay/__tests__") ? payScript : feedScript).create(q);
     const { review, rdir } = await runReview(repo, { settings: SETTINGS, agentModel: agent,
       challenger: new FakeJson([{ verdict: "confirmed", reason: "0.29 becomes 28" }]) });
     expect(review.projects).toEqual(["feed", "pay"]);
@@ -183,7 +188,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: projects", () => {
     expect(review.findings.map((f) => [f.project, f.func, f.file])).toEqual([
       ["pay", "charges cents exactly", gen("pay")]]);
     expect(review.passed).toBe(2);
-    expect(exitCode(review)).toBe(1);
+    expect(exitCode(review)).toBe(0);
     expect(review.findings[0]!.before!.status).toBe("regression"); // Math.round charged 29 cents before the change
 
     markReal(rdir);
@@ -201,7 +206,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: projects", () => {
       snapshot(repo, null, snap, [], { untracked: true });
       cpSync(join(repo, ".arnx", "tests"), join(snap, ".arnx", "tests"), { recursive: true });
       const own = await dockerSession(cfg, snap, join(tmp(), "build.log"),
-        async (s) => runTests(s, snap, cfg, [], "own.xml", 300)[1]);
+        async (s) => (await runTests(s, snap, cfg, [], "own.xml", 300))[1]);
       expect(own?.length).toBeGreaterThan(0);
       expect(own!.filter((t) => t.testId.includes(".arnx"))).toEqual([]);
     } finally {
@@ -285,11 +290,11 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: projects", () => {
     const head = fresh();
     try {
       const runs = await dockerSession(cfg, head, join(tmp(), "build.log"), async (s) => {
-        const first = s.run("cargo nextest run", 600);
-        const second = s.run("cargo nextest run", 600);
+        const first = await s.run("cargo nextest run", 600);
+        const second = await s.run("cargo nextest run", 600);
         const lib = join(head, "src/lib.rs");
         writeFileSync(lib, readFileSync(lib, "utf8").replace("a + b", "a - b"));
-        return [first, second, s.run("cargo nextest run", 600)];
+        return [first, second, await s.run("cargo nextest run", 600)];
       });
       expect(runs[0]!.output).toContain("Compiling rust-calc");
       expect(runs[1]!.exitCode).toBe(0);

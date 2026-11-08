@@ -124,3 +124,7 @@ export function purePosix(p: string): { path: string; absolute: boolean; parts: 
   const path = (absolute ? "/" : "") + parts.join("/");
   return { path: path || ".", absolute, parts };
 }
+
+/** Where a diff's next file starts: after a real line end only. To a regular expression's `m` a CR or U+2028 is a line end
+ * too, and either may be a file's own text. */
+export const DIFF_SECTION = /(?<![^\n])(?=diff --git )/;

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { isApproved, loadReviewConfig, parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
+import { digest, isApproved, loadReviewConfig, parseReviewConfig, parseReviewFile, reviewConfigPath, stamp, stampFile } from "../src/config";
 import { ArnxError, SetupRequired } from "../src/errors";
 import { GOOD } from "./helpers/yaml";
 import { useTmp } from "./helpers/tmp";
@@ -55,4 +55,44 @@ test("test_missing", () => {
 test("plain scalars resolve as PyYAML does", () => {
   const cfg = parseReviewConfig(GOOD.replace("env:\n", "env:\n  A: y\n  B: 012\n  C: 2026-10-11\n  D: 09\n  E: 1e-05\n  F: on\n"));
   expect(cfg.env).toMatchObject({ A: "y", B: "10", C: "2026-10-11", D: "09", E: "1e-05", F: "True" });
+});
+
+const one = (t: string) => parseReviewFile(t).projects[0]!;
+const TS_YAML = (extra: string, language = "typescript") =>
+  `version: 1\nprojects:\n  app:\n    root: .\n    language: ${language}\n    runner: ${language === "python" ? "pytest" : "jest"}\n` +
+  `    image: node:22\n    test_command: ${language === "python" ? "python -m pytest" : "npx jest"} {targets}\n` +
+  extra.split("\n").filter(Boolean).map((l) => `    ${l}\n`).join("");
+
+test("test_files must be a star and a test file suffix", () => {
+  expect(one(TS_YAML('test_files: "*Spec.tsx"\n')).testFiles).toBe("*Spec.tsx");
+  expect(one(TS_YAML('test_files: "*.integration.test.ts"\n')).testFiles).toBe("*.integration.test.ts");
+  for (const good of ["*.spec.ts", "*_test.js", "*-spec.mjs", "*Test.ts", "*.TEST.ts"]) {
+    expect(one(TS_YAML(`test_files: "${good}"\n`)).testFiles).toBe(good);
+  }
+  expect(one(TS_YAML("")).testFiles).toBeUndefined();
+  for (const bad of ["Spec.tsx", "*Spec", "*/Spec.tsx", "**Spec.ts", "*Spec.py", "*", "*Sp ec.ts", "*.ts", "*s.ts", "*x.ts", "*.d.ts", "*Bar.tsx", "*test.ts", "*spec.ts", "*Latest.tsx"]) {
+    expect(() => parseReviewFile(TS_YAML(`test_files: "${bad}"\n`))).toThrow(/test_files: must be a \* and a test file suffix/);
+  }
+  expect(() => parseReviewFile(TS_YAML('test_files: "*Spec.tsx"\n', "python")))
+    .toThrow(/test_files: only for typescript projects/);
+});
+
+test("a review.yaml without test_files keeps its stamp", () => {
+  // The digest an arnx without the key computed for this file: the new key changes nothing for a file that lacks it.
+  const text = TS_YAML("tests_dir: src/__tests__/arnx_generated\n");
+  expect(digest(one(text))).toBe("0c0fba578db219d562b6ab55acc246782a922d0dd5592329f65b890d3fb9e249");
+  const stamped = stampFile(parseReviewFile(text), "dev", "2026-11-06");
+  expect(isApproved(parseReviewFile(stamped).projects[0]!)).toBe(true);
+  // The key is part of what is approved: adding it voids the stamp.
+  expect(isApproved(parseReviewFile(stamped.replace("    root: .", '    root: .\n    test_files: "*Spec.tsx"')).projects[0]!))
+    .toBe(false);
+});
+
+test("with test_files set, a source file whose name ends the same way is still source", async () => {
+  const { adapterFor } = await import("../src/adapters");
+  const { changedSources } = await import("../src/untested");
+  const a = adapterFor({ language: "typescript", testFiles: "*Spec.tsx" });
+  expect(changedSources(["src/utils.ts", "src/SideBar.tsx", "src/FooSpec.tsx"], a)).toEqual(["src/utils.ts", "src/SideBar.tsx"]);
+  // A bare test ending would match latest.ts: refused, so latest.ts stays source.
+  expect(changedSources(["src/latest.ts"], adapterFor({ language: "typescript", testFiles: "*test.ts" }))).toEqual(["src/latest.ts"]);
 });

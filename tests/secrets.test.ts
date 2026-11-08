@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { excludePathspecs, firstUnpinned, hasSecretContent, isSecretEnvName, isSecretPath, secretPins }
+import { excludePathspecs, hasSecretContent, scanKeys, isSecretEnvName, isSecretPath, secretPins }
   from "../src/secrets";
 import { AWS_KEY, AWS_KEY_2, PRIVATE_KEY, SLACK_TOKEN } from "./helpers/fakekeys";
 
@@ -9,6 +9,11 @@ test("test_secret_paths", () => {
   }
   for (const p of ["env.py", "keyboard.py", "monkey.txt", "src/environment.md"]) expect(isSecretPath(p)).toBe(false);
 });
+
+const first = (text: string, pins: string[]) => {
+  const r = scanKeys("f.txt", text, pins);
+  return r && "withhold" in r ? r.withhold : null;
+};
 
 test("test_secret_content", () => {
   expect(hasSecretContent(`${PRIVATE_KEY}\nabc`)).toBe(true);
@@ -22,7 +27,7 @@ test("current OpenAI key shapes are secrets too (project, service-account and ad
   for (const kind of ["proj", "svcacct", "admin"]) {
     const key = `sk-${kind}-${"Ab3_x-".repeat(8)}`;
     expect(hasSecretContent(`OPENAI_API_KEY=${key}`)).toBe(true);
-    expect(firstUnpinned(`k = "${key}"`, [])).toEqual({ line: 1, label: `sk-${kind}-…` });
+    expect(first(`k = "${key}"`, [])).toEqual({ line: 1, label: `sk-${kind}-…` });
   }
   expect(hasSecretContent("sk-proj-short")).toBe(false);
   expect(hasSecretContent("task-project-name")).toBe(false);
@@ -56,11 +61,11 @@ test("a file's key-shaped strings are pinned by short hashes; it is kept only wh
   expect(pins).toHaveLength(2); // unique strings
   expect(pins.every((p) => /^[0-9a-f]{16}$/.test(p))).toBe(true);
   expect(pins.join("")).not.toContain("AKIA");
-  expect(firstUnpinned(fixture, pins)).toBeNull();
-  expect(firstUnpinned(fixture, [])).toEqual({ line: 1, label: "AKIA…" });
-  expect(firstUnpinned(fixture + `NEW = '${SLACK_TOKEN}'\n`, pins)).toEqual({ line: 4, label: "xoxb-…" });
-  expect(firstUnpinned(`${PRIVATE_KEY}\n`, [])).toEqual({ line: 1, label: "a private key" });
-  expect(firstUnpinned("def key_for(user): return user.id", [])).toBeNull();
+  expect(first(fixture, pins)).toBeNull();
+  expect(first(fixture, [])).toEqual({ line: 1, label: "AKIA…" });
+  expect(first(fixture + `NEW = '${SLACK_TOKEN}'\n`, pins)).toEqual({ line: 4, label: "xoxb-…" });
+  expect(first(`${PRIVATE_KEY}\n`, [])).toEqual({ line: 1, label: "a private key" });
+  expect(first("def key_for(user): return user.id", [])).toBeNull();
 });
 
 test("a port before an @ is not a password", () => {

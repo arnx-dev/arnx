@@ -27,10 +27,12 @@ export const PRICES: Prices = {
   // River (docs.river.ai, 2026-10-14): no cache-write charge.
   "zai-org/GLM-5.3-Flash": [0.12, 0.40, 0.024, 0.0],
   "deepseek-ai/DeepSeek-V4.1-Flash": [0.12, 0.48, 0.0024, 0.0],
-  // The other providers arnx knows (settings.ts KNOWN_PROVIDERS), from their docs, 2026-10-21. DeepSeek: peak rates
+  // The other providers arnx knows (settings.ts KNOWN_PROVIDERS), from their docs, 2026-10-21 DeepSeek: peak rates
   // (off-peak is half); OpenRouter: as Z.ai's own price for the model.
   "deepseek-flash": [0.3, 1.2, 0.006, 0.0],
-  "kimi-k3": [3.0, 15.0, 0.3, 0.0],
+  // Kimi, 2026-11-05: K3 bills a cache write; K3.1 Pro is cheaper than K3.
+  "kimi-k3": [3.0, 15.0, 0.3, 3.0],
+  "kimi-k3.1-pro": [2.0, 10.0, 0.2, 2.0],
   "z-ai/glm-5.3": [1.4, 4.4, 0.26, 0.0],
   "glm-5.3-flash": [0.15, 0.5, 0.03, 0.0],
   // 2026-10-13: prompts over 100K tokens are billed at five times the rate.
@@ -45,6 +47,42 @@ export function brief(message: string): string {
   return message.length > 100 ? `${message.slice(0, 100)}…` : message;
 }
 export const DELAYS = [2, 8, 30];
+/** Waits (seconds) while every attempt of a call found the provider down: 7 attempts over about 220 s, which stays
+ * under the 5-minute lifetime of Anthropic's prompt cache (jitter of 20% either way reaches 264 s, plus the
+ * attempts). Timeouts and streams cut after they started keep DELAYS: those may be billed. */
+export const OUTAGE_DELAYS = [2, 8, 30, 60, 60, 60];
+/** Once a provider has had this many seconds of outage waits in this process, its calls wait [2, 8] only, and a
+ * review that still finds it down ends with the resume advice. */
+export const OUTAGE_WAIT_MAX_SECONDS = 600;
+/** Per provider: the seconds of wall clock spent waiting out an outage (overlapping waits of parallel calls count once)
+ * and when the latest wait ends (ms on the clock). A call that succeeds clears it. */
+const outageWaited = new Map<string, { seconds: number; until: number }>();
+/** For tests: forget the outage waits of every provider. */
+export function resetOutageWaits(): void { outageWaited.clear(); }
+const waitedSeconds = (provider: string) => outageWaited.get(provider)?.seconds ?? 0;
+/** The waits a call to `provider` follows now while the provider stays down: `delays`, or [2, 8] of them once the
+ * provider has cost OUTAGE_WAIT_MAX_SECONDS. */
+function outageSchedule(provider: string, delays: number[]): number[] {
+  return waitedSeconds(provider) >= OUTAGE_WAIT_MAX_SECONDS ? delays.slice(0, 2) : delays;
+}
+/** `base` seconds with 20% jitter either way (`random` is in [0, 1)), to the tenth of a second. */
+const jittered = (base: number, random: () => number) => Math.round(base * (0.8 + 0.4 * random()) * 10) / 10;
+/** A provider-given wait (retry-after) is honoured, but not past what remains of the provider's cap. */
+const heldToCap = (provider: string, given: number) =>
+  Math.min(given, Math.max(0, OUTAGE_WAIT_MAX_SECONDS - waitedSeconds(provider)));
+/** A wait of `seconds` starting at `now` (ms): only the part no other wait already covers is counted. */
+function chargeOutage(provider: string, seconds: number, now: number): void {
+  const l = outageWaited.get(provider) ?? { seconds: 0, until: 0 }, end = now + seconds * 1000;
+  l.seconds += Math.max(0, end - Math.max(now, l.until)) / 1000;
+  l.until = Math.max(l.until, end);
+  outageWaited.set(provider, l);
+}
+/** The progress line of a wait for a provider that is down: who, what it answered, how long, which try is next. */
+function outageLine(provider: string, met: string, seconds: number, next: number, of: number): string {
+  const status = /^HTTP (\d+)$/.exec(met)?.[1];
+  const what = status === "429" ? `rate limited (${met})` : status ? `overloaded (${met})` : met;
+  return `${PRESETS[provider]?.label ?? provider} ${what}; waiting ${Math.round(seconds)} s, try ${next} of ${of}`;
+}
 /** A status that says the provider is down or overloaded, not that the request was wrong. */
 const isDown = (status: number) => status >= 500 || status === 429;
 /** A refused key, which no retry fixes. */
@@ -87,13 +125,15 @@ export const TOTAL_TIMEOUT = 300;
 // ATTEMPT_TIMEOUT bounds one attempt: a request still unanswered after it is abandoned and sent again (within the
 // total), since a second try of a hung request usually answers in seconds.
 export const ATTEMPT_TIMEOUT = 150;
-// Second opinions are short calls (3–20 s when the connection is up): a stalled one is abandoned after 60 s, so a
-// dropped connection costs a minute, not two and a half. Hunt calls keep ATTEMPT_TIMEOUT (they take 60–90 s). In
+// Second opinions take 9 s at the median and up to a minute for the slowest healthy stream, so the wall clock is
+// generous (150 s) and a dead connection is caught by silence instead (VERDICT_IDLE_TIMEOUT, 30 s without bytes).
+// Hunt calls keep ATTEMPT_TIMEOUT (they take 60–90 s). In
 // background mode (OpenAI) the attempt limit bounds only the create; polling runs to the call's total timeout.
 // When the challenger has a fallback, its first model is given one timed-out attempt only (`timeoutAttempts: 1`):
 // retrying a stalled model four times cost up to 280 s before the fallback, which answers in seconds, was asked.
 // Retryable statuses and network errors that are not timeouts keep the usual retries.
-export const VERDICT_ATTEMPT_TIMEOUT = 60;
+export const VERDICT_ATTEMPT_TIMEOUT = 150;
+export const VERDICT_IDLE_TIMEOUT = 30;
 // OpenAI streams of hidden reasoning go quiet for long stretches and stall on some networks although the response
 // completes: OpenAI calls run in background mode instead, polled every POLL_SECONDS (a GET, not a new generation).
 export const POLL_SECONDS = 3;
@@ -143,7 +183,8 @@ export interface AgentModel {
   readonly provider?: string;
   /** Told when a call stalls or loses its connection and is retried, so progress can say so. */
   notice?: (message: string) => void;
-  create(a: { system: string; tools: Tool[]; messages: Message[]; maxTokens: number }): Promise<Reply>;
+  /** `signal`: abort the request (and stop retrying) when the caller no longer wants the reply. */
+  create(a: { system: string; tools: Tool[]; messages: Message[]; maxTokens: number; signal?: AbortSignal }): Promise<Reply>;
 }
 
 /** The parsed reply, its cost, the token usage it was priced from, attempts billed with unknown usage, and (from a
@@ -159,7 +200,16 @@ export interface JsonModel {
   trace?: Trace;
   /** Told when a call stalls or loses its connection and is retried, so progress can say so. */
   notice?: (message: string) => void;
-  completeJson(system: string, user: string, schema: Record<string, unknown>): Promise<JsonReply>;
+  /** `signal`: abort the request (and stop retrying) when the caller no longer wants the reply. Providers that
+   * cannot cancel ignore it. */
+  completeJson(system: string, user: string, schema: Record<string, unknown>, signal?: AbortSignal): Promise<JsonReply>;
+}
+
+/** Aborts `own` when `signal` does. */
+function followSignal(signal: AbortSignal | undefined, own: AbortController): void {
+  if (!signal) return;
+  if (signal.aborted) own.abort();
+  else signal.addEventListener("abort", () => own.abort(), { once: true });
 }
 
 /** What one model was used for in a run: calls with known usage, calls billed with unknown usage, tokens and cost.
@@ -268,12 +318,19 @@ export class AnthropicAgent implements AgentModel {
   private timeoutAttempts: number;
   private fetch: typeof fetch;
   private sleep: (seconds: number) => Promise<void>;
+  /** The waits while every attempt finds the provider down (OUTAGE_DELAYS unless the role gives fewer). */
+  readonly downDelays: number[];
+  private random: () => number;
+  private clock: () => number;
 
   constructor(readonly model: string, readonly effort: string, private apiKey: string, private client?: MessagesClient,
               opts: { idleSeconds?: number; firstEventSeconds?: number; totalSeconds?: number; attemptSeconds?: number;
                 timeoutAttempts?: number; fetch?: typeof fetch; sleep?: (seconds: number) => Promise<void>;
-                provider?: string; baseURL?: string } = {}) {
+                provider?: string; baseURL?: string; downDelays?: number[]; random?: () => number; clock?: () => number } = {}) {
     this.provider = opts.provider ?? "anthropic";
+    this.downDelays = opts.downDelays ?? OUTAGE_DELAYS;
+    this.random = opts.random ?? Math.random;
+    this.clock = opts.clock ?? (() => performance.now());
     this.baseURL = opts.baseURL;
     this.timeoutAttempts = opts.timeoutAttempts ?? Infinity;
     this.fetch = opts.fetch ?? fetch;
@@ -286,13 +343,15 @@ export class AnthropicAgent implements AgentModel {
 
   /** Stream one request to its final message; a stream silent for `idle` seconds, or still running after the attempt
    * limit, is aborted and retried. `billed.unknown` counts attempts that streamed and were then cut off. */
-  private async send(params: Record<string, unknown>, attempts: Attempt[], billed: { unknown: number }):
-    Promise<Anthropic.Message> {
-    const deadline = performance.now() + this.total * 1000;
+  private async send(params: Record<string, unknown>, attempts: Attempt[], billed: { unknown: number },
+                     signal?: AbortSignal): Promise<Anthropic.Message> {
+    // An outage wait is not the call's time: the deadline moves by each wait taken.
+    let deadline = performance.now() + this.total * 1000;
     let timeouts = 0;
     // What each attempt met while every one found the provider down; null once one failed otherwise.
     let down: string[] | null = [];
     for (let attempt = 1; ; attempt++) {
+      if (signal?.aborted) throw this.cancelled(billed);
       let stream: MessageStream | undefined;
       let timeout: Attempt["timeout"], events = 0, chunks = 0, first: number | null = null, gap = 0;
       let firstByte: number | null = null;
@@ -326,6 +385,8 @@ export class AnthropicAgent implements AgentModel {
         arm(this.idle);
       };
       let delay = 0;
+      const onAbort = () => stream?.abort();
+      signal?.addEventListener("abort", onAbort, { once: true });
       try {
         arm(this.firstEvent);
         // The SDK filters SSE pings before its iterator. Observe bytes before parsing so heartbeats (and partial
@@ -347,6 +408,7 @@ export class AnthropicAgent implements AgentModel {
           timeout: this.total * 1000, fetch: observedFetch,
           ...(this.baseURL ? { baseURL: this.baseURL, authToken: null } : {}) }) as unknown as MessagesClient;
         stream = client.messages.stream(params);
+        if (signal?.aborted) stream.abort();
         for await (const _event of stream) {
           first ??= performance.now();
           events++;
@@ -355,8 +417,14 @@ export class AnthropicAgent implements AgentModel {
         const message = await stream.finalMessage() as Anthropic.Message;
         if (timeout) throw new Error("request timed out");
         record("ok");
+        outageWaited.delete(this.provider);
         return message;
       } catch (e) {
+        // The caller no longer wants the reply: no retry.
+        if (signal?.aborted) {
+          if (first !== null || firstByte !== null) billed.unknown++;
+          throw this.cancelled(billed);
+        }
         // Not the SDK, its transport or our timeout: a bug in arnx, passed on as is (never retried).
         if (!timeout && !(e instanceof Anthropic.AnthropicError)) throw e;
         const reason = timeout === "total" ? `no reply within ${this.total}s (total timeout)`
@@ -373,16 +441,20 @@ export class AnthropicAgent implements AgentModel {
         // An APIError by its status or type; any other SDK error (a dropped or truncated stream) is the transport's.
         const retryable = !!timeout || !(e instanceof Anthropic.APIError) || e instanceof Anthropic.APIConnectionError ||
           RETRY_STATUS.has(e.status ?? 0) || ["overloaded_error", "rate_limit_error", "api_error"].includes(e.type ?? "");
-        delay = Math.max(DELAYS[attempt - 1] ?? 0,
-          e instanceof Anthropic.APIError ? retryAfter(e.headers) ?? 0 : 0);
         if (timeout) timeouts += 1;
         const met = timeout || e instanceof Anthropic.APIConnectionTimeoutError ? null
           : e instanceof Anthropic.APIConnectionError ? noConnection(e.cause ?? e)
           : e instanceof Anthropic.APIError && e.status && isDown(e.status) ? `HTTP ${e.status}` : null;
         down = down && met ? [...down, met] : null;
+        // While every attempt found the provider down the outage schedule applies; otherwise today's three attempts.
+        const schedule = down ? outageSchedule(this.provider, this.downDelays) : DELAYS.slice(0, ANTHROPIC_ATTEMPTS - 1);
+        const base = schedule[attempt - 1];
+        const asked = e instanceof Anthropic.APIError ? retryAfter(e.headers) ?? 0 : 0;
+        delay = Math.max(base === undefined ? 0 : down ? jittered(base, this.random) : base,
+          down ? heldToCap(this.provider, asked) : asked);
         const exhausted = timeout === "total" || timeouts >= this.timeoutAttempts ||
-          performance.now() + delay * 1000 >= deadline;
-        if (!retryable || attempt >= ANTHROPIC_ATTEMPTS || exhausted) {
+          (!down && performance.now() + delay * 1000 >= deadline);
+        if (!retryable || base === undefined || exhausted) {
           const err = new ModelError(`${this.model}: ${reason} (${attempt} attempts)`);
           err.timedOut = !!timeout || (retryable && exhausted);
           err.unknownCalls = billed.unknown;
@@ -390,8 +462,15 @@ export class AnthropicAgent implements AgentModel {
           if (fault ?? down) err.fault = fault ?? unavailable(down!);
           throw err;
         }
-        this.notice?.(`${this.model}: ${reason}; retrying (${attempt + 1}/${ANTHROPIC_ATTEMPTS}) in ${delay}s`);
+        if (down) {
+          chargeOutage(this.provider, delay, this.clock());
+          deadline += delay * 1000;
+          this.notice?.(outageLine(this.provider, down[down.length - 1]!, delay, attempt + 1, schedule.length + 1));
+        } else {
+          this.notice?.(`${this.model}: ${reason}; retrying (${attempt + 1}/${ANTHROPIC_ATTEMPTS}) in ${delay}s`);
+        }
       } finally {
+        signal?.removeEventListener("abort", onAbort);
         settled = true;
         clearTimeout(timer);
         clearTimeout(cutoff);
@@ -401,7 +480,13 @@ export class AnthropicAgent implements AgentModel {
     }
   }
 
-  async create({ system, tools, messages, maxTokens }: Parameters<AgentModel["create"]>[0]): Promise<Reply> {
+  private cancelled(billed: { unknown: number }): ModelError {
+    const err = new ModelError(`${this.model}: request cancelled`);
+    err.unknownCalls = billed.unknown;
+    return err;
+  }
+
+  async create({ system, tools, messages, maxTokens, signal }: Parameters<AgentModel["create"]>[0]): Promise<Reply> {
     // Summarized thinking streams while the model thinks (billed the same as hidden thinking). Without it the API
     // sends nothing until thinking ends, and a long think would look like a dead connection.
     const params: Record<string, unknown> = { model: this.model, max_tokens: maxTokens, system, messages,
@@ -412,7 +497,7 @@ export class AnthropicAgent implements AgentModel {
     const attempts: Attempt[] = [], billed = { unknown: 0 };
     try {
       // One pool per model: a busy Sonnet reviewer does not hold back Haiku part hunters.
-      resp = await withProviderSlot(`${this.provider}:${this.model}`, () => this.send(params, attempts, billed));
+      resp = await withProviderSlot(`${this.provider}:${this.model}`, () => this.send(params, attempts, billed, signal));
     } catch (e) {
       if (e instanceof ModelError) e.attempts = attempts;
       throw e;
@@ -444,7 +529,8 @@ export class AnthropicJson implements JsonModel {
     this.ref = refString(ref);
   }
 
-  async completeJson(system: string, user: string, schema: Record<string, unknown>): Promise<JsonReply> {
+  async completeJson(system: string, user: string, schema: Record<string, unknown>, signal?: AbortSignal)
+    : Promise<JsonReply> {
     const messages: Message[] = [{ role: "user", content: user + "\n\nReply with one JSON object matching this JSON " +
       "Schema, and nothing else:\n" + JSON.stringify(schema) }];
     let total = 0, usage = NO_USAGE, unknown = 0, tries = 0;
@@ -453,7 +539,7 @@ export class AnthropicJson implements JsonModel {
       let reply: Reply;
       try {
         // Thinking counts toward max_tokens: room for a hunt's thinking and its list.
-        reply = await this.agent.create({ system, tools: [], messages, maxTokens: 16_000 });
+        reply = await this.agent.create({ system, tools: [], messages, maxTokens: 16_000, signal });
       } catch (e) {
         if (e instanceof ModelError) e.unknownCalls += unknown;
         if (e instanceof ModelError && total > 0) {
@@ -503,6 +589,10 @@ export class ResponsesJson implements JsonModel {
   readonly model: string;
   private fetch: typeof fetch;
   private sleep: (seconds: number) => Promise<void>;
+  /** The waits while every attempt finds the provider down (OUTAGE_DELAYS unless the role gives fewer). */
+  readonly downDelays: number[];
+  private random: () => number;
+  private clock: () => number;
   private idle: number;
   private connect: number;
   private total: number;
@@ -525,8 +615,11 @@ export class ResponsesJson implements JsonModel {
               opts: { fetch?: typeof fetch; sleep?: (seconds: number) => Promise<void>; idleSeconds?: number;
                       connectSeconds?: number; totalSeconds?: number; attemptSeconds?: number;
                       timeoutAttempts?: number; tier?: string | null; store?: boolean; background?: boolean; pollSeconds?: number;
-                      graceSeconds?: number } = {}) {
+                      graceSeconds?: number; downDelays?: number[]; random?: () => number; clock?: () => number } = {}) {
     this.ref = refString(ref);
+    this.downDelays = opts.downDelays ?? OUTAGE_DELAYS;
+    this.random = opts.random ?? Math.random;
+    this.clock = opts.clock ?? (() => performance.now());
     this.model = ref.model;
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.fetch = opts.fetch ?? fetch;
@@ -543,7 +636,8 @@ export class ResponsesJson implements JsonModel {
     this.graceSeconds = opts.graceSeconds ?? STORE_GRACE_SECONDS;
   }
 
-  async completeJson(system: string, user: string, schema: Record<string, unknown>): Promise<JsonReply> {
+  async completeJson(system: string, user: string, schema: Record<string, unknown>, signal?: AbortSignal)
+    : Promise<JsonReply> {
     const payload = { model: this.model, stream: true, reasoning: { effort: this.effort },
       ...(this.tier ? { service_tier: this.tier === "fast" ? "priority" : this.tier } : {}),
       ...(this.store !== undefined ? { store: this.store } : {}),
@@ -552,7 +646,7 @@ export class ResponsesJson implements JsonModel {
     const t0 = performance.now(), priced = this.tier ? `${this.model}@${this.tier}` : this.model;
     let data: Record<string, unknown>, unknown: number, tries: number;
     try {
-      [data, unknown, tries] = await this.post(payload);
+      [data, unknown, tries] = await this.post(payload, signal);
     } catch (e) {
       if (e instanceof ModelError) {
         emitJsonCall(this.ref, priced, t0, { cost: e.costUsd, usage: null, unknown: e.unknownCalls, error: e.message,
@@ -583,17 +677,19 @@ export class ResponsesJson implements JsonModel {
 
   /** The terminal response, and how many earlier attempts were accepted (status 200) but cut off: the provider may
    * bill those, and their usage is unknown; then the number of requests sent. Shared with ResponsesAgent. */
-  async post(payload: Record<string, unknown>): Promise<[Record<string, unknown>, number, number]> {
+  async post(payload: Record<string, unknown>, signal?: AbortSignal): Promise<[Record<string, unknown>, number, number]> {
     const { stream: _stream, ...rest } = payload;
     const body = this.background ? { ...rest, background: true } : payload;
-    return withProviderSlot(this.baseUrl, () => this.postWithinSlot(body));
+    return withProviderSlot(this.baseUrl, () => this.postWithinSlot(body, signal));
   }
 
-  private async postWithinSlot(payload: Record<string, unknown>): Promise<[Record<string, unknown>, number, number]> {
+  private async postWithinSlot(payload: Record<string, unknown>, signal?: AbortSignal)
+    : Promise<[Record<string, unknown>, number, number]> {
     let unknown = 0, attempt = 0, timeouts = 0;
     // What each attempt met while every one found the provider down; null once one failed otherwise.
     let down: string[] | null = [];
-    const deadline = performance.now() + this.total * 1000;
+    // An outage wait is not the call's time: the deadline moves by each wait taken.
+    let deadline = performance.now() + this.total * 1000;
     const failed = (e: ModelError) => {
       if (down?.length && down.length === attempt) e.fault = unavailable(down);
       return e;
@@ -603,23 +699,27 @@ export class ResponsesJson implements JsonModel {
       [e.timedOut, e.tries] = [true, attempt];
       return failed(e);
     };
-    for (const backoff of [...DELAYS, null]) {
+    const cancelled = () => billedError(`${this.ref}: request cancelled`, 0, null, unknown);
+    for (;;) {
+      if (signal?.aborted) throw cancelled();
       if (performance.now() >= deadline) throw late();
       attempt += 1;
       const started = performance.now();
       const diagnostics: Record<string, unknown> = {};
       const traced = (outcome: string) => this.trace?.({ attempt, outcome: outcome.slice(0, 300),
         secs: Math.round((performance.now() - started) / 100) / 10, ...diagnostics });
-      let delay = backoff ?? 0;
+      let delay = 0;
       try {
-        const data = this.background ? await this.backgroundAttempt(payload, deadline, attempt, diagnostics)
-          : await this.attempt(payload, deadline, diagnostics);
+        const data = this.background ? await this.backgroundAttempt(payload, deadline, attempt, diagnostics, signal)
+          : await this.attempt(payload, deadline, diagnostics, signal);
         const broke = data.status === "failed" ? noCredits(providerOf(this.ref), JSON.stringify(data.error ?? "")) : null;
         if (broke) throw broke;
         traced("ok");
+        outageWaited.delete(providerOf(this.ref));
         return [data, unknown, attempt];
       } catch (e) {
         traced(e instanceof Error ? e.message : String(e));
+        if (signal?.aborted) throw cancelled();
         if (e instanceof ModelError) {
           e.unknownCalls += unknown;
           e.tries = attempt;
@@ -630,23 +730,35 @@ export class ResponsesJson implements JsonModel {
         down = down && e.down ? [...down, e.down] : null;
         if (performance.now() >= deadline || diagnostics.timeout === "total") throw late(e.message);
         if (e.timedOut) timeouts += 1;
-        if (backoff === null || timeouts >= this.timeoutAttempts) {
+        // While every attempt found the provider down the outage schedule applies; otherwise today's four attempts.
+        const provider = providerOf(this.ref);
+        const schedule = down ? outageSchedule(provider, this.downDelays) : DELAYS;
+        const backoff = schedule[attempt - 1];
+        if (backoff === undefined || timeouts >= this.timeoutAttempts) {
           const err = billedError(`${this.ref}: ${e.message} (${attempt} attempt${attempt === 1 ? "" : "s"})`, 0, null, unknown);
           [err.timedOut, err.tries] = [e.timedOut, attempt];
           throw failed(err);
         }
-        delay = Math.max(delay, e.retryAfter ?? 0);
-        if (performance.now() + delay * 1000 >= deadline) throw late(`retry would exceed deadline; ${e.message}`);
-        this.notice?.(`${this.ref}: ${brief(e.message)}; retrying (attempt ${attempt + 1}) in ${delay}s`);
+        delay = Math.max(down ? jittered(backoff, this.random) : backoff,
+          down ? heldToCap(provider, e.retryAfter ?? 0) : e.retryAfter ?? 0);
+        if (!down && performance.now() + delay * 1000 >= deadline) throw late(`retry would exceed deadline; ${e.message}`);
+        if (down) {
+          chargeOutage(provider, delay, this.clock());
+          deadline += delay * 1000;
+          this.notice?.(outageLine(provider, down[down.length - 1]!, delay, attempt + 1, schedule.length + 1));
+        } else {
+          this.notice?.(`${this.ref}: ${brief(e.message)}; retrying (attempt ${attempt + 1}) in ${delay}s`);
+        }
       }
       await this.sleep(delay);
     }
-    throw new ModelError(`${this.ref}: no reply`);
   }
 
   /** One request. Network errors, timeouts and retryable statuses throw Retryable. */
-  private async attempt(payload: unknown, deadline: number, diagnostics: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async attempt(payload: unknown, deadline: number, diagnostics: Record<string, unknown>,
+                        signal?: AbortSignal): Promise<Record<string, unknown>> {
     const abort = new AbortController();
+    followSignal(signal, abort);
     const started = performance.now();
     let last = started, first: number | null = null, gap = 0, chunks = 0, accepted = false;
     let timeout: string | undefined;
@@ -717,7 +829,8 @@ export class ResponsesJson implements JsonModel {
    * generation (retried by the caller); a failed poll is tried again at the next tick. A response given up on before
    * it is terminal is cancelled. Traced: the create, each change of the polled status, the cancel. */
   private async backgroundAttempt(payload: unknown, deadline: number, attempt: number,
-                                  diagnostics: Record<string, unknown>): Promise<Record<string, unknown>> {
+                                  diagnostics: Record<string, unknown>, signal?: AbortSignal)
+    : Promise<Record<string, unknown>> {
     const started = performance.now();
     const note = (line: Record<string, unknown>) =>
       this.trace?.({ step: "poll", attempt, ...line, secs: Math.round((performance.now() - started) / 100) / 10 });
@@ -726,6 +839,7 @@ export class ResponsesJson implements JsonModel {
       const remaining = deadline - started, window = Math.min(this.connect, this.attemptLimit) * 1000;
       const kind = remaining <= window ? "total" : this.connect <= this.attemptLimit ? "connect" : "attempt";
       const abort = new AbortController();
+      followSignal(signal, abort);
       const timer = setTimeout(() => { timeout ??= kind; abort.abort(); }, Math.max(0, Math.min(remaining, window)));
       let data: Record<string, unknown>;
       try {
@@ -1088,25 +1202,35 @@ export class FallbackJson implements JsonModel {
   notice?: (message: string) => void;
   readonly uses: ModelUse[];
   lastModel = "";
+  /** The fallback's key ran out of credits: it is not asked again (said once). */
+  private fallbackOut = false;
 
   constructor(private first: JsonModel, private second: JsonModel) {
     this.ref = first.ref;
     this.uses = [newUse(first.ref), newUse(second.ref)];
   }
 
-  async completeJson(system: string, user: string, schema: Record<string, unknown>): Promise<JsonReply> {
-    const models = [this.first, this.second];
+  async completeJson(system: string, user: string, schema: Record<string, unknown>, signal?: AbortSignal)
+    : Promise<JsonReply> {
+    const models = this.fallbackOut ? [this.first] : [this.first, this.second];
     for (const [i, m] of models.entries()) {
       // Set once, never cleared: calls run in parallel, and each reply names the model that gave it.
       const outer = this.trace;
       m.trace = outer ? (line) => outer({ model: m.ref, ...line }) : undefined;
       m.notice = this.notice;
       try {
-        const reply = await m.completeJson(system, user, schema);
+        const reply = await m.completeJson(system, user, schema, signal);
         tally(this.uses[i]!, reply[1], reply[2], reply[3]);
         this.lastModel = m.ref;
         return [reply[0], reply[1], reply[2], reply[3], m.ref];
       } catch (e) {
+        // The fallback is optional: with no credits it is skipped, and this call fails as any fallback failure does.
+        if (e instanceof NoCredits && i > 0) {
+          // Verdicts run side by side: only the first to meet it says so.
+          if (!this.fallbackOut) this.notice?.(`challenger fallback skipped: ${e.provider} has no credits left on this key`);
+          this.fallbackOut = true;
+          throw new ModelError(`${m.ref}: ${e.message}`);
+        }
         if (!survivable(e)) throw e;
         if (e.costUsd > 0 || e.usage) tally(this.uses[i]!, e.costUsd, e.usage, e.unknownCalls);
         else this.uses[i]!.unknownCalls += e.unknownCalls;
@@ -1145,10 +1269,11 @@ function agentModel(s: Settings, env: Env): AgentModel {
 /** `effort`, when given, is sent as is (a role's own effort, such as second_hunter_effort); else `s.effort`, in the
  * provider's words. */
 export function makeJsonModel(ref: ModelRef, s: Settings, env: Env, b: Boundary, opts: JsonOptions = {}): JsonModel {
-  return maskedJson(jsonModel(ref, s, env, opts), b);
+  // Hunters and the ranker: the review goes on without them, so they wait [2, 8, 30] of an outage.
+  return maskedJson(jsonModel(ref, s, env, { downDelays: OUTAGE_DELAYS.slice(0, 3), ...opts }), b);
 }
 
-type JsonOptions = { attemptSeconds?: number; timeoutAttempts?: number; effort?: string };
+type JsonOptions = { attemptSeconds?: number; idleSeconds?: number; timeoutAttempts?: number; effort?: string; downDelays?: number[] };
 
 function jsonModel(ref: ModelRef, s: Settings, env: Env, opts: JsonOptions): JsonModel {
   const prices = allPrices(s);
@@ -1158,7 +1283,10 @@ function jsonModel(ref: ModelRef, s: Settings, env: Env, opts: JsonOptions): Jso
   const effort = own ?? vendorEffort(p, s.effort);
   if (p.api === "messages") {
     return new AnthropicJson(ref, new AnthropicAgent(ref.model, effort, key, undefined,
-      { ...(timing.timeoutAttempts ? { timeoutAttempts: timing.timeoutAttempts } : {}), ...messagesOpts(p, url) }),
+      { ...(timing.timeoutAttempts ? { timeoutAttempts: timing.timeoutAttempts } : {}),
+        ...(timing.attemptSeconds ? { attemptSeconds: timing.attemptSeconds } : {}),
+        ...(timing.idleSeconds ? { idleSeconds: timing.idleSeconds } : {}),
+        ...(timing.downDelays ? { downDelays: timing.downDelays } : {}), ...messagesOpts(p, url) }),
       prices);
   }
   const { tier, background } = responsesOpts(p, s);
@@ -1169,9 +1297,13 @@ function jsonModel(ref: ModelRef, s: Settings, env: Env, opts: JsonOptions): Jso
 /** The challenger: a second opinion per finding, with the configured fallback for any call the first model fails.
  * Both give up on a stalled attempt after VERDICT_ATTEMPT_TIMEOUT; the first model, when a fallback stands behind it,
  * after one timed-out attempt, so the fallback is asked at once. Without a fallback it retries as usual. */
-export function makeChallenger(s: Settings, env: Env, b: Boundary): JsonModel {
-  const verdict = { attemptSeconds: VERDICT_ATTEMPT_TIMEOUT };
-  const first = jsonModel(s.challenger, s, env, s.challengerFallback ? { ...verdict, timeoutAttempts: 1 } : verdict);
+export function makeChallenger(s: Settings, env: Env, b: Boundary,
+  limits: { attemptSeconds: number; idleSeconds: number } = { attemptSeconds: VERDICT_ATTEMPT_TIMEOUT,
+    idleSeconds: VERDICT_IDLE_TIMEOUT }): JsonModel {
+  const verdict = limits;
+  // With a fallback standing behind it, the first model waits out [2, 8] of an outage only: the fallback is asked next.
+  const first = jsonModel(s.challenger, s, env,
+    s.challengerFallback ? { ...verdict, timeoutAttempts: 1, downDelays: OUTAGE_DELAYS.slice(0, 2) } : verdict);
   return maskedJson(s.challengerFallback ? new FallbackJson(first, jsonModel(s.challengerFallback, s, env, verdict)) : first, b);
 }
 

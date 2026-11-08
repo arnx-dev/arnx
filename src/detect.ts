@@ -1,7 +1,7 @@
 // A model-free look at a repository's layout: candidate projects (from manifests), their runners and package
 // managers, workspaces, CI and compose files, and the service images they mention. It only gives hints: the setup
 // agent decides, and each project still has to prove itself by running its suite.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import type { AdapterId } from "./adapters/types";
 import { workingTreeFiles } from "./change";
@@ -111,6 +111,33 @@ export function typeCheckable(read: (rel: string) => string, root: string): bool
       return false;
     }
   });
+}
+
+/** CI text without comments and without install clauses (`pip install mypy`, `uv add --dev pyright`), which name a
+ * tool without running it. */
+function withoutNoise(text: string): string {
+  return text.split("\n").map((l) => l.replace(/(^|\s)#.*$/, "")
+    .replace(/\b(?:pip3?|pipx|uv|poetry|conda|npm|apt(?:-get)?)\b(?: [^&|;]*?)? (?:install|add)\b[^&|;]*/g, "")).join("\n");
+}
+
+/** The Python type checker a repository's CI runs (mypy, pyright, basedpyright, ty), and the CI file naming it. */
+export function ciTypeChecker(repo: string): { tool: string; from: string } | null {
+  const files: string[] = [];
+  for (const dir of [".github/workflows", ".circleci"]) {
+    try {
+      for (const f of readdirSync(join(repo, dir))) if (/\.ya?ml$/.test(f)) files.push(`${dir}/${f}`);
+    } catch { /* no such directory */ }
+  }
+  files.push(".gitlab-ci.yml");
+  for (const rel of files) {
+    let text = "";
+    try {
+      text = readFileSync(join(repo, rel), "utf8");
+    } catch { continue; }
+    const m = /\b(basedpyright|pyright|mypy|ty check)\b/.exec(withoutNoise(text));
+    if (m) return { tool: m[1] === "ty check" ? "ty" : m[1]!, from: rel.split("/").at(-1)! };
+  }
+  return null;
 }
 
 /** The type check setup proposes for a project typeCheckable finds. */

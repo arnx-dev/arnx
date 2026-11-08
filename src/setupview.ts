@@ -6,14 +6,19 @@ import { describe, filesAt, git, leftOutUntracked, resolveChange, someNames, unt
 import { type Baseline, BASELINE_FILE, type BaselineTest, describeBaselineChanges, parseBaseline, readBaseline } from "./baseline";
 import { fileDigest, isProven, parseReviewFile, readSecretPins, type ReviewFile, sandboxOnlyOf, secretPinsOf }
   from "./config";
-import { detect } from "./detect";
+import type { TypesUnchecked } from "./report";
+import { ciTypeChecker, detect, typeCheckable } from "./detect";
 import { ArnxError } from "./errors";
 import { refString, type Settings, untrackedSetting } from "./settings";
 import { BROWSER_TESTS, WEB_UI } from "./browser";
 import { matcher } from "./ignore";
 import { type Coverage, coverageFiles, coverageMap, NO_TESTS, type ProjectProof, SCRIPTS, unexplainedFailing }
   from "./setup";
-import { SOURCE } from "./untested";
+import { gapsLine } from "./typecheck";
+import { staleLine, staleRewrites } from "./standins";
+import { isSourcePath, SOURCE } from "./untested";
+import { NOT_SET_UP } from "./draft";
+import { route } from "./route";
 
 // Rough minutes and USD per project, for the estimate shown before setup starts.
 const MIN_PER_PROJECT = [1, 3];
@@ -73,12 +78,25 @@ export function downloadHosts(line: string): string[] {
 
 /** What a developer should look at once the environment is proven: tests it cannot run, shortcuts in it, and
  * downloads from outside the package registries. */
-export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = []): string[] {
+export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = [], holds?: (text: string) => boolean): string[] {
   const out: string[] = [];
   for (const p of file.projects) {
     const proof = proofs.find((x) => x.name === p.name);
     if (proof?.skips.length) out.push(`${p.name}: tests skipped because ${proof.skips.join("; ")}`);
+    if (proof?.unproven?.length) {
+      const needs = [...new Set(proof.unproven.map((u) => u.needs))];
+      out.push(`${p.name}: ${proof.unproven.length} test${proof.unproven.length === 1 ? " needs" : "s need"} ${someNames(needs, 5)}, left out or a fake here, ` +
+        `so not in ${BASELINE_FILE}: \`arnx allow-secret PATH\` to run ${proof.unproven.length === 1 ? "it" : "them"}`);
+    }
     if (proof?.gap) out.push(`${p.name}: ${proof.gap}; test_command leaves them out`);
+    if (proof?.typecheckProblem) out.push(`${p.name}: type check ${proof.typecheckProblem.replace(/ \(.*\)$/, "")}`);
+    if (proof?.typeGaps?.length) {
+      out.push(`${p.name}: ${gapsLine(proof.typeGaps)}`);
+      const siblings = proof.typeGaps.filter((g) => g.kind === "sibling").map((g) => g.module);
+      if (siblings.length) {
+        out.push(`${p.name}: workspace packages are not built; arnx builds none of them (${siblings.join(", ")})`);
+      }
+    }
     if (p.knownFailing.length) {
       const silent = unexplainedFailing(p);
       out.push(`${p.name}: ${p.knownFailing.length} test file(s) set aside as known failing` +
@@ -87,6 +105,8 @@ export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = []): s
     }
     const hidden = p.install.filter((l) => /\|\|\s*true\b/.test(l)).length + (/\|\|\s*true\b|;\s*true\)/.test(p.testCommand) ? 1 : 0);
     if (hidden) out.push(`${p.name}: ${hidden} command(s) ignore their own errors (|| true)`);
+    const stale = holds ? staleRewrites(p.install, holds) : [];
+    if (stale.length) out.push(`${p.name}: ${staleLine(p.name, stale)}`);
     const hosts = [...new Set(p.install.flatMap(downloadHosts))];
     if (hosts.length) out.push(`${p.name}: install downloads from ${hosts.join(", ")} (not a package registry)`);
   }
@@ -94,8 +114,8 @@ export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = []): s
 }
 
 /** Every warning recorded with a proof: approvalChecks, and the files allowed although they look like secrets. */
-export function approvalWarnings(file: ReviewFile, proofs: ProjectProof[] = []): string[] {
-  const checks = approvalChecks(file, proofs);
+export function approvalWarnings(file: ReviewFile, proofs: ProjectProof[] = [], holds?: (text: string) => boolean): string[] {
+  const checks = approvalChecks(file, proofs, holds);
   const allowed = secretPinsOf(file.raw);
   if (allowed.length) {
     checks.push(`${allowed.map((p) => p.path).join(", ")}: allowed although secret-looking; sent to the model and the ` +
@@ -143,13 +163,66 @@ export function approvalScreen(file: ReviewFile, repo: string, o: { proofs?: Pro
   return lines.join("\n");
 }
 
+/** Projects whose type errors no review will see: a TypeScript project that could be type checked and has no
+ * `typecheck`, and a Python project whose CI runs a type checker (arnx does not check Python types yet). `read`
+ * gives a file's text (relative to `repo`), "" when there is none. */
+export function typecheckGaps(file: ReviewFile, read: (rel: string) => string, repo?: string): string[] {
+  const out: string[] = [];
+  for (const p of file.projects) {
+    if (!p.typecheck && p.language === "typescript" && typeCheckable(read, p.workdir)) {
+      out.push(`${p.name}: has a tsconfig but no type check, so reviews do not type check it`);
+    }
+  }
+  const py = repo ? pythonTypeGap(file, repo) : null;
+  if (py) out.push(pythonGapLine(py));
+  return out;
+}
+
+/** What the CI of a repository type checks in Python that arnx does not: one entry for the repository, naming the
+ * Python projects without a `typecheck` (only those in `only`, when given). Null when CI runs none or no project applies. */
+export function pythonTypeGap(file: ReviewFile, repo: string, only?: string[]): TypesUnchecked | null {
+  const ci = ciTypeChecker(repo);
+  if (!ci) return null;
+  const projects = file.projects.filter((p) => !p.typecheck && p.language === "python" && (!only || only.includes(p.name)))
+    .map((p) => p.name);
+  return projects.length ? { ...ci, projects } : null;
+}
+
+/** The one repository-level line for `pythonTypeGap`. */
+export const pythonGapLine = (g: TypesUnchecked): string =>
+  `CI type checks with ${g.tool} (${g.from}); arnx does not, so types are not checked for: ${g.projects.join(", ")}`;
+
+/** `typecheckGaps` reading the working tree of `repo`. */
+export function repoTypecheckGaps(file: ReviewFile, repo: string): string[] {
+  return typecheckGaps(file, (rel) => { try { return readFileSync(join(repo, rel), "utf8"); } catch { return ""; } }, repo);
+}
+
+/** Before a first review spends money: the changed source files its tests will not reach (no project covers them, or
+ * review.yaml says their tests do not run), with the reasons. Null when every changed source file is covered. The
+ * count is a floor ("at least") when not all: files whose tests never reach them are only known after the review.
+ * `waiting`: a "Not set up yet, though" line names the projects not set up, so those files are left out here. */
+export function quickCoverageLine(file: ReviewFile, changed: string[], waiting = false): string | null {
+  const sources = changed.filter(isSourcePath);
+  if (!sources.length) return null;
+  const r = route(file, sources, Infinity);
+  const left = [...r.uncovered, ...r.declared].filter((x) => !(waiting && x.reason === NOT_SET_UP));
+  const paths = new Set(left.map((x) => x.path));
+  if (!paths.size) return null;
+  const reasons = [...new Set(left.map((x) => (x.reason === NOT_SET_UP ? "not set up yet" : x.reason).trim()))];
+  const n = sources.length;
+  const what = paths.size === n ? `all ${n} changed source file${n === 1 ? "" : "s"}`
+    : `at least ${paths.size} of ${n} changed source file${n === 1 ? "" : "s"}`;
+  return `Not tested in this review: ${what} (${reasons.slice(0, 2).join("; ")}).`;
+}
+
 /** The lines of "Worth a look" after a proof, only what applies: the warnings, then what no project tests (a change
  * there is reported as not tested), one line per kind (the whole list is in the approval record), and source files
  * no project mentions. */
 export function worthALook(file: ReviewFile, repo: string, o: { proofs?: ProjectProof[]; untracked?: boolean })
   : string[] {
   const base = currentBaseline(repo) ?? new Map();
-  const lines = [...environmentLines(file, base), ...baselineLines(file, base), ...approvalWarnings(file, o.proofs)];
+  const lines = [...environmentLines(file, base), ...baselineLines(file, base), ...approvalWarnings(file, o.proofs),
+    ...repoTypecheckGaps(file, repo)];
   if (!file.legacy) {
     const map = coverageMap(repo, file, !!o.untracked);
     lines.push(...notTestedLines(map, repo, !!o.untracked));

@@ -2,14 +2,14 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ArnxError } from "../src/errors";
-import { exitCode, load, MD_WIDTH, parseMarks, parseReport, render, save, summary, wrapMarkdown } from "../src/report";
+import { adjudicate, exitCode, load, MD_WIDTH, parseMarks, parseReport, render, save, summary, wrapMarkdown } from "../src/report";
 import { sampleReview, blankMarks } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
 
 test("test_exit_codes", () => {
-  expect(exitCode(sampleReview())).toBe(1);
+  expect(exitCode(sampleReview(), true)).toBe(1);
   expect(exitCode(sampleReview({ findings: [] }))).toBe(0);
   expect(exitCode(sampleReview({ findings: [], stop: "budget" }))).toBe(2);
   expect(exitCode(sampleReview({ findings: sampleReview().findings.slice(1) }))).toBe(0);
@@ -53,7 +53,7 @@ test("test_save_load", () => {
 
 test("test_summary", () => {
   const s = summary(sampleReview(), ".arnx/reviews/x/review.md");
-  for (const part of ["1 issue confirmed, 1 disputed", "  F1\n", "F2 disputed", "Q1", "$0.34", "arnx accept"]) expect(s).toContain(part);
+  for (const part of ["1 issue worth a look, 1 disputed", "  F1\n", "F2 disputed", "Q1", "$0.34", "arnx accept"]) expect(s).toContain(part);
 });
 
 test("test_parse_report", () => {
@@ -180,12 +180,17 @@ test("terminal colours: marks and status coloured on a terminal, plain otherwise
   expect(colorFor({ isTTY: true }, { NO_COLOR: "" })).toBe(false);
   expect(colorFor({ isTTY: false }, { FORCE_COLOR: "1" })).toBe(true);
   expect(colorFor({ isTTY: false }, {})).toBe(false);
-  const text = "Status: complete.\n  ✗ F1 confirmed\n  ? Q1 x\n  · F2 disputed";
+  const text = "Not tested: no test seen.\n  ✗ F1 confirmed\n  ? Q1 x\n  · F2 disputed";
   expect(colorLines(text, paint(false))).toBe(text);
   const on = colorLines(text, paint(true));
   expect(on).toContain("\x1b[31m✗\x1b[0m");
   expect(on).toContain("\x1b[33m?\x1b[0m");
-  expect(on).toContain("\x1b[32mStatus: complete.\x1b[0m");
+  // The status lines arnx prints (not a "Status:" label it never prints) are yellow.
+  expect(on).toContain("\x1b[33mNot tested: no test seen.\x1b[0m");
+  for (const head of ["Incomplete: x.", "Partly covered: 1 of 2."]) {
+    expect(colorLines(head, paint(true))).toBe(`\x1b[33m${head}\x1b[0m`);
+  }
+  expect(colorLines("Status: complete.", paint(true))).toBe("Status: complete.");
 });
 
 test("confirmed findings come marked real; disputed and question-bound ones do not", () => {
@@ -209,4 +214,42 @@ test("review.json carries schema_version, each finding's status and the exit cod
   expect(load(tmp())).toEqual(r);
   save(sampleReview({ findings: [] }), tmp(), "");
   expect(JSON.parse(readFileSync(join(tmp(), "review.json"), "utf8")).exit_code).toBe(0);
+});
+
+test("the header names every model that gave a verdict", () => {
+  const f = (id: string, judge?: string) => ({ ...sampleReview().findings[0]!, id, ...(judge ? { judge } : {}) });
+  const r = sampleReview({ challenger: "openai:gpt-5.5-2026-04-23", findings: [f("F1"), f("F2"), f("F3"),
+    f("F4", "river:glm-5"), { ...f("F5"), verdict: null, judge: "river:other" }] });
+  const md = render(r);
+  expect(md).toContain("Second opinion: openai:gpt-5.5-2026-04-23 (3 findings), river:glm-5 (1, when " +
+    "openai:gpt-5.5-2026-04-23 did not reply in time) · Prompts:");
+  expect(md.split("\n").find((l) => l.startsWith("- Reviewer:"))).not.toContain("river:other");
+});
+
+test("one judge reads as before", () => {
+  expect(render(sampleReview())).toContain("- Reviewer: anthropic:claude-sonnet-5-5 · Second opinion: " +
+    "openai:gpt-5.5-2026-04-23 · Prompts: abc");
+});
+
+test("two suspects sharing one test both get its outcome and finding ids", () => {
+  const r = sampleReview();
+  const sus = ["S1", "S2"].map((id) => ({ id, project: "main", file: "a.py", line: 1, claim: "c", by: "x",
+    outcome: "failed", tests: ["tests/t.py::test_a"] })) as never[];
+  // the later suspect took the finding's suspect id
+  adjudicate(sus, [{ ...r.findings[0]!, testId: "tests/t.py::test_a", suspect: "S2" }]);
+  for (const x of sus as { outcome: string; findings: string[] }[]) {
+    expect(x.findings).toEqual(["F1"]);
+    expect(x.outcome).toBe("proven");
+  }
+  const md = render(sampleReview({ suspects: sus as never }));
+  expect(md).not.toContain(": .");
+  expect(md).not.toContain("did not judge it: .");
+});
+
+test("a suspect with no finding ids does not render an empty reference", () => {
+  const sus = [{ id: "S1", project: "main", file: "a.py", line: 1, claim: "c", by: "x", outcome: "unchecked", tests: [],
+    findings: [] }] as never;
+  const md = render(sampleReview({ suspects: sus }));
+  expect(md).toContain("the second model did not judge it.");
+  expect(md).not.toContain("did not judge it:");
 });

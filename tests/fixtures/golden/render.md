@@ -46,4 +46,4 @@ Answer:
 - Flaky or unconfirmed (failed in some runs only): `tests/g/test_i.py::test_slow`
 - Errors (the test could not run): none
 - Runs without a report (timed out or crashed): 0
-- Files left out because they looked like secrets: `.env.local`. If one is a test fixture, not a secret: `arnx allow-secret PATH`, then `arnx review` again
+- Files left out because they looked like secrets: `.env.local`. If one is a test fixture, not a secret: `arnx allow-secret PATH`, then `arnx review` again. A test can fail for one of these with no name in its message, and then reads as any other failure

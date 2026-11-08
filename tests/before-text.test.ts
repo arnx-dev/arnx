@@ -19,7 +19,7 @@ test("one kind of outcome: a full sentence; the passing tests say 'either' after
   const fixNews = of<Fix["status"]>(["new-code"], ["new-code"], ["new-code"], ["new-code"], ["new-code"]);
   expect(fixText(fixNews, true)).toBe("the 5 passing tests cannot run there either, so they show no fix");
   expect(fixText(fixNews, false)).toBe("the 5 passing tests cannot run there (what they test is new), so they show no fix");
-  expect(beforeText(of<Before["status"]>(["regression"]))).toBe("the failing test passes there: the change broke it");
+  expect(beforeText(of<Before["status"]>(["regression"]))).toBe("the failing test passes there, fails with the change");
   expect(fixText(of<Fix["status"]>(["fixed"], ["fixed"]), false))
     .toBe("the 2 passing tests fail there and pass now");
   expect(fixText(of<Fix["status"]>(["unchanged"]), false)).toBe("the passing test passes there too");
@@ -28,7 +28,7 @@ test("one kind of outcome: a full sentence; the passing tests say 'either' after
 test("several outcomes: one line per kind of test, joined with '; ', singular and plural right", () => {
   expect(beforeText(of<Before["status"]>(["regression"], ["regression"], ["pre-existing"], ["changed"], ["new-code"],
     ["unknown", "flaky on the code before the change (passed in 1 of 3 runs)"])))
-    .toBe("2 failing tests pass there: the change broke them; 1 fails the same way there: not caused by the change; " +
+    .toBe("2 failing tests pass there, fail with the change; 1 fails with the same message there; " +
       "1 cannot run there (what it tests is new); 1 fails differently there; 1 unclear (flaky)");
   expect(fixText(of<Fix["status"]>(["fixed"], ["unchanged"], ["unchanged"], ["new-code"], ["unknown"]), false))
     .toBe("1 passing test fails there and passes now; 1 cannot run there (what it tests is new), " +

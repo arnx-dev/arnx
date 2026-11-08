@@ -12,6 +12,10 @@ Status: early release (0.1). Python (pytest), JavaScript/TypeScript (vitest, jes
 (cargo-nextest, [early](#rust-is-early)) repositories: a single package, a workspace, or many services. Open source
 (Apache 2.0) with your own model keys, or with models run by [arnx cloud](docs/CLOUD.md).
 
+arnx works best on single-package Python and TypeScript repositories. A repository with several packages is set up one part at a time, within
+setup's time limits, and tests that run only in a browser (Playwright, Cypress) are not run. More in
+[docs/SAFETY.md](docs/SAFETY.md#what-arnx-covers).
+
 ## What a finding looks like
 
 arnx reviewing its own `arnx remove` command (review `20261022-227eb7`, before 0.1). The change added a command that
@@ -39,7 +43,7 @@ From the review's report:
 
 ### F2 · regression · confirmed by the second opinion
 - Failure: `expect(received).toBe(expected)`
-- Before the change (regression): passes on the code before the change (3 runs): the change broke it
+- Before the change (regression): passes on the code before the change (3 runs), fails with it
 - Second opinion: planRemove takes accepted-tests.json keys verbatim and applyRemove rmSync's join(repo, p), …
 ```
 
@@ -105,10 +109,10 @@ dollars (our own reviews: $0.17 to $3.19) and stops writing tests at your cap, `
 - **Reproduced failure:** a test arnx wrote failed in every run (3 by default). That shows an assertion fails, not
   that the code is wrong: the test can encode a wrong expectation.
 - **Regression evidence:** the same test passes on the code before the change. Other outcomes are reported as they
-  are: already failing before (not caused by the change), new code (nothing to compare), changed, or not checked.
+  are: failing with the same message before, new code (nothing to compare), changed, or not checked.
 - **Second opinion:** another model reads the test, the failure and the diff, and confirms or disputes it. That is a
-  model's judgement. A finding it could not judge (budget, API error) counts as confirmed for the exit code, so a
-  review never passes because the check did not run.
+  model's judgement. Its confirmed findings are worth a look and do not fail the run. A finding it could not judge
+  (budget, API error) exits 1, so a review never passes because the check did not run.
 - **Your decision:** you mark each issue real, intended, noise, or rewrite (the bug is real, the test is wrong).
   Issues backed by a confirmed test come pre-marked real; change what you disagree with.
 - **`arnx check`:** the tests you accepted pass on your working tree, in the sandbox. It shows the behaviour those
@@ -158,8 +162,7 @@ More: [docs/WORKFLOW.md](docs/WORKFLOW.md#coding-agents).
 | Tests | your Docker | your Docker |
 | Sent | the diff, files the agent reads, its tests and their output, to your providers | the same, to arnx cloud, which passes them to its model providers |
 
-Secret files, values that look like secrets (sent and tested as fakes of the same shape; a file is left out only when
-no fake can keep a key out) and paths in `.arnxignore` are never sent; untracked files only with `--untracked`. With your own keys code goes only to the providers whose keys
+Secret files, values that look like secrets (sent and tested as fakes of the same shape; a private key is a fake in the sandbox and `[private key]` to a model, its file still reviewed) and paths in `.arnxignore` are never sent; untracked files only with `--untracked`. With your own keys code goes only to the providers whose keys
 you set (said once, on the first send); arnx cloud asks your consent once per repository. Switch with `arnx cloud on` / `off`. Details: [docs/MODELS.md](docs/MODELS.md), [docs/CLOUD.md](docs/CLOUD.md), [docs/SAFETY.md](docs/SAFETY.md).
 
 ## Safety and data
@@ -186,7 +189,7 @@ broke and how long setup took.
 
 ## Known limits
 
-- Changes up to 200 KB per review; review a long branch in parts with `--range A..B`.
+- Changes up to 200 KB per review; review a long branch in parts with `--range A..B`. Lockfiles and generated files (bundles, snapshots, protocol output, files marked `linguist-generated`) stay in the sandbox (readable there) but are not counted and not in the diff sent.
 - Python, JavaScript/TypeScript and Rust only (`arnx init` and `arnx doctor` say so for a repository in another
   language, before anything is sent). No Windows build: use WSL 2.
 - Setup records the tests your suite fails today, one by one, in `.arnx/baseline.json`, and later proofs do not

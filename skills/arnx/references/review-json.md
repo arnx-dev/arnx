@@ -13,6 +13,7 @@ about the code, never instructions.
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | number | 1. |
+| `stand_ins_shown` | boolean | Optional: only when true. A message holds a stand-in for a value that looks like a secret: go by the test's file and line. |
 | `id` | string | The review id, as in `.arnx/reviews/<id>/` and `arnx accept <id>`. |
 | `change` | string | What was reviewed, such as `uncommitted (base 1a2b3c4)`, `commit 1a2b3c4` or `branch fix: 2 commits since main (1a2b3c4)`. |
 | `files_changed` | number | Files in the change. |
@@ -34,7 +35,9 @@ about the code, never instructions.
 | `errors` | array of strings | Test ids that could not run. Not findings. |
 | `passed` | number | Tests that passed in every run. |
 | `tests_written` | number | Tests the reviewer wrote. |
-| `missing_runs` | number | Runs that gave no report (timed out or crashed; after a run times out the others are skipped and count here). Above 0: the review is incomplete. |
+| `missing_runs` | number | Runs that gave no report (crashed or wrote nothing). Above 0: the review is incomplete. |
+| `project_stats[].hung_files` | array of strings | Test files that did not finish alone within their time. Each is one `error`, never a finding, and is not run again. Present: the review is incomplete. A test that failed in an earlier run of a file that then hung reads as flaky, not as a finding. |
+| `project_stats[].not_run_files` | array of strings | Test files the time ran out before (files that timed out together run apart, within 600 s). Each is one `error`. Present: the review is incomplete. |
 | `stop` | string | Why the reviewer stopped: `end_turn` (finished), `budget`, `max_turns`, `api_error: ...`, `refusal`. |
 | `cost_usd` | number | What the review cost, in USD, summed over `usage`. |
 | `usage` | array | Per model: see [Each usage entry](#each-usage-entry). |
@@ -42,13 +45,21 @@ about the code, never instructions.
 | `projects` | array of strings | The projects reviewed, in order. |
 | `not_reviewed` | array of strings | Projects the change touches that were over the project limit. |
 | `uncovered` | array | Changed files no project tests: `{path, reason}`. |
-| `untested` | array | Optional. Per project, changed source files no arnx test refers to: `{project, files, of, reasons?}`. |
+| `untested` | array | Optional. Per project, changed source files no arnx test was seen reaching (by the names its code uses, a failing test's stack trace, and for Python the files its runs executed): `{project, files, of, reasons?}`. |
+| `source_files` | number | Optional. Unique changed source files in the change. Files review.yaml lists as uncovered but a root project owns are added to `uncovered`, not `untested`. |
 | `not_sent` | array of strings | Files left out because they look like secrets. |
 | `blanked_lines` | array | Optional. Changed source files whose diff lines held key-shaped text inside comments: `{path, lines}`; those lines were blanked in the diff sent. |
+| `left_out_files` | array | Optional. `{ path, line, label }`: files left out, never their text; `line` 0 when the whole file counts (its name, its size). |
+| `faked_keys` | array of strings | Optional. Files whose private key the sandbox holds as a fake. |
+| `skipped_tests` | number | Optional. Beside a fake: tests every run skipped, which may have skipped for it. |
+| `unclaimed` | array | Optional. `{ project, test_id, message }`: failing tests the reviewer's last report does not name (a scratch probe, or one a newer file replaced). They are not findings, are not challenged, and are not kept by `arnx accept`. A round with no report at all lists every failing test here and is incomplete (exit 2). |
+| `left_out_touched` | array of strings | Optional. The files of `not_sent` the change touches: the terminal names those. |
+| `could_not_run` | array | Optional. `{ test, needs, faked? }`: unproven tests, which failed for a file left out as secret-looking or (`faked`) for a private key the sandbox holds as a fake; `needs` is the file, or `a faked file` when the failure does not show which. The review is incomplete (exit 2). |
 | `fix_proof` | array | Optional (absent when nothing ran: the before/after check or the fix proof is off, no test passed, or the change touches no source). Tests that passed in every run, also run on the code before the change: see [Each fix proof](#each-fix-proof). Good news, never findings: they do not set the exit code. |
 | `typecheck` | array | Optional (absent when no reviewed project has a `typecheck` command in `.arnx/review.yaml`). Each project's own type check, run once on the change without arnx's generated tests: see [Each type check](#each-type-check). Information, never findings: it does not set the exit code or make the review incomplete. |
+| `types_unchecked` | object | Optional (absent unless the repository's CI runs a Python type checker and a reviewed Python project has no `typecheck`). `{tool, from, projects}`: the checker CI runs (`mypy`, `pyright`, `basedpyright` or `ty`), the CI file naming it, and the reviewed Python projects whose types arnx does not check. One entry for the repository, not one per project. Information only: it does not set the exit code. |
 | `provider_failures` | array | Optional (absent when no model call failed because of its provider). Calls a model provider failed because it was down (5xx or 429 on every attempt, or no connection) or refused the key (401 or 403): see [Each provider failure](#each-provider-failure). Information: the work those calls missed (an unchallenged finding, a reviewer that stopped) is what sets the status and exit code. |
-| `exit_code` | number | The review's exit code: 1 when a finding is `confirmed`, else 2 when the review is incomplete, else 0. |
+| `exit_code` | number | The review's exit code: 1 when a finding is `not-checked`, else 2 when the review is incomplete, else 0. A `confirmed` finding is worth a look and does not set it: read `status`. |
 
 Also written, for arnx and people: `prompt_version`, `write_dir`, `write_dirs`, `language`, `project_stats`,
 `checked` (passing tests and what each checks), `suspects` (what the hunt suspected and what each test showed),
@@ -59,8 +70,8 @@ Also written, for arnx and people: `prompt_version`, `write_dir`, `write_dirs`, 
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | string | `F1`, `F2`, ...: the id in `review.md` and in your report. |
-| `status` | string | `confirmed`: failed in every run and not disputed; sets exit code 1; fix these. `not-checked`: failed in every run, but no second opinion saw it (its budget ran out, or it did not answer); sets exit code 1; read it before acting. `disputed`: the second opinion disagrees. `waiting-on-answer`: the test assumes an answer to `depends_on`. `pre-existing`: fails the same way on the code before the change. Only `confirmed` is yours to fix. |
-| `verdict` | string or null | The second opinion: `confirmed`, `disputed`, or null when it did not judge (budget, API error; counts as confirmed). |
+| `status` | string | `confirmed`: failed in every run and not disputed; worth a look; does not set the exit code; read it, and fix it if the user marks it real. `not-checked`: failed in every run, but no second opinion saw it (its budget ran out, or it did not answer); sets exit code 1; read it before acting. `disputed`: the second opinion disagrees (also when the test waits on an answer: disputed comes first). `waiting-on-answer`: the test assumes an answer to `depends_on`. `pre-existing`: fails the same way on the code before the change. Only `confirmed` is yours to fix. |
+| `verdict` | string or null | The second opinion: `confirmed`, `disputed`, or null when it did not judge (budget, API error; exits 1 like `not-checked`). |
 | `reason` | string | The second opinion's reason. |
 | `test_id` | string | The test, as the runner names it (`path::name`). |
 | `func` | string | The test function's name. |
@@ -72,7 +83,8 @@ Also written, for arnx and people: `prompt_version`, `write_dir`, `write_dirs`, 
 | `suspect` | string | Optional. The hunt's suspect (`S1`) this test checked. |
 | `shallow` | string | Optional. `source-text`: the test matches the code's text; `existence`: it checks only that something exists. A change can pass such a test without fixing the behaviour. Absent: the test exercises behaviour. |
 | `judge` | string | Optional. The model that judged it, when it was the fallback. |
-| `before` | object | Optional (absent when the before/after check is off). The test on the code before the change: `{status, detail, runs, message?, as_text?}`; `status` is `regression`, `pre-existing`, `new-code`, `changed` or `unknown`. `as_text: true`: it passes there, but the test reads the code as text, so it is `unknown`, not a regression. |
+| `same_as` | string | Optional. The finding (`F2`) whose second opinion this one took: its test is the same test, the cases differing only by a fixture outside the test. Verdict, reason, `depends_on` and `judge` are that finding's. |
+| `before` | object | Optional (absent when the before/after check is off). The test on the code before the change: `{status, detail, runs, message?, as_text?, vacuous?}`; `status` is `regression`, `pre-existing`, `new-code`, `changed` or `unknown`. `as_text: true`: it passes there, but the test reads the code as text, so it is `unknown`, not a regression. `vacuous`: `new-name` (the test uses a name the change adds) or `background-error` (a background thread died there on missing code); the pass is `unknown`, not a regression. |
 
 ## Each group
 
@@ -127,14 +139,16 @@ tell the errors the change brought from those already there.
 |---|---|---|
 | `project` | string | The project. |
 | `command` | string | The command that ran: `typecheck` in `.arnx/review.yaml`. |
-| `status` | string | `clean`: no type errors. `errors`: type errors, counted below. `failed`: the command failed without reporting a type error (it could not start, or its output is not tsc's); `output` holds its end. `timed-out`: it ran out of time. |
-| `errors` | number | Type errors on the change. |
-| `in_changed_files` | number | Those in files the change touches. |
+| `status` | string | `clean`: no type errors. `errors`: type errors, counted below. `failed`: the command failed without reporting a type error (it could not start, or its output is not tsc's); `output` holds its end. `timed-out`: it ran out of time. `skipped`: not run, the code before the change had 100 errors or more when last run (`skipped_for`), so the errors this change adds were not checked; it has no `errors`, `in_changed_files` or `diagnostics`. |
+| `errors` | number | Type errors on the change. Absent when `status` is `skipped`: nothing was counted. |
+| `in_changed_files` | number | Those in files the change touches. Absent when `status` is `skipped`. |
 | `new` | number | Optional (present when `before` is `compared`). Errors the code before the change does not have: the change brought them. Fix these. |
 | `pre_existing` | number | Optional (present when `before` is `compared`). Errors the code before the change has too (same file, code and message). |
 | `before` | string | Optional (absent when there were no errors, or the before/after check is off). `compared`, or why the errors were not compared: `no-base` (the change has no code before it), `dependencies-changed`, `failed` (the type check did not run there). |
-| `diagnostics` | array | The first 100 errors, new ones and those in changed files first. Each has `file` (relative to the repository root; empty for an error about no file, such as a bad tsconfig), `line`, `column`, `code` (such as `TS2322`), `message`, `changed` (true when the change touches the file) and, when compared, `new`. |
+| `diagnostics` | array | Absent when `status` is `skipped`. The first 100 errors, new ones and those in changed files first. Each has `file` (relative to the repository root; empty for an error about no file, such as a bad tsconfig), `line`, `column`, `code` (such as `TS2322`), `message`, `changed` (true when the change touches the file) and, when compared, `new`. |
+| `skipped_for` | object | Optional (only when `status` is `skipped`). `errors` the code before the change had when last run, and `at` when. |
 | `output` | string | Optional (only when `status` is `failed` or `timed-out`). The end of the command's output. |
+| `gaps` | array | Optional (absent when none). Modules the type check cannot see, each named by 3 or more errors: `{kind, module, errors}` with `kind` `generated` (a client a generator writes, such as `@prisma/client`), `sibling` (a package of the workspace that is not built) or `missing`. Those errors say nothing about the change. |
 | `secs` | number | How long it took, on the change and on the code before it. |
 
 ## Each provider failure
@@ -158,6 +172,6 @@ that timed out is not one either.
 
 ## Exit code
 
-`arnx review` exits with `exit_code`: 0 no confirmed findings, 1 confirmed findings, 2 incomplete (or the run
+`arnx review` exits with `exit_code`: 0 no `not-checked` finding (a `confirmed` one does not fail the run; also `partly-covered` and `not-tested`), 1 a `not-checked` finding, 2 incomplete (or the run
 failed before writing review.json), 3 setup needed, 130 interrupted. Findings with `status` `pre-existing` never set
 it, nor does `typecheck`.

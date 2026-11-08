@@ -139,6 +139,39 @@ function parseJunitJs(text: string, root: string): TestResult[] | null {
   });
 }
 
+/** bun's console output: each failing test's text (from its `error:` line to the stack) comes before its `(fail) name`
+ * line, after the file's `path:` header; the source excerpt above the error is left out. */
+const BUN_MARK = /^\((pass|fail|skip|todo)\) (.*?)(?: \[[\d.]+m?s\])?$/;
+const BUN_FILE = /^([^\s()][^()]*\.[cm]?[jt]sx?):$/;
+
+/** bun's results with each failure's message taken from the run's output, where its JUnit report has none. */
+function bunMessages(results: TestResult[], output: string): TestResult[] {
+  const found = new Map<string, string>();
+  let file = "", block: string[] = [];
+  for (const line of output.replace(/\x1b\[[0-9;]*m/g, "").split("\n")) {
+    const header = BUN_FILE.exec(line);
+    const mark = header ? null : BUN_MARK.exec(line);
+    if (header) file = header[1]!;
+    if (mark?.[1] === "fail") {
+      const at = block.findIndex((l) => /^error\b/i.test(l));
+      const text = (at >= 0 ? block.slice(at) : block.filter((l) => !/^\s*\d+ \| |^\s*\^\s*$/.test(l))).join("\n").trim();
+      if (text) found.set(`${file}::${mark[2]}`, text.slice(0, MESSAGE_LIMIT));
+    }
+    if (header || mark) block = [];
+    else block.push(line);
+  }
+  if (!found.size) return results;
+  return results.map((t) => {
+    if (t.message || (t.outcome !== "failed" && t.outcome !== "error")) return t;
+    const hit = [...found].find(([key]) => {
+      const cut = key.lastIndexOf("::");
+      const [f, name] = [key.slice(0, cut), key.slice(cut + 2)];
+      return name === t.name && (!f || t.fileAttr === f || t.fileAttr.endsWith(`/${f}`));
+    });
+    return hit ? { ...t, message: hit[1] } : t;
+  });
+}
+
 /** vitest 2 and later list a run's tests (`vitest list`, as JSON in a file), jest its test files (--listTests); node:test
  * and bun test have no list form. vitest's must come from a test_command that says `vitest run`. */
 function listCommand(testCommand: string, targets: string[], listPath: string, runner: string): string | null {
@@ -351,6 +384,8 @@ export const typescript: Adapter = {
     const said = SAYS[runner];
     return said ? [...output.matchAll(said)].at(-1)?.[1]?.trim() ?? null : undefined;
   },
+  // jest starts a worker per CPU; vitest runs of a few files are seconds, so it is left as it is.
+  serialFlag: (_command, _read, runner) => (runner === "jest" ? "--runInBand" : null),
   command: (testCommand, targets, reportPath, runner) => {
     const t = targets.map(shQuote).join(" ");
     const r = shQuote(reportPath);
@@ -369,6 +404,7 @@ export const typescript: Adapter = {
   },
   parseReport: (text, runner, root) =>
     runner === "jest" ? parseJest(text, root) : runner === "node" ? parseNode(text, root) : parseJunitJs(text, root),
+  messagesFrom: (results, output, runner) => runner === "bun" ? bunMessages(results, output) : results,
   listCommand,
   parseList,
   reportSetup: (snapshot, runner) => {
@@ -409,3 +445,39 @@ export const typescript: Adapter = {
   downloadCache: ["npm_config_cache=/arnx-cache/npm"],
   runEnv: ["CI=1"],
 };
+
+/** The pattern test_files takes: a star and a suffix that ends in a JavaScript or TypeScript extension. */
+export const TEST_FILES = /^\*([\w.-]+\.(?:c|m)?[jt]sx?)$/;
+
+/** The suffix of a test_files pattern when it is valid: it ends in a JavaScript or TypeScript extension and names a
+ * test at a word edge (.test, _spec, -test in any case, or a capital Test or Spec), so no source file can end the same way; else null. */
+export function testFilesSuffix(glob: unknown): string | null {
+  const suffix = typeof glob === "string" ? TEST_FILES.exec(glob)?.[1] : undefined;
+  return suffix && (/[._-](?:test|spec)/i.test(suffix) || /Test|Spec/.test(suffix)) ? suffix : null;
+}
+
+/** `base` for a project whose runner collects the files named by `glob` (test_files, "*Spec.tsx") and not the usual
+ * *.test.* and *.spec.*: the probes, the files a round writes and collects, the test files, the words for the model
+ * and the name of a kept file follow the suffix. */
+export function withTestFiles(base: Adapter, glob: string): Adapter {
+  const suffix = testFilesSuffix(glob);
+  if (!suffix) return base;
+  const ends = new RegExp(`${escapeRx(suffix)}$`);
+  return {
+    ...base,
+    words: (runner) => ({ ...base.words(runner), testFiles: `*${suffix}`, writableFiles: `*${suffix} or arnx-helpers.<ext>` }),
+    writable: new RegExp(`^(?:.+${escapeRx(suffix)}|arnx-helpers\\.(?:c|m)?[jt]sx?)$`),
+    probes: (runner) => {
+      const [first] = base.probes(runner);
+      return [{ file: `arnx-probe${suffix}`, source: first!.source }];
+    },
+    isTestFile: (name) => base.isTestFile(name) || ends.test(name),
+    testStem: (fileName) => ends.test(fileName) ? fileName.slice(0, -suffix.length) : base.testStem(fileName),
+    acceptedPath: (original, tag, acceptedDir, name) => {
+      const own = posix.basename(original);
+      if (!ends.test(own)) return base.acceptedPath(original, tag, acceptedDir, name);
+      const dir = acceptedDir === DEFAULT_ACCEPTED_DIR ? TS_ACCEPTED_DIR : acceptedDir;
+      return posix.join(dir, `r${tag}`, posix.dirname(original), `${name}${suffix}`);
+    },
+  };
+}

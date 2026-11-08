@@ -238,6 +238,54 @@ test("at the limit with no file accepted, the projects proven so far are kept, t
     data: { ok: true, stop: "time", projects: ["api"], uncovered_projects: ["web"] } });
 });
 
+test("at the limit, a held try and a project proven after it are both kept: the file that keeps the most is taken",
+  async () => {
+  // web alone is tried first: it runs, but test_command leaves most of its tests out, so it goes back to the agent.
+  // Then a file of both projects: api is proven, and web's changed try runs into the limit. The last file keeps only
+  // api; the held try's file, with api put back as proven, keeps both.
+  const clock = { ms: 0 };
+  const repo = initRepo(join(tmp(), "two-held"));
+  for (const name of ["api", "web"]) {
+    mkdirSync(join(repo, name, "tests"), { recursive: true });
+    writeFileSync(join(repo, name, `${name}.py`), "def f():\n    return 1\n");
+    writeFileSync(join(repo, name, "tests", `test_${name}.py`), "def test_f():\n    assert True\n");
+  }
+  mkdirSync(join(repo, "web", "tests", "slow"), { recursive: true });
+  for (let i = 0; i < 25; i++) writeFileSync(join(repo, "web", "tests", "slow", `test_s${i}.py`), "def test_s():\n    pass\n");
+  commit(repo, "two");
+  const block = (name: string, image = "python:3.12-slim", only = "") => `  ${name}:
+    root: ${name}
+    language: python
+    image: ${image}
+    install: [pip install pytest]
+    test_command: python -m pytest -q ${only}{targets}
+`;
+  const held = `version: 1\nprojects:\n${block("web", undefined, "tests/test_web.py ")}`;
+  const both = `version: 1\nprojects:\n${block("api")}${block("web", "python:3.13-slim")}`;
+  const factory = async <T>(cfg: { name: string; image: string }, snap: string, _log: string,
+    body: (r: Runner) => Promise<T>) => {
+    if (cfg.image === "python:3.13-slim") {
+      clock.ms = 10 * MIN + 1;
+      throw new OutOfTime(10);
+    }
+    clock.ms += MIN;
+    return body(new FakeSession(snap, () =>
+      [junitXml([[`${cfg.name}/tests/test_${cfg.name}.py`, "test_f", "passed", ""]]), "1 passed", false]));
+  };
+  const model = new ScriptedAgent([[tool("try_project", { yaml: held, project: "web" })],
+    [tool("try_project", { yaml: both, project: "api" })], [tool("try_project", { yaml: both, project: "web" })],
+    [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"),
+    sessionFactory: factory, timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+  const first = String((model.calls[1]!.messages.at(-1)!.content as Record<string, unknown>[])[0]!.content);
+  expect(first).toContain("never ran");
+  expect([r.ok, r.stop, r.setAside]).toEqual([true, "time", []]);
+  const f = parseReviewFile(r.yamlText!);
+  expect(f.projects.map((p) => [p.name, p.image]).sort()).toEqual([["api", "python:3.12-slim"],
+    ["web", "python:3.12-slim"]]);
+  expect(r.projects.find((p) => p.name === "web")!.gap).toContain("never ran");
+});
+
 test("at the limit with nothing proven, setup fails as before", async () => {
   const clock = { ms: 0 };
   const repo = twoProjects();
@@ -314,4 +362,88 @@ test("setup stopped by a refused key says so, not that the environment does not 
   expect(failure.text).toBe("Setup stopped: the model provider refused the key (HTTP 401, claude-sonnet-5-5). " +
     "Check the key, then run again.");
   expect(failure.json.reason).toStartWith("setup's model call failed: claude-sonnet-5-5: HTTP 401");
+});
+
+test("a run that passes at the limit is kept, its doubt said", async () => {
+  const repo = initRepo(join(tmp(), "late"));
+  mkdirSync(join(repo, "tests", "slow"), { recursive: true });
+  for (let i = 0; i < 25; i++) writeFileSync(join(repo, "tests", "slow", `test_s${i}.py`), "def test_s():\n    pass\n");
+  writeFileSync(join(repo, "tests", "test_fast.py"), "def test_f():\n    pass\n");
+  commit(repo, "tests");
+  const narrow = TWO.split("  web:")[0]!.replace("root: api", "root: .").replace("{targets}", "tests/test_fast.py {targets}");
+  let ms = 0;
+  const factory = fakeFactory(() => {
+    ms = 10 * MIN + 1; // the run ends at the limit
+    return [junitXml([["tests/test_fast.py", "test_f", "passed", ""]]), "", false];
+  });
+  const model = new ScriptedAgent([[tool("try_project", { yaml: narrow })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"), sessionFactory: factory,
+    timeLimit: { at: 10 * MIN, now: () => ms, minutes: 10 } });
+  // The doubt is not sent back to the agent (no time to answer it): the project is proven and the doubt is kept.
+  expect(r.ok).toBe(true);
+  expect(r.projects.map((p) => p.name)).toEqual(["api"]);
+  expect(r.projects[0]!.gap).toBe("25 of 26 files that look like tests never ran (tests/slow 25)");
+  expect(r.yamlText).toContain("test_command");
+});
+
+test("a project proven earlier survives the time limit when the last file leaves it out", async () => {
+  const clock = { ms: 0 };
+  const repo = twoProjects();
+  const webOnly = `version: 1
+projects:
+  web:
+    root: web
+    language: python
+    image: python:3.12-slim
+    install: [pip install pytest]
+    test_command: python -m pytest -q {targets}
+uncovered:
+  - {path: /api/, reason: "not needed"}
+`;
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("try_project", { yaml: webOnly, project: "web" })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"),
+    sessionFactory: apiThenSlowWeb(clock), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+  expect([r.ok, r.stop, r.setAside]).toEqual([true, "time", ["web"]]);
+  const f = parseReviewFile(r.yamlText!);
+  expect(f.projects.map((p) => p.name)).toEqual(["api"]);
+  expect(f.uncovered).toEqual([{ path: "/web/", reason: TIME_LEFT_OUT }]);
+});
+
+const fastExceptWeb = (clock: { ms: number }) =>
+  async <T>(cfg: { name: string }, snap: string, _log: string, body: (r: Runner) => Promise<T>) =>
+    body(new FakeSession(snap, () => {
+      if (cfg.name !== "web") return [junitXml([["api/tests/test_api.py", "test_f", "passed", ""]]), "1 passed", false];
+      clock.ms += 11 * MIN;
+      return [junitXml([["web/tests/test_web.py", "test_f", "failed", "boom"]]), "1 failed", false];
+    }));
+
+test("at the limit, a proven project that overlaps the last file's projects is not put back: the file is still accepted", async () => {
+  const clock = { ms: 0 };
+  const repo = twoProjects();
+  mkdirSync(join(repo, "api", "lib"), { recursive: true });
+  writeFileSync(join(repo, "api", "lib", "lib.py"), "X = 1\n");
+  commit(repo, "lib");
+  const second = `version: 1
+projects:
+  lib:
+    root: api/lib
+    language: python
+    image: python:3.12-slim
+    install: [pip install pytest]
+    test_command: python -m pytest -q {targets}
+  web:
+    root: web
+    language: python
+    image: python:3.12-slim
+    install: [pip install pytest]
+    test_command: python -m pytest -q {targets}
+`;
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("try_project", { yaml: second, project: "lib" })], [tool("try_project", { yaml: second, project: "web" })],
+    [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"),
+    sessionFactory: fastExceptWeb(clock), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+  expect([r.ok, r.stop]).toEqual([true, "time"]);
+  expect(parseReviewFile(r.yamlText!).projects.map((p) => p.name)).toEqual(["lib"]);
 });

@@ -6,6 +6,7 @@
 // tree, and so does each issue marked rewrite (the bug is real, its test wrong), from the owner's reason. A finding's
 // test is set aside when the owner's answer to the question it assumed has a test of its own, or when it is rewritten.
 // Every mark is appended to .arnx/precision.jsonl.
+import { Boundary, maskedCopy, STAND_INS_NOTE } from "./boundary";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative, sep } from "node:path";
 import { adapterFor, getAdapter } from "./adapters";
@@ -15,21 +16,22 @@ import type { Brain } from "./brain";
 import { configSuspects, loadReviewFile, type ReviewFile, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
 import { type AgentModel, allPrices } from "./llm";
-import { baseName, funcOf, ownerFile, type TestResult } from "./outcomes";
+import { baseName, funcOf, ownerFile, testKey, type TestResult } from "./outcomes";
 import { fixPrompt } from "./fixprompt";
 import { LocalBrain } from "./localbrain";
 import { isModelKey } from "./prompts";
 import { promptsFor } from "./userprompts";
 import { defaultMarks, firstLine, groupsOf, load, type Marks, parseMarks, parseReports, type Review, wrapMarkdown }
   from "./report";
+import { keyReruns } from "./realkey";
 import { sayingDocker, type SessionFactory } from "./sandbox";
 import { refString, type Settings } from "./settings";
 import { agentUse, logUsage } from "./usage";
-import { collect, DOME, dockerSession, readCopies, testRound, writeDirOf } from "./testround";
+import { acceptedDirFor, collect, DOME, dockerSession, readCopies, testRound, writeDirOf } from "./testround";
 import { acceptedTestIds, recordAccepted, testsByFile } from "./check";
 import { isoSeconds } from "./util";
 import { inPool } from "./challenge";
-import { sliceDiff, workingTreeFiles } from "./change";
+import { sliceDiff, treeValues, workingTreeFiles } from "./change";
 import { route } from "./route";
 
 /** Answer rounds at once (each a model round and three sandbox runs). */
@@ -202,7 +204,7 @@ export function findAccepted(repo: string): string {
   return found.reduce((a, b) => (at(b) > at(a) ? b : a));
 }
 
-const funcOfId = (testId: string) => baseName(testId.split("::").at(-1) ?? "");
+const funcOfId = testKey;
 /** A finding's test as the adapter's skip names it: its func, read again from its test id, since an older arnx cut a
  * JavaScript name at its first "[" ("topup generated [memory] > S1: pays" saved as "topup generated "). */
 function funcOfFinding(f: { testId: string; func: string }): string {
@@ -349,12 +351,12 @@ function projectsOf(repo: string, rdir: string, review: Review, settings: Settin
   return review.projects.map((name) => {
     const cfg = file?.projects.find((p) => p.name === name);
     if (file && !cfg) throw new ArnxError(`review ${review.id} names project ${name}, which review.yaml no longer has`);
-    const adapter = getAdapter(cfg?.language ?? review.language);
+    const adapter = cfg ? adapterFor(cfg) : getAdapter(review.language);
     const testsRoot = legacy ? join(rdir, "tests") : join(rdir, "projects", name, "tests");
     const files = readCopies(testsRoot, adapter.writable);
     const rootRel = cfg ? cfg.workdir : ".";
     return { name, adapter, root: join(repo, DOME, rootRel), rootRel,
-      acceptedDir: settings.acceptedTestsDir, files,
+      acceptedDir: cfg ? acceptedDirFor(cfg, settings.acceptedTestsDir) : settings.acceptedTestsDir, files,
       writeDir: review.writeDirs[name] ?? review.writeDir };
   });
 }
@@ -380,6 +382,8 @@ export function makeAnswerRunner(repo: string, file: ReviewFile, settings: Setti
                                  brain: Brain = new LocalBrain({ agentModel: agentModel!, prices: allPrices(settings),
                                    prompts: promptsFor(repo) }))
   : AnswerRunner {
+  // One accept's answer rounds share the reruns with a real key.
+  const reruns = keyReruns();
   return async (qid, question, answer, diff, outDir, project) => {
     const cfg = file.projects.find((p) => p.name === project) ?? file.projects[0]!;
     const base = writeDirOf(cfg, "answers");
@@ -393,7 +397,7 @@ export function makeAnswerRunner(repo: string, file: ReviewFile, settings: Setti
     // Untracked files only when the config sends them (a one-off --untracked review leaves them out here).
     const rnd = await testRound(repo, null, cfg, { brain,
       ask: () => ({ kind: "answer", input: { cfg, question, answer, diff: part } }), writeDir: base,
-      budgetUsd: settings.answerBudgetUsd, runs: settings.runs, outDir, sessionFactory, untracked: settings.untracked,
+      budgetUsd: settings.answerBudgetUsd, runs: settings.runs, outDir, sessionFactory, untracked: settings.untracked, keyReruns: reruns,
       ...(progress ? { progress: (m: string) => progress(`${qid} · ${m}`) } : {}) });
     // A remote brain's cost goes by its tier and harness, never a model name.
     logUsage(repo, "accept", [agentUse(brain.label ? `${brain.label}/answer` : `anthropic:${agentModel!.model}`,
@@ -512,7 +516,9 @@ export async function accept(repo: string, rdir: string, settings: Settings,
       add(keeps.findings[f.id] === "real" ? keep : skip, f.file, func);
       if (setAside[f.id]) reasons[`${f.file}::${func}`] = why(f.id);
     }
-    for (const testId of [...review.flaky, ...review.errors]) {
+    // A failing test the reviewer did not report is no finding: it is never kept, whatever else its file keeps.
+    const unreported = (review.unclaimed ?? []).filter((u) => u.project === p.name).map((u) => u.testId);
+    for (const testId of [...review.flaky, ...review.errors, ...unreported]) {
       const owner = ownerFile(testId.split("::")[0]!, Object.keys(p.files));
       if (owner) add(skip, owner, funcOfId(testId));
     }
@@ -573,6 +579,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   const log = [...others, ...lines.map((l) => JSON.stringify(l))];
   writeFileSync(precision, log.join("\n") + "\n");
   ignoreLocal(repo, "precision.jsonl");
+  ignoreLocal(repo, "typecheck.json");
   const keptRel = kept.map((p) => relative(repo, p).split(sep).join("/"));
   // Pinned: arnx check refuses to run these files once they change (accept --again records them anew). `pins`: this
   // machine's record of what arnx pinned (localPinsPath), so a pin edited in the repository is told apart.
@@ -587,6 +594,10 @@ export async function accept(repo: string, rdir: string, settings: Settings,
     .map((f) => ({ id: f.id, testId: f.testId, project: f.project, explanation: f.explanation }));
   const result = { review, marks, kept, answers, rewrites, setAside, dest, red, moved, sources,
     precision: precisionOf(log), fixOverrides: prompts.overridden.filter((k) => !isModelKey(k)) };
-  writeFileSync(join(rdir, "fix-prompt.md"), wrapMarkdown(fixPrompt(result, settings, prompts)));
+  // A coding agent reads this. The review is masked already; answers and reasons are the user's own, and any may quote a
+  // value of today's tree.
+  const fix = maskedCopy(new Boundary(treeValues(repo)), fixPrompt(result, settings, prompts));
+  const note = fix.shown || review.standInsShown ? `${STAND_INS_NOTE}\n\n` : "";
+  writeFileSync(join(rdir, "fix-prompt.md"), wrapMarkdown(note + fix.value));
   return result;
 }

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { CHANGES, type ChangedTest, checkJson, checkSummary, type MayContradict, type ProjectCheck } from "../src/check";
 import { type ReviewRecheck, recheckJson } from "../src/recheck";
 import { FIX_STATUSES } from "../src/before";
-import { type Review, save } from "../src/report";
+import { exitCode, findingStatus, type Review, save } from "../src/report";
 import { TYPECHECK_BEFORE, TYPECHECK_STATUSES } from "../src/typecheck";
 import { finding, sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
@@ -46,14 +46,17 @@ const written = () => ["hunt", "plain"].map((n) =>
 function full(): Record<string, unknown> {
   const f = finding("F1", "tests/g/test_a.py::test_a", "test_a", "tests/g/test_a.py", "assert 1 == 2", "off by one",
     "confirmed", "yes");
-  const r: Review = sampleReview({ promptOverrides: ["hunt.task"], promptsHash: "abc123def456", promptsFileEdited: true,
-    acceptedTestsEdited: [".arnx/tests/tests/arnx/r1/test_a.py"], findings: [{ ...f, dependsOn: "Q1", suspect: "S1", judge: "openai:x", shallow: "existence",
+  const r: Review = sampleReview({ standInsShown: true, promptOverrides: ["hunt.task"], promptsHash: "abc123def456", promptsFileEdited: true,
+    acceptedTestsEdited: [".arnx/tests/tests/arnx/r1/test_a.py"], findings: [{ ...f, dependsOn: "Q1", suspect: "S1", judge: "openai:x", sameAs: "F0", shallow: "existence",
     before: { status: "regression", detail: "passes before", runs: ["passed", "passed", "passed"] } }],
   groups: [{ findings: ["F1"], title: "t", input: "i", actual: "a", expected: "e", consequence: "c", severity: "high" }],
-  untested: [{ project: "main", files: ["a.py"], of: 2 }],
+  sourceFiles: 2, untested: [{ project: "main", files: ["a.py"], of: 2 }],
   // Never both in one review (one is opted in, the other not); here only to see each written.
   untrackedIncluded: ["notes.md"], untrackedLeftOut: 1,
-  blankedLines: [{ path: "src/auth.ts", lines: [4] }],
+  leftOutFiles: [{ path: "k.ts", line: 1, label: "a private key" }], couldNotRun: [{ test: "t.py::a", needs: "k.ts" }], fakedKeys: ["f.ts"], skippedTests: 1,
+  unclaimed: [{ project: "main", testId: "tests/g/test_a.py::test_scratch", message: "assert 1 == 2" }], leftOutTouched: ["k.ts"],
+  typesUnchecked: { tool: "mypy", from: "main.yml", projects: ["main"] },
+      blankedLines: [{ path: "src/auth.ts", lines: [4] }],
   usage: [{ model: "anthropic:m", calls: 1, unknownCalls: 0, input: 1, output: 1, cacheRead: 0, cacheWrite: 0,
     costUsd: 0.1 }] as Review["usage"],
   fixProof: [{ testId: "tests/g/test_a.py::test_b", project: "main", file: "tests/g/test_a.py", beforeStatus: "unknown",
@@ -62,7 +65,9 @@ function full(): Record<string, unknown> {
   // `output` comes only with a check that failed or timed out; here only to see every field written.
   typecheck: [{ project: "main", command: "npx tsc --noEmit", status: "errors", errors: 1, inChangedFiles: 1, new: 1,
     preExisting: 0, before: "compared", diagnostics: [{ file: "a.ts", line: 1, column: 2, code: "TS2322",
-      message: "m", changed: true, new: true }], output: "a.ts(1,2): error TS2322: m", secs: 1 }],
+      message: "m", changed: true, new: true }], output: "a.ts(1,2): error TS2322: m", secs: 1,
+    gaps: [{ kind: "generated", module: "@prisma/client", errors: 3 }],
+    skippedFor: { errors: 100, at: "2026-11-01T00:00:00.000Z" } }],
   // `key` comes only with a refused key; here only to see every field written.
   providerFailures: [{ provider: "myprovider", name: "myprovider (llm.example.com)", kind: "auth", detail: "HTTP 401",
     calls: 2, failed: 2, attempts: 2, roles: ["challenge"], missing: ["challenge"], key: "MY_PROVIDER_KEY" }] });
@@ -131,7 +136,7 @@ test("review-json.md names each fix-proof status review.json can write", () => {
 
 // --- check --json -----------------------------------------------------------------------------------------------------
 
-const project: ProjectCheck = { project: "svc", files: ["svc/tests/arnx/r1/test_x.py"], passed: ["a"], skipped: 1,
+const project: ProjectCheck = { project: "svc", files: ["svc/tests/arnx/r1/test_x.py"], passed: ["a"], skipped: 1, notRun: [".arnx/tests/svc/tests/arnx/r1/test_y.py"],
   noReport: false, failed: [{ testId: "t::b", fileAttr: "", name: "b", outcome: "failed", message: "assert 0" }] };
 const changed: ChangedTest[] = [{ path: "tests/arnx/r1/test_x.py", review: "r1", change: "modified" }];
 const contradiction: MayContradict = { answer: "Q1", accepted: "F3", review: "r1", accepted_review: "r1",
@@ -180,7 +185,9 @@ test("check --json results match exit codes as check-json.md says", () => {
     expect(JSON.parse(checkJson([], code as number, code === 4 ? changed : [])).result).toBe(result);
   }
   expect(checkSummary([])[1]).toBe(3);
-  expect(checkSummary([{ ...project, failed: [] }])[1]).toBe(0);
+  expect(checkSummary([{ ...project, failed: [], notRun: [] }])[1]).toBe(0);
+  // A kept file the runner left out is exit 2, never a pass.
+  expect(checkSummary([{ ...project, failed: [] }])[1]).toBe(2);
   expect(checkSummary([{ ...project, noReport: true }])[1]).toBe(2);
 });
 
@@ -215,4 +222,40 @@ test("check --review --json results match exit codes as check-json.md says", () 
   expect([one("fixed"), one("still-failing"), one("no-report"), JSON.parse(recheckJson({ review: "r", findings: [] }))]
     .map((j) => [j.result, j.exit_code])).toEqual(rows);
   for (const s of ["fixed", "still-failing", "no-report"]) expect(doc).toContain(`\`${s}\``);
+});
+
+// The skill's exit table and the status words must say what exitCode does.
+test("the skill's exit table and status words match exitCode", () => {
+  const skill = readFileSync(join(import.meta.dir, "..", "skills", "arnx", "SKILL.md"), "utf8");
+  const refs = readFileSync(join(REFS, "review-json.md"), "utf8");
+  const table = skill.slice(skill.indexOf("## Exit codes"));
+  const row = (code: string) => table.split("\n").find((l) => l.startsWith(`| ${code} |`))!;
+  const base = { findings: [], questions: [], passed: 3 };
+  const unjudged = finding("F1", "t.py::a", "a", "t.py", "boom", "x", null);
+  const confirmedF = finding("F1", "t.py::a", "a", "t.py", "boom", "x", "confirmed");
+  const disputedF = finding("F1", "t.py::a", "a", "t.py", "boom", "x", "disputed");
+  // Exit 1: an unjudged (not-checked) finding. A confirmed finding is worth a look and exits 0; both are named in the
+  // skill and in review-json.md.
+  expect(exitCode(sampleReview({ ...base, findings: [confirmedF] }))).toBe(0);
+  expect(exitCode(sampleReview({ ...base, findings: [unjudged] }))).toBe(1);
+  expect(findingStatus(unjudged)).toBe("not-checked");
+  for (const text of [row("1"), row("0")]) expect(text).toContain("`not-checked`");
+  expect(row("0")).toContain("`confirmed`");
+  expect(refs).toMatch(/1 when a finding is `not-checked`/);
+  expect(refs).toMatch(/1 a `not-checked` finding/);
+  // Exit 0: a disputed finding, and a change nothing was seen reaching (status not-tested, partly-covered).
+  expect(exitCode(sampleReview({ ...base, findings: [disputedF] }))).toBe(0);
+  const notTested = sampleReview({ ...base, passed: 0, sourceFiles: 1, untested: [{ project: "main", files: ["a.py"], of: 1 }] });
+  expect(exitCode(notTested)).toBe(0);
+  expect(row("0")).toContain("`partly-covered` or `not-tested`");
+  expect(skill).toContain("`not-tested`");
+  // Exit 2: incomplete.
+  expect(exitCode(sampleReview({ ...base, stop: "budget" }))).toBe(2);
+  expect(row("2")).toContain("incomplete");
+  // A finding both disputed and waiting on an answer reads disputed; the page says so.
+  expect(findingStatus({ ...disputedF, dependsOn: "Q1" })).toBe("disputed");
+  expect(refs).toContain("(also when the test waits on an answer: disputed comes first)");
+  // A fix proof is "a fix or new behaviour", never plain "your fix".
+  expect(skill).toContain("a fix or new behaviour");
+  expect(skill).not.toContain("confirmed your fix");
 });

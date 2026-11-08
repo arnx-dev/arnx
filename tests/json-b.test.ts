@@ -97,11 +97,11 @@ test("review --json: the summary's findings, questions, status and next, from th
   save(r, rdir, "diff");
   const back = load(rdir);
   const [result, code, fields] = reviewJson(back, ".arnx/reviews/x/review.md", ".arnx/reviews/x/review.json");
-  expect([result, code]).toEqual(["findings", 1]);
+  expect([result, code]).toEqual(["findings", 0]);
   expect(fields).toEqual({
     review_id: RID, review_md: ".arnx/reviews/x/review.md", review_json: ".arnx/reviews/x/review.json",
     change: "uncommitted (base 1a2b3c4)", files_changed: 4, added: 140, removed: 3, status: "complete",
-    issues: 2, findings: [
+    issues: 2, finding_count: 2, findings: [
       { ids: ["F1"], state: "confirmed", confirmed: true, regression: false, projects: ["main"],
         title: "Any member can invite.", severity: null },
       { ids: ["F2"], state: "disputed", confirmed: false, regression: false, projects: ["main"], title: "Duplicates.",
@@ -126,7 +126,12 @@ test("review --json: the summary's findings, questions, status and next, from th
     untested: [{ project: "main", files: ["app/x.py"], of: 3 }] }), "m", "j");
   expect(partly.slice(0, 2)).toEqual(["clean", 0]);
   expect(partly[2]).toMatchObject({ status: "partly-covered", not_tested: ["app/x.py"],
-    problems: ["no test refers to 1 of 3 changed source files, so finding nothing there says nothing about them"] });
+    problems: ["no test was seen reaching 1 of 3 changed source files, so finding nothing there says nothing about them"] });
+  const none = reviewJson(sampleReview({ findings: [], questions: [], passed: 0, sourceFiles: 2,
+    untested: [{ project: "main", files: ["app/x.py", "app/y.py"], of: 2 }] }), "m", "j");
+  expect(none.slice(0, 2)).toEqual(["clean", 0]);
+  expect(none[2]).toMatchObject({ status: "not-tested", source_files: 2, not_tested: ["app/x.py", "app/y.py"],
+    problems: ["no test was seen reaching any of 2 changed source files, so finding nothing says nothing"] });
 });
 
 test("triage --json draws nothing and changes nothing: the marks and answers as review.md holds them", async () => {

@@ -4,11 +4,13 @@ import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runAgent, Workspace } from "../src/agent";
-import { ModelError, NoCredits } from "../src/errors";
-import { type AgentModel, AnthropicAgent, FallbackJson, PRICES, ResponsesAgent, ResponsesJson } from "../src/llm";
+import { fatal, ModelError, NoCredits } from "../src/errors";
+import { parseReviewFile } from "../src/config";
+import { LocalBrain } from "../src/localbrain";
+import { type AgentModel, AnthropicAgent, FallbackJson, PRICES, resetOutageWaits, ResponsesAgent, ResponsesJson } from "../src/llm";
 import { parseModelRef } from "../src/settings";
 import { Cli } from "./helpers/cli";
-import { FakeJson } from "./helpers/fakes";
+import { FakeJson, ScriptedAgent, text } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
 import { useTmp } from "./helpers/tmp";
 
@@ -52,6 +54,7 @@ test("OpenAI: a background response that failed for credits stops at once", asyn
 });
 
 test("OpenAI: a 429 for credits is not retried; one for the rate limit still is", async () => {
+  resetOutageWaits();
   let n = 0;
   const quota = new ResponsesJson(GPT, "https://api.example/v1", "k", "medium", PRICES, { sleep: noSleep,
     fetch: fetching((i) => {
@@ -67,7 +70,7 @@ test("OpenAI: a 429 for credits is not retried; one for the rate limit still is"
     }) });
   const e = await busy.completeJson("s", "u", { type: "object" }).catch((x: unknown) => x);
   expect(e).not.toBeInstanceOf(NoCredits);
-  expect(n).toBe(4);
+  expect(n).toBe(7);
 });
 
 test("Anthropic: \"Your credit balance is too low\" (400) stops at once", async () => {
@@ -116,4 +119,66 @@ test("setup stops with the one line, exit 2, not as an environment it could not 
   const j = new Cli({ cwd: repo, env, setupModel: broke() });
   expect(await j.run("setup", "--yes", "--json")).toBe(2);
   expect(JSON.parse(j.stdout).error).toBe(LINE);
+});
+
+test("what escapes every handler (a stray promise) prints an ArnxError's own line: NoCredits exits 2, never as a bug", () => {
+  expect(fatal(new NoCredits("OpenAI"), {})).toEqual({ lines: [`arnx: ${LINE}`], code: 2 });
+  const bug = fatal(new TypeError("x is undefined"), {});
+  expect([bug.lines[0]!.startsWith("arnx: internal error (TypeError: x is undefined)"), bug.code]).toEqual([true, 2]);
+});
+
+test("a second hunter with no credits is skipped, said once, and the round goes on", async () => {
+  const cfg = parseReviewFile("version: 1\nimage: python:3.12-slim\ntest_command: pytest {targets}\n").projects[0]!;
+  const said: string[] = [];
+  // One second hunter and one brain for the run, as a review makes them; each round has its reviewer.
+  const second = new FakeJson([new NoCredits("OpenAI"), new NoCredits("OpenAI")]);
+  const reviewers: AgentModel[] = [];
+  const brain = new LocalBrain({ agentModel: { model: "claude-sonnet-5-5", create: (a) => reviewers[0]!.create(a) },
+    prices: PRICES, secondHunter: second });
+  const round = async () => {
+    // The reviewer answers after the second hunter has failed: its rejection must not go unhandled meanwhile.
+    const report = JSON.stringify({ tests: [], suspected_defects: [], questions: [] });
+    const reviewer = new ScriptedAgent([[text(JSON.stringify({ suspects: [], questions: [] }))], [text(report)],
+      [text(report)]]);
+    reviewers[0] = { model: reviewer.model, create: async (a) => {
+      await new Promise((r) => setTimeout(r, 20));
+      return reviewer.create(a);
+    } };
+    const r = await brain.agentRound("review",
+      { cfg, diff: "diff --git a/a.py b/a.py\n+x = 1\n", scope: { owned: ["a.py"], used: [] }, scoped: true,
+        envTests: [], maxQuestions: 3, dbNames: [], budgetUsd: 5, hunt: { context: "", searchDirs: [] },
+        progress: (m) => said.push(m) }, Promise.resolve({ tools: () => [], call: async () => "" }));
+    return r;
+  };
+  expect((await round()).agent.stop).toBe("end_turn");
+  expect((await round()).agent.stop).toBe("end_turn"); // a second project in the same run: not asked again
+  expect(second.calls).toHaveLength(1);
+  expect(said.filter((m) => m.includes("second hunter skipped: OpenAI has no credits left on this key"))).toHaveLength(1);
+});
+
+test("a challenger fallback with no credits is skipped, said once; the challenger's own stays fatal", async () => {
+  const notices: string[] = [];
+  const first = new FakeJson([new ModelError("first: HTTP 503"), new ModelError("first: HTTP 503")]);
+  const fallback = new FakeJson([new NoCredits("OpenAI")]);
+  const m = new FallbackJson(first, fallback);
+  m.notice = (x) => notices.push(x);
+  for (let i = 0; i < 2; i++) {
+    const e = await m.completeJson("s", "u", {}).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ModelError);
+    expect(e).not.toBeInstanceOf(NoCredits);
+  }
+  expect(fallback.calls).toHaveLength(1); // the second verdict does not ask it again
+  expect(notices.filter((x) => x === "challenger fallback skipped: OpenAI has no credits left on this key"))
+    .toHaveLength(1);
+});
+
+test("verdicts side by side meet a fallback with no credits: it is said once", async () => {
+  const notices: string[] = [];
+  const first = new FakeJson([new ModelError("first: HTTP 503"), new ModelError("first: HTTP 503")]);
+  const fallback = new FakeJson([new NoCredits("OpenAI"), new NoCredits("OpenAI")]);
+  const m = new FallbackJson(first, fallback);
+  m.notice = (x) => notices.push(x);
+  const all = await Promise.all([0, 1].map(() => m.completeJson("s", "u", {}).catch((x: unknown) => x)));
+  for (const e of all) expect(e).not.toBeInstanceOf(NoCredits);
+  expect(notices.filter((x) => x.startsWith("challenger fallback skipped"))).toHaveLength(1);
 });

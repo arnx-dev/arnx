@@ -213,7 +213,9 @@ test("a change that touches no source (tests, docs) proves no fix: no session on
   commit(repo, "notes");
   writeFileSync(join(repo, "NOTES.md"), "more notes\n");
   const seen: Seen[] = [];
-  const { review: r } = await review(SETTINGS, seen);
+  // documentation alone is reviewed only on request
+  const { review: r } = await runReview(repo, { settings: SETTINGS, agentModel: agent(),
+    challenger: new FakeJson([]), sessionFactory: sessions(seen), docs: true });
   expect(r.testsWritten).toBe(4);
   expect(seen).toHaveLength(1);
   expect(r.fixProof).toBeUndefined();
@@ -221,7 +223,7 @@ test("a change that touches no source (tests, docs) proves no fix: no session on
 
 // A test that hangs on the code before the change made each of its runs there wait the whole timeout, for the
 // findings and again for the passing tests.
-test("on the code before the change, a timed-out run skips the rest, findings' and passing tests'", async () => {
+test("on the code before the change, a file that does not finish is one error and is not run again, findings' and passing tests'", async () => {
   const add = `${G}/test_add.py`, zero = `${G}/test_zero.py`;
   const after = (command: string) => junitXml([[add, "test_add", "failed", "assert 4 == 5"], [zero, "test_zero",
     "passed", ""]].filter(([f]) => command.includes(f!)) as [string, string, string, string][]);
@@ -240,17 +242,15 @@ test("on the code before the change, a timed-out run skips the rest, findings' a
   const base = seen[1]!.commands;
   expect([base.filter((c) => c.includes("before-")).length, base.filter((c) => c.includes("fix-proof-")).length])
     .toEqual([1, 1]);
-  expect(r.findings[0]!.before).toMatchObject({ status: "unknown", runs: ["timeout", "missing", "missing"],
-    detail: "3 of 3 runs on the code before the change gave no report (1 timed out)" });
+  expect(r.findings[0]!.before).toMatchObject({ status: "unknown", runs: ["error", "error", "error"],
+    detail: "could not run on the code before the change (did not finish in 600 s; its tests have no result)" });
   expect(r.fixProof!.map((x) => [x.testId, x.beforeStatus, x.beforeRuns])).toEqual([[id("zero"), "unknown",
-    ["timeout", "missing", "missing"]]]);
+    ["error", "error", "error"]]]);
   const ev = events(rdir);
   for (const type of ["before.run", "fix_proof.run"]) {
     expect(ev.filter((e) => e.type === type).map((e) => [e.data.run, e.data.timed_out, e.data.skipped]))
-      .toEqual([[1, true, undefined], [2, false, true], [3, false, true]]);
+      .toEqual([[1, false, undefined], [2, false, undefined], [3, false, undefined]]);
   }
-  expect(said).toContain("main: before the change: run 1/3 timed out; the other runs skipped");
-  expect(said).toContain("main: before the change: run 1/3 of the passing tests timed out; the other runs skipped");
 });
 
 test("a passing test beside a finding is judged from the findings' runs; the findings do not change", async () => {
@@ -265,7 +265,8 @@ test("a passing test beside a finding is judged from the findings' runs; the fin
   };
   const steps = () => new ScriptedAgent([[tool("write_file", { path: file, content: "from app import add\n" +
     "def test_add():\n    assert add(2, 3) == 5\ndef test_add2():\n    assert add(1, 1) == 2\n" })],
-  [text(JSON.stringify({ tests: [{ test: `${file}::test_add2`, expects: "one and one" }], suspected_defects: [],
+  [text(JSON.stringify({ tests: [{ test: `${file}::test_add`, expects: "five" }, { test: `${file}::test_add2`, expects: "one and one" }],
+    suspected_defects: [],
     questions: [] }))], [text("{}")]]);
   const run = async (settings: typeof SETTINGS) => {
     const seen: Seen[] = [];

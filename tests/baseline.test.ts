@@ -8,6 +8,7 @@ import { type Baseline, baselineText, describeBaselineChanges, parseBaseline, re
 import { isProven, loadReviewFile, parseReviewConfig, parseReviewFile, reviewConfigPath } from "../src/config";
 import { defaultSettings } from "../src/settings";
 import { snapshot, snapshotDigest } from "../src/change";
+import { OutOfTime } from "../src/sandbox";
 import { approveFile, coverageGap, envDigest, runSetup, type SetupRun, suiteOk, withoutKnownFailing } from "../src/setup";
 import { approvalChecks, baselineLines, environmentLines, worthALook } from "../src/setupview";
 import { fakeFactory, type FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -336,4 +337,53 @@ test("setup sends tests left out of test_command back to the agent once; kept, t
   expect(r.projects[0]!.gap).toBe("25 of 26 files that look like tests never ran (tests/slow 25)");
   expect(approvalChecks(parseReviewFile(narrow), r.projects)).toContain("main: 25 of 26 files that look like tests " +
     "never ran (tests/slow 25); test_command leaves them out");
+});
+
+test("tests left out of test_command went back to the agent; the limit cuts its next try: the first try stands",
+  async () => {
+  const repo = gitRepo(join(tmp(), "gap"));
+  mkdirSync(join(repo, "tests", "slow"), { recursive: true });
+  for (let i = 0; i < 25; i++) writeFileSync(join(repo, "tests", "slow", `test_s${i}.py`), "def test_s():\n    pass\n");
+  writeFileSync(join(repo, "tests", "test_fast.py"), "def test_f():\n    pass\n");
+  runGit(repo, "add", "-A");
+  runGit(repo, "commit", "-qm", "tests");
+  const narrow = `version: 1
+projects:
+  main:
+    root: .
+    language: python
+    image: python:3.12-slim
+    install: [pip install pytest]
+    test_command: python -m pytest -q tests/test_fast.py {targets}
+`;
+  const rebuilt = narrow.replace("python:3.12-slim", "python:3.13-slim");
+  const MIN = 60_000;
+  const clock = { ms: 0 };
+  const passing = fakeFactory(() => [junitXml([["tests/test_fast.py", "test_f", "passed", ""]]), "", false]);
+  const timed: typeof passing = async (cfg, snap, log, body) => {
+    if (cfg.image === "python:3.13-slim") {
+      clock.ms = 10 * MIN + 1;
+      throw new OutOfTime(10);
+    }
+    clock.ms += 2 * MIN;
+    return passing(cfg, snap, log, body);
+  };
+  const model = new ScriptedAgent([[tool("try_project", { yaml: narrow })], [tool("try_project", { yaml: rebuilt })],
+    [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"), sessionFactory: timed,
+    timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+  expect([r.ok, r.stop]).toEqual([true, "time"]);
+  expect(parseReviewFile(r.yamlText!).projects[0]!.image).toBe("python:3.12-slim");
+  expect(r.projects[0]!.gap).toBe("25 of 26 files that look like tests never ran (tests/slow 25)");
+});
+
+test("a file recorded as not loading matches whatever id the runner later gives that failure", () => {
+  const cfg = parseReviewConfig(YAML);
+  const base = [{ id: "tests/test_e.py::tests/test_e.py", file: "tests/test_e.py", first: "no module", load: true as const }];
+  const run = [t("tests/test_a.py", "test_a", "passed"),
+    t("tests/test_e.py", "tests.test_e", "error", "collection failure\nE   ModuleNotFoundError: x")];
+  const [ok, , counts] = suiteOk(run, cfg, undefined, undefined, base);
+  expect(ok).toBe(true);
+  expect(counts.left).toEqual([]);
+  expect(counts.baselineFailing).toBe(1);
 });

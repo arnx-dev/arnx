@@ -7,6 +7,16 @@ export class ArnxError extends Error {
   override name = "ArnxError";
 }
 
+/** The test environment of this commit cannot be had: its image does not build (`build`, `log` the build's output) or
+ * runs no test (`probe`). `network`: the build failed on the connection, which is no verdict on the commit. `log` is a
+ * file name in the project's folder of the review. */
+export class EnvFailed extends ArnxError {
+  override name = "EnvFailed";
+  constructor(message: string, readonly kind: "build" | "probe", readonly log: string, readonly network = false) {
+    super(message);
+  }
+}
+
 /** What the user sees for an error arnx did not expect (exit code 2): one line naming it as a bug in arnx, never the
  * bundled source a runtime prints for an uncaught error. The stack follows only with ARNX_DEBUG=1. */
 export function internalError(e: unknown, env: Record<string, string | undefined>): string[] {
@@ -17,9 +27,25 @@ export function internalError(e: unknown, env: Record<string, string | undefined
   return env.ARNX_DEBUG === "1" && e instanceof Error && e.stack ? [line, e.stack] : [line];
 }
 
+/** An error that escaped every handler (a callback, a stray promise): an ArnxError says its own line with its exit
+ * code (NoCredits: exit 2), anything else is internalError's bug line (exit 2). */
+export function fatal(e: unknown, env: Record<string, string | undefined>): { lines: string[]; code: number } {
+  return e instanceof ArnxError ? { lines: [`arnx: ${e.message}`], code: e.exitCode } : { lines: internalError(e, env), code: 2 };
+}
+
 /** There is no change to review: the diff is empty. `arnx next` tells this apart from a change it cannot review. */
 export class NoChange extends ArnxError {
   override name = "NoChange";
+}
+
+/** The change holds documentation only: nothing to test unless `--docs` asks. Not a failure: exit code 0. */
+export class OnlyDocs extends NoChange {
+  override name = "OnlyDocs";
+  override exitCode = 0;
+  constructor(files: readonly string[]) {
+    const shown = files.slice(0, 3).join(", ") + (files.length > 3 ? `, +${files.length - 3} more` : "");
+    super(`nothing to test: only documentation changed (${shown}). \`arnx review --docs\` reviews it anyway.`);
+  }
 }
 
 /** The change is over the size a review reads; a smaller --range fixes it, except for the first commit (`root`). */

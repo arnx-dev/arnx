@@ -7,25 +7,35 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
-import { git, hasCommits, snapshot } from "./change";
-import { loadReviewFile, type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
+import { Boundary, maskedCopy, STAND_INS_NOTE } from "./boundary";
+import { A_FAKED_FILE, markUnproven, unprovenText } from "./diagnose";
+import { filesAt, git, hasCommits, takeSnapshot, type Withheld } from "./change";
+import { configSuspects, loadReviewFile, type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
 import { placed } from "./fixprompt";
-import { baseName, runTests, type TestResult } from "./outcomes";
+import { baseName, ownerFile, runTests, type TestResult } from "./outcomes";
+import { keyReruns, rerunCandidates, rerunWithRealKeys, sweepRealKeyCopies } from "./realkey";
 import { load, type Review } from "./report";
 import type { Say } from "./progress";
 import { sayingDocker, type SessionFactory } from "./sandbox";
 import type { Env, Settings } from "./settings";
-import { DOME, dockerSession, keptTestFiles, legacyKeptFiles, runPath } from "./testround";
+import { collect, deepestHolder, DOME, dockerSession, keptTestFiles, legacyKeptFiles, runPath, swapFiles, swapIn } from "./testround";
 
 export const CHECK_TIMEOUT = 900;
 
 /** `accepted`: the ids among passed and failed that are accepted tests (behind findings marked real; absent: all are).
  * `reason` and `log`, with noReport: why there is no report, and the runner's output (repository-relative).
  * `reviews`: a failed test → the review that accepted its file, when known. */
-export interface ProjectCheck { project: string; files: string[]; passed: string[]; failed: TestResult[];
+const FIX_WITH_FAKE = "Fix the code; if this test needs a real key: `arnx allow-secret PATH`";
+
+export interface ProjectCheck { /** Something in it was masked. */ standInsShown?: boolean;
+  /** Files the snapshot left out as secret-looking; tests that failed for one, which could not run. */
+  leftOut?: Withheld[]; fakedKeys?: string[]; couldNotRun?: { testId: string; needs: string; faked?: boolean; notRerun?: boolean }[]; project: string; files: string[];
+  passed: string[]; failed: TestResult[];
   skipped: number; noReport: boolean; accepted?: string[]; reason?: string; log?: string | null;
-  reviews?: Record<string, string>; workdir?: string }
+  reviews?: Record<string, string>; workdir?: string;
+  /** Kept test files the runner reported nothing for (its configuration leaves that name or folder out). */
+  notRun?: string[] }
 
 /** The accepted tests, as `file::test` (repository-relative, parameters dropped): those accept recorded per file in
  * ACCEPTED_RECORD, else (a record by an older arnx) from each accepted review's marks. `files`: the kept files the
@@ -118,11 +128,9 @@ export function legacyAccepted(repo: string, settings: Settings): Map<string, Re
   const projects = [...file.projects].sort((a, b) => posix.normalize(a.workdir).length - posix.normalize(b.workdir).length);
   const out = new Map<string, ReviewConfig>();
   for (const cfg of projects) for (const p of legacyKeptFiles(repo, cfg, settings.acceptedTestsDir)) out.set(p, cfg);
-  const holds = (cfg: ReviewConfig, p: string) => posix.normalize(cfg.workdir) === "." ||
-    p.startsWith(`${posix.normalize(cfg.workdir)}/`);
   for (const p of Object.keys(readRecord(repo).files)) {
     if (p.startsWith(`${DOME}/`) || out.has(p) || !existsSync(join(repo, p))) continue;
-    const cfg = projects.filter((c) => holds(c, p)).at(-1);
+    const cfg = deepestHolder(projects, p);
     if (cfg) out.set(p, cfg);
   }
   return new Map([...out].sort(([a], [b]) => (a < b ? -1 : 1)));
@@ -181,8 +189,11 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
   const file = loadReviewFile(repo);
   const out: ProjectCheck[] = [];
   let known: AcceptedIds | undefined;
+  sweepRealKeyCopies();
+  // The check's reruns with a real key, over all its projects.
+  const reruns = keyReruns();
   for (const cfg of file.projects) {
-    const files = keptTestFiles(repo, cfg, settings.acceptedTestsDir);
+    const files = keptTestFiles(repo, cfg, settings.acceptedTestsDir, file.projects);
     if (!files.length) continue;
     o.progress?.(`${cfg.name}: running ${o.what ?? "the accepted tests"}`);
     const tmp = mkdtempSync(join(tmpdir(), "arnx-check-"));
@@ -190,18 +201,44 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       const snap = join(tmp, "repo");
       // The working tree as it is now, fixes included, untracked files too (accepted tests are untracked until
       // committed): no model sees what a check runs.
-      snapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw), untracked: true });
-      // The accepted tests and their support files, in place in this copy only.
+      const taken = takeSnapshot(repo, null, snap, secretPinsOf(file.raw), { sandbox: sandboxOnlyOf(file.raw),
+        untracked: true });
+      // A coding agent reads what a check says, and the code it ran on holds real values.
+      const boundary = new Boundary(configSuspects(repo));
+      boundary.addScrubbed(taken);
+      // The accepted tests and their support files, in place in this copy only, which alone gets the real values.
       cpSync(join(repo, DOME), snap, { recursive: true });
+      const placed = new Set(collect(join(repo, DOME), "", /./));
+      const swap = swapIn(boundary, snap, (rel) => placed.has(rel));
       // Each review's files run apart (reviewGroup); the build log is kept where a failed build's error can point to
       // it (the snapshot is removed below).
       const groups = [...new Set(files.map(reviewGroup))];
       const target = (f: string) => posix.relative(cfg.workdir, runPath(f)) || runPath(f);
-      const runs = await sayingDocker(o.progress, () => (o.sessionFactory ?? dockerSession)(cfg, snap,
-        join(repo, ".arnx", "run", `check-${cfg.name}-build.log`), async (session) =>
-          groups.map((g, i) => [g, ...runTests(session, snap, cfg, files.filter((f) => reviewGroup(f) === g).map(target),
-            groups.length > 1 ? `check-${i + 1}.xml` : "check.xml", CHECK_TIMEOUT)] as const)));
-      const results = runs.flatMap(([, , r]) => r ?? []);
+      const done = await sayingDocker(o.progress, () => (o.sessionFactory ?? dockerSession)(cfg, snap,
+        join(repo, ".arnx", "run", `check-${cfg.name}-build.log`), async (session) => {
+          if (!session.copies) swapFiles(snap, [...placed], swap);
+          // One after another: they share the session and the snapshot.
+          const ran = [];
+          for (const [i, g] of groups.entries()) {
+            ran.push([g, ...await runTests(session, snap, cfg, files.filter((f) => reviewGroup(f) === g).map(target),
+              groups.length > 1 ? `check-${i + 1}.xml` : "check.xml", CHECK_TIMEOUT)] as const);
+          }
+          // A failure or a skip beside a fake runs once more with the real key, each review's tests apart again: outcomes only.
+          const real = new Map<string, string | null>();
+          for (const [g, , results] of taken.fakedKeys.length ? ran : []) {
+            const mine = files.filter((f) => reviewGroup(f) === g).map(target);
+            const got = await rerunWithRealKeys(session, snap, cfg, { source: { repo, head: null }, fakedKeys: taken.fakedKeys,
+              tests: rerunCandidates([results]), all: [results], target: (t) => mine.find((f) => ownerFile(t.fileAttr, [f]) !== null) ?? null,
+              budget: reruns, timeout: CHECK_TIMEOUT });
+            for (const [id, outcome] of got) real.set(id, outcome);
+          }
+          return [ran, real] as const;
+        }, undefined, undefined, swap));
+      // A test failing for a file left out, or for a key the sandbox holds a fake of, says nothing about the code.
+      const lacking = taken.withheld.map((w) => w.path);
+      const [runs, real] = done;
+      const results = markUnproven(runs.flatMap(([, , r]) => r ?? []), { leftOut: lacking, fakedKeys: taken.fakedKeys,
+        all: lacking.length ? filesAt(repo, null, true) : [], real });
       const missing = runs.filter(([, , r]) => r === null);
       const log = checkLog(cfg.name);
       rmSync(join(repo, log), { force: true });
@@ -213,18 +250,26 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
           : `the runner wrote no report${run.exitCode === null ? "" : ` (exit ${run.exitCode})`}`) +
           (groups.length > 1 && g ? ` (the tests of review ${g.slice(1).replace("_", "-")})` : "");
         mkdirSync(dirname(join(repo, log)), { recursive: true });
-        writeFileSync(join(repo, log), missing.map(([, r]) => r.output).join("\n"));
+        writeFileSync(join(repo, log), boundary.mask(missing.map(([, r]) => r.output).join("\n")));
       }
+      // A kept file the runner reported no test for was left out by its configuration: named, never silently dropped.
+      const notRun = missing.length ? [] : files.filter((f) => !results.some((t) => ownerFile(t.fileAttr, [target(f)]) !== null));
       known ??= acceptedIds(repo);
       const ran = results.filter((t) => t.outcome !== "skipped");
-      const failed = ran.filter((t) => t.outcome === "failed" || t.outcome === "error");
+      const couldNotRun = ran.filter((t) => t.needs).map((t) => ({ testId: t.testId, needs: t.needs!, ...(t.fakedKey ? { faked: true } : {}),
+        ...(t.notRerun ? { notRerun: true } : {}) }));
+      const failed = ran.filter((t) => !t.needs && (t.outcome === "failed" || t.outcome === "error"));
       const reviews = Object.fromEntries(failed.map((t) => [t.testId, reviewOf(known!, cfg.workdir, t.testId)])
         .filter(([, r]) => r));
-      out.push({ project: cfg.name, workdir: cfg.workdir, files, noReport: missing.length > 0,
+      const said = maskedCopy(boundary, { project: cfg.name, workdir: cfg.workdir, files, noReport: missing.length > 0,
         passed: ran.filter((t) => t.outcome === "passed").map((t) => t.testId), failed, reviews,
         skipped: results.filter((t) => t.outcome === "skipped").length,
-        accepted: ran.filter((t) => isAccepted(known!, cfg.workdir, t.testId)).map((t) => t.testId),
-        ...(reason ? { reason, log } : { log: null }) });
+        accepted: ran.filter((t) => !t.needs && isAccepted(known!, cfg.workdir, t.testId)).map((t) => t.testId),
+        ...(taken.withheld.length ? { leftOut: taken.withheld } : {}), ...(taken.fakedKeys.length ? { fakedKeys: taken.fakedKeys } : {}),
+        ...(couldNotRun.length ? { couldNotRun } : {}),
+        ...(notRun.length ? { notRun } : {}),
+        ...(reason ? { reason, log } : { log: null }) } as ProjectCheck);
+      out.push(said.shown ? { ...said.value, standInsShown: true } : said.value);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -370,6 +415,14 @@ const count = (k: number, one: string, many = `${one}s`) => `${k} ${k === 1 ? on
  * tests changed since accept, is decided before anything runs: see changedAccepted). Accepted tests (behind findings
  * marked real) are told apart from the other tests the review wrote into the same files. */
 export function checkSummary(results: ProjectCheck[]): [string, number] {
+  const [text, code] = summaryOf(results);
+  if (!results.some((r) => r.standInsShown)) return [text, code];
+  const lines = text.split("\n");
+  lines.splice(lines.at(-1)!.startsWith("Next:") ? lines.length - 1 : lines.length, 0, STAND_INS_NOTE);
+  return [lines.join("\n"), code];
+}
+
+function summaryOf(results: ProjectCheck[]): [string, number] {
   if (!results.length) return ["No accepted tests yet: arnx accept keeps them after a review.", 3];
   const multi = results.length > 1;
   const lines: string[] = [];
@@ -413,6 +466,30 @@ export function checkSummary(results: ProjectCheck[]): [string, number] {
         ...failingList(othFail, multi));
     }
   }
+  // A file left out or a key faked: what could not run for it says so, and whatever else went wrong may have it for a cause.
+  const blocked = results.flatMap((r) => r.couldNotRun ?? []);
+  const allowFile = (paths: string[]) => `\`arnx allow-secret ${paths.length === 1 && paths[0] !== A_FAKED_FILE ? paths[0] : "PATH"}\``;
+  if (blocked.length) {
+    const needs = [...new Set(blocked.map((x) => x.needs))];
+    lines.push(`✗ ${count(blocked.length, "test")} ${unprovenText(blocked.length, blocked, (p) => p.slice(0, 5).join(", "))}. ` +
+      `If it is a test fixture: ${allowFile(needs)}, then \`arnx check\` again.`);
+  }
+  const notRun = results.flatMap((r) => r.notRun ?? []);
+  if (notRun.length) {
+    lines.push(`✗ ${count(notRun.length, "accepted test file")} did not run, the runner leaves ${notRun.length === 1 ? "it" : "them"} ` +
+      `out: ${notRun.slice(0, 5).map(runPath).join(", ")}${notRun.length > 5 ? ", …" : ""}`);
+  }
+  const leftOut = [...new Set(results.flatMap((r) => (r.leftOut ?? []).map((w) => w.path)))];
+  if (leftOut.length && !blocked.length && (missing.length || failed.length)) {
+    lines.push(`Left out as secret-looking, which these tests may need: ${leftOut.slice(0, 5).join(", ")}${leftOut.length > 5 ? ", …" : ""}. ` +
+      `If one is a test fixture: ${allowFile(leftOut)}.`);
+  }
+  const fakedKeys = [...new Set(results.flatMap((r) => r.fakedKeys ?? []))];
+  const skips = results.reduce((n, r) => n + r.skipped, 0);
+  if (fakedKeys.length && !blocked.length && (missing.length || failed.length || skips)) {
+    lines.push(`A fake private key is in the sandbox: ${fakedKeys.slice(0, 5).join(", ")}${fakedKeys.length > 5 ? ", …" : ""}. ` +
+      (failed.length ? FIX_WITH_FAKE : `A test ${skips && !missing.length ? "skipped " : ""}may need the real one: ${allowFile(fakedKeys)}`) + ".");
+  }
   if (missing.length) {
     const timeout = missing.every((r) => r.reason?.startsWith("the tests timed out"));
     lines.push(`The accepted tests${multi ? ` of ${missing.map((r) => r.project).join(", ")}` : ""} could not be ` +
@@ -427,18 +504,19 @@ export function checkSummary(results: ProjectCheck[]): [string, number] {
       const again = ids.length ? `\`arnx accept --again ${ids[0]}\`` +
         (ids.length > 1 ? ` (and ${ids.slice(1).map((r) => `\`${r}\``).join(", ")})` : "")
         : "accept the review that kept it again (`arnx accept --again` with its id; `ls .arnx/reviews` lists them)";
-      lines.push("Fix the code, not the accepted tests. A real bug whose test is wrong: mark it rewrite in review.md " +
+      lines.push(`${fakedKeys.length ? "Leave the accepted tests as they are" : "Fix the code, not the accepted tests"}. A real bug whose test is wrong: mark it rewrite in review.md ` +
         `with a \`Rewrite:\` line saying why (noise only when there is no bug), then ${again}.`);
     }
     if (othFail.length) {
       const one = othFail.length === 1;
       lines.push(`The ${count(othFail.length, `${other}test`)} that fail${one ? "s is not a finding" : " are not findings"}: ` +
-        `marks do not cover ${one ? "it" : "them"}. Fix the code, or fix or delete ${one ? "it" : "them"} in the file ` +
+        `marks do not cover ${one ? "it" : "them"}. ${fakedKeys.length ? "Or fix" : "Fix the code, or fix"} or delete ${one ? "it" : "them"} in the file ` +
         "(then `arnx accept --keep-edits`).");
     }
     lines.push("Next: arnx check");
     return [lines.join("\n"), 1];
   }
+  if (blocked.length || notRun.length) return [lines.join("\n"), 2];
   lines.push("✓ Accepted tests unchanged since arnx accept");
   lines.push(`Commit the fixes, the accepted tests and ${ACCEPTED_RECORD} together.`);
   return [lines.join("\n"), 0];
@@ -759,7 +837,12 @@ export function checkJson(results: ProjectCheck[], code: number, changed: Change
         log: r.log ?? null, passed: r.passed, accepted: [...r.passed, ...r.failed.map((t) => t.testId)].filter(acc),
         failed: r.failed.map((t) => ({ test_id: t.testId, outcome: t.outcome, message: t.message,
           accepted: acc(t.testId) })),
-        skipped: r.skipped };
+        skipped: r.skipped,
+        ...(r.notRun ? { not_run: r.notRun.map(runPath) } : {}),
+        ...(r.leftOut ? { left_out: r.leftOut } : {}),
+        ...(r.fakedKeys ? { faked_keys: r.fakedKeys } : {}),
+        ...(r.couldNotRun ? { could_not_run: r.couldNotRun.map((x) => ({ test_id: x.testId, needs: x.needs, ...(x.faked ? { faked_key: true } : {}),
+          ...(x.notRerun ? { not_rerun: true } : {}) })) } : {}) };
     }),
-    changed, may_contradict: contradict }, null, 2);
+    changed, may_contradict: contradict, stand_ins_shown: results.some((r) => !!r.standInsShown) }, null, 2);
 }

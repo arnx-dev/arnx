@@ -65,7 +65,7 @@ throwaway copy.
 | `prompt` | Print the fix prompt of the review accepted last (or the id given) | `.arnx/reviews/<id>/fix-prompt.md` | nothing | no | no |
 | `check` | Run the accepted tests in the approved sandbox, accepted tests told from the other tests in their files; refuse (exit 4) when a pinned file or its entry changed. `--review [id]`: run a review's confirmed tests on the working tree instead (`recheck.ts`), before anything is accepted | `.arnx/tests/`, `.arnx/accepted-tests.json`, `.arnx/answer-watch.json`; with `--review`, `.arnx/reviews/<id>/` | `.arnx/run/` logs | no | yes |
 | `consent` | `--cloud`: record the consent to send code to arnx cloud without sending anything; own keys need none | `.arnx/config.toml` | `cloud_consent_at` | no | no |
-| `allow-secret` | Pin the key-like strings of test-fixture files, so they are sent and copied; never shows the strings. `--remove PATH...` takes the paths' pins out (the files need not exist; a seed left with none is deleted), so they are withheld again | the files named | `.arnx/review.yaml` (proven again before the next review) | no | no |
+| `allow-secret` | Pin test-fixture files: their key-like strings, and the whole text of a file holding a private key or left out by its name or size. The sandbox then keeps the real key, and models read the same as without a pin; never shows the strings. `--remove PATH...` takes the paths' pins out (the files need not exist; a seed left with none is deleted) | the files named | `.arnx/review.yaml` (proven again before the next review) | no | no |
 | `env prune` | Remove this repository's environment images no approved project uses, older than `--keep-days` (7); `--all-repos`, `--dry-run`. An image made from the code (`<key>-src-<hash>`, baked.ts) also takes the build cache records its build left, each by id, found from the step marked with its tag; one an arnx before 0.1.3 built has no such step (`docker image history` shows it), and its records cannot be told apart from others, so prune names `docker builder prune` instead | Docker's image labels, `docker buildx du` | nothing | no | yes |
 | `login`, `logout`, `credits` | arnx cloud: a device login (RFC 8628), its deletion, the balance (no answer: "arnx cloud unavailable", exit 2; "not open yet" only on arnx cloud's `not_open`) | the config directory, `/v1/account` | `~/.config/arnx/credentials.json` (0600) | no | no |
 | `cloud on`, `cloud off` | arnx cloud's models for this repository, or the user's keys again: asks the cloud consent once, changes only `[cloud] models` | `.arnx/config.toml` | `.arnx/config.toml` | no | no |
@@ -83,16 +83,17 @@ fields are in `skills/arnx/references/json.md` and `check-json.md`; `tests/json-
     review
       resolveChange        change.ts     uncommitted work, else the last commit, or --range A..B; no commits: every file
       testRound            testround.ts
-        snapshot           change.ts     copy of the code at the change's head, secrets removed
+        snapshot           change.ts     copy of the code at the change's head: secret files out, certain values
+                                         faked; guesses stay real, and get stand-ins in the build context beside it
         dockerSession      sandbox.ts    build the env image once, start services, internal network
           bakedIn          baked.ts      an older copy of the code in the image: use an image made from this code
-                                         (keyed on the code, kept for later sessions; `env prune` removes it)
+                                         (keyed on the install and the code it holds, so projects on one install and later sessions share it; `env prune` removes it)
           probe            testround.ts  arnx's one-line test must pass, else the round stops before any model call
           agentRound       localbrain.ts the brain's round starts with its tools (with --hunt, the tool-less hunters
                                          too); after each final reply, the facts
           runAgent         agent.ts      the model reads, writes tests, runs them (tools only, no shell)
-        runTests x3        outcomes.ts   the adapter's command and report -> passed / failed / error, per run;
-                                         after a run times out the rest are skipped (no report)
+        runBounded x3      outcomes.ts   the adapter's command and report -> passed / failed / error, per run;
+                                         files that time out together (600 s) run apart (180 s each, 600 s in all)
         classify           outcomes.ts   failed in all 3 runs = finding; anything else never is
         beforeStage        testround.ts  findings' files x3 on a snapshot of the change's base, same image
           judgeBefore      before.ts     regression / pre-existing / new-code / changed / unknown, per finding
@@ -109,6 +110,12 @@ a test and never sees a file except through a tool call the CLI runs; the follow
 computes (`untested.ts`: changed files no test names, SQL no database test names), and `reviewer.ts`, `testround.ts`,
 `accept.ts` and `setup.ts` call no prompt function. `tests/brain.test.ts` holds a round to the step sequence a remote
 brain will speak (tool calls answered by id, a final report, the facts after it, the end).
+
+The "no test yet" follow-up is limited (`filesToAsk` in `untested.ts`, applied in `LocalBrain.review`): it asks about at
+most three files, largest first, each with at least 20 added code lines (blank lines, comments and imports do not
+count); test-named and generated files are never asked about. It fires only while the round has spent at most half its
+budget, and it may spend $0.10: a follow-up cut short at that limit keeps the report the round ended on. The database
+follow-up and the "Not tested" report lines are unchanged.
 
 LocalBrain also runs away from the CLI, behind a remote brain that bridges its tool calls, so it needs nothing only
 the CLI has: `facts()` may return a promise (awaited); a review's `hunt` can carry the
@@ -143,7 +150,7 @@ uncommitted work); a first commit has none and its findings are `unknown` ("not 
 commits yet (change kind `no-commits`: every file a working-tree snapshot holds, diffed against the empty tree). The
 snapshot of the base gets the round's generated files exactly as they ran and nothing else from the change; only the
 files with findings run, `runs` times, each with the final runs' timeout, in the change's image (`SessionFactory`'s
-`envFrom`); as in the final runs, after a run times out the others are skipped (runs without a report), here and in
+`envFrom`); as in the final runs (`runBounded`), once files have run apart they go file by file, here and in
 the fix proof's runs. A same failure is the same first line of the message (addresses evened out); when the change also alters
 what keys the image (its dependencies), a same failure proves nothing and is `unknown`. A check that cannot run (no
 base, out of time, an error, an image holding a copy of the code that differs from the base: `baked.ts`) never stops
@@ -221,6 +228,17 @@ whole log: real among the marked findings whose mark is `"chosen"`, with the `"d
 apart and left out of the ratio (neither says whether the owner agrees). An unmarked finding (`mark` null) is no
 verdict and counts nowhere, chosen or not.
 
+A test run or type check does not hold the process (`Session.spawnRun`): while one project's run goes on, the other
+project's timers, polls and streams go on too, and a signal's handler runs at once. Two things rest on it. Each session
+has one user, who waits for each run, so a snapshot changes only between its runs and its sandbox-only files are read by
+no model, whose tools wait on the same loop. On an interrupt, `Session.close` kills Docker's client, removes the run's
+container by its name (asking again for a little over a second, since a start already sent can still make it) and gives
+the run no answer: what waits on it stops there, so a killed run never reads as a result. A run's limit lives in this
+process, so `main.ts` closes every session on any exit too: a project failing while another's run is in flight, or a
+session opened after the interrupt's cleanup, leaves no container. That cleanup is synchronous and at exit no signal can
+stop it, so Docker gets 3 s per call and 10 s in all; past that arnx exits with its own code and names what may be left.
+SIGKILL and an unhandled signal such as SIGHUP cannot be caught this way.
+
 ## Trace events
 
 Every review writes `.arnx/reviews/<id>/events.jsonl`, and every setup `.arnx/setup/<id>/events.jsonl` (other setup
@@ -241,19 +259,39 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
   `provider_failures` and the sentence after the review's status. A review with an `unavailable` failure of the
   reviewer or the judging (`cutByOutage`, not once accepted) resumes like an interrupted one: `--resume` tests again
   the project rounds a failed call stopped (their verdicts dropped), keeps the others and judges again. Its status
-  line and `arnx next` then name `arnx review --resume`.
+  line, `arnx next` and the summary's next step then name `arnx review --resume`. A round counts as stopped by a failed call
+  per `roundCut` (reviewer.ts): its stop is `api_error`; or its `agent.cut` is one and a suspect has neither test nor
+  reason; or (folders of 0.1.7 and 0.1.8, which wrote that stop as a normal end) the transcript's last turn is a failed
+  call and no test was written. The new attempt gets the hunt's suspects (`ReviewInput.prior`, the local brain only): no
+  hunter runs, the hunters' costs and the cut attempt's are kept, and usage.jsonl logs only what it did not hold for the
+  id. `state.json` keeps `seconds`, which a resume adds to.
+- Spend is logged however a review ends (`usage.ts`). `logUsage` with an id writes only what that id has not logged
+  (one mechanism for a resume, a failure, an interrupt and a kill), so a dollar is neither counted twice nor lost.
+  `usageFromEvents` sums the `model.call` events, which are appended as each call ends. A failed review calls
+  `logPartial` (`partial: true`, `reason: failed`); an interrupt or an exit calls it synchronously first thing
+  (`spendClosers` in `interrupt.ts`: the stopped run's promise never settles), adding the calls still holding a
+  provider slot as `unknown_calls`; `reconcileUsage` at the start of a review logs reviews with events but no
+  `review.json` as `killed` (SIGKILL). Outage waits cost nothing and are not in usage. Setup is not covered yet.
 - `agent.turn` (`agent.ts`): one agent turn: stop reason, tools called, `paths` (the path argument of each `read_file`,
   `list_dir` and `grep` call, in order; never contents), tool errors, writes, test runs.
 - `hunt.list`, `hunt.suspect`, `hunt.merged`, `hunt.dropped` (`localbrain.ts`): each hunter's list, the ranked
-  suspects, where a listed suspect went (`hunt.merged` has `duplicate`).
+  suspects, where a listed suspect went (`hunt.merged` has `duplicate`). The second hunter gets
+  `SECOND_HUNT_WAIT_MS` plus `SECOND_HUNT_GRACE_MS` (`within`); one still out then does not end the round as "nothing
+  suspected". Its suspects that arrive before the reviewer's first report (new ones, at most 3, after `sameSuspect`) are
+  asked for with `proveTask` and listed as `hunt.list` `second-late`; later ones are `suspect.outcome` "not tested"
+  with `late: true`, and the report says "Second hunter, too late to test: N suspects". Its spend is recorded either way.
 - `test.files`, `test.run`, `test.run_missing`, `test.classified` (`testround.ts`): generated files, each result of each
   repeat (`func`; `run_seconds` for runs that were not carried), the class of each test; a run without a report says
-  `timed_out`, `exit_code` and `seconds`. After a final run times out the others are not run (a hanging test would
-  hang again): each says `skipped` and counts as a run without a report.
+  `timed_out`, `exit_code` and `seconds`. Final runs go through `runBounded`: all files together within the run limit (600 s); when
+  that times out, each file alone within 180 s (600 s of its own for the apart stage; a file the budget cannot give its whole 180 s is `not_run_files`, one error), the reports merged, and the later repeats
+  and the before check go file by file. A file that does not finish alone is one `error` result ("did not finish in
+  180 s; its tests have no result"; never a finding), is not run again, and is listed in `project_stats[].hung_files`;
+  the review is incomplete. The output is saved as `final-N.log`, masked. pytest runs with
+  `-o faulthandler_timeout=60`, which names a stuck test in the log without killing it.
 - `test.written` (`reviewer.ts`): which suspect a test was written for; `func` is the test function name, the key
   `test.run` and `test.classified` share.
 - `before.started`, `before.run`, `before.done` (`testround.ts`): the before/after check of one project: findings and
-  files; each run's `duration_ms`, whether it `reported` and `timed_out` (`skipped` after a run timed out); the whole
+  files; each run's `duration_ms`, whether it `reported` and `timed_out`; the whole
   check's `duration_ms`, `snapshot_ms`, `runs_ms`, `counts` by status, and `skipped_reason` (`no-base`, `time`,
   `error`) when it did not run.
 - `before.finding` (`reviewer.ts`): each finding's status on the code before the change, with `detail` (`resumed`
@@ -271,7 +309,7 @@ id being the review or setup id. `seq` starts at 1 and continues across a resume
 - `suspect.outcome`, `report.done` (`reviewer.ts`): what became of each suspect; the report's totals.
 - `setup.started` (with `minutes`, the time limit), `setup.attempt`, `setup.completed` (with `stop`; `time` at the
   limit, and `uncovered_projects` when it kept the projects proven by then) (`setup.ts`): the setup agent's attempts and result;
-  `setup.withheld`: files left out of its snapshot as secret-looking, `blanked`, files kept with comment lines
+  `setup.withheld`: files left out of its snapshot by name, size or what they hold, `blanked`, files kept with comment lines
   blanked, and `stand_ins`, files kept with stand-ins (only when there are some); `setup.sandbox_only`: files
   `.arnxignore` leaves out that a run needed, copied into the sandbox before the project runs again; `setup.exec`: each exec command (`n`, project, `secs`, `exit`, `timed_out`,
   `bytes` of output; `ran: false` and `refused` when exec refused it); `setup.paths_check`:
@@ -326,6 +364,20 @@ challenger (the first model only) is built with `timeoutAttempts: 1` (`makeChall
 (attempt, connect or idle timeout) fails the call with a `timedOut` `ModelError`, so `FallbackJson` asks the fallback
 at once instead of after four attempts (~280 s). A retryable status or a network error that is not a timeout is still
 retried on the first model. The fallback, the hunters and a challenger without a fallback keep the usual retries.
+
+### Outage waits
+
+While every attempt of a call found the provider down (5xx, 429, no connection), the call follows `OUTAGE_DELAYS`
+(2, 8, 30, 60, 60, 60 s: seven attempts, about 220 s, each wait with 20% jitter) instead of the three or four attempts
+of `DELAYS`, and says so in the progress line ("Anthropic overloaded (HTTP 503); waiting 60 s, try 5 of 7"). Timeouts and
+streams cut after they started keep the usual attempts, because those may be billed; an error reply is not billed, so the
+budget is untouched. The role gives the schedule with `downDelays`: the full one for the reviewer, a challenger with no
+fallback and the fallback; [2, 8] for a challenger with a fallback; [2, 8, 30] for the hunters and the ranker. Once a
+provider has cost `OUTAGE_WAIT_MAX_SECONDS` (600 s of wall clock; waits of parallel calls that overlap count once, and an
+success from the provider clears the count) its calls wait [2, 8] only; a `retry-after` is honoured but not past what
+remains of that cap. A wait moves the call's deadline by its length, so waits never use up the call's own time; a call
+that really hangs still times out. 220 s stays under the five-minute lifetime of Anthropic's prompt cache (jitter can
+reach 264 s).
 
 ## Telemetry
 
@@ -396,6 +448,16 @@ A project the agent gives no tests_dir gets one from its runner's own configurat
 outside it (`testsdir.ts`: vitest include and projects, jest roots, testMatch and testRegex, pytest testpaths; set in
 the file by `withTestsDirs`, said once to the agent): a new `arnx_generated` folder beside most of the project's own
 tests. Configuration in JavaScript is read only where it is literal; otherwise the default stays and the probe decides.
+A runner may collect only files named another way (jest testRegex `__tests__/.*Spec`): for a TypeScript project the
+choice then holds `test_files` too, a `*` and the ending of its own tests' names (`namesFor`), written beside tests_dir.
+`adapterFor(cfg)` returns the adapter with the probes, the writable names, the test-file test, the words for the model
+and a kept file's name following that ending (`withTestFiles`); the key is optional and absent changes nothing, not even
+the stamp. When a configuration is code and the one-line test is not listed, `look` derives the place from the files the
+runner lists (`placementFrom`, one re-probe in the same session), `try_project` writes tests_dir and test_files into the
+file and runs the project again, and every later file for that project gets them too (`withPlacements`). A TypeScript
+project with a tests_dir that is not the default keeps accepted tests beside it, in a sibling `arnx` folder
+(`acceptedDirFor`), where the runner collects them. A path listed under `uncovered` is never routed to another project
+through `uses`; `mapHints` says when a `uses` entry matches only files in another language than the project's.
 An accepted test changed since `arnx accept` does not stop setup or the proof right after it (said once); `arnx
 approve` on its own and `arnx check` still refuse it.
 
@@ -474,12 +536,13 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `interrupt.ts` | On SIGINT/SIGTERM: tear down running sessions, cancel in-flight OpenAI background responses, exit 130/143 |
 | `settings.ts` | `.arnx/config.toml`: consent, models, budgets, prices, `[cloud]` |
 | `config.ts` | `.arnx/review.yaml`: validation (YAML scalars resolved as PyYAML does), secret-looking variable names refused, approval hash |
-| `secrets.ts` | What is never sent or copied: secret file names, key-like text, credential variable names; `scanKeys`: withhold a file, or blank its comment lines when its only key-like text is in comments |
+| `secrets.ts` | What is never sent or copied: secret file names, key-like text, credential variable names; `scanKeys`: what a file's key-like text comes to, or its comment lines blanked when that text is only in comments; `fakeKeys` and `maskPrivateKeys`: a private key's fake in the sandbox and `[private key]` on the wire |
 | `comments.ts` | Where a JavaScript, TypeScript, Rust or Python file's comments are (strings and literals skipped) |
 | `ignore.ts` | `.arnxignore` matching, and the proposal of data-like files for `init` |
-| `change.ts` | Resolve the change (diff lines with key-like text in comments blanked); build the snapshot |
-| `sandbox.ts` | Docker: env image, locked-down runs, services, timeouts, cleanup of live sessions; the container a Rust session's runs share |
-| `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, kept when runs reach them (a Python project's own package, from pyproject's or setup.cfg's name, when a probe run in the session imports it from outside `/src`: site-packages, an editable install of a copy; docker.jsonl step `package`), compared with the code to test; the key of an image made from the code (its files, not the tests or reports beside it); when a round's probe runs no test, the files only the copy holds (named in the stop message with `arnx setup --project NAME`) |
+| `boundary.ts` | The one filter: `Boundary` holds each value with its JSON, URL, case, hex and base64 forms (an encoded form's stand-in is the value's stand-in, encoded the same way; only plain forms come back from `unmask`). `maskedCopy` masks what is written or printed. `swapFor` gives a model's text back as it means where real files are: a value real there comes back, a certain one's stand-in stays, and one those files hold stays. A value's slow hash is taken only when the text has a window of its shape. |
+| `change.ts` | Resolve the change (diff lines with key-like text in comments blanked); build the snapshot, and its build context beside it (`<snapshot>.build`: hard links, but for the files that hold a guess; none when no guess is left to replace). Certain values (`isCertainRule`: `key-shaped`, `address-password`) get stand-ins in both; guesses (`named-*`) only in the build context, in every file but the project's manifests (`manifestRule`: what keys its image; before review.yaml, manifests outside folders of examples and tests) and lockfiles. A `named-word` guess (`Summer2024`) that code uses as a name anywhere is dropped from the filter too. `.env*` files at the repository's top give values only. The build context's hard links mean a run writing in place into a file with no guess changes that file there too: it matters only for a build after runs on one snapshot (setup's later tries, a before-check whose image is gone), and copying instead would double each snapshot's disk |
+| `sandbox.ts` | Docker: env image (built from `buildContextOf(snapshot)`, never from what tests run: a build has network), locked-down runs, services, timeouts, cleanup of live sessions; the container a Rust session's runs share |
+| `baked.ts` | Copies of the code an install made outside `/src`: found by path and content, kept when runs reach them (a Python project's own package, from pyproject's or setup.cfg's name, when a probe run in the session imports it from outside `/src`: site-packages, an editable install of a copy; docker.jsonl step `package`), compared with the code to test, as the build context holds it, since that is what the copy came from: tests that run on such a copy see stand-ins for guesses, while tests on `/src` see the real values, and `CopyDiffers` and the rebuild never fire on that difference; the key of an image made from the code (its files in the build context, not the tests or reports beside it); when a round's probe runs no test, the files only the copy holds (named in the stop message with `arnx setup --project NAME`) |
 | `outcomes.ts` | Run tests through the adapter; classify results across runs |
 | `before.ts` | The before/after check's comparison: a finding's runs on the code before the change against its failure |
 | `typecheck.ts` | The project's own type check: tsc's output read, errors on the change against those before it, in words |
@@ -546,6 +609,19 @@ before its Next line and lists the pair in `may_contradict` (`mayContradict`). N
   or later, and arnx says so on an older one), no host environment, no capabilities, CPU, memory and process limits, and a
   throwaway copy of the repo.
 - Model keys stay in the arnx process: never passed to Docker, written to a file, or logged.
+- A guess at a secret (`named-*`) never changes code that runs: it stays real where tests run, and every read a model has
+  goes through the filter (`boundary.ts`), as does what arnx writes or prints for a coding agent: a round and a review as
+  they are saved and returned, `fix-prompt.md`, and `check`'s and `check --review`'s results and log. Only the code tests run
+  holds it: an image is built from the build context, which has its stand-in, since a build has network. The project's own
+  manifests and lockfiles are the one exception, in those files alone, as a stand-in there can break an install. An install's copy of the project (`cp -a`, `pip install .`) comes from the build context, so tests that run there see the
+  stand-ins, and that difference from `/src` is not a changed copy (`baked.ts`).
+- A model's text meets real files only through a `Swap` (`Boundary.swapFor`), and nothing it gives back is kept. `Workspace`
+  swaps paths, grep patterns and test files as they enter the snapshot; `check` and `check --review` swap kept tests in their
+  throwaway copy; `Session` swaps its env, service env and commands as it hands them to Docker and logs what it was given.
+  `review.yaml`, files under `.arnx/` and logs keep the stand-in, and output goes back through the filter. An image's build
+  never gets a swap: it has network. A project with a baked copy gets no swap in what it runs (`Runner.copies`), as that copy
+  holds the stand-ins; its tools still read real files. Only certain values' stand-ins may be refused in a proposed file: a
+  guess's stand-in there is legal and comes back at the run.
 - arnx never edits the user's code. `review` writes under `.arnx/`; `accept` writes only to `.arnx/` (accepted tests in
   `.arnx/tests/`) and its local pins; `init` writes `.arnxignore` only when there is none; `skill install` writes only the skill
   folders.

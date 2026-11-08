@@ -11,11 +11,10 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
 import { parse as parseToml } from "smol-toml";
-import { getAdapter, LANGUAGES } from "./adapters";
+import { getAdapter } from "./adapters";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
-import { DEFAULT_LIMITS, docker, dockerSteps, REPORT_DIR, runArgv } from "./sandbox";
-import { globRegex } from "./secrets";
+import { buildContextOf, DEFAULT_LIMITS, docker, dockerSteps, dockerfile, isManifest, manifestFiles, notCode, projectOf, runArgv } from "./sandbox";
 import { randomHex, shQuote } from "./util";
 
 /** A copy of a snapshot folder (`scope`, relative to the repository; "" for the repository) at `root` in the image:
@@ -35,17 +34,9 @@ const FIND = `find / -xdev \\( ${[...PRUNED_PATHS.map((p) => `-path ${p}`), ...P
 /** Fewest files of a folder an image path must hold to count as its copy (a stray index.js is not one). */
 const MIN_FILES = 3;
 
-const manifestRx = LANGUAGES.flatMap((l) => {
-  try {
-    return getAdapter(l).manifests.map(globRegex);
-  } catch {
-    return []; // a language without an adapter yet
-  }
-});
-
 /** Files under `dir` of the snapshot (POSIX paths relative to it), without manifests (installs copy those on purpose,
- * and they key the image already), dependency folders, git data and the files below `skip` (relative to `dir`). */
-export function scopeFiles(snap: string, dir: string, skip: string[] = []): string[] {
+ * and they key the image already; `withManifests` keeps them), dependency folders, git data and the files below `skip` (relative to `dir`). */
+export function scopeFiles(snap: string, dir: string, skip: string[] = [], withManifests = false): string[] {
   const out: string[] = [];
   const base = join(snap, dir);
   if (!existsSync(base)) return out;
@@ -56,7 +47,7 @@ export function scopeFiles(snap: string, dir: string, skip: string[] = []): stri
       const st = lstatSync(join(base, r));
       if (st.isDirectory()) {
         if (!PRUNED_NAMES.includes(name)) visit(r);
-      } else if (st.isFile() && !manifestRx.some((rx) => rx.test(name))) out.push(r);
+      } else if (st.isFile() && (withManifests || !isManifest(name))) out.push(r);
     }
   };
   visit("");
@@ -134,34 +125,20 @@ export function differing(copies: BakedCopy[], imageHashes: Map<string, string>,
   return [...out].sort();
 }
 
-/** Where `arnx accept` keeps tests (testround.ts DOME); `arnx check` puts each in place from there. */
-const KEPT = ".arnx/tests";
-
-/** What in a scope is not the code under test (relative to the scope): the generated tests' folder (it changes during
- * a round), and in the repository's scope arnx's own folder, the runners' reports and the accepted tests a check put
- * in place. */
-function notCode(cfg: ReviewConfig, snap: string, scope: string): string[] {
-  const tests = posix.normalize(posix.join(projectOf(cfg), cfg.testsDir));
-  const rel = (p: string) => (scope ? posix.relative(scope, p) : p);
-  const kept = existsSync(join(snap, KEPT)) ? (readdirSync(join(snap, KEPT), { recursive: true }) as string[])
-    .map((p) => p.split("\\").join("/")).filter((p) => statSync(join(snap, KEPT, p)).isFile()) : [];
-  return [tests, ".arnx", REPORT_DIR, ...kept].filter((p) => !scope || p.startsWith(`${scope}/`)).map(rel);
-}
-
-const projectOf = (cfg: ReviewConfig) => posix.normalize(cfg.workdir).replace(/^\.$/, "").replace(/\/$/, "");
-
-/** The scopes a copy is looked for in: the project's folder (an install that copies `.`) and the repository's. */
+/** The scopes a copy is looked for in: the project's folder (an install that copies `.`) and the repository's. An image's
+ * copy comes from the snapshot's build context, so that is what it is compared with: its guesses are stand-ins. */
 function scopesOf(cfg: ReviewConfig, snap: string): { scope: string; files: string[] }[] {
   const project = projectOf(cfg);
-  const scopes = [{ scope: project, files: scopeFiles(snap, project, notCode(cfg, snap, project)) }];
-  if (project) scopes.push({ scope: "", files: scopeFiles(snap, "", notCode(cfg, snap, "")) });
+  const code = buildContextOf(snap);
+  const scopes = [{ scope: project, files: scopeFiles(code, project, notCode(cfg, snap, project)) }];
+  if (project) scopes.push({ scope: "", files: scopeFiles(code, "", notCode(cfg, snap, "")) });
   return scopes;
 }
 
 const listed = new Map<string, string[]>();
 
 /** The image's files outside the pruned paths, listed once per image (a tag never changes what it holds). */
-function imageFiles(image: string): string[] {
+export function imageFiles(image: string): string[] {
   let paths = listed.get(image);
   if (!paths) {
     try {
@@ -303,7 +280,8 @@ function packageCopy(cfg: ReviewConfig, image: string, snap: string)
     return null;
   }
   const scope = "dir" in local ? local.dir : posix.dirname(local.module);
-  const wanted = "dir" in local ? scopeFiles(snap, scope, notCode(cfg, snap, scope)) : [`${name}.py`];
+  const code = buildContextOf(snap);
+  const wanted = "dir" in local ? scopeFiles(code, scope, notCode(cfg, snap, scope)) : [`${name}.py`];
   const hashes = imageHashes(image, wanted.map((f) => inRoot(root, f))) ?? new Map<string, string>();
   const files = wanted.filter((f) => hashes.has(inRoot(root, f)));
   if (!files.length) {
@@ -311,7 +289,7 @@ function packageCopy(cfg: ReviewConfig, image: string, snap: string)
     return null;
   }
   const copy = { root, scope, files };
-  log(root, { differ: differing([copy], hashes, snap).length });
+  log(root, { differ: differing([copy], hashes, code).length });
   return { copy, hashes };
 }
 
@@ -334,24 +312,23 @@ export function bakedIn(cfg: ReviewConfig, image: string, snap: string): Baked |
     for (const [p, h] of found) hashes.set(p, h);
   }
   if (pkg && !copies.some((c) => c.root === pkg.copy.root)) copies.push(pkg.copy);
-  return { copies, differ: differing(copies, hashes, snap) };
+  return { copies, differ: differing(copies, hashes, buildContextOf(snap)) };
 }
 
-/** The image key for the code in the snapshot: the environment's key and a hash of the code in the scopes the copies
- * came from. Tests and reports beside the code do not count, so every session on the same code (a round, its answer
- * rounds, a check) and every later review of it use one image. */
-export function bakedKey(key: string, cfg: ReviewConfig, copies: BakedCopy[], snap: string): string {
-  const h = createHash("sha256");
-  const wanted = new Set(copies.map((c) => c.scope));
-  const known = scopesOf(cfg, snap);
-  // A package's folder (packageCopy) is a scope of its own, after the project's and the repository's.
-  const own = [...wanted].filter((w) => !known.some((s) => s.scope === w)).sort()
-    .map((scope) => ({ scope, files: scopeFiles(snap, scope, notCode(cfg, snap, scope)) }));
-  for (const { scope, files } of [...known.filter((s) => wanted.has(s.scope)), ...own]) {
-    for (const f of files) {
-      const rel = inScope(scope, f);
-      h.update(`${rel}\0`).update(readFileSync(join(snap, rel))).update("\0");
-    }
+/** The image key for the code in the snapshot: the environment's key, the Dockerfile's text (the install steps, with the
+ * image and the install's folder), and a hash of every file the build context holds that goes into the image: the code,
+ * and the manifests and lockfiles at any depth.
+ * Nothing else enters it: not which project asks, the review, the tests and reports beside the code, nor `.arnx`. So
+ * every session on the same code (a round, its answer rounds, a check), every project on the same install and every
+ * later review of it use one image. */
+export function bakedKey(key: string, cfg: ReviewConfig, snap: string): string {
+  const h = createHash("sha256").update(dockerfile(cfg)).update("\0");
+  const code = buildContextOf(snap);
+  const skip = notCode(cfg, snap, "");
+  const files = [...scopeFiles(code, "", skip), ...manifestFiles(code, isManifest).filter((f) => !skip.some((k) => f === k || f.startsWith(`${k}/`)))];
+  // Every manifest and lockfile at any depth: an install can read one anywhere (`pip install -r app/requirements.txt`).
+  for (const f of files.sort()) {
+    h.update(`${f}\0${statSync(join(code, f)).mode & 0o111 ? "x" : ""}\0`).update(readFileSync(join(code, f))).update("\0");
   }
   return `${key}-src-${h.digest("hex").slice(0, 12)}`;
 }
@@ -384,6 +361,30 @@ export function onlyInCopies(copies: BakedCopy[], imagePaths: string[], snap: st
   const depth = (p: string) => p.split("/").length;
   return [...new Set([...named.sort(),
     ...beside.sort((a, b) => depth(a) - depth(b) || a.localeCompare(b))])];
+}
+
+/** What an install or a run leaves in a copy of the code that is no source: a folder of build output, a compiled or
+ * cached file. The one list: a copy holding only these has nothing this commit removed. */
+const BUILD_OUTPUT_DIRS = new Set(["__pycache__", "build", "dist", "target", ".pytest_cache", ".tox", ".mypy_cache",
+  ".ruff_cache", ".eggs", ".cache"]);
+export const isBuildOutput = (rel: string): boolean => /\.(pyc|pyo)$/.test(rel) ||
+  rel.split("/").some((seg) => BUILD_OUTPUT_DIRS.has(seg) || seg.endsWith(".egg-info"));
+
+/** Files (repository paths) the copies hold that the snapshot lacks, build output and the generated tests' folder `tests`
+ * aside: what this code removed, or never had. */
+export function absentFromSnapshot(cfg: ReviewConfig, copies: BakedCopy[], imagePaths: string[], snap: string): string[] {
+  const tests = posix.normalize(posix.join(cfg.workdir, cfg.testsDir));
+  const out: string[] = [];
+  for (const c of copies) {
+    const prefix = c.root === "/" ? "/" : `${c.root}/`;
+    for (const p of imagePaths) {
+      if (!p.startsWith(prefix)) continue;
+      const rel = inScope(c.scope, p.slice(prefix.length));
+      if (rel.startsWith(`${tests}/`) || isBuildOutput(rel) || existsSync(join(snap, rel))) continue;
+      out.push(rel);
+    }
+  }
+  return [...new Set(out)].sort();
 }
 
 /** The image's copies reached by runs, and the files only they hold (the output's first). */

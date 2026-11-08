@@ -6,6 +6,7 @@ import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { whatNext } from "../src/next";
 import { save } from "../src/report";
 import { writeSettings, defaultSettings } from "../src/settings";
+import { PRIVATE_KEY_BLOCK } from "./helpers/fakekeys";
 import { commit, gitRepo, runGit } from "./helpers/gitutil";
 import { sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
@@ -74,7 +75,8 @@ test("a change over the size limit is next's answer, not 'nothing to review'", (
 
 test("a change that cannot be sent is shown as the error itself", () => {
   const repo = approved();
-  writeFileSync(join(repo, "svc/key.py"), `KEY = "sk-ant-api03-${"a".repeat(90)}"\n`);
+  writeSettings(repo, { ...defaultSettings(), standIns: false });
+  writeFileSync(join(repo, "svc/key.py"), `KEY = """${PRIVATE_KEY_BLOCK}"""\n`);
   runGit(repo, "add", "svc/key.py");
   const n = whatNext(repo);
   expect(n.where).toBe("the change cannot be reviewed");
