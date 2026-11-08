@@ -7,11 +7,11 @@ import { ArnxError, ModelError, SetupRequired } from "../src/errors";
 import { closeOpen, closers } from "../src/interrupt";
 import { LocalBrain } from "../src/localbrain";
 import { exitCode, incomplete, render, summary } from "../src/report";
-import { claimed, newReviewId, runReview, suspectOutcomes } from "../src/reviewer";
+import { AGENT_SHARE, claimed, newReviewId, runReview, suspectOutcomes } from "../src/reviewer";
 import { defaultSettings, type Settings } from "../src/settings";
-import { PRICES, type Reply } from "../src/llm";
+import { type Block, PRICES, type Reply } from "../src/llm";
 import type { SessionFactory } from "../src/sandbox";
-import { FakeJson, fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
+import { BusyAgent, FakeJson, fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { gitRepo, runGit } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
@@ -428,6 +428,45 @@ test("a failing test with no report at all is unclaimed, and the round is incomp
   expect(review.unclaimed!.map((u) => u.testId)).toEqual([`${GEN}::test_add`]);
   expect(review.projectStats[0]!.noReport).toBe(true);
   expect(exitCode(review)).toBe(2);
+});
+
+// Each reply costs $0.004; of a $0.012 review the round has $0.0102 (AGENT_SHARE): after a write and a read, the next
+// call would cross it.
+const BUSY_BUDGET = { ...SETTINGS, reviewBudgetUsd: 0.012 };
+const ADD_ONLY = "from app import add\n\ndef test_add():\n    assert add(2, 3) == 5\n";
+const busy = (report: Block[] | Error) => new BusyAgent([[tool("write_file", { path: GEN, content: ADD_ONLY })]],
+  [tool("read_file", { path: "app.py" })], report);
+const reviewerCost = (review: { usage: { model: string; costUsd: number }[] }) =>
+  review.usage.find((u) => u.model.includes("sonnet"))!.costUsd;
+
+test("a budget cut gives the reviewer one last turn, with no tool run, to report the tests it wrote", async () => {
+  const OTHER = "tests/arnx_generated/test_more.py";
+  const model = busy([text(reportFor(`${GEN}::test_add`)), tool("write_file", { path: OTHER, content: ADD_ONLY })]);
+  const { review, rdir } = await runReview(repo, { settings: BUSY_BUDGET, agentModel: model,
+    challenger: new FakeJson([{ verdict: "confirmed", reason: "r" }]), sessionFactory: fakeFactory(failing("test_add")) });
+  expect(model.calls).toHaveLength(3); // the write, a read, then the report turn
+  const asked = model.calls[2]!.messages.at(-1)!.content as { type: string; text?: string }[];
+  expect(asked.at(-1)!.type).toBe("text");
+  expect(review.findings.map((f) => f.func)).toEqual(["test_add"]);
+  expect(review.unclaimed ?? []).toEqual([]);
+  expect(review.projectStats[0]!.noReport).toBeUndefined();
+  expect(review.stop).toBe("budget");
+  expect(incomplete(review)).toBe(true);
+  // The tool the report turn asked for never ran.
+  expect(existsSync(join(rdir, "tests", OTHER + COPY_SUFFIX))).toBe(false);
+  // Spend: the round's budget and at most one call more.
+  expect(reviewerCost(review)).toBeLessThanOrEqual(0.012 * AGENT_SHARE + 0.004 + 1e-9);
+});
+
+test("a report turn that fails leaves the failing tests unreported, as before", async () => {
+  const model = busy(new ModelError("claude-sonnet-5-5: HTTP 529: overloaded"));
+  const { review } = await runReview(repo, { settings: BUSY_BUDGET, agentModel: model, challenger: new FakeJson([]),
+    sessionFactory: fakeFactory(failing("test_add")) });
+  expect(model.calls).toHaveLength(3);
+  expect(review.findings).toEqual([]);
+  expect(review.unclaimed!.map((u) => u.testId)).toEqual([`${GEN}::test_add`]);
+  expect(review.projectStats[0]!.noReport).toBe(true);
+  expect(review.stop).toBe("budget");
 });
 
 const failedAt = (testId: string, fileAttr = "") => ({ testId, fileAttr, name: testId.split("::").at(-1)!, outcome: "failed", message: "m" });

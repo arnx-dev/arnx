@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { backtracks, grepLimits, runAgent, ToolError, Workspace } from "../src/agent";
 import { ModelError } from "../src/errors";
 import { type Attempt, billedError, PRICES, type Reply } from "../src/llm";
-import { ScriptedAgent, text, tool } from "./helpers/fakes";
+import { BusyAgent, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -102,6 +102,32 @@ test("test_budget_stops_the_loop", async () => {
   expect(result.stop).toBe("budget");
   expect(result.costUsd).toBeGreaterThanOrEqual(0.5);
   expect(model.calls).toHaveLength(2);
+});
+
+test("a call that would cross the budget becomes the round's last word: one reply, no tool run, stop budget", async () => {
+  // Each reply costs $0.30; after the first, the next would cross $0.50.
+  const usage = { input: 100_000, output: 10_000, cacheRead: 0, cacheWrite: 0 };
+  const model = new BusyAgent([], [tool("list_dir", { path: "." })], [text("REPORT"), tool("list_dir", { path: "." })],
+    usage);
+  const ws = new Workspace(root);
+  const ran: string[] = [];
+  const finals: string[] = [];
+  const result = await runAgent(model, { tools: () => ws.tools(), call: (n, i) => {
+    ran.push(n);
+    return ws.call(n, i);
+  } }, { system: "s", user: "u", budgetUsd: 0.5, prices: PRICES, lastWord: () => "report now",
+    onFinal: (t) => finals.push(t) });
+  expect(model.calls).toHaveLength(2);
+  expect(model.calls[1]!.messages.at(-1)!.content).toContainEqual({ type: "text", text: "report now" });
+  expect(model.calls[0]!.messages.at(-1)!.content).toBe("u"); // what was sent before stays as it was
+  expect(ran).toEqual(["list_dir"]); // the first reply's tool; none of the last word's
+  expect([result.stop, result.finalText, finals]).toEqual(["budget", "REPORT", ["REPORT"]]);
+  expect(result.costUsd).toBeLessThanOrEqual(0.5 + 0.3);
+  // Nothing to ask for: the loop stops at the budget as before.
+  const quiet = new BusyAgent([], [tool("list_dir", { path: "." })], [text("REPORT")], usage);
+  const plain = await runAgent(quiet, new Workspace(root), { system: "s", user: "u", budgetUsd: 0.5, prices: PRICES,
+    lastWord: () => null });
+  expect([plain.stop, plain.finalText, quiet.calls.length]).toEqual(["budget", "", 2]);
 });
 
 test("a model with no price runs past the budget: its cost unknown, each reply counted with unknown usage", async () => {

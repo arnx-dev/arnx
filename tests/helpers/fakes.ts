@@ -38,6 +38,26 @@ export class ScriptedAgent implements AgentModel {
   }
 }
 
+/** Works through `steps`, then keeps asking for `idle` (it is never done on its own). Asked for its report (a text block
+ * after the tool results), it replies with `report`, or fails with it when it is an error. */
+export class BusyAgent extends ScriptedAgent {
+  constructor(steps: Block[][], readonly idle: Block[], readonly report: Block[] | Error, usage?: Usage) {
+    super(steps, usage);
+  }
+
+  override async create(a: { system: string; tools: Tool[]; messages: Message[] }): Promise<Reply> {
+    const last = a.messages.at(-1)?.content;
+    const asked = Array.isArray(last) && last.some((b) => (b as { type?: string }).type === "text");
+    if (asked && this.report instanceof Error) {
+      this.calls.push({ system: a.system, tools: a.tools.map((t) => t.name), messages: [...a.messages] });
+      throw this.report;
+    }
+    if (asked) this.steps.unshift(this.report as Block[]);
+    else if (!this.steps.length) this.steps.push(this.idle);
+    return super.create(a);
+  }
+}
+
 export class FakeJson implements JsonModel {
   ref = "openai:gpt-5.5-2026-04-23";
   calls: string[] = [];

@@ -33,6 +33,11 @@ export const GREP_LINE_LIMIT = 10_000;
 const BATCH_SLACK_MS = 1000;
 export const WRITE_LIMIT = 200_000;
 export const MAX_TOKENS = 16_000;
+/** The share of a round's budget its last word (runAgent `lastWord`) may count on: with less than this left, or less
+ * than the last reply cost, the next call is the round's last. */
+export const REPORT_RESERVE = 0.05;
+/** The last word's reply is capped: a report, not more work. */
+export const REPORT_MAX_TOKENS = 8_000;
 export const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv", ".arnx-run", ".mypy_cache",
   ".pytest_cache"]);
 
@@ -545,7 +550,11 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
   onFinal?: (finalText: string, turn: number) => void;
   /** Whether a reply is the round's report (default: any reply). A cut follow-up restores the reply before it only
    * when that is a report; a hunt reply is not. */
-  isReport?: (text: string) => boolean }): Promise<AgentResult> {
+  isReport?: (text: string) => boolean;
+  /** The round's last word: when the next call would leave too little of the budget (under REPORT_RESERVE of it, or
+   * under what the last reply cost), the model is sent this instead and replies once, with no tool run; its reply is
+   * the round's final and the round stops for the budget. null: nothing to ask for now. */
+  lastWord?: () => string | null }): Promise<AgentResult> {
   const tools = ws.tools();
   const messages: Message[] = [{ role: "user", content: o.user }];
   let cost = 0, stop = "max_turns", final = "", turn = 0, usage = NO_USAGE, calls = 0, unknown = 0;
@@ -556,6 +565,8 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
   };
   if (transcript) mkdirSync(dirname(transcript), { recursive: true });
   const timeUp = () => !!o.deadline && o.deadline.now() >= o.deadline.at;
+  // The last reply's cost, and whether the round's last word was asked for (and answered with text).
+  let lastCost = 0, last = false, lastSaid = false;
   for (turn = 1; turn <= (o.maxTurns ?? 60); turn++) {
     if (cost >= o.budgetUsd) {
       stop = "budget";
@@ -565,14 +576,24 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
       stop = "time";
       break;
     }
+    const word = o.lastWord && cost + Math.max(lastCost, o.budgetUsd * REPORT_RESERVE) >= o.budgetUsd
+      ? o.lastWord() : null;
+    if (word !== null) {
+      // After the tool results (or the message) the model has; a new message object, so earlier ones stay as sent.
+      const prev = messages.at(-1)!;
+      messages[messages.length - 1] = { role: "user", content: Array.isArray(prev.content)
+        ? [...prev.content, { type: "text", text: word }] : `${String(prev.content)}\n\n${word}` };
+      last = true;
+    }
     const started = performance.now();
     let reply, latency = 0;
     try {
-      reply = await model.create({ system: o.system, tools, messages, maxTokens: MAX_TOKENS });
+      reply = await model.create({ system: o.system, tools, messages, maxTokens: last ? REPORT_MAX_TOKENS : MAX_TOKENS });
       latency = Math.round(performance.now() - started);
     } catch (e) {
       if (!(e instanceof ModelError)) throw e;
-      stop = `api_error: ${e.message}`;
+      // A failed last word leaves the round as the budget left it.
+      stop = last ? "budget" : `api_error: ${e.message}`;
       unknown += e.unknownCalls;
       // What the failed call was billed (a reply cut short, a retry after a partial one) is spent all the same.
       cost += e.costUsd || 0;
@@ -593,6 +614,7 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
     const priced = costUsd(model.model, reply.usage, o.prices), replyCost = priced ?? 0;
     const unpriced = priced === null ? 1 : 0;
     cost += replyCost;
+    lastCost = replyCost;
     spend.add(replyCost);
     usage = addUsage(usage, reply.usage);
     calls += 1;
@@ -603,7 +625,8 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
       cost_usd: replyCost, latency_ms: latency, ...(tried(reply.attempts?.length ?? reply.tries)),
       unknown_usage: (reply.unknownCalls ?? 0) + unpriced, timed_out: false, turn });
     const text = reply.content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
-    const uses = reply.content.filter((b) => b.type === "tool_use");
+    // The last word runs no tool, whatever it asks for.
+    const uses = last ? [] : reply.content.filter((b) => b.type === "tool_use");
     // secs is the model's reply alone (all its attempts); the tools it asked for are timed on the line after.
     const attempts = reply.attempts && (reply.attempts.length > 1 || reply.attempts[0]?.outcome !== "ok")
       ? { attempts: reply.attempts.map((a) => ({ secs: a.secs, first_event_secs: a.firstEventSecs,
@@ -622,6 +645,15 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
     }
     if (reply.stopReason === "refusal") {
       stop = "refusal";
+      break;
+    }
+    if (last) {
+      // The round's report, as far as it got: its final, and the round stops for the budget.
+      if (text.trim()) {
+        [final, lastSaid] = [text, true];
+        o.onFinal?.(text, turn);
+      }
+      stop = "budget";
       break;
     }
     messages.push({ role: "assistant", content: reply.raw });
@@ -675,7 +707,10 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
   let cut: string | undefined;
   if (stop !== "end_turn" && stop !== "stopped" && earlier.length) {
     cut = stop;
-    if ((o.isReport ?? (() => true))(earlier.at(-1)!)) {
+    const isReport = o.isReport ?? (() => true);
+    // A last word that reports ends the follow-up as a report would; otherwise the report before it stands.
+    if (lastSaid && isReport(final)) stop = "end_turn";
+    else if (isReport(earlier.at(-1)!)) {
       final = earlier.pop()!;
       stop = "end_turn";
     }
