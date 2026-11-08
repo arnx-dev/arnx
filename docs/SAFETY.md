@@ -82,7 +82,7 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   `[review] stand_ins = false` in `.arnx/config.toml` turns stand-ins off in both copies: files with key-shaped text in code
   are left out, and requests still hold stand-ins for the other values.
   A review's diff blanks comment lines the same way and names them.
-  **Private keys.** A key with an intact header and END (PEM, PGP's block, SSH2's four dashes, any label) does not reach a
+  **Private keys.** A key with an intact header and END (PEM, PGP's block, SSH2's four dashes, a label of capitals, digits, blanks and `%+-` up to 64 characters) does not reach a
   model, however it is wrapped. What is only read (a diff, `read_file`, `grep`, the context a hunter gets) shows a fake of every token
   between the two, computed on the whole file before any page or search; and the filter replaces all from header to END with
   `[private key]` in what leaves arnx, test and `exec` output too, before arnx cuts it. A run of 64 or more base64 characters in
@@ -147,9 +147,8 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   the file under `sandbox_only` in `.arnx/review.yaml` and under "Worth a look". This holds for every line of
   `.arnxignore`, arnx's defaults and yours alike: `init` writes data files it finds there by name, so the file does
   not tell them apart. A test's output still goes to the model, and may quote such a file.
-- Everything sent to a model, arnx cloud, the second-opinion model or telemetry goes through one filter, in every
-  string of the request: a value arnx took for a secret is replaced by its stand-in there too, and so is a piece of
-  one at the edge of a word, unless the value is proven a name or words. What is still imperfect: a secret arnx does
+- The same filter covers what goes to arnx cloud, the second-opinion model and telemetry, and also masks a piece of a
+  secret at the edge of a word, unless the value is proven a name or words. What is still imperfect: a secret arnx does
   not pick as a secret is not masked; a cut piece of a word-like value can still leave; a dotted username with a
   1-5 digit address password (`user.name:12345@host`) reads as a host and is not masked; a file over 32 MB is not
   scanned and is left out.
