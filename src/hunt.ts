@@ -78,8 +78,9 @@ export async function secondHunt(root: string | null, cfg: ReviewConfig, o: { mo
   } catch (e) {
     // An optional role: a key with no credits skips it for the rest of the run instead of stopping the review.
     if (e instanceof NoCredits) {
+      // Calls run side by side: only the first to meet it says so.
+      if (!noCredits.has(o.model)) say(`second hunter skipped: ${e.provider} has no credits left on this key`);
       noCredits.add(o.model);
-      say(`second hunter skipped: ${e.provider} has no credits left on this key`);
       return { suspects: [], use, failed: true };
     }
     if (!survivable(e)) throw e;

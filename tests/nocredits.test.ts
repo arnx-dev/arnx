@@ -171,3 +171,14 @@ test("a challenger fallback with no credits is skipped, said once; the challenge
   expect(notices.filter((x) => x === "challenger fallback skipped: OpenAI has no credits left on this key"))
     .toHaveLength(1);
 });
+
+test("verdicts side by side meet a fallback with no credits: it is said once", async () => {
+  const notices: string[] = [];
+  const first = new FakeJson([new ModelError("first: HTTP 503"), new ModelError("first: HTTP 503")]);
+  const fallback = new FakeJson([new NoCredits("OpenAI"), new NoCredits("OpenAI")]);
+  const m = new FallbackJson(first, fallback);
+  m.notice = (x) => notices.push(x);
+  const all = await Promise.all([0, 1].map(() => m.completeJson("s", "u", {}).catch((x: unknown) => x)));
+  for (const e of all) expect(e).not.toBeInstanceOf(NoCredits);
+  expect(notices.filter((x) => x.startsWith("challenger fallback skipped"))).toHaveLength(1);
+});

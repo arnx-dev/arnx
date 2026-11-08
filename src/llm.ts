@@ -1226,8 +1226,9 @@ export class FallbackJson implements JsonModel {
       } catch (e) {
         // The fallback is optional: with no credits it is skipped, and this call fails as any fallback failure does.
         if (e instanceof NoCredits && i > 0) {
+          // Verdicts run side by side: only the first to meet it says so.
+          if (!this.fallbackOut) this.notice?.(`challenger fallback skipped: ${e.provider} has no credits left on this key`);
           this.fallbackOut = true;
-          this.notice?.(`challenger fallback skipped: ${e.provider} has no credits left on this key`);
           throw new ModelError(`${m.ref}: ${e.message}`);
         }
         if (!survivable(e)) throw e;
