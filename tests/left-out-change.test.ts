@@ -384,6 +384,10 @@ test("a diff shows what git holds, whatever a text conversion, a submodule setti
   runGit(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", join(sub), "sm");
   commit(repo, "add the submodule");
   writeFileSync(join(repo, "sm/f.txt"), `${body}\n`);
+  // A clone has no identity of its own: a runner with no global git config needs one to commit.
+  runGit(join(repo, "sm"), "config", "user.email", "dev@example.com");
+  runGit(join(repo, "sm"), "config", "user.name", "Dev");
+  runGit(join(repo, "sm"), "config", "commit.gpgsign", "false");
   commit(join(repo, "sm"), "a value in the submodule");
   editApp(repo);
   commit(repo, "bump");
