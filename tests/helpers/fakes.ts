@@ -17,7 +17,7 @@ const asParam = (b: Block) => b.type === "tool_use"
   ? { type: "tool_use", id: b.id, name: b.name, input: b.input }
   : { type: "text", text: b.text };
 
-export interface Call { system: string; tools: string[]; messages: Message[] }
+export interface Call { system: string; tools: string[]; messages: Message[]; maxTokens?: number }
 
 /** Replies with the given steps in order; each step is the list of blocks of one reply. */
 export class ScriptedAgent implements AgentModel {
@@ -29,8 +29,9 @@ export class ScriptedAgent implements AgentModel {
     this.steps = [...steps];
   }
 
-  async create({ system, tools, messages }: { system: string; tools: Tool[]; messages: Message[] }): Promise<Reply> {
-    this.calls.push({ system, tools: tools.map((t) => t.name), messages: [...messages] });
+  async create({ system, tools, messages, maxTokens }: { system: string; tools: Tool[]; messages: Message[];
+    maxTokens?: number }): Promise<Reply> {
+    this.calls.push({ system, tools: tools.map((t) => t.name), messages: [...messages], maxTokens });
     const blocks = this.steps.shift();
     if (!blocks) throw new Error("ScriptedAgent ran out of steps");
     const stop = blocks.some((b) => b.type === "tool_use") ? "tool_use" : "end_turn";
@@ -39,17 +40,25 @@ export class ScriptedAgent implements AgentModel {
 }
 
 /** Works through `steps`, then keeps asking for `idle` (it is never done on its own). Asked for its report (a text block
- * after the tool results), it replies with `report`, or fails with it when it is an error. */
+ * after the tool results), it replies with `report`, or fails with it when it is an error. `usage` may give each
+ * reply's usage in turn. */
 export class BusyAgent extends ScriptedAgent {
-  constructor(steps: Block[][], readonly idle: Block[], readonly report: Block[] | Error, usage?: Usage) {
-    super(steps, usage);
+  constructor(steps: Block[][], readonly idle: Block[], readonly report: Block[] | Error,
+              readonly usages?: Usage | Usage[]) {
+    super(steps, Array.isArray(usages) ? undefined : usages);
   }
 
-  override async create(a: { system: string; tools: Tool[]; messages: Message[] }): Promise<Reply> {
+  override async create(a: { system: string; tools: Tool[]; messages: Message[]; maxTokens?: number }): Promise<Reply> {
+    const reply = await this.reply(a);
+    return Array.isArray(this.usages) ? { ...reply, usage: this.usages[this.calls.length - 1]! } : reply;
+  }
+
+  private async reply(a: { system: string; tools: Tool[]; messages: Message[]; maxTokens?: number }): Promise<Reply> {
     const last = a.messages.at(-1)?.content;
     const asked = Array.isArray(last) && last.some((b) => (b as { type?: string }).type === "text");
     if (asked && this.report instanceof Error) {
-      this.calls.push({ system: a.system, tools: a.tools.map((t) => t.name), messages: [...a.messages] });
+      this.calls.push({ system: a.system, tools: a.tools.map((t) => t.name), messages: [...a.messages],
+        maxTokens: a.maxTokens });
       throw this.report;
     }
     if (asked) this.steps.unshift(this.report as Block[]);

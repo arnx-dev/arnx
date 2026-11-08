@@ -34,8 +34,10 @@ const BATCH_SLACK_MS = 1000;
 export const WRITE_LIMIT = 200_000;
 export const MAX_TOKENS = 16_000;
 /** The share of a round's budget its last word (runAgent `lastWord`) may count on: with less than this left, or less
- * than the last reply cost, the next call is the round's last. */
+ * than the dearest of the last LAST_REPLIES replies cost, the next call is the round's last. */
 export const REPORT_RESERVE = 0.05;
+/** How many recent replies the next one's cost is judged from (the first reply, which writes the cache, never). */
+export const LAST_REPLIES = 3;
 /** The last word's reply is capped: a report, not more work. */
 export const REPORT_MAX_TOKENS = 8_000;
 export const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv", ".arnx-run", ".mypy_cache",
@@ -552,7 +554,7 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
    * when that is a report; a hunt reply is not. */
   isReport?: (text: string) => boolean;
   /** The round's last word: when the next call would leave too little of the budget (under REPORT_RESERVE of it, or
-   * under what the last reply cost), the model is sent this instead and replies once, with no tool run; its reply is
+   * under what the dearest of the last LAST_REPLIES replies cost, the first reply aside), the model is sent this instead and replies once, with no tool run; its reply is
    * the round's final and the round stops for the budget. null: nothing to ask for now. */
   lastWord?: () => string | null }): Promise<AgentResult> {
   const tools = ws.tools();
@@ -565,8 +567,9 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
   };
   if (transcript) mkdirSync(dirname(transcript), { recursive: true });
   const timeUp = () => !!o.deadline && o.deadline.now() >= o.deadline.at;
-  // The last reply's cost, and whether the round's last word was asked for (and answered with text).
-  let lastCost = 0, last = false, lastSaid = false;
+  // The recent replies' costs (not the first's), and whether the round's last word was asked for (and answered).
+  const recent: number[] = [];
+  let last = false, lastSaid = false;
   for (turn = 1; turn <= (o.maxTurns ?? 60); turn++) {
     if (cost >= o.budgetUsd) {
       stop = "budget";
@@ -576,7 +579,7 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
       stop = "time";
       break;
     }
-    const word = o.lastWord && cost + Math.max(lastCost, o.budgetUsd * REPORT_RESERVE) >= o.budgetUsd
+    const word = o.lastWord && cost + Math.max(o.budgetUsd * REPORT_RESERVE, ...recent.slice(-LAST_REPLIES)) >= o.budgetUsd
       ? o.lastWord() : null;
     if (word !== null) {
       // After the tool results (or the message) the model has; a new message object, so earlier ones stay as sent.
@@ -614,7 +617,7 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
     const priced = costUsd(model.model, reply.usage, o.prices), replyCost = priced ?? 0;
     const unpriced = priced === null ? 1 : 0;
     cost += replyCost;
-    lastCost = replyCost;
+    if (calls > 0) recent.push(replyCost);
     spend.add(replyCost);
     usage = addUsage(usage, reply.usage);
     calls += 1;

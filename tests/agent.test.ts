@@ -105,7 +105,7 @@ test("test_budget_stops_the_loop", async () => {
 });
 
 test("a call that would cross the budget becomes the round's last word: one reply, no tool run, stop budget", async () => {
-  // Each reply costs $0.30; after the first, the next would cross $0.50.
+  // Each reply costs $0.30. The first (which writes the cache) is no guide; after the second, the next would cross $0.80.
   const usage = { input: 100_000, output: 10_000, cacheRead: 0, cacheWrite: 0 };
   const model = new BusyAgent([], [tool("list_dir", { path: "." })], [text("REPORT"), tool("list_dir", { path: "." })],
     usage);
@@ -115,19 +115,34 @@ test("a call that would cross the budget becomes the round's last word: one repl
   const result = await runAgent(model, { tools: () => ws.tools(), call: (n, i) => {
     ran.push(n);
     return ws.call(n, i);
-  } }, { system: "s", user: "u", budgetUsd: 0.5, prices: PRICES, lastWord: () => "report now",
+  } }, { system: "s", user: "u", budgetUsd: 0.8, prices: PRICES, lastWord: () => "report now",
     onFinal: (t) => finals.push(t) });
-  expect(model.calls).toHaveLength(2);
-  expect(model.calls[1]!.messages.at(-1)!.content).toContainEqual({ type: "text", text: "report now" });
+  expect(model.calls).toHaveLength(3);
+  expect(model.calls[2]!.messages.at(-1)!.content).toContainEqual({ type: "text", text: "report now" });
   expect(model.calls[0]!.messages.at(-1)!.content).toBe("u"); // what was sent before stays as it was
-  expect(ran).toEqual(["list_dir"]); // the first reply's tool; none of the last word's
+  expect(ran).toEqual(["list_dir", "list_dir"]); // the first replies' tools; none of the last word's
   expect([result.stop, result.finalText, finals]).toEqual(["budget", "REPORT", ["REPORT"]]);
-  expect(result.costUsd).toBeLessThanOrEqual(0.5 + 0.3);
+  expect(result.costUsd).toBeLessThanOrEqual(0.8 + 0.3);
   // Nothing to ask for: the loop stops at the budget as before.
   const quiet = new BusyAgent([], [tool("list_dir", { path: "." })], [text("REPORT")], usage);
-  const plain = await runAgent(quiet, new Workspace(root), { system: "s", user: "u", budgetUsd: 0.5, prices: PRICES,
+  const plain = await runAgent(quiet, new Workspace(root), { system: "s", user: "u", budgetUsd: 0.8, prices: PRICES,
     lastWord: () => null });
-  expect([plain.stop, plain.finalText, quiet.calls.length]).toEqual(["budget", "", 2]);
+  expect([plain.stop, plain.finalText, quiet.calls.length]).toEqual(["budget", "", 3]);
+});
+
+test("the last word comes in time when a reply costs 1.7 times the one before it", async () => {
+  // $0.10 (writes the cache), $0.30, $0.20, then a $0.34 reply: from the last reply alone ($0.20) the $0.34 one
+  // would start at $0.60 as normal work and cross $0.85, leaving no last word. The largest of the last three ($0.30)
+  // makes it the last word.
+  const out = (usd: number) => ({ input: 0, output: Math.round(usd * 100_000), cacheRead: 0, cacheWrite: 0 });
+  const model = new BusyAgent([], [tool("list_dir", { path: "." })], [text("REPORT")],
+    [out(0.1), out(0.3), out(0.2), out(0.34)]);
+  const result = await runAgent(model, new Workspace(root), { system: "s", user: "u", budgetUsd: 0.85, prices: PRICES,
+    lastWord: () => "report now" });
+  expect(model.calls).toHaveLength(4);
+  expect([result.stop, result.finalText]).toEqual(["budget", "REPORT"]);
+  // The last word itself may cross the budget, by at most that one call.
+  expect(result.costUsd).toBeCloseTo(0.94, 9);
 });
 
 test("a model with no price runs past the budget: its cost unknown, each reply counted with unknown usage", async () => {

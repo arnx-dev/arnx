@@ -143,15 +143,15 @@ test("a report that reaches the budget is still the round's final, before done",
     [text(report)],
   ]);
   const log: Logged[] = [];
-  // The first reply is under the budget; the next would cross it, so it is the round's last word: the report, no
-  // follow-up, and the round reads as cut by the budget.
+  // The first reply is under the budget; the report crosses it, so no follow-up is asked. (The first reply writes the
+  // cache, so its cost does not make the next call a last word.)
   const tools = cli([{ untestedFiles: ["b.py"], dbUntested: [], generatedFiles: [GEN] }], log);
   const r = await new LocalBrain({ agentModel: model, prices: PRICES }).agentRound("review",
     input({ budgetUsd: 0.005 }), Promise.resolve(tools));
   expect(log.filter((e) => e.type !== "ran").map((e) => e.type)).toEqual(["actions", "final", "done"]);
   const final = log.find((e): e is Extract<Step, { type: "final" }> => e.type === "final")!;
   expect([final.turn, final.report!.tests]).toEqual([2, [{ test: `${GEN}::test_a`, expects: "a works" }]]);
-  expect([r.agent.stop, r.agent.finalText, model.calls.length]).toEqual(["budget", report, 2]);
+  expect([r.agent.stop, r.agent.finalText, model.calls.length]).toEqual(["end_turn", report, 2]);
 });
 
 test("an answer whose report reaches the budget also ends on final, then done", async () => {
