@@ -82,7 +82,7 @@ After the user says they accepted:
 |---|---|---|
 | 0 | `pass` | Go to 5. |
 | 1 | `fail` | Fix the code for each `failed` test, run again. After 3 rounds still failing, stop and report. A `may_contradict` pair (an answer's test passes now, an accepted test fails): stop and show the user the pair; which one holds is theirs. |
-| 2 | `no-report` | Tests did not report (timeout, runner). Report it; do not loop. |
+| 2 | `no-report` | Tests did not report (timeout, runner), are unproven, or a kept test file was not run (`not_run`). Report it; do not loop. |
 | 3 | `nothing-accepted` | Nothing was accepted: ask the user whether they ran `arnx accept <id>`. |
 | 4 | `tests-changed` | An accepted test file, or its entry in `.arnx/accepted-tests.json`, changed since accept; nothing ran. Do not touch them: report each `changed` entry to the user. Restoring (`arnx accept --again <id>`; plain `arnx check` names a `git checkout` when the committed copy is the accepted one) or keeping the edit (`--keep-edits`) is theirs. |
 
@@ -141,7 +141,7 @@ this change`) or lists paths in `uncovered` or `untested`:
 |---|---|---|
 | 0 | no `not-checked` finding; `confirmed` findings do not fail the run (also when `status` is `partly-covered` or `not-tested`) | all accepted tests pass |
 | 1 | a `not-checked` finding | some accepted tests fail |
-| 2 | incomplete (or failed: the message says why) | some tests did not report |
+| 2 | incomplete (or failed: the message says why) | some tests did not report, are unproven or were not run |
 | 3 | setup needed (config, consent, keys, Docker, environment) | nothing accepted yet |
 | 4 | | an accepted test changed since accept |
 | 130 | interrupted | interrupted |
