@@ -449,7 +449,7 @@ test("a JWT with no dash under a secret name", () => {
 });
 
 test("under a strong name, random letters and generated passwords the shape check once took for names", () => {
-  for (const value of ["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", "rTxKpQmZvBnWcYdLgHsJfAeUoIiXyTqR", "xKqPzRtYbNmVcLw4",
+  for (const value of ["hf_" + "rTxKpQmZvBnWcYdLgHsJfAeUoIiXyTqRpK", "rTxKpQmZvBnWcYdLgHsJfAeUoIiXyTqR", "xKqPzRtYbNmVcLw4",
     "bNmVcLwKqPzRtYx27"]) {
     expect([value, rule(`api_token = "${value}"\n`, "a.py")]).toEqual([value, guessed(value)]);
     // A weak name wants more.
