@@ -1,7 +1,8 @@
 import { beforeEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { backtracks, grepLimits, runAgent, ToolError, Workspace } from "../src/agent";
+import { backtracks, grepLimits, MAX_TOKENS, REPORT_MAX_TOKENS, REPORT_THINKING_TOKENS, runAgent, ToolError, Workspace }
+  from "../src/agent";
 import { ModelError } from "../src/errors";
 import { type Attempt, billedError, PRICES, type Reply } from "../src/llm";
 import { BusyAgent, ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -119,6 +120,10 @@ test("a call that would cross the budget becomes the round's last word: one repl
     onFinal: (t) => finals.push(t) });
   expect(model.calls).toHaveLength(3);
   expect(model.calls[2]!.messages.at(-1)!.content).toContainEqual({ type: "text", text: "report now" });
+  // The last word's cap leaves REPORT_MAX_TOKENS for the reply after thinking's share; other calls get MAX_TOKENS.
+  expect(model.calls.map((c) => c.maxTokens)).toEqual([MAX_TOKENS, MAX_TOKENS,
+    REPORT_THINKING_TOKENS + REPORT_MAX_TOKENS]);
+  expect(REPORT_MAX_TOKENS).toBe(8_000);
   expect(model.calls[0]!.messages.at(-1)!.content).toBe("u"); // what was sent before stays as it was
   expect(ran).toEqual(["list_dir", "list_dir"]); // the first replies' tools; none of the last word's
   expect([result.stop, result.finalText, finals]).toEqual(["budget", "REPORT", ["REPORT"]]);

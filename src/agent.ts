@@ -40,6 +40,8 @@ export const REPORT_RESERVE = 0.05;
 export const LAST_REPLIES = 3;
 /** The last word's reply is capped: a report, not more work. */
 export const REPORT_MAX_TOKENS = 8_000;
+/** What the last word's cap adds for thinking (it counts toward max_tokens), so the report keeps REPORT_MAX_TOKENS. */
+export const REPORT_THINKING_TOKENS = 4_000;
 export const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv", ".arnx-run", ".mypy_cache",
   ".pytest_cache"]);
 
@@ -591,7 +593,7 @@ export async function runAgent(model: AgentModel, ws: Pick<Workspace, "tools" | 
     const started = performance.now();
     let reply, latency = 0;
     try {
-      reply = await model.create({ system: o.system, tools, messages, maxTokens: last ? REPORT_MAX_TOKENS : MAX_TOKENS });
+      reply = await model.create({ system: o.system, tools, messages, maxTokens: last ? REPORT_THINKING_TOKENS + REPORT_MAX_TOKENS : MAX_TOKENS });
       latency = Math.round(performance.now() - started);
     } catch (e) {
       if (!(e instanceof ModelError)) throw e;
