@@ -79,6 +79,9 @@ export interface Adapter {
    * relative to the repository root; `exists` tells whether a path relative to it is a file in the snapshot (Rust
    * finds the source file of a test inside src/ by its module path). */
   parseReport(text: string, runner: string, projectRoot: string, exists?: (rel: string) => boolean): TestResult[] | null;
+  /** The parsed results with the failure messages the report left empty filled from the run's output (bun's JUnit
+   * report holds none); absent for runners whose report has them. */
+  messagesFrom?(results: TestResult[], output: string, runner: string): TestResult[];
   /** Shell command that lists the tests a run of the targets would run (all of them with none), running none; null when
    * the runner has no list form or test_command cannot be turned into one safely. A runner that writes its list to a
    * file writes it to listPath (inside the container). */

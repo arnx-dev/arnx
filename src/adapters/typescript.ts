@@ -139,6 +139,39 @@ function parseJunitJs(text: string, root: string): TestResult[] | null {
   });
 }
 
+/** bun's console output: each failing test's text (from its `error:` line to the stack) comes before its `(fail) name`
+ * line, after the file's `path:` header; the source excerpt above the error is left out. */
+const BUN_MARK = /^\((pass|fail|skip|todo)\) (.*?)(?: \[[\d.]+m?s\])?$/;
+const BUN_FILE = /^([^\s()][^()]*\.[cm]?[jt]sx?):$/;
+
+/** bun's results with each failure's message taken from the run's output, where its JUnit report has none. */
+function bunMessages(results: TestResult[], output: string): TestResult[] {
+  const found = new Map<string, string>();
+  let file = "", block: string[] = [];
+  for (const line of output.replace(/\x1b\[[0-9;]*m/g, "").split("\n")) {
+    const header = BUN_FILE.exec(line);
+    const mark = header ? null : BUN_MARK.exec(line);
+    if (header) file = header[1]!;
+    if (mark?.[1] === "fail") {
+      const at = block.findIndex((l) => /^error\b/i.test(l));
+      const text = (at >= 0 ? block.slice(at) : block.filter((l) => !/^\s*\d+ \| |^\s*\^\s*$/.test(l))).join("\n").trim();
+      if (text) found.set(`${file}::${mark[2]}`, text.slice(0, MESSAGE_LIMIT));
+    }
+    if (header || mark) block = [];
+    else block.push(line);
+  }
+  if (!found.size) return results;
+  return results.map((t) => {
+    if (t.message || (t.outcome !== "failed" && t.outcome !== "error")) return t;
+    const hit = [...found].find(([key]) => {
+      const cut = key.lastIndexOf("::");
+      const [f, name] = [key.slice(0, cut), key.slice(cut + 2)];
+      return name === t.name && (!f || t.fileAttr === f || t.fileAttr.endsWith(`/${f}`));
+    });
+    return hit ? { ...t, message: hit[1] } : t;
+  });
+}
+
 /** vitest 2 and later list a run's tests (`vitest list`, as JSON in a file), jest its test files (--listTests); node:test
  * and bun test have no list form. vitest's must come from a test_command that says `vitest run`. */
 function listCommand(testCommand: string, targets: string[], listPath: string, runner: string): string | null {
@@ -371,6 +404,7 @@ export const typescript: Adapter = {
   },
   parseReport: (text, runner, root) =>
     runner === "jest" ? parseJest(text, root) : runner === "node" ? parseNode(text, root) : parseJunitJs(text, root),
+  messagesFrom: (results, output, runner) => runner === "bun" ? bunMessages(results, output) : results,
   listCommand,
   parseList,
   reportSetup: (snapshot, runner) => {

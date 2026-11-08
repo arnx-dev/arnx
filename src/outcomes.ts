@@ -141,7 +141,8 @@ export async function runTests(session: Runner, snap: string, cfg: ReviewConfig,
   const text = file !== report && session.clean ? session.clean(raw) : raw;
   if (file !== report) rmSync(file, { force: true });
   const exists = (rel: string) => existsSync(join(snap, cfg.workdir, rel));
-  return [result, adapter.parseReport(text, cfg.runner, cfg.workdir, exists)];
+  const parsed = adapter.parseReport(text, cfg.runner, cfg.workdir, exists);
+  return [result, parsed && adapter.messagesFrom ? adapter.messagesFrom(parsed, result.output, cfg.runner) : parsed];
 }
 
 /** The report a runner says it wrote somewhere else in the code under test, as a path in the snapshot: vitest keeps
