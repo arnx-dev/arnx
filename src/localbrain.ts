@@ -314,6 +314,10 @@ export class LocalBrain implements Brain {
       searchDirs: h.searchDirs, scope, outDir: x.outDir, progress: x.progress, prompts,
       ...(h.parts ? { parts: h.parts } : {}) })
       : null;
+    // They may fail (a key with no credits) before the reviewer's hunt reply awaits them: that await sees it, so the
+    // command ends with the error's own line, never as an unhandled rejection.
+    other?.catch(() => {});
+    parts?.catch(() => {});
     let arrived: { suspects: Suspect[]; use: ModelUse } | null = null;
     const folded = { done: false };
     /** The second hunter's suspects that came after the hunt but before the first report: new ones, at most

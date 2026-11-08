@@ -9,7 +9,7 @@ import { save } from "../src/report";
 import { loadSettings, writeSettings } from "../src/settings";
 import { type Runner, sandboxOptions, type SessionFactory } from "../src/sandbox";
 import { approvalChecks } from "../src/setupview";
-import { ArnxError } from "../src/errors";
+import { ArnxError, NoCredits } from "../src/errors";
 import { Cli } from "./helpers/cli";
 import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
@@ -164,6 +164,15 @@ test("review proves a changed review.yaml again first and goes on; without a cop
   expect(cli.stderr).not.toContain("arnx approve");
   expect(readFileSync(join(repo, ".arnx", "setup", "approval.md"), "utf8"))
     .toContain("\nChanged since the last proof: no copy of the proven file to compare\n");
+});
+
+test("a reviewer whose key has no credits ends the review with that one line, exit 2, never as a bug", async () => {
+  const repo = await changed();
+  const cli = new Cli({ cwd: repo, env: ENV, approveSessions: suites([PASS]),
+    runReview: async () => { throw new NoCredits("OpenAI"); } });
+  expect(await cli.run("review", "--quiet")).toBe(2);
+  expect(cli.stderr).toContain("arnx: OpenAI has no credits left on this key: add credits, then run again.");
+  expect(cli.stdout + cli.stderr).not.toContain("internal error");
 });
 
 test("a re-proof that fails stops the review before any model call, naming the failing test", async () => {

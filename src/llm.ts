@@ -1202,6 +1202,8 @@ export class FallbackJson implements JsonModel {
   notice?: (message: string) => void;
   readonly uses: ModelUse[];
   lastModel = "";
+  /** The fallback's key ran out of credits: it is not asked again (said once). */
+  private fallbackOut = false;
 
   constructor(private first: JsonModel, private second: JsonModel) {
     this.ref = first.ref;
@@ -1210,7 +1212,7 @@ export class FallbackJson implements JsonModel {
 
   async completeJson(system: string, user: string, schema: Record<string, unknown>, signal?: AbortSignal)
     : Promise<JsonReply> {
-    const models = [this.first, this.second];
+    const models = this.fallbackOut ? [this.first] : [this.first, this.second];
     for (const [i, m] of models.entries()) {
       // Set once, never cleared: calls run in parallel, and each reply names the model that gave it.
       const outer = this.trace;
@@ -1222,6 +1224,12 @@ export class FallbackJson implements JsonModel {
         this.lastModel = m.ref;
         return [reply[0], reply[1], reply[2], reply[3], m.ref];
       } catch (e) {
+        // The fallback is optional: with no credits it is skipped, and this call fails as any fallback failure does.
+        if (e instanceof NoCredits && i > 0) {
+          this.fallbackOut = true;
+          this.notice?.(`challenger fallback skipped: ${e.provider} has no credits left on this key`);
+          throw new ModelError(`${m.ref}: ${e.message}`);
+        }
         if (!survivable(e)) throw e;
         if (e.costUsd > 0 || e.usage) tally(this.uses[i]!, e.costUsd, e.usage, e.unknownCalls);
         else this.uses[i]!.unknownCalls += e.unknownCalls;

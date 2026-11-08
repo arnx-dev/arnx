@@ -27,6 +27,12 @@ export function internalError(e: unknown, env: Record<string, string | undefined
   return env.ARNX_DEBUG === "1" && e instanceof Error && e.stack ? [line, e.stack] : [line];
 }
 
+/** An error that escaped every handler (a callback, a stray promise): an ArnxError says its own line with its exit
+ * code (NoCredits: exit 2), anything else is internalError's bug line (exit 2). */
+export function fatal(e: unknown, env: Record<string, string | undefined>): { lines: string[]; code: number } {
+  return e instanceof ArnxError ? { lines: [`arnx: ${e.message}`], code: e.exitCode } : { lines: internalError(e, env), code: 2 };
+}
+
 /** There is no change to review: the diff is empty. `arnx next` tells this apart from a change it cannot review. */
 export class NoChange extends ArnxError {
   override name = "NoChange";

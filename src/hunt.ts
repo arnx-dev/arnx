@@ -8,7 +8,7 @@ import { changedDefinitions, CONTEXT_LIMIT, contextPack } from "./context";
 import { sliceDiff } from "./change";
 import { adapterFor } from "./adapters";
 import { changedSources } from "./untested";
-import { survivable } from "./errors";
+import { NoCredits, survivable } from "./errors";
 import { withRole } from "./events";
 import { type JsonModel, type ModelUse, newUse, tally } from "./llm";
 import { DEFAULT_PROMPTS, HUNT_SCHEMA, MAX_SUSPECTS, type Prompts, RANK_SCHEMA, type Scope, type Suspect }
@@ -53,11 +53,15 @@ export function mergeSuspects(first: Suspect[], second: Suspect[]): Suspect[] {
 /** The second hunter's suspects and what it cost; an API error is reported and gives none. The changed definitions
  * are `o.changedDefinitions` when given, else read from the snapshot at `root` (none without either). Its attempts
  * are logged to hunt-second.jsonl in `o.outDir`, when given. */
+/** Second hunters whose key ran out of credits in this run: skipped from then on, said once. */
+const noCredits = new WeakSet<JsonModel>();
+
 export async function secondHunt(root: string | null, cfg: ReviewConfig, o: { model: JsonModel; diff: string;
   context: string; scope: Scope; outDir?: string; progress?: Say; changedDefinitions?: string; prompts?: Prompts;
   signal?: AbortSignal }): Promise<{ suspects: Suspect[]; use: ModelUse; failed?: true }> {
   const say = (m: string) => o.progress?.(`${cfg.name}: ${m}`);
   const use = newUse(o.model.ref);
+  if (noCredits.has(o.model)) return { suspects: [], use, failed: true };
   if (o.outDir) {
     mkdirSync(o.outDir, { recursive: true });
     const log = join(o.outDir, "hunt-second.jsonl");
@@ -72,6 +76,12 @@ export async function secondHunt(root: string | null, cfg: ReviewConfig, o: { mo
     tally(use, cost, usage, unknown);
     return { suspects: parseSuspects(reply, o.model.ref.replace(/^[a-z]+:/, "")), use };
   } catch (e) {
+    // An optional role: a key with no credits skips it for the rest of the run instead of stopping the review.
+    if (e instanceof NoCredits) {
+      noCredits.add(o.model);
+      say(`second hunter skipped: ${e.provider} has no credits left on this key`);
+      return { suspects: [], use, failed: true };
+    }
     if (!survivable(e)) throw e;
     if (e.costUsd > 0 || e.usage) tally(use, e.costUsd, e.usage, e.unknownCalls);
     else use.unknownCalls += e.unknownCalls;
