@@ -6,6 +6,8 @@ looks broken, runs them in Docker, and tells you what failed and what it cannot 
 A finding is a test you can run, not a comment. arnx runs each one 3 times, runs it again on the code before the
 change, has a second model challenge it, and lets you keep the useful ones as regression tests.
 
+![arnx init, then arnx review on a branch that adds discount codes: arnx proves a half-cent rounding bug with a failing test and asks two questions](assets/demo.gif)
+
 Status: early release (0.1). Python (pytest), JavaScript/TypeScript (vitest, jest, node:test, bun) and Rust
 (cargo-nextest, [early](#rust-is-early)) repositories: a single package, a workspace, or many services. Open source
 (Apache 2.0) with your own model keys, or with models run by [arnx cloud](docs/CLOUD.md).
