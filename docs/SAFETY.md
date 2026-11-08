@@ -147,6 +147,12 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   the file under `sandbox_only` in `.arnx/review.yaml` and under "Worth a look". This holds for every line of
   `.arnxignore`, arnx's defaults and yours alike: `init` writes data files it finds there by name, so the file does
   not tell them apart. A test's output still goes to the model, and may quote such a file.
+- Everything sent to a model, arnx cloud, the second-opinion model or telemetry goes through one filter, in every
+  string of the request: a value arnx took for a secret is replaced by its stand-in there too, and so is a piece of
+  one at the edge of a word, unless the value is proven a name or words. What is still imperfect: a secret arnx does
+  not pick as a secret is not masked; a cut piece of a word-like value can still leave; a dotted username with a
+  1-5 digit address password (`user.name:12345@host`) reads as a host and is not masked; a file over 32 MB is not
+  scanned and is left out.
 - A variable whose name looks like a secret (KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL, …) is refused in
   `.arnx/review.yaml` unless listed under `allow_env_names` or set to `arnx:generated` (64 hex digits arnx makes) or
   `arnx:generated:base64` (32 bytes, URL-safe base64): throwaway values, the same in every run.
@@ -182,6 +188,10 @@ always; `--no-untracked` overrides that); `arnx setup` reads the same way. With 
 the review says so first. Paths in `.arnxignore` and secret files (`.env`, `.ppk`, a `.pem` with no key and the like) are not sent, a private key goes as `[private key]` and other
 key-shaped text as a stand-in (see [What runs where](#what-runs-where)). review.json records `untracked_included` or
 `untracked_left_out`, and `not_sent` the files left out.
+
+The diff is git's plain text form. arnx turns off textconv drivers, external diff tools and the diff form of a
+submodule (`diff.submodule`) for every diff it reads. A driver that decrypts a file cannot put its text in the diff.
+A submodule shows as a pointer only.
 
 With arnx cloud, the same content goes to arnx cloud instead of your providers, and arnx cloud passes it to its model
 providers ([CLOUD.md](CLOUD.md)).

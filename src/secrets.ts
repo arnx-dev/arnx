@@ -23,7 +23,9 @@ const KEY_FILES = ["*.pem", "*.key", "id_rsa*", "id_ecdsa*", "id_ed25519*"];
 const ARMOUR = "( |%20|\\+)[A-Z0-9 %+-]{0,64}PRIVATE( |%20|\\+)KEY(( |%20|\\+)BLOCK)?( |%20)?-{4,5}";
 /** A private key's header, as a pattern. */
 export const KEY_HEADER = `-{4,5}( |%20)?BEGIN${ARMOUR}`;
-const isHeader = (s: string) => s.startsWith("----");
+/** A private key's header or END line, as against a password in an address that happens to start with dashes. */
+const ARMOUR_AT = new RegExp(`^-{4,5}( |%20)?(BEGIN|END)${ARMOUR}`);
+const isHeader = (s: string) => ARMOUR_AT.test(s);
 /** Base64 in either alphabet. */
 const B64 = "[A-Za-z0-9+/_-]";
 /** What a private key's base64 must start with when no header says so, as a pattern: a whole PEM's base64, an OpenSSH

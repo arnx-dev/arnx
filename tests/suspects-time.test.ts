@@ -25,6 +25,9 @@ const SHAPES: Record<string, string> = {
     .join("\n"),
   "many keys on one comment line": `# ${Array.from({ length: SIZE / 60 }, (_, i) =>
     `sk-${"a".repeat(32)}${String(i).padStart(8, "0")}`).join(" ")}`,
+  "an armour's start again and again": `# ${repeat("---- BEGIN ", SIZE)}\n`,
+  "an armour's label again and again": `# ${repeat("-----BEGIN A-1 ", SIZE)}\n`,
+  "an armour's end again and again": `# ${repeat("---- END ", SIZE)}\n`,
   "a key header in every comment": repeat(`# -----BEGIN ${"PRIVATE"} KEY-----\n`, SIZE),
   "a key header, then keys": `# -----BEGIN ${"PRIVATE"} KEY-----\n${Array.from({ length: SIZE / 60 }, (_, i) =>
     `# sk-${"a".repeat(32)}${String(i).padStart(8, "0")}`).join("\n")}`,
