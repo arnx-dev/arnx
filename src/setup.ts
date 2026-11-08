@@ -1261,6 +1261,11 @@ function seedPins(repo: string): SecretPin[] {
   }
 }
 
+/** A working run kept while its note went back to the agent: the file it ran with, what records its proof, the type
+ * check record for later reviews, and its line and event when it stands. */
+interface Standing { file: string; prove: () => void; remember: () => void; summary: string; said: string;
+  event: Record<string, unknown> }
+
 /** A setup's events go to `<outDir>/<id>/events.jsonl`, the id made like a review's. */
 export async function runSetup(repo: string, settings: Settings, agentModel: AgentModel | null, o: SetupOptions)
   : Promise<SetupResult> {
@@ -1299,6 +1304,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     // run it came from: the same environment tried again goes on from that run without running the suite again.
     held: new Map<string, { env: string; files: string; shown: Set<string>; run: { digest: string; summary: string;
       skips: string[]; counts: SuiteCounts } }>(),
+    // A run that went back to the agent for a note (tests test_command leaves out, a type check that failed, a type
+    // gap), per project, newest last: if the time limit or the agent's budget or turns end setup before the project is
+    // proven again, it stands as if tried again unchanged. A later failed try leaves it; a later proof replaces it.
+    standing: new Map<string, Standing>(),
     // The whole-suite run that proved each project (SetupRun).
     runs: new Map<string, SetupRun>(),
     // The most tests a whole-suite run of each project reported, and the test_command that ran them.
@@ -1548,6 +1557,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       };
       // --- end of the web UI rule ---
       const t0 = performance.now();
+      // On the time limit's clock: a try that took longer than the time left is not sent back for a note.
+      const began = limit.now();
       const attempt = (a: { ok: boolean; reused: boolean; summary: string; failing: number; skips: number;
         hints: string; error?: string }) => emit("setup.attempt", { n, project: name, ...a,
         secs: Number(((performance.now() - t0) / 1000).toFixed(1)) });
@@ -1712,8 +1723,44 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const gap = ok ? coverageGap(cfg, snap, counts.listed ? counts.listed.map((f) => ({ fileAttr: f }) as TestResult)
         : counts.all, counts.listed ? undefined : state.mostRan.get(name), accepted,
         (r) => nested.some((w) => r === w || r.startsWith(`${w}/`)) || uncovered(r)) : null;
-      if (gap && !shown.has("gap") && !timeIsUp(limit)) {
+      // What proves the project from this run: recorded at once, or kept as it stands while a note goes back to the
+      // agent (state.standing).
+      const snapshot = withSandbox(code, sandbox);
+      const prove = () => {
+        state.proven.set(name, projectDigest(f, name));
+        if (!f.legacy) state.provenBlocks.set(name, provenBlock(f, name));
+        // A run that proves a project ran the whole suite (a rerun of failing files that passes is followed by one).
+        const [, counted] = suiteOk(counts.all, cfg, trusted, accepted, "record");
+        state.runs.set(name, { name, digest: ranWith, env, snapshot, untracked, summary,
+          skips, counts, after: summary.startsWith(counted) ? summary.slice(counted.length) : "" });
+        state.proofs.set(name, { name, summary, skips,
+          failed: counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined)),
+          ...(counts.unproven ? { unproven: counts.unproven } : {}),
+          ...(gap ? { gap: gap.line } : {}),
+          ...(counts.typecheckProblem ? { typecheckProblem: counts.typecheckProblem } : {}),
+          ...(counts.typeGaps ? { typeGaps: counts.typeGaps } : {}) });
+      };
+      // The code as it is now is what later reviews' changes start from: a swamped type check is remembered.
+      const remember = () => {
+        if (cfg.typecheck && counts.typeErrors !== undefined) recordTypecheck(repo, cfg, counts.typeErrors);
+      };
+      const stand = (note: string) => {
+        state.standing.delete(name);
+        state.standing.set(name, { file: parsed.yaml, prove, remember,
+          summary: f.legacy ? summary : `${name}: ${summary}`, said: `${name}: ✓ try ${tried} stands: ` +
+          `${summary}${note ? ` · ${note}` : ""}`, event: { n, project: name, ok: true, reused: true,
+          summary: clip(summary, 500), failing: 0, skips: skips.length, hints: clip(note, 1000) } });
+      };
+      // A note goes back to the agent once; not with the time up, nor when this try took longer than the time left.
+      const ask = (key: string, what: string): boolean => {
+        if (shown.has(key) || timeIsUp(limit)) return false;
+        if (limit.now() - began <= limit.at - limit.now()) return true;
+        say(`${name}: runs, but ${what}; too little time left to ask the agent`);
+        return false;
+      };
+      if (gap && ask("gap", gap.line)) {
         hold("gap");
+        stand(gap.line);
         state.problem = `${name}: ${gap.line}`;
         attempt({ ok: false, reused: false, summary: clip(summary, 500), failing: failing.length, skips: skips.length,
           hints: clip(gap.line, 1000) });
@@ -1724,8 +1771,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       }
       // A type check that did not run, or errors about a module it cannot see, go back to the agent once; tried again
       // unchanged, they stand and are said at approval.
-      if (ok && counts.typecheckProblem && !shown.has("typecheck") && !timeIsUp(limit)) {
+      if (ok && counts.typecheckProblem && ask("typecheck", `its type check: ${counts.typecheckProblem}`)) {
         hold("typecheck");
+        stand("");
         const line = `the type check of ${name}: ${counts.typecheckProblem}`;
         state.problem = `${name}: ${line}`;
         attempt({ ok: false, reused: false, summary: clip(summary, 500), failing: failing.length, skips: skips.length,
@@ -1736,9 +1784,10 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           "again unchanged: the problem is then shown to the user.";
       }
       const gaps = ok ? (counts.typeGaps ?? []) : [];
-      if (gaps.length && !shown.has("types") && !timeIsUp(limit)) {
+      if (gaps.length && ask("types", gapsLine(gaps))) {
         hold("types");
         const line = gapsLine(gaps);
+        stand(line);
         state.problem = `${name}: ${line}`;
         attempt({ ok: false, reused: false, summary: clip(summary, 500), failing: failing.length, skips: skips.length,
           hints: clip(line, 1000) });
@@ -1780,20 +1829,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const red = counts.acceptedFailing ? ` ${plural(counts.acceptedFailing, "failure")} in accepted tests (bugs not ` +
         "fixed yet) do not count; leave those tests as they are." : "";
       if (red) say(stillRed(counts.acceptedFailing));
-      state.proven.set(name, projectDigest(f, name));
-      if (!f.legacy) state.provenBlocks.set(name, provenBlock(f, name));
-      // A run that proves a project ran the whole suite (a rerun of failing files that passes is followed by one).
-      const [, counted] = suiteOk(counts.all, cfg, trusted, accepted, "record");
-      state.runs.set(name, { name, digest: ranWith, env, snapshot: withSandbox(code, sandbox), untracked, summary,
-        skips, counts, after: summary.startsWith(counted) ? summary.slice(counted.length) : "" });
-      // The code as it is now is what later reviews' changes start from: a swamped type check is remembered.
-      if (cfg.typecheck && counts.typeErrors !== undefined) recordTypecheck(repo, cfg, counts.typeErrors);
-      state.proofs.set(name, { name, summary, skips,
-        failed: counts.failed.map((t) => entryOf(t, causeOf(t, cfg, snap, counts.hints) ?? undefined)),
-        ...(counts.unproven ? { unproven: counts.unproven } : {}),
-        ...(gap ? { gap: gap.line } : {}),
-        ...(counts.typecheckProblem ? { typecheckProblem: counts.typecheckProblem } : {}),
-        ...(counts.typeGaps ? { typeGaps: counts.typeGaps } : {}) });
+      prove();
+      remember();
+      state.standing.delete(name);
       // A TypeScript project that can be type checked and has no typecheck yet: say so while the agent is here.
       const typed = cfg.language === "typescript" && !cfg.typecheck && typeCheckable(readSnap, cfg.workdir)
         ? ` ${name} has a tsconfig.json and typescript among its dependencies: add typecheck (for example ` +
@@ -1828,14 +1866,14 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         "arnx put it back.)\n";
       return r.yaml;
     };
-    // At the time limit with no file accepted: the projects of the last whole file proven as they stand there are
-    // kept, the others listed under uncovered (TIME_LEFT_OUT), and that file is accepted. Approved projects must be
-    // as approved. Returns the projects set aside; null (nothing accepted) when no project of this setup is proven or
-    // the file does not hold together without them.
-    const keepProven = (): string[] | null => {
-      if (!state.lastFile) return null;
+    // At the time limit with no file accepted: the projects of the last whole file (or `file`) proven as they stand
+    // there are kept, the others listed under uncovered (TIME_LEFT_OUT), and that file is accepted. Approved projects
+    // must be as approved. Returns the projects set aside; null (nothing accepted) when no project of this setup is
+    // proven, the file does not hold together without them, or (`whole`) one would be set aside.
+    const keepProven = (file = state.lastFile, whole = false): string[] | null => {
+      if (!file) return null;
       let f: ReviewFile;
-      let last = state.lastFile;
+      let last = file;
       try {
         last = putBack(last);
         f = parseReviewFile(withOurs(last));
@@ -1850,6 +1888,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       if (!proven.length) return null;
       const web = fresh.filter((name) => state.webUi.has(name));
       const aside = fresh.filter((name) => !proven.includes(name) && !web.includes(name));
+      if (whole && aside.length) return null;
       const reason = (name: string) => state.tooMany.has(name) ? manyServicesReason(state.tooMany.get(name)!)
         : TIME_LEFT_OUT;
       let yaml = withUncovered(last, [...derivedOf(f, web), ...aside.flatMap((name) =>
@@ -2086,7 +2125,33 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       new Date());
     // A run cut short at the limit, then the agent's last word: out of time all the same.
     const late = state.outOfTime || result.stop === "time" || (state.accepted === null && timeIsUp(limit));
-    const aside = late && state.accepted === null && !state.needed ? keepProven() : null;
+    const capped = result.stop === "budget" || result.stop === "max_turns";
+    let aside: string[] | null = null;
+    // Out of time (or, after a note went back to the agent, out of budget or turns) with no file accepted. A working
+    // run whose note went back to the agent stands as if tried again unchanged (a later failed try never replaces
+    // it): of the last whole file and the files those runs ran with, the one that keeps the most projects is taken.
+    if (state.accepted === null && !state.needed && (late || (capped && state.standing.size))) {
+      const proven = new Map(state.proven);
+      const stood = [...state.standing.values()];
+      stood.forEach((x) => x.prove());
+      let best: { accepted: string; final: ReviewFile; aside: string[] } | null = null;
+      for (const file of [state.lastFile, ...stood.map((x) => x.file).reverse()]) {
+        const left = keepProven(file, !late);
+        if (left && state.accepted !== null && state.final && (!best || left.length < best.aside.length)) {
+          best = { accepted: state.accepted, final: state.final, aside: left };
+        }
+        [state.accepted, state.final] = [null, null];
+      }
+      if (best) [state.accepted, state.final, aside] = [best.accepted, best.final, best.aside];
+      else state.proven = proven;
+      for (const [name, x] of state.standing) {
+        if (!state.final?.projects.some((p) => p.name === name)) continue;
+        x.remember();
+        say(x.said);
+        emit("setup.attempt", x.event);
+        state.summary = x.summary;
+      }
+    }
     const projects = (state.final?.projects ?? []).map((p) => state.proofs.get(p.name) ??
       { name: p.name, summary: keep.has(p.name) ? "approved earlier" : "not run", skips: [] });
     // Every project of the last file a web UI app whose runs failed: nothing here arnx sets up.

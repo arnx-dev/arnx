@@ -681,6 +681,70 @@ ${typecheck ? `    typecheck: ${typecheck}\n` : ""}uncovered: []
     expect(checks).toEqual(["web: type check failed without reporting a type error"]);
   });
 
+  // A run that went back to the agent for a note (a type check that failed, a type gap) stands when the limit cuts the
+  // agent's next try: recorded and proven as if tried again unchanged.
+  const MIN = 60_000;
+  const cutAfterHold = async (typecheck: string, o: { firstMinutes?: number; budget?: number; propose?: boolean } = {}) => {
+    const clock = { ms: 0 };
+    const m = new ScriptedAgent([
+      [tool("try_project", { yaml: web(typecheck) })],
+      // A changed image: a rebuild, which runs into the limit.
+      o.propose ? [tool("propose", { yaml: web(typecheck) })]
+        : [tool("try_project", { yaml: web(typecheck).replace("image: node:22", "image: node:24") })],
+      [text("done")],
+    ]);
+    const timed: SessionFactory = async (cfg, snap, log, body) => {
+      if (cfg.image === "node:24") {
+        clock.ms = 10 * MIN + 1;
+        throw new OutOfTime(10);
+      }
+      clock.ms += (o.firstMinutes ?? 2) * MIN;
+      return sandbox()(cfg, snap, log, body);
+    };
+    const said: string[] = [];
+    const settings = o.budget === undefined ? defaultSettings() : { ...defaultSettings(), setupBudgetUsd: o.budget };
+    const r = await runSetup(repo, settings, m, { outDir: join(tmp(), "s"), sessionFactory: timed,
+      progress: (x) => said.push(x), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+    const toAgent = (call: number) => (m.calls[call]!.messages.at(-1)!.content as Record<string, unknown>[])
+      .map((x) => String(x.content)).join("\n");
+    return { r, said, m, toAgent };
+  };
+
+  test("a type check that failed went back to the agent; the limit cuts its next try: the first try stands", async () => {
+    const { r, said } = await cutAfterHold("missing-tsc");
+    expect([r.ok, r.stop]).toEqual([true, "time"]);
+    expect(parseReviewFile(r.yamlText!).projects[0]!.image).toBe("node:22");
+    expect(r.projects[0]!.typecheckProblem).toContain("failed without reporting a type error");
+    expect(r.runs.map((x) => x.name)).toEqual(["web"]);
+    expect(approvalChecks(parseReviewFile(web("missing-tsc")), r.projects))
+      .toEqual(["web: type check failed without reporting a type error"]);
+    expect(said.some((l) => l.startsWith("web: ✓ try 1 stands"))).toBe(true);
+  });
+
+  test("a type gap went back to the agent; the limit cuts its next try: the first try stands with the gap", async () => {
+    const { r } = await cutAfterHold("gap-tsc");
+    expect([r.ok, r.stop]).toEqual([true, "time"]);
+    expect(parseReviewFile(r.yamlText!).projects[0]!.image).toBe("node:22");
+    expect(r.projects[0]!.typeGaps).toEqual([{ kind: "generated", module: "@prisma/client", errors: 3 }]);
+  });
+
+  test("the agent's budget ends setup after a type check went back to it: the first try stands", async () => {
+    const { r, m } = await cutAfterHold("missing-tsc", { budget: 0.000001 });
+    expect(m.calls).toHaveLength(1);
+    expect([r.ok, r.stop]).toEqual([true, "budget"]);
+    expect(r.projects[0]!.typecheckProblem).toContain("failed without reporting a type error");
+  });
+
+  test("a try that took longer than the time left is not sent back: its note is said and it is proven", async () => {
+    const { r, said, toAgent } = await cutAfterHold("missing-tsc", { firstMinutes: 6, propose: true });
+    expect(toAgent(1)).toContain("the suite of web runs:");
+    expect(toAgent(1)).not.toContain("It is information, not a failed proof");
+    expect(said).toContain("web: runs, but its type check: failed without reporting a type error (it could " +
+      "not start, or its output is not tsc's); too little time left to ask the agent");
+    expect([r.ok, r.stop]).toEqual([true, "end_turn"]);
+    expect(r.projects[0]!.typecheckProblem).toContain("failed without reporting a type error");
+  });
+
   test("try_project tells the agent to add typecheck to a TypeScript project that can be type checked", async () => {
     const m = new ScriptedAgent([
       [tool("try_project", { yaml: web(null) })],
