@@ -1,0 +1,9 @@
+{"Time":"2026-11-09T17:44:44.764156137Z","Action":"start","Package":"example.com/events/exit3"}
+{"Time":"2026-11-09T17:44:44.766387863Z","Action":"run","Package":"example.com/events/exit3","Test":"TestBefore"}
+{"Time":"2026-11-09T17:44:44.766416241Z","Action":"output","Package":"example.com/events/exit3","Test":"TestBefore","Output":"=== RUN   TestBefore\n"}
+{"Time":"2026-11-09T17:44:44.76646647Z","Action":"output","Package":"example.com/events/exit3","Test":"TestBefore","Output":"--- PASS: TestBefore (0.00s)\n"}
+{"Time":"2026-11-09T17:44:44.766473889Z","Action":"pass","Package":"example.com/events/exit3","Test":"TestBefore","Elapsed":0}
+{"Time":"2026-11-09T17:44:44.766480148Z","Action":"run","Package":"example.com/events/exit3","Test":"TestCrash"}
+{"Time":"2026-11-09T17:44:44.766488019Z","Action":"output","Package":"example.com/events/exit3","Test":"TestCrash","Output":"=== RUN   TestCrash\n"}
+{"Time":"2026-11-09T17:44:44.766709659Z","Action":"output","Package":"example.com/events/exit3","Output":"FAIL\texample.com/events/exit3\t0.002s\n"}
+{"Time":"2026-11-09T17:44:44.766737705Z","Action":"fail","Package":"example.com/events/exit3","Elapsed":0.003}

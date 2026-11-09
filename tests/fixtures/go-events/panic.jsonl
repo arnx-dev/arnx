@@ -1,0 +1,26 @@
+{"Time":"2026-11-09T17:44:44.287633138Z","Action":"start","Package":"example.com/events/panic"}
+{"Time":"2026-11-09T17:44:44.28989388Z","Action":"run","Package":"example.com/events/panic","Test":"TestBefore"}
+{"Time":"2026-11-09T17:44:44.289926575Z","Action":"output","Package":"example.com/events/panic","Test":"TestBefore","Output":"=== RUN   TestBefore\n"}
+{"Time":"2026-11-09T17:44:44.289969533Z","Action":"output","Package":"example.com/events/panic","Test":"TestBefore","Output":"--- PASS: TestBefore (0.00s)\n"}
+{"Time":"2026-11-09T17:44:44.289980343Z","Action":"pass","Package":"example.com/events/panic","Test":"TestBefore","Elapsed":0}
+{"Time":"2026-11-09T17:44:44.289987043Z","Action":"run","Package":"example.com/events/panic","Test":"TestPanics"}
+{"Time":"2026-11-09T17:44:44.289990958Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"=== RUN   TestPanics\n"}
+{"Time":"2026-11-09T17:44:44.289995765Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"--- FAIL: TestPanics (0.00s)\n"}
+{"Time":"2026-11-09T17:44:44.292379919Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"panic: kaboom [recovered, repanicked]\n"}
+{"Time":"2026-11-09T17:44:44.292398407Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"\n"}
+{"Time":"2026-11-09T17:44:44.292405318Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"goroutine 7 [running]:\n"}
+{"Time":"2026-11-09T17:44:44.29241248Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"testing.tRunner.func1.2({0x550fc0, 0x5945d0})\n"}
+{"Time":"2026-11-09T17:44:44.292416108Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"\t/usr/local/go/src/testing/testing.go:1974 +0x232\n"}
+{"Time":"2026-11-09T17:44:44.292420678Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"testing.tRunner.func1()\n"}
+{"Time":"2026-11-09T17:44:44.29242402Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"\t/usr/local/go/src/testing/testing.go:1977 +0x349\n"}
+{"Time":"2026-11-09T17:44:44.292427199Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"panic({0x550fc0?, 0x5945d0?})\n"}
+{"Time":"2026-11-09T17:44:44.292430312Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"\t/usr/local/go/src/runtime/panic.go:860 +0x13a\n"}
+{"Time":"2026-11-09T17:44:44.292433837Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"example.com/events/panic.TestPanics(0xb4dd5196488?)\n"}
+{"Time":"2026-11-09T17:44:44.292438956Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"\t/src/panic/lib_test.go:6 +0x25\n"}
+{"Time":"2026-11-09T17:44:44.292442755Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"testing.tRunner(0xb4dd5196488, 0x592e80)\n"}
+{"Time":"2026-11-09T17:44:44.29244628Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"\t/usr/local/go/src/testing/testing.go:2036 +0xea\n"}
+{"Time":"2026-11-09T17:44:44.292450281Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"created by testing.(*T).Run in goroutine 1\n"}
+{"Time":"2026-11-09T17:44:44.292453942Z","Action":"output","Package":"example.com/events/panic","Test":"TestPanics","Output":"\t/usr/local/go/src/testing/testing.go:2101 +0x4c5\n"}
+{"Time":"2026-11-09T17:44:44.29282688Z","Action":"fail","Package":"example.com/events/panic","Test":"TestPanics","Elapsed":0}
+{"Time":"2026-11-09T17:44:44.292844821Z","Action":"output","Package":"example.com/events/panic","Output":"FAIL\texample.com/events/panic\t0.005s\n"}
+{"Time":"2026-11-09T17:44:44.292861245Z","Action":"fail","Package":"example.com/events/panic","Elapsed":0.005}

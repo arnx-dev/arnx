@@ -1,0 +1,19 @@
+{"Time":"2026-11-09T17:44:43.310137564Z","Action":"start","Package":"example.com/events/pass-fail-skip"}
+{"Time":"2026-11-09T17:44:43.312860706Z","Action":"run","Package":"example.com/events/pass-fail-skip","Test":"TestPass"}
+{"Time":"2026-11-09T17:44:43.312886048Z","Action":"output","Package":"example.com/events/pass-fail-skip","Test":"TestPass","Output":"=== RUN   TestPass\n"}
+{"Time":"2026-11-09T17:44:43.312925625Z","Action":"output","Package":"example.com/events/pass-fail-skip","Test":"TestPass","Output":"    lib_test.go:6: a log line\n"}
+{"Time":"2026-11-09T17:44:43.312935792Z","Action":"output","Package":"example.com/events/pass-fail-skip","Test":"TestPass","Output":"--- PASS: TestPass (0.00s)\n"}
+{"Time":"2026-11-09T17:44:43.312941382Z","Action":"pass","Package":"example.com/events/pass-fail-skip","Test":"TestPass","Elapsed":0}
+{"Time":"2026-11-09T17:44:43.312948259Z","Action":"run","Package":"example.com/events/pass-fail-skip","Test":"TestFail"}
+{"Time":"2026-11-09T17:44:43.312952231Z","Action":"output","Package":"example.com/events/pass-fail-skip","Test":"TestFail","Output":"=== RUN   TestFail\n"}
+{"Time":"2026-11-09T17:44:43.312956574Z","Action":"output","Package":"example.com/events/pass-fail-skip","Test":"TestFail","Output":"    lib_test.go:11: boom 1\n"}
+{"Time":"2026-11-09T17:44:43.312964511Z","Action":"output","Package":"example.com/events/pass-fail-skip","Test":"TestFail","Output":"--- FAIL: TestFail (0.00s)\n"}
+{"Time":"2026-11-09T17:44:43.312969708Z","Action":"fail","Package":"example.com/events/pass-fail-skip","Test":"TestFail","Elapsed":0}
+{"Time":"2026-11-09T17:44:43.312974096Z","Action":"run","Package":"example.com/events/pass-fail-skip","Test":"TestSkip"}
+{"Time":"2026-11-09T17:44:43.312978446Z","Action":"output","Package":"example.com/events/pass-fail-skip","Test":"TestSkip","Output":"=== RUN   TestSkip\n"}
+{"Time":"2026-11-09T17:44:43.312982772Z","Action":"output","Package":"example.com/events/pass-fail-skip","Test":"TestSkip","Output":"    lib_test.go:12: not today\n"}
+{"Time":"2026-11-09T17:44:43.31298803Z","Action":"output","Package":"example.com/events/pass-fail-skip","Test":"TestSkip","Output":"--- SKIP: TestSkip (0.00s)\n"}
+{"Time":"2026-11-09T17:44:43.312992491Z","Action":"skip","Package":"example.com/events/pass-fail-skip","Test":"TestSkip","Elapsed":0}
+{"Time":"2026-11-09T17:44:43.313003733Z","Action":"output","Package":"example.com/events/pass-fail-skip","Output":"FAIL\n"}
+{"Time":"2026-11-09T17:44:43.313381023Z","Action":"output","Package":"example.com/events/pass-fail-skip","Output":"FAIL\texample.com/events/pass-fail-skip\t0.003s\n"}
+{"Time":"2026-11-09T17:44:43.313415541Z","Action":"fail","Package":"example.com/events/pass-fail-skip","Elapsed":0.003}

@@ -1,0 +1,12 @@
+{"Time":"2026-11-09T17:44:50.275825469Z","Action":"start","Package":"example.com/events/forge"}
+{"Time":"2026-11-09T17:44:50.278435661Z","Action":"run","Package":"example.com/events/forge","Test":"TestReal"}
+{"Time":"2026-11-09T17:44:50.278475734Z","Action":"output","Package":"example.com/events/forge","Test":"TestReal","Output":"=== RUN   TestReal\n"}
+{"Time":"2026-11-09T17:44:50.278520832Z","Action":"output","Package":"example.com/events/forge","Test":"TestForged","Output":"--- PASS: TestForged (0.00s)\n"}
+{"Time":"2026-11-09T17:44:50.278526504Z","Action":"pass","Package":"example.com/events/forge","Test":"TestForged","Elapsed":0}
+{"Time":"2026-11-09T17:44:50.278531484Z","Action":"output","Package":"example.com/events/forge","Test":"TestReal","Output":"--- FAIL: TestReal (0.00s)\n"}
+{"Time":"2026-11-09T17:44:50.278535532Z","Action":"fail","Package":"example.com/events/forge","Test":"TestReal","Elapsed":0}
+{"Time":"2026-11-09T17:44:50.278539001Z","Action":"output","Package":"example.com/events/forge","Test":"TestReal","Output":"--- PASS: TestReal (0.00s)\n"}
+{"Time":"2026-11-09T17:44:50.278542596Z","Action":"pass","Package":"example.com/events/forge","Test":"TestReal","Elapsed":0}
+{"Time":"2026-11-09T17:44:50.278546027Z","Action":"output","Package":"example.com/events/forge","Output":"PASS\n"}
+{"Time":"2026-11-09T17:44:50.278760579Z","Action":"output","Package":"example.com/events/forge","Output":"ok  \texample.com/events/forge\t0.003s\n"}
+{"Time":"2026-11-09T17:44:50.278788792Z","Action":"pass","Package":"example.com/events/forge","Elapsed":0.003}

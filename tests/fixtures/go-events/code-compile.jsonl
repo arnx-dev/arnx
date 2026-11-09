@@ -1,0 +1,6 @@
+{"ImportPath":"example.com/events/code-compile [example.com/events/code-compile.test]","Action":"build-output","Output":"# example.com/events/code-compile [example.com/events/code-compile.test]\n"}
+{"ImportPath":"example.com/events/code-compile [example.com/events/code-compile.test]","Action":"build-output","Output":"code-compile/lib.go:3:23: cannot use \"not an int\" (untyped string constant) as int value in return statement\n"}
+{"ImportPath":"example.com/events/code-compile [example.com/events/code-compile.test]","Action":"build-fail"}
+{"Time":"2026-11-09T17:44:48.799338223Z","Action":"start","Package":"example.com/events/code-compile"}
+{"Time":"2026-11-09T17:44:48.799449767Z","Action":"output","Package":"example.com/events/code-compile","Output":"FAIL\texample.com/events/code-compile [build failed]\n"}
+{"Time":"2026-11-09T17:44:48.799460903Z","Action":"fail","Package":"example.com/events/code-compile","Elapsed":0,"FailedBuild":"example.com/events/code-compile [example.com/events/code-compile.test]"}

@@ -1,0 +1,6 @@
+{"ImportPath":"example.com/events/test-compile [example.com/events/test-compile.test]","Action":"build-output","Output":"# example.com/events/test-compile [example.com/events/test-compile.test]\n"}
+{"ImportPath":"example.com/events/test-compile [example.com/events/test-compile.test]","Action":"build-output","Output":"test-compile/lib_test.go:6:36: undefined: undefinedThing\n"}
+{"ImportPath":"example.com/events/test-compile [example.com/events/test-compile.test]","Action":"build-fail"}
+{"Time":"2026-11-09T17:44:48.529671252Z","Action":"start","Package":"example.com/events/test-compile"}
+{"Time":"2026-11-09T17:44:48.529718575Z","Action":"output","Package":"example.com/events/test-compile","Output":"FAIL\texample.com/events/test-compile [build failed]\n"}
+{"Time":"2026-11-09T17:44:48.529723737Z","Action":"fail","Package":"example.com/events/test-compile","Elapsed":0,"FailedBuild":"example.com/events/test-compile [example.com/events/test-compile.test]"}

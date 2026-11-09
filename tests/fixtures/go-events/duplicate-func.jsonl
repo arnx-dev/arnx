@@ -1,0 +1,7 @@
+{"ImportPath":"example.com/events/duplicate-func [example.com/events/duplicate-func.test]","Action":"build-output","Output":"# example.com/events/duplicate-func [example.com/events/duplicate-func.test]\n"}
+{"ImportPath":"example.com/events/duplicate-func [example.com/events/duplicate-func.test]","Action":"build-output","Output":"duplicate-func/b_test.go:5:6: helper redeclared in this block\n"}
+{"ImportPath":"example.com/events/duplicate-func [example.com/events/duplicate-func.test]","Action":"build-output","Output":"\tduplicate-func/a_test.go:5:6: other declaration of helper\n"}
+{"ImportPath":"example.com/events/duplicate-func [example.com/events/duplicate-func.test]","Action":"build-fail"}
+{"Time":"2026-11-09T17:44:49.281954796Z","Action":"start","Package":"example.com/events/duplicate-func"}
+{"Time":"2026-11-09T17:44:49.282071389Z","Action":"output","Package":"example.com/events/duplicate-func","Output":"FAIL\texample.com/events/duplicate-func [build failed]\n"}
+{"Time":"2026-11-09T17:44:49.282079877Z","Action":"fail","Package":"example.com/events/duplicate-func","Elapsed":0,"FailedBuild":"example.com/events/duplicate-func [example.com/events/duplicate-func.test]"}
