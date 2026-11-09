@@ -1,7 +1,7 @@
 // Everything that depends on the reviewed repository's language goes behind one interface. Piece 1 implements
 // Python; TypeScript, Rust and C# add adapters, not redesigns.
 
-export type AdapterId = "python" | "typescript" | "rust" | "csharp";
+export type AdapterId = "python" | "typescript" | "rust" | "go" | "csharp";
 
 /** One test in one run, from the runner's report. */
 export interface TestResult {

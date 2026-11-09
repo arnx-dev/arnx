@@ -37,7 +37,7 @@ export function fileReferences(indexes: ScipIndex[]): Map<string, Set<string>> {
 }
 
 /** An extension of each language arnx reviews, to name it. */
-const EXT: Record<string, string> = { python: "py", typescript: "ts", rust: "rs" };
+const EXT: Record<string, string> = { python: "py", typescript: "ts", rust: "rs", go: "go" };
 
 const folder = (f: string) => {
   const parts = f.split("/");

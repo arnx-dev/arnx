@@ -49,8 +49,34 @@ const LOCKS: [string, string][] = [["pnpm-lock.yaml", "pnpm"], ["yarn.lock", "ya
   ["bun.lockb", "bun"], ["package-lock.json", "npm"], ["npm-shrinkwrap.json", "npm"]];
 /** Manifests under these directories are test data (fixtures, sample apps of a test suite), not projects. */
 const NOT_PROJECTS = new Set(["fixtures", "__fixtures__", "testdata", "test-data", "test", "tests", "__tests__", "e2e"]);
+/** Go: a go.mod under these is vendored code, not a module of the repository. */
+const GO_SKIP = new Set(["vendor", "third_party"]);
+const GO_TEST = /_test\.go$/;
 const MAX_LISTED = 40;
-const LANGUAGE_NAMES: Record<string, string> = { python: "Python", typescript: "JavaScript/TypeScript", rust: "Rust" };
+const LANGUAGE_NAMES: Record<string, string> = { python: "Python", typescript: "JavaScript/TypeScript", rust: "Rust",
+  go: "Go" };
+
+/** The directories a go.work lists in its `use` lines (block or single). */
+function goWorkUses(text: string): string[] {
+  const out: string[] = [];
+  const add = (s: string) => {
+    const dir = s.replace(/\/\/.*$/, "").trim().replace(/^["'`]|["'`]$/g, "");
+    if (dir) out.push(dir);
+  };
+  let inBlock = false;
+  for (const line of text.split("\n")) {
+    if (inBlock) {
+      if (/^\s*\)/.test(line)) inBlock = false;
+      else add(line);
+    } else if (/^\s*use\s*\(/.test(line)) {
+      inBlock = true;
+    } else {
+      const m = /^\s*use\s+(\S.*)$/.exec(line);
+      if (m) add(m[1]!);
+    }
+  }
+  return out;
+}
 
 const dirOf = (p: string) => posix.dirname(p);
 const list = (xs: string[], max = 10) =>
@@ -154,7 +180,7 @@ export function detect(repo: string, files?: string[]): Detection {
   const paths = all.filter((p) => !p.split("/").includes("node_modules"));
   const set = new Set(paths);
   const languages: Record<string, number> = {};
-  const sources: Record<string, string[]> = { python: [], typescript: [], rust: [] };
+  const sources: Record<string, string[]> = { python: [], typescript: [], rust: [], go: [] };
   for (const p of paths) {
     const lang = EXT_LANG[posix.extname(p).slice(1)];
     if (lang) languages[lang] = (languages[lang] ?? 0) + 1;
@@ -173,6 +199,13 @@ export function detect(repo: string, files?: string[]): Detection {
   const candidates: Candidate[] = [];
   const ownFiles = new Map<Candidate, string[]>();
   const workspaces = new Set<string>();
+  // Go: the directories a go.work lists; each runs from inside itself, with install_root "."
+  const goMembers = new Set<string>();
+  for (const p of paths) {
+    if (posix.basename(p) !== "go.work" || dirOf(p).split("/").some((s) => NOT_PROJECTS.has(s) || GO_SKIP.has(s))) continue;
+    workspaces.add(dirOf(p));
+    for (const u of goWorkUses(read(repo, p))) goMembers.add(posix.normalize(posix.join(dirOf(p), u)));
+  }
   for (const p of paths) {
     const name = posix.basename(p);
     const root = dirOf(p);
@@ -195,6 +228,11 @@ export function detect(repo: string, files?: string[]): Detection {
       if (/^\s*\[package\]/m.test(text)) {
         candidates.push({ root, language: "rust", manifest: p, runner: "nextest", packageManager: "cargo", evidence: [] });
       }
+    } else if (name === "go.mod") {
+      if (root.split("/").some((s) => GO_SKIP.has(s))) continue;
+      // A stray go.mod beside no Go code is not a Go project.
+      if (!paths.some((q) => q.endsWith(".go") && (root === "." || q.startsWith(root + "/")))) continue;
+      candidates.push({ root, language: "go", manifest: p, runner: "gotest", packageManager: "go", evidence: [] });
     } else if (/^(pyproject\.toml|setup\.py|setup\.cfg|requirements[^/]*\.txt)$/.test(name)) {
       if (candidates.some((c) => c.root === root && c.language === "python")) continue;
       const pytest = [p, `${root}/pytest.ini`, `${root}/conftest.py`].some((f) => /pytest/.test(read(repo, f))) ||
@@ -204,10 +242,11 @@ export function detect(repo: string, files?: string[]): Detection {
     }
   }
   for (const c of candidates) {
-    const files = testFiles(c.root);
+    const files = c.language === "go"
+      ? paths.filter((p) => (c.root === "." || p.startsWith(c.root + "/")) && GO_TEST.test(p)) : testFiles(c.root);
     const deeper = candidates.filter((o) => o.language === c.language && o.root !== c.root &&
       (c.root === "." || o.root.startsWith(c.root + "/")));
-    const ext = c.language === "rust" ? /\.rs$/ : c.language === "python" ? /\.py$/ : /\.[cm]?[jt]sx?$/;
+    const ext = c.language === "rust" ? /\.rs$/ : c.language === "go" ? /\.go$/ : c.language === "python" ? /\.py$/ : /\.[cm]?[jt]sx?$/;
     const own = files.filter((p) => ext.test(p) && !deeper.some((o) => p.startsWith(o.root + "/")));
     c.ownTests = own.length;
     ownFiles.set(c, own);
@@ -215,6 +254,7 @@ export function detect(repo: string, files?: string[]): Detection {
     const n = files.length;
     c.evidence.push(`${n} test file${n === 1 ? "" : "s"}`);
     if (workspaces.has(c.root)) c.evidence.push("workspace root");
+    if (c.language === "go" && goMembers.has(c.root)) c.evidence.push("install_root: .");
     if (c.language === "typescript" && typeCheckable((rel) => (set.has(rel) ? read(repo, rel) : ""), c.root)) {
       c.evidence.push("tsconfig.json and typescript: give it a typecheck");
     }

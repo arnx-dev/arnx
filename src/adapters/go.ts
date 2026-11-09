@@ -57,7 +57,6 @@ function skip(source: string, names: Set<string>, reason: string): string {
 const ENV = ["GOTOOLCHAIN=local", "GOFLAGS=-buildvcs=false", "GOCACHE=/opt/arnx-gocache"];
 
 export const go: Adapter = {
-  // @ts-expect-error "go" joins AdapterId when the adapter is registered.
   id: "go",
   runners: ["gotest"],
   defaultRunner: "gotest",

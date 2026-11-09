@@ -6,9 +6,10 @@ import { join } from "node:path";
 import { digest, parseReviewConfig, parseReviewFile } from "../src/config";
 import { GOOD } from "./helpers/yaml";
 
-test("the four languages are known; python is the one implemented", () => {
-  expect(LANGUAGES).toEqual(["python", "typescript", "rust", "csharp"]);
+test("the five languages are known; csharp is reserved", () => {
+  expect(LANGUAGES).toEqual(["python", "typescript", "rust", "go", "csharp"]);
   expect(getAdapter("python").id).toBe("python");
+  expect(getAdapter("go").id).toBe("go");
   expect(() => getAdapter("csharp")).toThrow(/not supported in this version/);
   expect(() => getAdapter("cobol")).toThrow(/unknown language/);
 });

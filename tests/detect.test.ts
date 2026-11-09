@@ -124,3 +124,58 @@ test("untracked files count as the snapshot holds them; git-ignored ones do not"
   expect(d.languages.typescript).toBe(2);
   expect(d.candidates[0]!.evidence).toContain("1 test file");
 });
+
+test("a go.mod gives one go project", () => {
+  const d = detect(repoWith({
+    "go.mod": "module example.com/x\n\ngo 1.24\n",
+    "go.sum": "",
+    "x.go": "package x\n",
+    "x_test.go": "package x\n",
+    "sub/y_test.go": "package sub\n",
+  }));
+  expect(short(d)).toEqual([[".", "go", "gotest", "go"]]);
+  expect(d.candidates[0]!.evidence[0]).toBe("2 test files");
+  expect(d.languages.go).toBe(3);
+});
+
+test("a go.work with two use members gives two go projects with install_root .", () => {
+  const d = detect(repoWith({
+    "go.work": "go 1.24\n\nuse (\n\t./a\n\t./b\n)\n",
+    "go.work.sum": "",
+    "a/go.mod": "module example.com/a\n",
+    "a/a.go": "package a\n",
+    "b/go.mod": "module example.com/b\n",
+    "b/b.go": "package b\n",
+  }));
+  expect(short(d)).toEqual([["a", "go", "gotest", "go"], ["b", "go", "gotest", "go"]]);
+  expect(d.candidates.every((c) => c.evidence.includes("install_root: ."))).toBe(true);
+  expect(d.workspaces).toEqual(["."]);
+});
+
+test("a single-line go.work use gives its member", () => {
+  const d = detect(repoWith({
+    "go.work": "go 1.24\nuse ./m\n",
+    "m/go.mod": "module example.com/m\n",
+    "m/m.go": "package m\n",
+  }));
+  expect(short(d)).toEqual([["m", "go", "gotest", "go"]]);
+  expect(d.candidates[0]!.evidence).toContain("install_root: .");
+});
+
+test("a go.mod under vendor, third_party or testdata is no project", () => {
+  const d = detect(repoWith({
+    "vendor/x/go.mod": "module x\n", "vendor/x/x.go": "package x\n",
+    "third_party/y/go.mod": "module y\n", "third_party/y/y.go": "package y\n",
+    "testdata/z/go.mod": "module z\n", "testdata/z/z.go": "package z\n",
+  }));
+  expect(d.candidates).toEqual([]);
+});
+
+test("a Python project with a stray go.mod and no .go file stays one Python project", () => {
+  const d = detect(repoWith({
+    "pyproject.toml": "[project]\nname='x'\n",
+    "app.py": "",
+    "tools/go.mod": "module example.com/tools\n",
+  }));
+  expect(d.candidates.map((c) => c.language)).toEqual(["python"]);
+});

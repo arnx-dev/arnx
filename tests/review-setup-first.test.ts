@@ -349,7 +349,7 @@ test("setupParts: which changed files a review sets up first, by the reason thei
   const hasTests = (path: string) => path === "/lib/";
   const changed = ["api/api.py", "web/web.py", "web/README.md", "later/a.ts", "e2e/login.spec.ts", "ui/app.tsx",
     "tools/release.py", "stack/svc.py", "gen/out.py", "lib/util.py", "legacy/old.py", "failed/x.py",
-    "plugins/one/main.py", "extra/new.py", "cmd/main.go"];
+    "plugins/one/main.py", "extra/new.py", "cmd/Main.java"];
   expect(setupParts(f, changed, new Set(["/failed/"]), hasTests)).toEqual({
     files: ["web/web.py", "later/a.ts", "lib/util.py", "legacy/old.py", "plugins/one/main.py", "extra/new.py"],
     parts: ["/web/", "/later/", "/lib/", "/legacy/", "/plugins/*/", "/extra/"],
