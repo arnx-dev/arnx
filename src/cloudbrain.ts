@@ -258,8 +258,11 @@ export class CloudBrain implements Brain {
       agentRole: "reviewer", onFinal, stream });
     const extras = [...uses.values()].filter((u) => u.model !== this.modelOf("reviewer"));
     const found = suspects as Suspect[] | null;
+    // A hunt that suspects nothing ends its round normally with no final; a round that also ran tests stays incomplete.
+    const nothingSuspected = !!h && found === null && agent.stop === "end_turn" && !agent.finalText;
     const hunt: RoundHunt | null = x.hunt || extras.length || found?.length
-      ? { suspects: found, second: null, extras, late: null } : null;
+      ? { suspects: nothingSuspected ? [] : found, second: null, extras, late: null,
+        ...(nothingSuspected ? { ended: true as const } : {}) } : null;
     return { agent, ...(hunt ? { hunt } : {}) };
   }
 

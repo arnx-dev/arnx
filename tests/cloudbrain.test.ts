@@ -192,6 +192,26 @@ test("a cloud round that ends with an empty report and no test run is incomplete
   expect(summary(review, "review.md")).toContain("the reviewer gave no report");
 });
 
+test("a hunted round that ends normally with no final suspected nothing: complete, not a missing report", async () => {
+  const c = cloud = fakeCloud({ rounds: { "*": [ROUND[0]!, { type: "done", stop: "end_turn" }] } });
+  const { review } = await runReview(repo, { settings: SETTINGS, brain: brainFor(c), hunt: true, sessionFactory: fakeFactory(runs) });
+  expect(review.projectStats?.[0]?.noReport).toBeFalsy();
+  expect(exitCode(review)).toBe(0);
+  expect(summary(review, "review.md")).not.toContain("the reviewer gave no report");
+});
+
+test("a hunted round that wrote tests and ended with no final is still a missing report", async () => {
+  const c = cloud = fakeCloud({ rounds: { "*": [ROUND[0]!, ROUND[1]!, { type: "done", stop: "end_turn" }] } });
+  const { review } = await runReview(repo, { settings: SETTINGS, brain: brainFor(c), hunt: true, sessionFactory: fakeFactory(runs) });
+  expect(review.projectStats?.[0]?.noReport).toBe(true);
+});
+
+test("a round with no hunt that ends normally with no final is still a missing report", async () => {
+  const c = cloud = fakeCloud({ rounds: { "*": [ROUND[0]!, { type: "done", stop: "end_turn" }] } });
+  const { review } = await runReview(repo, { settings: SETTINGS, brain: brainFor(c), hunt: false, sessionFactory: fakeFactory(runs) });
+  expect(review.projectStats?.[0]?.noReport).toBe(true);
+});
+
 test("409 turn_conflict sends the same turn once more", async () => {
   const c = cloud = fakeCloud({ rounds: { "*": ROUND.map((s) => ({ ...s })) },
     fail: { "POST /v1/reviews/*/projects/*/agent/steps": [{ status: 409, body: { code: "turn_conflict",
