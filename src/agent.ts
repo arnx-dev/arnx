@@ -496,6 +496,9 @@ export class Workspace {
       throw new ToolError(`writes are allowed only for ${this.adapter.words(this.runner).writableFiles} under ` +
         `${this.writeDir}/`);
     }
+    const problem = this.adapter.pathProblem?.(
+      relative(resolveLoose(join(this.root, this.writeDir!)), full).split(sep).join("/"));
+    if (problem) throw new ToolError(problem);
     if (content.length > WRITE_LIMIT) throw new ToolError("file too large");
     if (content.includes(KEY_SHOWN)) throw new ToolError(KEY_SHOWN_MEANS);
     mkdirSync(dirname(full), { recursive: true });

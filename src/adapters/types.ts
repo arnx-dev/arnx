@@ -53,6 +53,12 @@ export interface Adapter {
   defaultTestsDir: string;
   /** Files the agent may write under the tests directory; a round collects exactly these. */
   writable: RegExp;
+  /** Why a file `writable` allows cannot go at this path, relative to the tests directory; null when it can. Absent:
+   * any path there will do. */
+  pathProblem?(relToWriteDir: string): string | null;
+  /** Whether a generated test refers to this changed file (path relative to the project's root; tests: test file to
+   * its raw text). Absent: the test must name the file. */
+  refersTo?(path: string, tests: Record<string, string>): boolean;
   /** One-test files that prove the runner picks up files in the tests directory (any one reported passing is
    * enough; file names relative to that directory). */
   probes(runner: string): { file: string; source: string }[];
