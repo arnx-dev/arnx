@@ -201,9 +201,11 @@ export function detect(repo: string, files?: string[]): Detection {
   const workspaces = new Set<string>();
   // Go: the directories a go.work lists; each runs from inside itself, with install_root "."
   const goMembers = new Set<string>();
+  const goWorkDirs = new Set<string>();
   for (const p of paths) {
     if (posix.basename(p) !== "go.work" || dirOf(p).split("/").some((s) => NOT_PROJECTS.has(s) || GO_SKIP.has(s))) continue;
     workspaces.add(dirOf(p));
+    goWorkDirs.add(dirOf(p));
     for (const u of goWorkUses(read(repo, p))) goMembers.add(posix.normalize(posix.join(dirOf(p), u)));
   }
   for (const p of paths) {
@@ -230,6 +232,8 @@ export function detect(repo: string, files?: string[]): Detection {
       }
     } else if (name === "go.mod") {
       if (root.split("/").some((s) => GO_SKIP.has(s))) continue;
+      // Under a go.work, only its `use` members are projects.
+      if (ancestors(root).some((d) => goWorkDirs.has(d)) && !goMembers.has(root)) continue;
       // A stray go.mod beside no Go code is not a Go project.
       if (!paths.some((q) => q.endsWith(".go") && (root === "." || q.startsWith(root + "/")))) continue;
       candidates.push({ root, language: "go", manifest: p, runner: "gotest", packageManager: "go", evidence: [] });

@@ -179,3 +179,20 @@ test("a Python project with a stray go.mod and no .go file stays one Python proj
   }));
   expect(d.candidates.map((c) => c.language)).toEqual(["python"]);
 });
+
+test("under a go.work only its use members are projects", () => {
+  const d = detect(repoWith({
+    "go.work": "go 1.24\nuse ./a\n",
+    "a/go.mod": "module example.com/a\n", "a/a.go": "package a\n",
+    "b/go.mod": "module example.com/b\n", "b/x.go": "package b\n",
+  }));
+  expect(short(d)).toEqual([["a", "go", "gotest", "go"]]);
+});
+
+test("a go.work with use . gives the root module", () => {
+  const d = detect(repoWith({
+    "go.work": "go 1.24\nuse (\n\t.\n)\n",
+    "go.mod": "module example.com/r\n", "r.go": "package r\n",
+  }));
+  expect(short(d)).toEqual([[".", "go", "gotest", "go"]]);
+});
