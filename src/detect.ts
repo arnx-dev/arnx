@@ -32,7 +32,7 @@ export interface Detection {
   others?: OtherLanguage[];
   /** What the files settle about each candidate (versions, managers, CI, services), for the draft. */
   facts?: Facts;
-  /** Python, JavaScript/TypeScript and Rust source files, by language, for the draft. */
+  /** Python, JavaScript/TypeScript, Rust and Go source files, by language, for the draft. */
   sources?: Record<string, string[]>;
 }
 

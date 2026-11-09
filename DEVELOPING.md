@@ -469,7 +469,8 @@ and the manifests that key the environment image. `review.yaml` names the langua
 Implemented: Python (`adapters/python.ts`: pytest, JUnit xunit1, a text-based skip marker), JavaScript/TypeScript
 (`adapters/typescript.ts`: vitest, jest via its JSON report, node:test, bun; kept tests get their relative imports
 rewritten) and Rust (`adapters/rust.ts`: cargo-nextest JUnit; generated tests are integration tests in the crate's
-`tests/`). More languages are planned. JUnit walking shared by adapters is in `adapters/junit.ts`.
+`tests/`) and Go (`adapters/go.ts`: `go test -json`; each generated test is a test-only package in its own folder,
+`<name>_arnx/<name>_arnx_test.go`, so a file that does not compile loses only itself). More languages are planned. JUnit walking shared by adapters is in `adapters/junit.ts`.
 
 Rust keeps its build within a session (`keepBuild`): the session's runs share one container, started at its first run
 with every limit a run has, so cargo starts each run from the target the last run left instead of compiling the
@@ -537,7 +538,7 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `settings.ts` | `.arnx/config.toml`: consent, models, budgets, prices, `[cloud]` |
 | `config.ts` | `.arnx/review.yaml`: validation (YAML scalars resolved as PyYAML does), secret-looking variable names refused, approval hash |
 | `secrets.ts` | What is never sent or copied: secret file names, key-like text, credential variable names; `scanKeys`: what a file's key-like text comes to, or its comment lines blanked when that text is only in comments; `fakeKeys` and `maskPrivateKeys`: a private key's fake in the sandbox and `[private key]` on the wire |
-| `comments.ts` | Where a JavaScript, TypeScript, Rust or Python file's comments are (strings and literals skipped) |
+| `comments.ts` | Where a JavaScript, TypeScript, Rust, Go or Python file's comments are (strings and literals skipped) |
 | `ignore.ts` | `.arnxignore` matching, and the proposal of data-like files for `init` |
 | `boundary.ts` | The one filter: `Boundary` holds each value with its JSON, URL, case, hex and base64 forms (an encoded form's stand-in is the value's stand-in, encoded the same way; only plain forms come back from `unmask`). `maskedCopy` masks what is written or printed. `swapFor` gives a model's text back as it means where real files are: a value real there comes back, a certain one's stand-in stays, and one those files hold stays. A value's slow hash is taken only when the text has a window of its shape. |
 | `change.ts` | Resolve the change (diff lines with key-like text in comments blanked); build the snapshot, and its build context beside it (`<snapshot>.build`: hard links, but for the files that hold a guess; none when no guess is left to replace). Certain values (`isCertainRule`: `key-shaped`, `address-password`) get stand-ins in both; guesses (`named-*`) only in the build context, in every file but the project's manifests (`manifestRule`: what keys its image; before review.yaml, manifests outside folders of examples and tests) and lockfiles. A `named-word` guess (`Summer2024`) that code uses as a name anywhere is dropped from the filter too. `.env*` files at the repository's top give values only. The build context's hard links mean a run writing in place into a file with no guess changes that file there too: it matters only for a build after runs on one snapshot (setup's later tries, a before-check whose image is gone), and copying instead would double each snapshot's disk |

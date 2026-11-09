@@ -24,7 +24,7 @@ arnx reviews only code inside a project backed by an existing test suite (a proj
      production unnoticed.
    - Every later arnx review of that code writes and proves its tests against a real environment.
 3. **Only after the user says yes**, write the minimal suite:
-   - with the runner the project already uses (`node --test`, vitest, jest, pytest, `cargo test`), where its tests
+   - with the runner the project already uses (`node --test`, vitest, jest, pytest, `cargo test`, `go test`), where its tests
      usually live;
    - self-contained: arnx runs tests in Docker with no network, so use saved fixtures (a recorded API response, a
      transaction as JSON in a file), never live services, keys or the internet;

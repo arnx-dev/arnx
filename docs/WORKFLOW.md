@@ -93,6 +93,18 @@ hides every test in it, so it is recorded as one (`"load": true`) and listed apa
 `review.yaml` from before 0.1.5 with `known_failing` keeps working; `arnx setup --baseline` replaces it with the
 failing tests in those files.
 
+### Go modules
+
+Go works, but it is new, so here is where it stands:
+
+- **Exported names only.** Each generated test is its own test-only package in a folder of its own
+  (`<name>_arnx/<name>_arnx_test.go`), so it sees your module's exported API; `package main` and unexported code are
+  out of reach, and a bug behind them is found through an exported function, or not at all.
+- **Nested packages.** A package such as `a/internal/b` is covered by a project at `a`, whose module root holds
+  `go.mod`; under a `go.work`, only its `use` members are projects.
+- **Image.** Setup picks a `golang:<major.minor>-bookworm` image from the `go` line of `go.mod` (1.24 at least).
+- **Little tested.** Our runs are small modules and test fixtures, not large real-world ones.
+
 ### Rust crates
 
 Rust works, but it is the least tried of arnx's languages, so here is where it stands:
@@ -207,8 +219,8 @@ checked, and review.md and review.json (`types_unchecked`) record it. Run your o
    picked it in `arnx triage`) or left it as it came.
 2. `arnx accept <id>` (without an id: the review started last). Tests behind findings marked real are copied into
    `.arnx/tests/`, at the path each runs from: `.arnx/tests/<project root>/tests/arnx/r<id>/` (`accepted_tests_dir`
-   in `.arnx/config.toml`; at that default a TypeScript project uses `__tests__/arnx/r<id>/`, and a Rust crate
-   `tests/arnx_<id>_<name>.rs`). pytest, node --test and nextest leave that folder out; for a runner that collects it, such as vitest, accept shows the one-line exclude. Only
+   in `.arnx/config.toml`; at that default a TypeScript project uses `__tests__/arnx/r<id>/`, a Rust crate
+   `tests/arnx_<id>_<name>.rs`, and a Go module `r<id>/<name>_arnx/<name>_arnx_test.go`). pytest, node --test, nextest and go test leave that folder out; for a runner that collects it, such as vitest, accept shows the one-line exclude. Only
    `arnx check` puts them in place, in a throwaway copy. Each file is named after the problem it
    protects (`test_deep_json_recursion.py`); answered questions become tests of the behaviour you described (one model
    round each, run in parallel; `answer_model` in `.arnx/config.toml` can pick a cheaper model; `--no-answers` skips

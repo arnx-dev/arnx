@@ -8,8 +8,8 @@ change, has a second model challenge it, and lets you keep the useful ones as re
 
 ![arnx init, then arnx review on a branch that adds discount codes: arnx proves a half-cent rounding bug with a failing test and asks two questions](assets/demo.gif)
 
-Status: early release (0.1). Python (pytest), JavaScript/TypeScript (vitest, jest, node:test, bun) and Rust
-(cargo-nextest, [early](#rust-is-early)) repositories: a single package, a workspace, or many services. Open source
+Status: early release (0.1). Python (pytest), JavaScript/TypeScript (vitest, jest, node:test, bun), Rust
+(cargo-nextest, [early](#rust-is-early)) and Go (`go test`, [early](#go-is-early)) repositories: a single package, a workspace, or many services. Open source
 (Apache 2.0) with your own model keys, or with models run by [arnx cloud](docs/CLOUD.md).
 
 arnx works best on single-package Python and TypeScript repositories. A repository with several packages is set up one part at a time, within
@@ -187,10 +187,18 @@ are integration tests that see your crate's public API only. Just before launch 
 Rust tests you had accepted (fixed in 0.1): expect a few more bugs like it. Point arnx at your crate and tell us what
 broke and how long setup took.
 
+## Go is early
+
+Go works, but it is new and little tried on large modules. Generated tests are external test packages, one folder
+each (`<name>_arnx/<name>_arnx_test.go`), so they reach your module's exported names only: a bug in `package main` or
+behind an unexported function is reached through an exported one, or not at all. A nested module such as
+`a/internal/b` needs a project at `a`. Setup runs in a `golang:<major.minor>-bookworm` image, taken from your `go.mod` (1.24 at least).
+Point arnx at your module and tell us what broke.
+
 ## Known limits
 
 - Changes up to 200 KB per review; review a long branch in parts with `--range A..B`. Lockfiles and generated files (bundles, snapshots, protocol output, files marked `linguist-generated`) stay in the sandbox (readable there) but are not counted and not in the diff sent.
-- Python, JavaScript/TypeScript and Rust only (`arnx init` and `arnx doctor` say so for a repository in another
+- Python, JavaScript/TypeScript, Rust and Go only (`arnx init` and `arnx doctor` say so for a repository in another
   language, before anything is sent). No Windows build: use WSL 2.
 - Setup records the tests your suite fails today, one by one, in `.arnx/baseline.json`, and later proofs do not
   count them. A failure that looks like the environment (a missing service, package or variable) goes back to the

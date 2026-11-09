@@ -34,7 +34,7 @@ const MAX_ROOTS = 5;
 
 export interface OtherLanguage { name: string; files: number; manifests: number; roots: string[] }
 export interface LanguageSurvey {
-  /** Source files per supported language (python, typescript, rust). */
+  /** Source files per supported language (python, typescript, rust, go). */
   supported: Record<string, number>;
   /** Languages arnx does not review, most files first. */
   others: OtherLanguage[];
@@ -51,7 +51,7 @@ export function otherLanguageOf(path: string): string | null {
 
 const SUPPORTED_NAME: Record<string, string> = { python: "Python", typescript: "JavaScript/TypeScript", rust: "Rust", go: "Go" };
 
-/** The language of a source file: `id` is arnx's adapter id for a language it reviews (python, typescript, rust) and the
+/** The language of a source file: `id` is arnx's adapter id for a language it reviews (python, typescript, rust, go) and the
  * display name for another; null for a file that is no source (or lies in a vendored or build folder). */
 export function sourceLanguageOf(path: string): { id: string; name: string } | null {
   if (skipped(path)) return null;

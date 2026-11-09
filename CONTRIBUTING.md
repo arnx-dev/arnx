@@ -18,9 +18,9 @@ and tell us what happened. Issues and pull requests on GitHub are the place for 
 - **Other prompts.** Try one on your code without a build: `arnx prompts copy KEY` writes arnx's text of that key to
   `.arnx/prompts.toml` to edit ([docs/MODELS.md](docs/MODELS.md#make-it-yours)). The defaults are in
   `src/prompts.toml`.
-- **Rust.** It works but is the least tested language: a setup that fails on a real workspace is as useful to us as a
-  found bug.
-- **Language adapters.** Everything language-specific is in `src/adapters/` (Python, TypeScript, Rust): the test
+- **Rust and Go.** They work but are the least tested languages: a setup that fails on a real workspace or module is
+  as useful to us as a found bug.
+- **Language adapters.** Everything language-specific is in `src/adapters/` (Python, TypeScript, Rust, Go): the test
   runner's command and report, how tests are skipped and where kept tests go. A new runner or language starts with an
   issue; [DEVELOPING.md](DEVELOPING.md#language-adapters) explains the pieces.
 
