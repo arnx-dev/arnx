@@ -50,6 +50,27 @@ test("accept keeps each project's tests under that project's root", async () => 
   expect(existsSync(join(repo, "services", "pay", "tests", "arnx"))).toBe(false); // out of the project's own run
 });
 
+test("a repository's one project named main keeps its tests from the projects folder", async () => {
+  const repo = gitRepo(tmp());
+  mkdirSync(join(repo, ".arnx"));
+  writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(
+    "version: 1\nprojects:\n  main:\n    root: .\n    language: python\n    image: python:3.12-slim\n" +
+    "    test_command: python -m pytest -q {targets}\n"), "Dev", "2026-10-12"));
+  const rdir = join(repo, ".arnx", "reviews", RID);
+  save(sampleReview({ id: RID, projects: ["main"], questions: [], questionProjects: [], flaky: [], errors: [], notSent: [],
+    findings: [{ ...finding("F1", `${GEN}::test_bad`, "test_bad", GEN, "boom", "wrong", "confirmed", "yes"), project: "main" }],
+    writeDir: "tests/arnx_generated", writeDirs: { main: "tests/arnx_generated" } }), rdir, "d");
+  const dir = join(rdir, "projects", "main", "tests", "tests", "arnx_generated");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "test_x.py"), SRC);
+  writeFileSync(join(rdir, "review.md"), blankMarks(readFileSync(join(rdir, "review.md"), "utf8"))
+    .replace("Mark: [ ] real  [ ] intended  [ ] noise", "Mark: [x] real  [ ] intended  [ ] noise"));
+  const result = await accept(repo, rdir, SETTINGS);
+  expect(result.kept.length).toBe(1);
+  expect(result.kept[0]!.startsWith(join(repo, ".arnx", "tests"))).toBe(true);
+  expect(readFileSync(result.kept[0]!, "utf8")).toBe(SRC);
+});
+
 test("answers run in the project the question came from", async () => {
   const { repo, rdir } = setup();
   writeFileSync(join(rdir, "review.md"), readFileSync(join(rdir, "review.md"), "utf8").replace("Answer:", "Answer: yes"));
