@@ -346,7 +346,8 @@ interface ProjectInfo { name: string; adapter: Adapter; root: string; rootRel: s
                         acceptedDir: string; files: Record<string, string>; writeDir: string }
 
 function projectsOf(repo: string, rdir: string, review: Review, settings: Settings): ProjectInfo[] {
-  const legacy = review.projects.length === 1 && review.projects[0] === "main";
+  // A project named main is no sign of the old layout: setup names a project at the repository's root main too.
+  const legacy = review.projects.length === 1 && review.projects[0] === "main" && !existsSync(join(rdir, "projects", "main", "tests"));
   const file = legacy ? null : loadReviewFile(repo, { requireApproved: false });
   return review.projects.map((name) => {
     const cfg = file?.projects.find((p) => p.name === name);
