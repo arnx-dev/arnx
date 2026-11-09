@@ -154,6 +154,14 @@ test("Go: a test refers to a file by importing its directory", () => {
   expect(refers("pkg/foo/bar.go", { t: 'package arnx\n\nimport `example.com/m/pkg/foo`\n' })).toBe(true);
 });
 
+test("Go: a standard-library import of the same name does not refer to a project directory", () => {
+  const refers = go.refersTo!;
+  for (const std of ["errors", "strings", "log", "time", "context"]) {
+    expect(refers(`internal/${std}/x.go`, { t: GO_TEST(`"${std}"`, '"testing"') })).toBe(false);
+    expect(refers(`internal/${std}/x.go`, { t: GO_TEST(`"example.com/m/internal/${std}"`) })).toBe(true);
+  }
+});
+
 test("Go: comments and text past the imports name nothing", () => {
   const refers = go.refersTo!;
   expect(refers("pkg/foo/bar.go", { t: 'package arnx\n\n// import "example.com/m/pkg/foo"\nimport "testing"\n' })).toBe(false);

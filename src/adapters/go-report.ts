@@ -35,17 +35,19 @@ const fromFailure = (lines: string[]) => {
 export function parseGoReport(text: string): TestResult[] | null {
   let modulePath = "";
   const files = new Map<string, Set<string>>(); // dir -> files declaring a test function
+  const unread = new Set<string>(); // dirs with a listed test line whose name cannot be read
   const declared = new Map<string, string>(); // `${dir}\0${name}` -> file
   const events: GoEvent[] = [];
   for (const line of text.split("\n")) {
     const mod = /^#arnx-module (\S+)/.exec(line);
     if (mod) { modulePath = mod[1]!; continue; }
-    const decl = /^#arnx-test (.+?\.go):func (Test\w*)\(/.exec(line);
+    const decl = /^#arnx-test (.+?\.go):func (?:(Test[^\s(]*)\()?/.exec(line);
     if (decl) {
       const file = posix.normalize(decl[1]!), dir = posix.dirname(file);
       if (!files.has(dir)) files.set(dir, new Set());
       files.get(dir)!.add(file);
-      if (decl[2] !== "TestMain") declared.set(`${dir}\0${decl[2]}`, file);
+      if (!decl[2]) unread.add(dir);
+      else if (decl[2] !== "TestMain") declared.set(`${dir}\0${decl[2]}`, file);
       continue;
     }
     if (!line.startsWith("{")) continue;
@@ -58,6 +60,7 @@ export function parseGoReport(text: string): TestResult[] | null {
 
   const dirOf = (pkg: string) => {
     if (pkg === modulePath) return ".";
+    if (pkg.startsWith("./")) return posix.normalize(pkg); // a failure Go names by its pattern, not an import path
     return pkg.startsWith(`${modulePath}/`) ? pkg.slice(modulePath.length + 1) : pkg;
   };
   const buildOutput = new Map<string, string[]>(); // ImportPath -> lines
@@ -81,10 +84,10 @@ export function parseGoReport(text: string): TestResult[] | null {
       else if (ev.Action === "pass" || ev.Action === "fail" || ev.Action === "skip") packageEnds.push(ev);
       continue;
     }
-    sawTest.add(dir);
     const top = ev.Test.split("/")[0]!;
     const key = `${dir}\0${top}`;
     if (!declared.has(key)) continue; // forged or unknown
+    sawTest.add(dir);
     let c = cases.get(key);
     if (!c) {
       c = { dir, name: top, terminals: new Set(), out: [] };
@@ -113,7 +116,7 @@ export function parseGoReport(text: string): TestResult[] | null {
       results.push({ testId: `${f}::${f}`, fileAttr: f, name: f, outcome, message });
     }
   };
-  const hasDeclared = (dir: string) => [...declared.keys()].some((k) => k.startsWith(`${dir}\0`));
+  const hasDeclared = (dir: string) => unread.has(dir) || [...declared.keys()].some((k) => k.startsWith(`${dir}\0`));
   for (const ev of packageEnds) {
     const dir = dirOf(ev.Package!);
     if (ev.Action === "fail" && (ev.FailedBuild || !sawTest.has(dir))) {

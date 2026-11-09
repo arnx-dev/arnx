@@ -101,3 +101,44 @@ test("a leading ./ on a declared path is dropped", () => {
   const r = parseGoReport(synth("./p/x_test.go", "hi"))!;
   expect(r.map((t) => t.testId)).toEqual(["p/x_test.go::TestA"]);
 });
+
+const run = (...lines: string[]) => parseGoReport([...lines, "#arnx-module example.com/events"].join("\n") + "\n")!;
+const events = (test: string, end: "pass" | "fail") => [
+  ev({ Action: "run", Test: test }),
+  ev({ Action: "output", Test: test, Output: "    x_test.go:5: boom\n" }),
+  ev({ Action: end, Test: test }),
+  ev({ Action: end }),
+];
+
+test("a test with a non-ASCII name keeps its result", () => {
+  const r = run(...events("TestÜber", "fail"), '#arnx-test ./p/x_test.go:func TestÜber(t *testing.T) { t.Fatal("boom") }');
+  expect(r.map((t) => [t.testId, t.outcome])).toEqual([["p/x_test.go::TestÜber", "failed"]]);
+  expect(r[0]!.message).toContain("boom");
+});
+test("a failing package whose only test line cannot be read is a file-level failure", () => {
+  const r = run(...events("TestSp", "fail"), "#arnx-test ./p/x_test.go:func TestSp (t *testing.T) {");
+  expect(r.map((t) => [t.name, t.fileAttr, t.outcome])).toEqual([["p/x_test.go", "p/x_test.go", "failed"]]);
+});
+test("a passing package whose only test line cannot be read is a file-level error", () => {
+  const r = run(...events("TestSp", "pass"), "#arnx-test ./p/x_test.go:func TestSp (t *testing.T) {");
+  expect(r.map((t) => [t.name, t.outcome])).toEqual([["p/x_test.go", "error"]]);
+});
+test("events only for undeclared tests do not hide a failing package", () => {
+  const r = run(...events("TestOther", "fail"), "#arnx-test ./p/x_test.go:func TestA(t *testing.T) {");
+  expect(r.map((t) => [t.name, t.outcome])).toEqual([["p/x_test.go", "failed"]]);
+});
+test("a package Go names by its pattern still reports on its file", () => {
+  const pkg = "./arnx_generated/_u_arnx";
+  const r = run(
+    JSON.stringify({ ImportPath: pkg, Action: "build-output", Output: `# ${pkg}\n` }),
+    JSON.stringify({ ImportPath: pkg, Action: "build-output", Output: "no Go files in /w/arnx_generated/_u_arnx\n" }),
+    JSON.stringify({ ImportPath: pkg, Action: "build-fail" }),
+    JSON.stringify({ Action: "start", Package: pkg }),
+    JSON.stringify({ Action: "output", Package: pkg, Output: `FAIL\t${pkg} [setup failed]\n` }),
+    JSON.stringify({ Action: "fail", Package: pkg, FailedBuild: pkg }),
+    "#arnx-test ./arnx_generated/_u_arnx/_u_arnx_test.go:func TestX(t *testing.T) {",
+  );
+  const f = "arnx_generated/_u_arnx/_u_arnx_test.go";
+  expect(r.map((t) => [t.name, t.fileAttr, t.outcome])).toEqual([[f, f, "failed"]]);
+  expect(r[0]!.message).toContain("no Go files");
+});

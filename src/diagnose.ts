@@ -124,7 +124,7 @@ export function classify(message: string, cfg: ReviewConfig, snap: string): Omit
     return { kind: "unresolved-host", detail: host, evidence: lineOf(message, m.index) };
   }
   if ((m = /ECONNREFUSED ([\w.:[\]-]+)|connection to server at "([^"]+)"[^\n]*(?:\n[^\n]*)?refused|Connection refused|\[Errno 111\]/.exec(message))) {
-    return { kind: "connection-refused", detail: m[1] ?? m[2] ?? m[3] ?? "", evidence: lineOf(message, m.index) };
+    return { kind: "connection-refused", detail: m[1] ?? m[2] ?? "", evidence: lineOf(message, m.index) };
   }
   // A variable env sets, named or quoted by its value on the line that says what went wrong (not the source lines a
   // traceback prints): the value env gives is wrong, or it overrides a default the tests set themselves. A KeyError

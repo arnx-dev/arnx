@@ -6,7 +6,6 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFile
   writeFileSync } from "node:fs";
 import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
 import { Worker } from "node:worker_threads";
-import { GO_SKIP_DIRS } from "./adapters/go";
 import { python } from "./adapters/python";
 import type { Adapter } from "./adapters/types";
 import type { Swap } from "./boundary";
@@ -363,9 +362,10 @@ export class Workspace {
     return full;
   }
 
-  /** Whether a name a listing or a search leaves out: the shared list, and for Go vendored code and test data. */
+  /** Whether a name a listing or a search leaves out: the shared list, and for Go vendored code. testdata/ stays visible,
+   * since that is where a Go test finds its fixtures. */
   private skipped(name: string): boolean {
-    return SKIP_DIRS.has(name) || (this.adapter.id === "go" && GO_SKIP_DIRS.has(name));
+    return SKIP_DIRS.has(name) || (this.adapter.id === "go" && name === "vendor");
   }
 
   private rel(full: string): string {

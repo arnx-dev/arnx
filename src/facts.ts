@@ -538,7 +538,7 @@ const goLine = (text: string) => /^\s*go\s+(\d[\w.]*)/m.exec(text)?.[1] ?? null;
 export function goWorkUses(text: string): string[] {
   const out: string[] = [];
   const add = (s: string) => {
-    const dir = s.replace(/\/\/.*$/, "").trim().replace(/^["'`]|["'`]$/g, "");
+    const dir = s.replace(/\/\/.*$/, "").trim().replace(/^["'`]|["'`]$/g, "").replace(/\/+$/, "");
     if (dir) out.push(dir);
   };
   let inBlock = false;

@@ -162,6 +162,18 @@ test("a single-line go.work use gives its member", () => {
   expect(d.candidates[0]!.evidence).toContain("install_root: .");
 });
 
+test("a go.work use with a trailing slash still names its member", () => {
+  for (const work of ["go 1.24\nuse ./a/\n", "go 1.24\n\nuse (\n\t./a/\n)\n", 'go 1.24\nuse "./a//"\n']) {
+    const d = detect(repoWith({
+      "go.work": work,
+      "a/go.mod": "module example.com/a\n",
+      "a/a.go": "package a\n",
+    }));
+    expect(short(d)).toEqual([["a", "go", "gotest", "go"]]);
+    expect(d.candidates[0]!.evidence).toContain("install_root: .");
+  }
+});
+
 test("a go.mod under vendor, third_party or testdata is no project", () => {
   const d = detect(repoWith({
     "vendor/x/go.mod": "module x\n", "vendor/x/x.go": "package x\n",

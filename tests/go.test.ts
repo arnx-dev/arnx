@@ -38,6 +38,14 @@ test("only the fixed ending is writable, so a stem cannot pick a build constrain
   expect(go.isSupportFile("foo_arnx_test.go")).toBe(false);
 });
 
+test("a stem Go would ignore is not writable", () => {
+  for (const name of ["_u_arnx_test.go", "__arnx_test.go", "_arnx_test.go"]) {
+    expect(go.writable.test(name)).toBe(false);
+    expect(go.isTestFile(name)).toBe(false);
+  }
+  for (const name of ["u_arnx_test.go", "a_b_arnx_test.go", "0a_arnx_test.go"]) expect(go.writable.test(name)).toBe(true);
+});
+
 test("the table's fixed values", () => {
   expect(go.id as string).toBe("go");
   expect(go.runners).toEqual(["gotest"]);
@@ -88,6 +96,11 @@ test("skip uses the test's own parameter, and gives a blank one a name", () => {
   expect(go.skip("func TestA(tt *testing.T) {\n}\n", new Set(["TestA"]), "why")).toContain('tt.Skip("why")');
   expect(go.skip("func TestA(_ *testing.T) {\n}\n", new Set(["TestA"]), "why"))
     .toBe('func TestA(t *testing.T) {\n\tt.Skip("why")\n}\n');
+});
+
+test("skip reaches a test with a non-ASCII name", () => {
+  expect(go.skip("func TestÜber(t *testing.T) {\n\tf()\n}\n", new Set(["TestÜber"]), "why"))
+    .toBe('func TestÜber(t *testing.T) {\n\tt.Skip("why")\n\tf()\n}\n');
 });
 
 test("skip keeps what followed the brace on a line of its own", () => {
@@ -219,18 +232,18 @@ test("the #arnx-test listing follows Go's rule for what is a test", () => {
   expect(out).not.toContain("Testdata");
 });
 
-test("the agent's listings skip vendor/ and testdata/ for Go only", async () => {
+test("the agent's listings skip vendor/ for Go only and keep testdata/ visible", async () => {
   const root = tmp();
   for (const f of ["vendor/x/a.go", "testdata/b.go", "lib/c.go"]) {
     mkdirSync(join(root, dirname(f)), { recursive: true });
     writeFileSync(join(root, f), "package x // needle\n");
   }
   const goWs = new Workspace(root, { adapter: go, runner: "gotest" });
-  expect(await goWs.call("list_dir", { path: "." })).toBe("lib/");
+  expect(await goWs.call("list_dir", { path: "." })).toBe("lib/\ntestdata/");
   const found = await goWs.call("grep", { pattern: "needle" });
   expect(found).toContain("lib/c.go");
+  expect(found).toContain("testdata/b.go");
   expect(found).not.toContain("vendor");
-  expect(found).not.toContain("testdata");
   const pyWs = new Workspace(root);
   expect(await pyWs.call("list_dir", { path: "." })).toBe("lib/\ntestdata/\nvendor/");
   expect(await pyWs.call("grep", { pattern: "needle" })).toContain("vendor/x/a.go");

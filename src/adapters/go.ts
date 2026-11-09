@@ -7,7 +7,7 @@ import { shQuote } from "../util";
 import { parseGoReport } from "./go-report";
 import type { Adapter, Words } from "./types";
 
-const GENERATED = /^[a-z0-9_]+_arnx_test\.go$/;
+const GENERATED = /^[a-z0-9][a-z0-9_]*_arnx_test\.go$/;
 const ENDING = "_arnx_test.go";
 const LAYOUT = "<name>_arnx/<name>_arnx_test.go";
 const FILES = `${LAYOUT}, one self-contained file per folder: package arnx, import the code under test by its module ` +
@@ -51,7 +51,7 @@ function command(testCommand: string, targets: string[], reportPath: string): st
 
 /** `t.Skip("<reason>")` as the first statement of each named test; a blank parameter gets a name so the call compiles. */
 function skip(source: string, names: Set<string>, reason: string): string {
-  return source.replace(/^func (Test\w*)\((\w+) \*testing\.T\) \{([^\n]*)/gm, (whole, name: string, param: string, rest: string) => {
+  return source.replace(/^func (Test[^\s(]*)\((\w+) \*testing\.T\) \{([^\n]*)/gm, (whole, name: string, param: string, rest: string) => {
     if (!names.has(name)) return whole;
     const t = param === "_" ? "t" : param;
     // A one-line body must not stay on the call's line: Go needs a statement end between them.
@@ -79,8 +79,9 @@ function imports(source: string): string[] {
 }
 
 /** A Go test names a package, not a file: it refers to a file by importing a path whose last element is the file's
- * directory. A file in the module root counts once a test exists, since the module path is not known here; vendored
- * code, test data and the project's own _test.go files are no source to cover. */
+ * directory, with a `/` in it, since a bare path is the standard library. A file in the module root counts once a test
+ * exists, since the module path is not known here; vendored code, test data and the project's own _test.go files are
+ * no source to cover. */
 function refersTo(path: string, tests: Record<string, string>): boolean {
   if (goSkipped(path) || path.endsWith("_test.go")) return true;
   const texts = Object.values(tests).filter((t) => t.trim());
@@ -88,7 +89,7 @@ function refersTo(path: string, tests: Record<string, string>): boolean {
   const dir = posix.dirname(path);
   if (dir === ".") return true;
   const last = posix.basename(dir);
-  return texts.some((t) => imports(t).some((i) => posix.basename(i) === last));
+  return texts.some((t) => imports(t).some((i) => i.includes("/") && posix.basename(i) === last));
 }
 
 const ENV = ["GOTOOLCHAIN=local", "GOFLAGS=-buildvcs=false", "GOCACHE=/opt/arnx-gocache"];
