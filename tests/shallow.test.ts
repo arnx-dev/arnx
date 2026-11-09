@@ -271,3 +271,28 @@ describe("Go test bodies", () => {
   });
 });
 
+describe("telling a Go file costs linear time", () => {
+  const quick = (source: string, func: string) => {
+    const start = performance.now();
+    const body = testBody(source, func);
+    expect(performance.now() - start).toBeLessThan(500);
+    return body;
+  };
+
+  test("many block comments before a file that is not Go", () => {
+    const source = `${"/* c */\n".repeat(5000)}test("t", () => {\n  expect(1).toBe(1);\n});\n`;
+    expect(quick(source, "t")).toContain("expect(1)");
+  });
+
+  test("many block comments before a Go package clause", () => {
+    const source = `${"/* c */\n".repeat(5000)}package arnx\n\nfunc TestA(t *testing.T) {\n}\n`;
+    expect(quick(source, "TestA")!.startsWith("func TestA(")).toBe(true);
+  });
+
+  test("a long comment, stars and an unclosed comment", () => {
+    expect(quick(`/* ${"* x ".repeat(100_000)}*/\npackage arnx\n\nfunc TestA(t *testing.T) {\n}\n`, "TestA")).toContain("TestA");
+    expect(quick(`/* ${"* x ".repeat(100_000)}\ntest("t", () => {});\n`, "t")).toContain("t");
+    expect(quick(`${"// c\n".repeat(20_000)}test("t", () => {});\n`, "t")).toContain("t");
+  });
+});
+

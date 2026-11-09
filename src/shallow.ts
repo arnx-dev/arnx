@@ -37,7 +37,7 @@ const FOR_IN = /^\s*for\s+([A-Za-z_]\w*)\s+in\b/;
 const WITH_OPEN = /\bwith\b[^\n]*\bas\s+([A-Za-z_]\w*)\s*:/;
 
 /** A Go file: its package clause, after blank lines and comments, comes first. */
-const GO_FILE = /^(?:\s|\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*package\s+[A-Za-z_]\w*/;
+const GO_FILE = /^(?:\s|\/\/[^\n]*(?:\n|$)|\/\*(?:[^*]|\*(?!\/))*\*\/)*package\s+[A-Za-z_]\w*/;
 
 /** Where the test is: from its name to the next test, or the end of the file. JS names come as "describe > it": the
  * name is looked for after its describe blocks', so two tests of the same name in different suites are told apart. */

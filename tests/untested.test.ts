@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { go } from "../src/adapters/go";
 import { python } from "../src/adapters/python";
 import { sliceDiff } from "../src/change";
@@ -194,5 +194,38 @@ test("the Python path is unchanged: the by-name reading and string names still c
   expect(notReached(["a/snapshot.py"], { tests: { "t.py": "import snapshot\n" }, frames: [] }, python)).toEqual([]);
   expect(notReached(["a/plain.py"], { tests: { "t.py": 'NAMES = ["plain"]\n' }, frames: [] }, python)).toEqual([]);
   expect(notReached(["a/plain.py"], { tests: { "t.py": "x = 1\n" }, frames: [] }, python)).toEqual(["a/plain.py"]);
+});
+
+describe("Go: a module in a sub-directory", () => {
+  const importing = (path: string) => ({ "svc/arnx_generated/a_arnx/a_arnx_test.go": GO_TEST(`"${path}"`) });
+
+  test("a file in the module's root counts as referred to, given the project's root", () => {
+    const tests = importing("example.com/api");
+    expect(untestedFiles(["svc/lib.go"], tests, go, "svc")).toEqual([]);
+    expect(notReached(["svc/lib.go"], { tests, frames: [] }, go, "svc")).toEqual([]);
+    expect(dbUntested(["svc/lib.go"], () => "SELECT a FROM t", { x: `${GO_TEST('"testing"')}\nDATABASE_URL` }, go,
+      ["DATABASE_URL"], "svc")).toEqual([]);
+  });
+
+  test("the same file reads as outside a root the project does not have", () => {
+    expect(untestedFiles(["svc/lib.go"], importing("example.com/api"), go)).toEqual(["svc/lib.go"]);
+  });
+
+  test("a package below the module's root still needs its import", () => {
+    expect(untestedFiles(["svc/pkg/foo/bar.go", "svc/pkg/baz/q.go"], importing("example.com/api/pkg/foo"), go, "svc"))
+      .toEqual(["svc/pkg/baz/q.go"]);
+    expect(untestedFiles(["svc/vendor/x/y.go", "svc/lib_test.go"], importing("example.com/api"), go, "svc")).toEqual([]);
+  });
+
+  test("with no test, a file in the module's root is not referred to", () => {
+    expect(untestedFiles(["svc/lib.go"], {}, go, "svc")).toEqual(["svc/lib.go"]);
+  });
+
+  test("an adapter without the hook reads repository paths whatever the root", () => {
+    const owned = ["svc/snapshot.py", "svc/other.py"];
+    const tests = { "t.py": "import snapshot\n" };
+    expect(untestedFiles(owned, tests, python, "svc")).toEqual(untestedFiles(owned, tests, python));
+    expect(notReached(owned, { tests, frames: [] }, python, "svc")).toEqual(["svc/other.py"]);
+  });
 });
 

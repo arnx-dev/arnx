@@ -57,6 +57,11 @@ function referredTo(path: string, tests: Record<string, string>): boolean {
   return INDEX.includes(stem) && Object.entries(tests).some(([t, body]) => loadsRelatively(path, t, body));
 }
 
+/** Whether `tests` refer to `path`: an adapter's own rule reads the path relative to the project's `root`. */
+function refers(adapter: Adapter, path: string, tests: Record<string, string>, root: string): boolean {
+  return adapter.refersTo ? adapter.refersTo(posix.relative(root, path), tests) : referredTo(path, tests);
+}
+
 /** Whether a path is a source file a review must cover: not a test or a test folder's file. */
 export const isSourcePath = (p: string) => SOURCE.test(p) && !isTestPath(p) && !TEST_DIR.test(p);
 
@@ -152,7 +157,7 @@ export function framed(sources: string[], frames: string[]): string[] {
  * (not in a comment or a string it only reads), no stack frame of a failing test goes through them, and none of `ran`
  * (files a run reported) is them. */
 export function notReached(owned: string[], ev: { tests: Record<string, string>; frames: string[]; ran?: string[] },
-                           adapter: Adapter): string[] {
+                           adapter: Adapter, root = "."): string[] {
   const tests = Object.fromEntries(Object.entries(ev.tests).map(([k, v]) => [k, codeOf(v, k)]));
   const text = Object.values(tests).join("\n");
   const names = new Set(Object.entries(ev.tests).flatMap(([k, v]) => stringNames(v, k)));
@@ -160,7 +165,7 @@ export function notReached(owned: string[], ev: { tests: Record<string, string>;
   const hit = new Set([...framed(sources, ev.frames), ...(ev.ran ?? []).filter((r) => sources.includes(r))]);
   // An adapter's own rule reads the raw text (stripped text blanks Go's import blocks) and replaces the reading by name:
   // a string like "errors" or a subtest name matches a file's stem, not the file.
-  const named = (p: string) => adapter.refersTo ? adapter.refersTo(p, ev.tests) : referredTo(p, tests) || namedByString(p, names);
+  const named = (p: string) => adapter.refersTo ? refers(adapter, p, ev.tests, root) : referredTo(p, tests) || namedByString(p, names);
   return sources.filter((p) => !hit.has(p) && (posix.basename(p) === "lib.rs" ? !text.trim() : !named(p)));
 }
 
@@ -179,10 +184,10 @@ export function loadedTests(files: Record<string, string>, c: Classified, not: s
 
 /** Changed source files that no generated test names. A Rust crate root (lib.rs) is reached by every integration
  * test, which names the crate rather than the file, so any test counts for it. */
-export function untestedFiles(owned: string[], tests: Record<string, string>, adapter: Adapter): string[] {
+export function untestedFiles(owned: string[], tests: Record<string, string>, adapter: Adapter, root = "."): string[] {
   const text = Object.values(tests).join("\n");
   return changedSources(owned, adapter).filter((p) => posix.basename(p) === "lib.rs" ? !text.trim()
-    : !(adapter.refersTo ?? referredTo)(p, tests));
+    : !refers(adapter, p, tests, root));
 }
 
 /** SQL a file sends to a database: a statement keyword in capitals followed by its usual partner. */
@@ -202,13 +207,13 @@ export function databaseEnv(env: Record<string, string>, services: { name: strin
  * the file's module and one of `envNames`. This is text, not execution: it shows the reviewer was not pointed at
  * the database, never that the changed SQL ran. Empty when no variable reaches a database service. */
 export function dbUntested(owned: string[], read: (path: string) => string | null, tests: Record<string, string>,
-                           adapter: Adapter, envNames: string[]): string[] {
+                           adapter: Adapter, envNames: string[], root = "."): string[] {
   if (!envNames.length) return [];
   const withEnv = Object.fromEntries(Object.entries(tests).filter(([, t]) => envNames.some((n) => t.includes(n))));
   return changedSources(owned, adapter).filter((p) => {
     const body = read(p);
     if (body === null || !SQL.test(body)) return false;
-    return !(adapter.refersTo ?? referredTo)(p, withEnv);
+    return !refers(adapter, p, withEnv, root);
   });
 }
 

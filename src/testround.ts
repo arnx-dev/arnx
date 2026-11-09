@@ -501,8 +501,8 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const tools: RoundTools = { tools: () => ws.tools(), call: (name, args) => ws.call(name, args),
           facts: () => {
             const now = generatedNow();
-            return { untestedFiles: untestedFiles(coverage, now, adapter),
-              dbUntested: dbUntested(coverage, read, now, adapter, dbNames), generatedFiles: Object.keys(now) };
+            return { untestedFiles: untestedFiles(coverage, now, adapter, cfg.workdir),
+              dbUntested: dbUntested(coverage, read, now, adapter, dbNames, cfg.workdir), generatedFiles: Object.keys(now) };
           } };
         // The brain starts only now, the hunt too: a review the probe stops has made no model call.
         const done = await (ask.kind === "review"
@@ -513,7 +513,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const a = done.agent;
         const f = generatedNow();
         emit("test.files", { project: cfg.name, files: Object.keys(f).sort() });
-        if (o.coverage?.length && dbNames.length) dbLeft = dbUntested(o.coverage, read, f, adapter, dbNames);
+        if (o.coverage?.length && dbNames.length) dbLeft = dbUntested(o.coverage, read, f, adapter, dbNames, cfg.workdir);
         const target = expand([o.writeDir]);
         const hasTests = target.length > 0;
         // Only the generated tests count: a command that ignores {targets} can also run the project's own suite.

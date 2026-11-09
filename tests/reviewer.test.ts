@@ -11,7 +11,7 @@ import { AGENT_SHARE, claimed, newReviewId, runReview, suspectOutcomes } from ".
 import { defaultSettings, type Settings } from "../src/settings";
 import { type Block, PRICES, type Reply } from "../src/llm";
 import type { SessionFactory } from "../src/sandbox";
-import { BusyAgent, FakeJson, fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
+import { BusyAgent, FakeJson, fakeFactory, FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { gitRepo, runGit } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
@@ -496,3 +496,43 @@ test("a report that claims nothing while a test fails is incomplete; a partial c
   expect(review.projectStats[0]!.noReport).toBe(true);
   expect(exitCode(review)).toBe(2);
 });
+
+test("Go: a file in the root of a module in a sub-directory is not listed as untested", async () => {
+  mkdirSync(join(repo, "svc"));
+  writeFileSync(reviewConfigPath(repo), stamp(parseReviewConfig(
+    "version: 1\nimage: golang:1.24\nlanguage: go\nworkdir: svc\ntest_command: go test {targets}\n"), "Dev", "2026-10-11"));
+  writeFileSync(join(repo, "svc/go.mod"), "module example.com/api\n");
+  writeFileSync(join(repo, "svc/lib.go"), "package api\n\nfunc Add(a, b int) int {\n\treturn a - b\n}\n");
+  runGit(repo, "add", "svc");
+  runGit(repo, "commit", "-q", "-m", "svc");
+  writeFileSync(join(repo, "svc/lib.go"), "package api\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n");
+  const file = "svc/arnx_generated/a_arnx/a_arnx_test.go";
+  const body = 'package arnx\n\nimport (\n\t"testing"\n\n\tapi "example.com/api"\n)\n\nfunc TestA(t *testing.T) {\n\tapi.Add(1, 2)\n}\n';
+  const model = new ScriptedAgent([[tool("write_file", { path: file, content: body })],
+    [text(JSON.stringify({ tests: [{ test: `${file}::TestA`, expects: "adds" }], suspected_defects: [], questions: [] }))]]);
+  const events = (pkg: string, name: string, decl: string) => [
+    JSON.stringify({ Action: "run", Package: pkg, Test: name }), JSON.stringify({ Action: "pass", Package: pkg, Test: name }),
+    JSON.stringify({ Action: "pass", Package: pkg }), `#arnx-test ./${decl}:func ${name}(t *testing.T) {`];
+  const report = ["#arnx-module example.com/api",
+    ...events("example.com/api/arnx_generated/a_arnx", "TestA", "arnx_generated/a_arnx/a_arnx_test.go"),
+    ...events("example.com/api/arnx_generated/arnx_probe_arnx", "TestArnxProbe", "arnx_generated/arnx_probe_arnx/arnx_probe_arnx_test.go"),
+  ].join("\n");
+  // The fake writes a report only for --junitxml; Go's command sends it to a file.
+  const sessionFactory: SessionFactory = async (_cfg, snap, _log, body) => {
+    const session = new FakeSession(snap, () => [null, "", false]);
+    const run = session.run.bind(session);
+    session.run = (command) => {
+      const m = /> '?\/src\/([^'\s;]+)/.exec(command);
+      if (m) {
+        mkdirSync(dirname(join(snap, m[1]!)), { recursive: true });
+        writeFileSync(join(snap, m[1]!), report);
+      }
+      return run(command);
+    };
+    return body(session);
+  };
+  const { review } = await runReview(repo, { settings: SETTINGS, agentModel: model, challenger: new FakeJson([]), sessionFactory });
+  expect(review.testsWritten).toBe(1);
+  expect(review.untested?.flatMap((u) => u.files) ?? []).not.toContain("svc/lib.go");
+});
+

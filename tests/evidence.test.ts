@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { Boundary } from "../src/boundary";
 import { changeMessage } from "../src/change";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
-import { EVIDENCE_LIMIT, evidencePacks, gitTree, judgeEvidence, snapshotTree, type TreeReader } from "../src/evidence";
+import { EVIDENCE_LIMIT, evidencePacks, gitTree, judgeEvidence, mayDefine, snapshotTree, type TreeReader } from "../src/evidence";
 import { runReview } from "../src/reviewer";
 import { defaultSettings } from "../src/settings";
 import { AWS_KEY, PRIVATE_KEY_BLOCK } from "./helpers/fakekeys";
@@ -452,3 +452,53 @@ test("lines shaped to make a pattern backtrack cost linear time", () => {
     }
   }
 }, 600_000);
+
+/** A repository with `first` committed, then `second` written over it: its pack for one generated test. */
+function twoCommitPack(first: Record<string, string>, second: Record<string, string>): string {
+  const repo = initRepo(join(tmp(), "repo"));
+  put(repo, first);
+  commit(repo, "first");
+  put(repo, second);
+  runGit(repo, "add", "-A");
+  const diff = runGit(repo, "diff", "--cached");
+  return judgeEvidence({ boundary: new Boundary(), tree: snapshotTree(repo), diff, testSource: "x", testFile: GEN, func: "test_x", commitMessage: "",
+    writeDir: WRITE_DIR });
+}
+
+const GO_CALLERS = {
+  "cmd/run.go": 'package cmd\n\nimport "example.com/m/lib"\n\nfunc Run() int {\n\treturn lib.Total(1)\n}\n',
+  "cmd/start.go": "package cmd\n\nfunc Start() int {\n\treturn Run()\n}\n",
+};
+
+test("Go: a body edit in a function with one caller gives the target, the caller and its second level", () => {
+  const old = "package lib\n\nfunc Total(a int) int {\n\treturn a\n}\n";
+  const pack = twoCommitPack({ "lib/calc.go": old, ...GO_CALLERS }, { "lib/calc.go": old.replace("return a", "return a + 1") });
+  expect(pack).not.toContain("none found");
+  expect(pack).toContain("`Total`");
+  expect(pack).toContain("cmd/run.go:6 in `Run`");
+  expect(pack).toContain("cmd/start.go:4");
+});
+
+test("Go: a method and a signature over several lines are definitions", () => {
+  const old = "package lib\n\nfunc (s *Store) Total(a int,\n\tb int) int {\n\treturn a\n}\n";
+  const pack = twoCommitPack({ "lib/calc.go": old, "cmd/run.go": GO_CALLERS["cmd/run.go"].replace("lib.Total(1)", "s.Total(1, 2)") },
+    { "lib/calc.go": old.replace("return a", "return a + b") });
+  expect(pack).toContain("`Total`");
+  expect(pack).toContain("cmd/run.go:6 in `Run`");
+});
+
+test("Go's definitions are not read in other languages' files", () => {
+  const body = "func Total(a int) int {\n\treturn a\n}\n";
+  const pack = twoCommitPack({ "lib/calc.py": body }, { "lib/calc.py": body.replace("return a", "return a + 1") });
+  expect(pack).not.toContain("`Total`");
+});
+
+test("the word func is a sign of a definition in a .go file only", () => {
+  expect(mayDefine("func Total(a int,", "lib/calc.go")).toBe(true);
+  for (const path of ["lib/calc.py", "lib/calc.ts", "lib/calc.rs", ""]) {
+    expect(mayDefine("func Total(a int,", path)).toBe(false);
+    expect(mayDefine("    func = table[name],", path)).toBe(false);
+    expect(mayDefine("def total(a):", path)).toBe(true);
+  }
+});
+
