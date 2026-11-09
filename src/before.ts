@@ -46,6 +46,9 @@ const MISSING = new RegExp([
   "Failed to (?:load|resolve) (?:url|import)", "cannot find (?:function|value|struct|type|macro|trait|module)",
   "unresolved import", "no (?:function|method|associated item|field) named", "object has no field", "error\\[E0(?:412|425|432|433|599|609)\\]",
   "ENOENT: no such file or directory, \\w+ '/src/", "No such file or directory: '/src/",
+  // Go: the compiler's lines, anchored on `file.go:L:C: ` so no other language's text matches
+  "\\.go:\\d+(?::\\d+)?: (?:undefined: |[^\\n]* undefined \\(type |(?:too many|not enough) arguments in call to |" +
+    "no required module provides package |[^\\n]* does not implement [^\\n]*\\(missing method )",
   // vitest clips an import failure to the module's alias and the name: `__vite_ssr_import_2__.assertNever`
   "__vite_ssr_import_\\d+__\\.", "__vi_import_\\d+__", "unexpected keyword argument",
 ].join("|"));
@@ -57,6 +60,7 @@ const UNDEFINED = new RegExp([
   "Cannot (?:read|set) propert(?:y|ies) of (?:undefined|null)", "Cannot destructure",
   "(?:undefined|null) is not an object", "Right side of assignment cannot be destructured",
   "'NoneType' object (?:has no attribute|is not (?:callable|subscriptable|iterable))", "non-iterable NoneType",
+  "invalid memory address or nil pointer dereference",
 ].join("|"));
 
 const head = (m: string) => (splitLines(m.trim())[0] ?? "").trim();

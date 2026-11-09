@@ -144,3 +144,28 @@ test("files pass apart only when every one of their tests passes or is skipped",
   expect(passingApart(["a.py", "b.py", "c.py"], apart)).toEqual(["a.py"]);
   expect(passingApart(["a.py"], null)).toEqual([]);
 });
+
+test("Go: module and toolchain failures get the hint that fixes the environment", () => {
+  const GO = parseReviewConfig(CFG.replace("image: python:3.12-slim", "image: golang:1.22\nlanguage: go")
+    .replace("python -m pytest -q {targets}", "go test {targets}"));
+  const k = (m: string) => classify(m, GO, tmp())?.kind;
+  expect(k("x.go:3:2: missing go.sum entry for module providing package example.com/y")).toBe("missing-package");
+  expect(k("x.go:3:2: module lookup disabled by GOPROXY=off")).toBe("missing-package");
+  expect(k("go: downloading example.com/y v1.0.0")).toBe("missing-package");
+  expect(k("dial tcp 1.2.3.4:5432: connect: connection refused")).toBe("connection-refused");
+  expect(k("dial tcp: lookup db on 10.0.0.1:53: no such host")).toBe("unresolved-host");
+  expect(classify("dial tcp: lookup db on 10.0.0.1:53: no such host", GO, tmp())?.detail).toBe("db");
+  expect(k("dial tcp 1.2.3.4:443: connect: network is unreachable")).toBe("connection-refused");
+  expect(classify('exec: "x": executable file not found in $PATH', GO, tmp())).toMatchObject({ kind: "missing-program", detail: "x" });
+  expect(classify('cgo: C compiler "gcc" not found: exec: "gcc": executable file not found in $PATH', GO, tmp()))
+    .toMatchObject({ kind: "missing-program", detail: "gcc" });
+  expect(classify("/usr/bin/ld: cannot find -lx", GO, tmp())).toMatchObject({ kind: "missing-library", detail: "libx" });
+  expect(classify("go: go.mod requires go >= 1.99 (running go 1.22)", GO, tmp()))
+    .toMatchObject({ kind: "wrong-image", detail: "go >= 1.99" });
+});
+
+test("Go signatures leave Python, JavaScript and Rust failures as they were", () => {
+  expect(classify("Error: connect ECONNREFUSED 127.0.0.1:5432", NODE, tmp())?.kind).toBe("connection-refused");
+  expect(classify("expected undefined: 5", NODE, tmp())).toBeNull();
+  expect(classify("go.mod is great and no such thing", PY, tmp())).toBeNull();
+});

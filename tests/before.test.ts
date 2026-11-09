@@ -665,3 +665,37 @@ describe("a pass and a failure say only what the runs show", () => {
     expect(missingName("assert 1 == 2")).toBeNull();
   });
 });
+
+describe("judgeBefore: Go compiler text at the base", () => {
+  const goT = t("TestAdd", "error", "x.go:3:5: undefined: lib.Add");
+  const base = (message: string) => judgeBefore(goT, GEN, three(run(t("TestAdd", "error", message))));
+  const missing = [
+    "undefined: lib.Nope", "lib.T{}.Nope undefined (type lib.T has no field or method Nope)",
+    "too many arguments in call to lib.Add", "not enough arguments in call to lib.Add",
+    "no required module provides package x/y; to add it:", "lib.T does not implement I (missing method Gone)",
+  ];
+  for (const m of missing) {
+    test(`new code: ${m}`, () => {
+      expect(base(`x.go:3:5: ${m}`).status).toBe("new-code");
+      expect(base(`dir/sub/x_arnx_test.go:3:5: ${m}`).status).toBe("new-code");
+    });
+  }
+  test("a Go nil dereference is an undefined value, not a missing name", () => {
+    const f = t("TestAdd", "failed", "x.go:3:5: invalid memory address or nil pointer dereference");
+    const r = (x: TestResult) => judgeBefore(f, GEN, three(run(x)));
+    expect(r(t("TestAdd", "failed", "x.go:3:5: invalid memory address or nil pointer dereference")).status).toBe("pre-existing");
+    const other = judgeBefore(t("TestAdd", "failed", "got 1, want 2"), GEN,
+      three(run(t("TestAdd", "failed", "x.go:3:5: invalid memory address or nil pointer dereference"))));
+    expect(other.status).toBe("unknown");
+  });
+  test("a test that can never build (a program imported as a package) is not new code", () => {
+    const m = 'x.go:6:2: import "example.com/m" is a program, not an importable package';
+    expect(base(m).status).toBe("unknown");
+  });
+  test("the same text without a .go:L: prefix is not Go: JavaScript failures are unchanged", () => {
+    const js = (m: string) => judgeBefore(t("TestAdd", "error", "boom"), GEN, three(run(t("TestAdd", "error", m))));
+    expect(js("expected undefined: 5").status).toBe("unknown");
+    expect(js("too many arguments in call to lib.Add").status).toBe("unknown");
+    expect(js("undefined: lib.Nope").status).toBe("unknown");
+  });
+});

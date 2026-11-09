@@ -266,6 +266,7 @@ const ENV_FIX: Record<string, string> = {
   "import-path": "the import does not resolve in the sandbox; check root and install",
   "missing-library": "install the system library in install",
   "missing-program": "install the program in install",
+  "wrong-image": "use an image with the Go version go.mod needs",
   "missing-variable": "set it under env",
   "env-value": "the value env gives does not work; set one that does",
   "unresolved-host": "add a service by that name, or point env at one",

@@ -16,7 +16,7 @@ import { clip } from "./events";
 
 export type HintKind = "missing-package" | "import-path" | "missing-library" | "missing-program" |
   "missing-variable" | "env-value" | "unresolved-host" | "connection-refused" | "does-not-load" | "order-dependent" |
-  "genuine-failure";
+  "genuine-failure" | "wrong-image";
 
 /** source: who judged it when it is not a signature (the experimental JEV, with its confidence). */
 export interface Hint { kind: HintKind; detail: string; files: string[]; evidence: string; source?: string }
@@ -83,6 +83,19 @@ export function classify(message: string, cfg: ReviewConfig, snap: string): Omit
     if (name.startsWith("node:")) return null;
     return { kind: "missing-package", detail: name, evidence: lineOf(message, m.index) };
   }
+  // Go: a module the build cannot get, a toolchain older than go.mod asks for.
+  if ((m = /missing go\.sum entry for module providing package (\S+)|go: downloading (\S+)|module lookup disabled by GOPROXY=off/.exec(message))) {
+    return { kind: "missing-package", detail: m[1] ?? m[2] ?? "a Go module", evidence: lineOf(message, m.index) };
+  }
+  if ((m = /go(?:\.mod)? requires go (>= ?[\d.]+)/.exec(message))) {
+    return { kind: "wrong-image", detail: `go ${m[1]!}`, evidence: lineOf(message, m.index) };
+  }
+  if ((m = /exec: "([^"]+)": executable file not found|C compiler "([^"]+)" not found/.exec(message))) {
+    return { kind: "missing-program", detail: (m[1] ?? m[2])!, evidence: lineOf(message, m.index) };
+  }
+  if ((m = /cannot find -l([\w+.-]+)/.exec(message))) {
+    return { kind: "missing-library", detail: `lib${m[1]}`, evidence: lineOf(message, m.index) };
+  }
   if ((m = /(lib[\w+.-]*?\.so(?:\.[\w.]+)?): cannot open shared object file/.exec(message))) {
     return { kind: "missing-library", detail: m[1]!, evidence: lineOf(message, m.index) };
   }
@@ -97,13 +110,13 @@ export function classify(message: string, cfg: ReviewConfig, snap: string): Omit
       (m = /os\.(?:getenv|environ\.get)\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\)/.exec(message))) {
     return { kind: "missing-variable", detail: m[1]!, evidence: lineOf(message, m.index) };
   }
-  if ((m = /getaddrinfo (?:ENOTFOUND|EAI_AGAIN) ([^\s:'"]+)|Failed to resolve '([^']+)'|host='([^']+)'[^\n]*(?:NameResolutionError|Failed to resolve|Name or service not known|Temporary failure in name resolution)|Temporary failure in name resolution|Name or service not known|No address associated with hostname|nodename nor servname provided|DNS operation timed out|All nameservers failed to answer|The DNS query name does not exist/.exec(message))) {
-    const host = m[1] ?? m[2] ?? m[3] ?? "";
+  if ((m = /getaddrinfo (?:ENOTFOUND|EAI_AGAIN) ([^\s:'"]+)|Failed to resolve '([^']+)'|host='([^']+)'[^\n]*(?:NameResolutionError|Failed to resolve|Name or service not known|Temporary failure in name resolution)|Temporary failure in name resolution|Name or service not known|No address associated with hostname|nodename nor servname provided|lookup ([^\s:]+)[^\n]*no such host|no such host|DNS operation timed out|All nameservers failed to answer|The DNS query name does not exist/.exec(message))) {
+    const host = m[1] ?? m[2] ?? m[3] ?? m[4] ?? "";
     if (host && (LOCAL.test(host) || cfg.services.some((s) => s.name === host))) return null;
     return { kind: "unresolved-host", detail: host, evidence: lineOf(message, m.index) };
   }
-  if ((m = /ECONNREFUSED ([\w.:[\]-]+)|connection to server at "([^"]+)"[^\n]*(?:\n[^\n]*)?refused|Connection refused|\[Errno 111\]/.exec(message))) {
-    return { kind: "connection-refused", detail: m[1] ?? m[2] ?? "", evidence: lineOf(message, m.index) };
+  if ((m = /ECONNREFUSED ([\w.:[\]-]+)|connection to server at "([^"]+)"[^\n]*(?:\n[^\n]*)?refused|dial tcp ([\w.:[\]-]+): connect: (?:connection refused|network is unreachable)|Connection refused|\[Errno 111\]/.exec(message))) {
+    return { kind: "connection-refused", detail: m[1] ?? m[2] ?? m[3] ?? "", evidence: lineOf(message, m.index) };
   }
   // A variable env sets, named or quoted by its value on the line that says what went wrong (not the source lines a
   // traceback prints): the value env gives is wrong, or it overrides a default the tests set themselves. A KeyError
@@ -321,6 +334,8 @@ function sentence(h: Hint, cfg: ReviewConfig): string {
           "are reached by their name";
       }
       return `a connection was refused${h.detail ? ` (${h.detail})` : ""}: a service the test expects is not running`;
+    case "wrong-image":
+      return `the image's Go is older than the module needs (${h.detail}): use an image with a newer Go`;
     case "genuine-failure":
       return "the code runs and fails on its own result or data, not on the environment";
     case "order-dependent":
