@@ -189,9 +189,9 @@ broke and how long setup took.
 
 ## Go is early
 
-Go works, but it is new and little tried on large modules. Generated tests are external test packages, one folder
+Go works, but it is new and little tried on large modules. Generated tests are test-only packages, one folder
 each (`<name>_arnx/<name>_arnx_test.go`), so they reach your module's exported names only: a bug in `package main` or
-behind an unexported function is reached through an exported one, or not at all. A nested module such as
+behind an unexported function is reached through an exported one, or not at all. A nested package such as
 `a/internal/b` needs a project at `a`. Setup runs in a `golang:<major.minor>-bookworm` image, taken from your `go.mod` (1.24 at least).
 Point arnx at your module and tell us what broke.
 

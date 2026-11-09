@@ -443,7 +443,7 @@ listed), and the proof takes setup's runs (`setAside` in the result, `uncovered_
 A round clears every file with the adapter's writable names from tests_dir, so a tests_dir holding the project's own
 such files (Python's test_*.py, conftest.py, __init__.py; not those under the folders `accept` keeps tests in) is
 refused by `try_project`, `propose`, `approve` and `review` (`ownTestsInWriteDir`). Rust's writable names are arnx's own
-(`arnx_generated_*.rs`), so a crate's tests in `tests/` never count.
+(`arnx_generated_*.rs`) and so are Go's (`<name>_arnx_test.go`), so a crate's or module's own tests never count.
 A project the agent gives no tests_dir gets one from its runner's own configuration when the default folder lies
 outside it (`testsdir.ts`: vitest include and projects, jest roots, testMatch and testRegex, pytest testpaths; set in
 the file by `withTestsDirs`, said once to the agent): a new `arnx_generated` folder beside most of the project's own
@@ -486,7 +486,7 @@ at `Session` in `sandbox.ts`.
 
 Kept test files are named after what they protect, inside a folder that keeps the review id, under `.arnx/tests/` at
 the path each runs from (`.arnx/tests/<project root>/tests/arnx/r<id>/`, i.e. `accepted_tests_dir` under the
-project's root; while that is the default, TypeScript uses `__tests__/arnx/r<id>/`; Rust has no folder, as cargo builds
+project's root; while that is the default, TypeScript uses `__tests__/arnx/r<id>/` and Go `r<id>/<name>_arnx/<name>_arnx_test.go` (one folder per file); Rust has no folder, as cargo builds
 only `tests/*.rs`, so the id is a prefix: `tests/arnx_<id>_<name>.rs`). The name comes from the file's first finding
 marked real (F1, F2, … order): the title of its problem (its group from `explain`), else its explanation's first
 line, else its test function's name, made into lowercase ASCII words joined by `_` (`slugify`: at most 50 characters,
@@ -496,7 +496,7 @@ the name in its own form (`test_<name>.py`, `<name>.test.ts`, `arnx_<id>_<name>.
 arnx-helpers) keep theirs. A name that another file in the repository already has (the owner's tests, an earlier
 review's in `.arnx/tests/`; not this review's own) gets `_2`, `_3`: pytest imports test files by name. `accepted.json`
 maps each generated file to where it went (`moved`), which the fix prompt uses; `arnx check` runs whatever is in the
-accepted folders under `.arnx/tests/` (and a Rust crate's `tests/arnx_<id>_*.rs`: the adapter's `kept`), so tests
+accepted folders under `.arnx/tests/` (and a Rust crate's `tests/arnx_<id>_*.rs`: the adapter's `kept`; Go's are in the folders), so tests
 kept under the older names (`test_<id>_<name>.py`, `<name>.r<id>.test.ts`) keep running. Accepting again under other
 marks can rename a file: the copy under its old name is removed.
 
@@ -529,7 +529,7 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 |---|---|
 | `route.ts` | Which projects review a change; what no project covers |
 | `detect.ts` | Layout found without a model: candidate projects, runners, workspaces, services |
-| `facts.ts` | What the files settle per candidate without a model: Node/Python/Rust/Bun versions, package manager and install root, CI jobs (GitHub Actions; GitLab best effort), compose and CI services, Dockerfile base images, example env names |
+| `facts.ts` | What the files settle per candidate without a model: Node/Python/Rust/Go/Bun versions, package manager and install root, CI jobs (GitHub Actions; GitLab best effort), compose and CI services, Dockerfile base images, example env names |
 | `draft.ts` | The review.yaml draft setup's agent starts from, written from the facts; unsettled values marked `# unsure:` |
 | `languages.ts` | Languages found without a model (extensions, manifests, vendored folders left out): a repository written only in languages arnx does not review fails doctor's `Languages` check, so setup and review stop before any model call; in a mixed one their files count as uncovered on their own |
 | `cli.ts` | Argument parsing, prompts, printing, exit codes; all I/O is injectable for tests |
