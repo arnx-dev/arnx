@@ -45,10 +45,12 @@ function command(testCommand: string, targets: string[], reportPath: string): st
 
 /** `t.Skip("<reason>")` as the first statement of each named test; a blank parameter gets a name so the call compiles. */
 function skip(source: string, names: Set<string>, reason: string): string {
-  return source.replace(/^func (Test\w*)\((\w+) \*testing\.T\) \{/gm, (whole, name: string, param: string) => {
+  return source.replace(/^func (Test\w*)\((\w+) \*testing\.T\) \{([^\n]*)/gm, (whole, name: string, param: string, rest: string) => {
     if (!names.has(name)) return whole;
     const t = param === "_" ? "t" : param;
-    return `func ${name}(${t} *testing.T) {\n\t${t}.Skip(${JSON.stringify(reason)})`;
+    // A one-line body must not stay on the call's line: Go needs a statement end between them.
+    const after = rest.trim() ? `\n\t${rest.trimStart()}` : "";
+    return `func ${name}(${t} *testing.T) {\n\t${t}.Skip(${JSON.stringify(reason)})${after}`;
   });
 }
 

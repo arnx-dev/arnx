@@ -88,6 +88,14 @@ test("skip uses the test's own parameter, and gives a blank one a name", () => {
     .toBe('func TestA(t *testing.T) {\n\tt.Skip("why")\n}\n');
 });
 
+test("skip keeps what followed the brace on a line of its own", () => {
+  const skipA = (source: string) => go.skip(source, new Set(["TestA"]), "why");
+  expect(skipA("func TestA(t *testing.T) { f() }\n")).toBe('func TestA(t *testing.T) {\n\tt.Skip("why")\n\tf() }\n');
+  expect(skipA("func TestA(t *testing.T) {}\n")).toBe('func TestA(t *testing.T) {\n\tt.Skip("why")\n\t}\n');
+  expect(skipA("func TestA(t *testing.T) { // note\n\tf()\n}\n"))
+    .toBe('func TestA(t *testing.T) {\n\tt.Skip("why")\n\t// note\n\tf()\n}\n');
+});
+
 test("a test command needs go test and {targets}", () => {
   expect(go.validateCommand("go test ./...", "gotest").length).toBeGreaterThan(0);
   expect(go.validateCommand("pytest {targets}", "gotest").length).toBeGreaterThan(0);
