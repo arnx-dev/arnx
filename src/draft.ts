@@ -12,7 +12,7 @@ import { SOURCE } from "./untested";
 type Raw = Record<string, unknown>;
 interface Mark { path: (string | number)[]; why: string }
 
-const DEFAULT_VERSION = { node: "22", python: "3.12", rust: "1", bun: "1" } as const;
+const DEFAULT_VERSION = { node: "22", python: "3.12", rust: "1", bun: "1", go: "1.26" } as const;
 const NEXTEST = "curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/cargo/bin";
 const PYTEST = "pytest hypothesis";
 const SECRET = /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i;
@@ -57,7 +57,7 @@ function names(cs: Candidate[]): string[] {
     const parts = c.root === "." ? ["main"] : c.root.split("/");
     let name = clean(parts.at(-1)!);
     if (out.includes(name) && parts.length > 1) name = clean(parts.slice(-2).join("-"));
-    if (out.includes(name)) name = `${name}-${c.language === "typescript" ? "js" : c.language === "python" ? "py" : "rs"}`;
+    if (out.includes(name)) name = `${name}-${c.language === "typescript" ? "js" : c.language === "python" ? "py" : c.language === "go" ? "go" : "rs"}`;
     let n = 2;
     const base = name;
     while (out.includes(name)) name = `${base}-${n++}`;
@@ -90,7 +90,8 @@ export function draftReview(d: Detection): { doc: Raw; marks: Mark[] } | null {
     const p: Raw = { root: c.root, language: c.language };
     if (!(c.ownTests ?? 0)) mark("root", "no test files found here");
     const built = c.language === "typescript" ? jsProject(c, f, d, mark)
-      : c.language === "python" ? pythonProject(f, mark) : rustProject(c, f, mark);
+      : c.language === "python" ? pythonProject(f, mark)
+      : c.language === "go" ? goProject(c, f, mark) : rustProject(c, f, mark);
     Object.assign(p, built);
     const services = f.services.map((s) => s.value);
     if (services.length) {
@@ -421,6 +422,23 @@ function pythonProject(f: ProjectFacts, mark: MarkFn): Raw {
   if (f.installRoot !== f.root) p.install_root = f.installRoot;
   p.install = install;
   p.test_command = `${f.nativeBuild ? "tar xzf /opt/ext.tgz && " : ""}python -m pytest {targets}`;
+  return p;
+}
+
+/** arnx runs no toolchain older than 1.24 (the first with JSON build events); a patch-newer pin fails under
+ * GOTOOLCHAIN=local, so the image is major.minor only. */
+const GO_MIN = [1, 24] as const;
+
+function goProject(c: Candidate, f: ProjectFacts, mark: MarkFn): Raw {
+  const v = f.versions.go?.value ?? DEFAULT_VERSION.go;
+  if (!f.versions.go) mark("image", "no Go version found");
+  const [major, minor] = v.split(".").map(Number) as [number, number];
+  const tag = major > GO_MIN[0] || (major === GO_MIN[0] && minor >= GO_MIN[1]) ? v : GO_MIN.join(".");
+  const p: Raw = { runner: "gotest", image: `golang:${tag}-bookworm` };
+  if (f.installRoot !== c.root) p.install_root = f.installRoot;
+  // A workspace root holds no go.mod, so the test build cannot warm there: modules are fetched, tests build in the member.
+  p.install = [f.installRoot !== c.root ? "go mod download" : "go mod download && go test -run '^$' ./..."];
+  p.test_command = "go test {targets}";
   return p;
 }
 

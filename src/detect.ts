@@ -6,7 +6,7 @@ import { join, posix } from "node:path";
 import type { AdapterId } from "./adapters/types";
 import { workingTreeFiles } from "./change";
 import { loadReviewFile, reviewConfigPath } from "./config";
-import { type Facts, readFacts } from "./facts";
+import { type Facts, goWorkUses, readFacts } from "./facts";
 import { loadIgnore } from "./ignore";
 import { notableOthers, onlyOtherLanguages, type OtherLanguage, surveyLanguages, type LanguageSurvey } from "./languages";
 
@@ -55,28 +55,6 @@ const GO_TEST = /_test\.go$/;
 const MAX_LISTED = 40;
 const LANGUAGE_NAMES: Record<string, string> = { python: "Python", typescript: "JavaScript/TypeScript", rust: "Rust",
   go: "Go" };
-
-/** The directories a go.work lists in its `use` lines (block or single). */
-function goWorkUses(text: string): string[] {
-  const out: string[] = [];
-  const add = (s: string) => {
-    const dir = s.replace(/\/\/.*$/, "").trim().replace(/^["'`]|["'`]$/g, "");
-    if (dir) out.push(dir);
-  };
-  let inBlock = false;
-  for (const line of text.split("\n")) {
-    if (inBlock) {
-      if (/^\s*\)/.test(line)) inBlock = false;
-      else add(line);
-    } else if (/^\s*use\s*\(/.test(line)) {
-      inBlock = true;
-    } else {
-      const m = /^\s*use\s+(\S.*)$/.exec(line);
-      if (m) add(m[1]!);
-    }
-  }
-  return out;
-}
 
 const dirOf = (p: string) => posix.dirname(p);
 const list = (xs: string[], max = 10) =>

@@ -92,7 +92,17 @@ export const go: Adapter = {
     posix.join(acceptedDir, `r${tag}`, `${name}_arnx`, `${name}${ENDING}`),
   testStem,
   relocate: (source) => source,
-  setupHints: "",
+  setupHints: [
+    "- A Go project is a directory with a go.mod; under a go.work, one project per `use` member, each with " +
+      "install_root: . (the workspace root) and the same image and install (go mod download). Tests run from inside " +
+      "the member.",
+    "- Use golang:<major.minor>-bookworm: the go line of go.mod, or 1.24 if that is older (arnx runs no older " +
+      "toolchain), and 1.26 when there is no go line. Never pin a patch: a toolchain newer than the image fails.",
+    "- Modules must be in the image: install ends with go mod download && go test -run '^$' ./... (builds the test " +
+      "binaries, fills the build cache). Tests run offline.",
+    "- Set runner: gotest and test_command: go test {targets}. Do not add -run, -v or -json: arnx adds its own flags.",
+    "- Generated tests are external test packages, one folder per file, so they see exported names only.",
+  ].join("\n"),
   manifests: ["go.mod", "go.sum", "go.work", "go.work.sum"],
   nestedManifests: true,
   buildEnv: ENV,

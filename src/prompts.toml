@@ -320,8 +320,8 @@ allow_env_names: [<names that look like secrets but hold throwaway values, such 
 projects:
   <name>:                  # lowercase letters, digits and dashes
     root: <directory where the tests run, relative to the repository root; "." for the root>
-    language: <python, typescript (also for JavaScript) or rust>
-    runner: <pytest; vitest, jest, node or bun; nextest>
+    language: <python, typescript (also for JavaScript), rust or go>
+    runner: <pytest; vitest, jest, node or bun; nextest; gotest>
     image: <base image>
     install: [<shell commands run once while building, from root>]
     test_command: <a command that runs the runner directly, with the placeholder {targets}>

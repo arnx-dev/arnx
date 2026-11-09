@@ -8,7 +8,7 @@ import { parse as parseYaml } from "yaml";
 import type { Candidate } from "./detect";
 
 export interface Fact { value: string; from: string }
-export type Tool = "node" | "python" | "rust" | "bun";
+export type Tool = "node" | "python" | "rust" | "bun" | "go";
 
 /** A database or broker the tests can reach by name. */
 export interface ServiceFact { name: string; image: string; kind: string | null; env: Record<string, string>;
@@ -167,8 +167,11 @@ export function satisfies(v: string, range: string): boolean {
 }
 const pickIn = (range: string, preferred: string[]) => preferred.find((v) => satisfies(v, range)) ?? null;
 
-/** A version as an image tag: node majors, python and rust major.minor (patch kept when given). */
+/** A version as an image tag: node majors, python and rust major.minor (patch kept when given), go major.minor
+ * (a patch-newer pin fails under GOTOOLCHAIN=local, so it is never kept). */
 function cleanVersion(tool: Tool, raw: string): string | null {
+  if (tool === "go") return /^1\.\d+(?:\.\d+|\.x|rc\d+|beta\d+)?$/.exec(raw.trim().replace(/^[\^~>=v ]+/, "").replace(/^go/, ""))
+    ?.[0].match(/^1\.\d+/)![0] ?? null;
   const v = raw.trim().replace(/^v/, "").replace(/^python-?/, "");
   if (tool === "node") {
     const m = /^(\d+)(\.\d+){0,2}$/.exec(v) ?? /^(\d+)\.x$/.exec(v);
@@ -208,7 +211,7 @@ interface Files {
 }
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const TOOLS: Tool[] = ["node", "python", "rust", "bun"];
+const TOOLS: Tool[] = ["node", "python", "rust", "bun", "go"];
 
 /** Facts for every candidate, read from the files a snapshot holds (`paths`); `tests`: each candidate's own test
  * files. */
@@ -260,6 +263,7 @@ export function readFacts(repo: string, paths: string[], candidates: Candidate[]
     if (c.language === "typescript") jsFacts(f, ups, paths, files);
     else if (c.language === "python") pythonFacts(f, ups, paths, files);
     else if (c.language === "rust") rustFacts(f, ups, files);
+    else if (c.language === "go") goFacts(f, ups, files);
     const deps = dependencyNames(f, c, files);
     f.deps = deps.filter((d) => /^(ts-node|tsx|@swc\/register|esbuild-register)$/.test(d));
     const testText = [...(tests.get(c) ?? []).slice(0, 40), at(c.root, "conftest.py"), at(c.root, "tests/conftest.py")]
@@ -295,14 +299,20 @@ function versionsOf(ups: string[], ownJobs: CiJob[], jobs: CiJob[], images: Fact
     const v = cleanVersion(tool, raw);
     if (v) versions[tool] = { value: v, from };
   };
+  // Go: the go.mod line decides (a minimum, newer toolchains build older modules), then the toolchain line.
+  const gomod = read(at(ups[0]!, "go.mod"));
+  set1("go", goLine(gomod), `${at(ups[0]!, "go.mod")} go line`);
+  set1("go", /^\s*toolchain\s+go(\S+)/m.exec(gomod)?.[1], `${at(ups[0]!, "go.mod")} toolchain line`);
   for (const d of ups) {
+    set1("go", goLine(read(at(d, "go.work"))), `${at(d, "go.work")} go line`);
+    set1("go", read(at(d, ".go-version")).split("\n")[0], at(d, ".go-version"));
     for (const file of [".nvmrc", ".node-version"]) set1("node", read(at(d, file)), at(d, file));
     set1("python", read(at(d, ".python-version")).split("\n")[0], at(d, ".python-version"));
     set1("python", read(at(d, "runtime.txt")), at(d, "runtime.txt"));
     const tv = Object.fromEntries(read(at(d, ".tool-versions")).split("\n").map((l) => l.trim().split(/\s+/))
       .filter((p) => p.length >= 2).map((p) => [p[0], p[1]]));
     for (const [tool, name] of [["node", tv.nodejs ?? tv.node], ["python", tv.python], ["rust", tv.rust],
-      ["bun", tv.bun]] as [Tool, string | undefined][]) set1(tool, name, at(d, ".tool-versions"));
+      ["bun", tv.bun], ["go", tv.golang]] as [Tool, string | undefined][]) set1(tool, name, at(d, ".tool-versions"));
     for (const file of ["rust-toolchain.toml", "rust-toolchain"]) {
       const text = read(at(d, file));
       set1("rust", text ? (/channel\s*=\s*"([^"]+)"/.exec(text)?.[1] ?? text.trim().split("\n")[0]) : null, at(d, file));
@@ -316,8 +326,8 @@ function versionsOf(ups: string[], ownJobs: CiJob[], jobs: CiJob[], images: Fact
   }
   for (const j of ownJobs) for (const t of TOOLS) set1(t, j.versions[t], j.id);
   for (const img of images) {
-    const m = /^(?:docker\.io\/)?(?:library\/)?(node|python|rust|oven\/bun):v?([\d.]+)/.exec(img.value);
-    if (m) set1(m[1] === "oven/bun" ? "bun" : m[1] as Tool, m[2]!, `${img.from} (the image it ships in)`);
+    const m = /^(?:docker\.io\/)?(?:library\/)?(node|python|rust|golang|oven\/bun):v?([\d.]+)/.exec(img.value);
+    if (m) set1(m[1] === "oven/bun" ? "bun" : m[1] === "golang" ? "go" : m[1] as Tool, m[2]!, `${img.from} (the image it ships in)`);
   }
   for (const d of ups) {
     const pkg = json(at(d, "package.json"));
@@ -512,6 +522,43 @@ function rustFacts(f: ProjectFacts, ups: string[], { set, toml, read }: Files) {
     .filter((p) => p !== "protobuf-compiler" || !/^name = "protobuf-src"$/m.test(lock));
 }
 
+/** The `go` line of a go.mod or go.work. */
+const goLine = (text: string) => /^\s*go\s+(\d[\w.]*)/m.exec(text)?.[1] ?? null;
+
+/** The directories a go.work lists in its `use` lines (block or single). */
+export function goWorkUses(text: string): string[] {
+  const out: string[] = [];
+  const add = (s: string) => {
+    const dir = s.replace(/\/\/.*$/, "").trim().replace(/^["'`]|["'`]$/g, "");
+    if (dir) out.push(dir);
+  };
+  let inBlock = false;
+  for (const line of text.split("\n")) {
+    if (inBlock) {
+      if (/^\s*\)/.test(line)) inBlock = false;
+      else add(line);
+    } else if (/^\s*use\s*\(/.test(line)) {
+      inBlock = true;
+    } else {
+      const m = /^\s*use\s+(\S.*)$/.exec(line);
+      if (m) add(m[1]!);
+    }
+  }
+  return out;
+}
+
+function goFacts(f: ProjectFacts, ups: string[], { set, read }: Files) {
+  f.manager = { value: "go", from: at(f.root, "go.mod") };
+  // The go.work that lists this module installs for all its members: install runs there, tests from inside the member.
+  for (const d of ups) {
+    if (set.has(at(d, "go.work")) && goWorkUses(read(at(d, "go.work"))).some((u) => posix.normalize(posix.join(d, u)) === f.root)) {
+      f.installRoot = d;
+      break;
+    }
+  }
+  if (set.has(at(f.installRoot, "go.sum"))) f.lockfile = "go.sum";
+}
+
 /** A Cargo or package.json workspace member pattern as a regex over directories. */
 const globDir = (g: string) => new RegExp(`^${g.split("/").map((s) => s === "**" ? ".*" :
   s.replace(/[.+^${}()|[\]\\]/g, "\\$&").replaceAll("*", "[^/]*").replaceAll("?", "[^/]")).join("/")}$`);
@@ -544,6 +591,15 @@ function dependencyNames(f: ProjectFacts, c: Candidate, { read, json, toml }: Fi
     for (const m of lines.matchAll(/["']([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(?:[<>=!~;]|["'])/g)) {
       out.add(m[1]!.toLowerCase());
     }
+  } else if (c.language === "go") {
+    // Module paths of the usual clients, by a name the service kinds know.
+    const clients: [RegExp, string][] = [[/^github\.com\/(lib\/pq|jackc\/pgx)(\/|$)/, "pg"],
+      [/^github\.com\/go-sql-driver\/mysql$/, "mysql"],
+      [/^github\.com\/(redis\/go-redis|go-redis\/redis|gomodule\/redigo)(\/|$)/, "redis"],
+      [/^go\.mongodb\.org\/mongo-driver(\/|$)/, "mongodb"], [/^github\.com\/(rabbitmq\/amqp091-go|streadway\/amqp)$/, "amqplib"]];
+    for (const m of read(c.manifest).matchAll(/^\s*(?:require\s+)?([a-z0-9][\w.-]*\.[a-z]+\/[^\s]+)\s+v\d/gm)) {
+      for (const [rx, name] of clients) if (rx.test(m[1]!)) out.add(name);
+    }
   } else if (c.language === "rust") {
     const cargo = toml(c.manifest);
     for (const k of ["dependencies", "dev-dependencies"]) {
@@ -560,8 +616,8 @@ function dependencyNames(f: ProjectFacts, c: Candidate, { read, json, toml }: Fi
   return [...out];
 }
 
-const INSTALL = /\b(npm (ci|install|i)\b|pnpm (i|install)\b|yarn( install)?\s*($|--)|bun install|pip3? install|uv (sync|pip install)|poetry install|pipenv install|pdm (install|sync)|cargo (install|fetch|build))/;
-const TEST = /\b(pytest|vitest|jest|mocha|node --test|bun test|cargo (test|nextest)|(npm|pnpm|yarn|bun)( run)? test\b|tox\b|nox\b|make test)/;
+const INSTALL = /\b(npm (ci|install|i)\b|pnpm (i|install)\b|yarn( install)?\s*($|--)|bun install|pip3? install|uv (sync|pip install)|poetry install|pipenv install|pdm (install|sync)|cargo (install|fetch|build)|go (mod download|get|install))/;
+const TEST = /\b(pytest|vitest|jest|mocha|node --test|bun test|cargo (test|nextest)|go test|(npm|pnpm|yarn|bun)( run)? test\b|tox\b|nox\b|make test)/;
 
 /** GitHub Actions jobs: their versions, services, env and commands. */
 function githubJobs(paths: string[], yaml: (rel: string) => unknown, read: (rel: string) => string): CiJob[] {
@@ -596,9 +652,14 @@ function githubJobs(paths: string[], yaml: (rel: string) => unknown, read: (rel:
         const uses = str(step.uses) ?? "";
         const w = isMap(step.with) ? step.with : {};
         const wv = (k: string) => resolve(str(w[k]));
+        const goFileVersion = (rel: string | null) => {
+          const text = rel ? read(norm(rel)) : "";
+          return /(^|\/)go\.(mod|work)$/.test(rel ?? "") ? goLine(text) : text.trim().split("\n")[0] || null;
+        };
         const fileVersion = (k: string) => (wv(k) ? read(norm(wv(k))).trim().split("\n")[0] ?? null : null);
         if (uses.startsWith("actions/setup-node")) j.versions.node ??= wv("node-version") ?? fileVersion("node-version-file") ?? undefined;
         if (uses.startsWith("actions/setup-python")) j.versions.python ??= wv("python-version") ?? fileVersion("python-version-file") ?? undefined;
+        if (uses.startsWith("actions/setup-go")) j.versions.go ??= wv("go-version") ?? goFileVersion(wv("go-version-file")) ?? undefined;
         if (uses.startsWith("oven-sh/setup-bun")) j.versions.bun ??= wv("bun-version") ?? undefined;
         if (/^(dtolnay\/rust-toolchain|actions-rs\/toolchain|actions-rust-lang\/setup-rust-toolchain)/.test(uses)) {
           const ref = uses.split("@")[1] ?? "";
@@ -657,6 +718,7 @@ function jobLanguages(j: CiJob): string[] {
   }
   if (j.versions.python || /\b(pytest|tox|nox|python -m)\b/.test(j.text)) out.add("python");
   if (j.versions.rust || /\bcargo\b/.test(j.text)) out.add("rust");
+  if (j.versions.go || /\bgo (test|build|vet|mod)\b/.test(j.text)) out.add("go");
   return [...out];
 }
 
@@ -674,8 +736,8 @@ function gitlabJobs(set: Set<string>, yaml: (rel: string) => unknown): CiJob[] {
     const env = { ...vars, ...strEnv(job.variables) };
     const j: CiJob = { id: `${file}:${id}`, dirs: ["."], versions: {}, services: [], env, install: [], test: [], apt: [],
       languages: [], text: "" };
-    const m = image ? /^(node|python|rust):v?([\d.]+)/.exec(image) : null;
-    if (m) j.versions[m[1] as Tool] = m[2]!;
+    const m = image ? /^(node|python|rust|golang):v?([\d.]+)/.exec(image) : null;
+    if (m) j.versions[m[1] === "golang" ? "go" : m[1] as Tool] = m[2]!;
     for (const s of Array.isArray(job.services ?? top.services) ? (job.services ?? top.services) as unknown[] : []) {
       const img = imageName(s);
       if (!img || EXPR.test(img)) continue;

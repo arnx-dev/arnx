@@ -5,7 +5,8 @@
 // asks only what the change does not settle; an explanation states as fact only what a test or the code shows) and
 // the setup task (test_files, the reasons for uncovered folders, two runs for a web UI app, a type check that
 // names one missing module, a proven project stays in the file), and it added review.last_word (the reviewer's last
-// turn when its budget runs out). The default judge prompt templates did not change.
+// turn when its budget runs out). The default judge prompt templates did not change. The Go adapter changed the
+// setup task's language and runner lists and nothing else (tests/fixtures/prompts-go.json, which holds PROMPT_VERSION).
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -22,10 +23,13 @@ const JUDGE_SHA = ["12121d7b3881127998db9156d6cf140331a06a2944eaf8d48d36fdf202df
   "877fc100e912bd3ec9004d79dee5659d7a8dc1a6ea86bb1ded1e0231b5f1b3e4",
   "dcd1eecca51e7f1936a7a4d1c2bf343dce0c95dcebe484bf03cec93e190e4bce"];
 const NEWER = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompts-0.1.9.json"), "utf8")) as Frozen;
+// Go support changed the setup task's language and runner lists and nothing else.
+const GO = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "prompts-go.json"), "utf8")) as Frozen;
 
-test("PROMPT_VERSION has 0.1.9's value; 0.1.7's fixture keeps what 0.1.8 shipped", () => {
-  expect(PROMPT_VERSION).toBe("d80ccf1654c5");
-  expect(NEWER.PROMPT_VERSION?.text).toBe(PROMPT_VERSION);
+test("PROMPT_VERSION has the Go layer's value; earlier fixtures keep what 0.1.8 and 0.1.9 shipped", () => {
+  expect(PROMPT_VERSION).toBe("2563555251f6");
+  expect(GO.PROMPT_VERSION?.text).toBe(PROMPT_VERSION);
+  expect(NEWER.PROMPT_VERSION?.text).toBe("d80ccf1654c5");
   expect(CHANGED.PROMPT_VERSION?.text).toBe("1624d507cd4f");
   expect(Object.keys(CHANGED)).toEqual(["setupTask", "setupTask/draft", "PROMPT_VERSION"]);
 });
@@ -35,8 +39,9 @@ test("every built prompt is byte-equal to the release that last changed it", () 
   expect(Object.keys(cases).filter((k) => !(k in FROZEN))).toEqual(["lastWordTask", "setupTask/draft"]);
   expect(Object.keys(FROZEN).filter((k) => !(k in cases))).toEqual([]);
   expect(Object.keys(NEWER).filter((k) => !(k in cases) && k !== "PROMPT_VERSION")).toEqual([]);
+  expect(Object.keys(GO)).toEqual(["setupTask", "setupTask/draft", "PROMPT_VERSION"]);
   for (const [name, text] of Object.entries(cases)) {
-    const want = NEWER[name] ?? CHANGED[name] ?? FROZEN[name]!;
+    const want = GO[name] ?? NEWER[name] ?? CHANGED[name] ?? FROZEN[name]!;
     if (want.text !== undefined) expect(`${name}: ${text}`).toBe(`${name}: ${want.text}`);
     expect(`${name}: ${createHash("sha256").update(text).digest("hex")}`).toBe(`${name}: ${want.sha256}`);
   }
@@ -44,6 +49,25 @@ test("every built prompt is byte-equal to the release that last changed it", () 
   const moved = Object.keys(NEWER).map((k) => k.split("/")[0]!);
   expect([...new Set(moved)].sort()).toEqual(["PROMPT_VERSION", "huntTask", "lastWordTask", "proveTask", "reviewTask",
     "secondHuntTask", "setupTask"]);
+});
+
+test("the Go layer moves only the setup task, and only the lines naming languages and runners", () => {
+  for (const k of ["setupTask", "setupTask/draft"]) {
+    const was = NEWER[k]!.text!.split("\n");
+    const now = GO[k]!.text!.split("\n");
+    expect(now).toHaveLength(was.length);
+    const changed = now.map((l, i) => [was[i]!, l]).filter(([a, b]) => a !== b);
+    expect(changed).toEqual([
+      ["    language: <python, typescript (also for JavaScript) or rust>", "    language: <python, typescript (also for JavaScript), rust or go>"],
+      ["    runner: <pytest; vitest, jest, node or bun; nextest>", "    runner: <pytest; vitest, jest, node or bun; nextest; gotest>"]]);
+  }
+  // Every other prompt is the 0.1.9 (or earlier) text, byte for byte: the fixtures above hold them, the Go layer holds
+  // nothing else.
+  const cases = promptCases();
+  for (const k of Object.keys(cases).filter((n) => !(n in GO))) {
+    const want = NEWER[k] ?? CHANGED[k] ?? FROZEN[k]!;
+    expect(`${k}: ${createHash("sha256").update(cases[k]!).digest("hex")}`).toBe(`${k}: ${want.sha256}`);
+  }
 });
 
 test("0.1.9's lines are in the review, hunt, prove and setup tasks, and the judge prompt is untouched", () => {
