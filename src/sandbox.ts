@@ -11,6 +11,7 @@ import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync
 import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import { adapterFor, getAdapter, LANGUAGES } from "./adapters";
+import { GO_SKIP_DIRS, goSkipped, go as goAdapter } from "./adapters/go";
 import type { CopyOnly } from "./baked";
 import type { Swap } from "./boundary";
 import { digest, loadReviewFile, type ReviewConfig } from "./config";
@@ -326,6 +327,8 @@ export function isManifest(path: string): boolean {
     }
   });
   const name = posix.basename(path);
+  // A go.mod under vendor/ or testdata/ is someone else's module or a fixture; no other language's manifests are affected.
+  if (goAdapter.manifests.includes(name) && goSkipped(path)) return false;
   return manifestGlobs.some((g) => g.test(name));
 }
 
@@ -337,7 +340,8 @@ function keysImage(cfg: ReviewConfig, rel: string): boolean {
   const inner = root ? rel.slice(root.length + 1) : rel;
   const adapter = adapterFor(cfg);
   const dirs = inner.split("/").slice(0, -1);
-  if (adapter.nestedManifests ? dirs.some((d) => d.startsWith(".") || d === "target" || d === "node_modules") : dirs.length) {
+  if (adapter.nestedManifests ? dirs.some((d) => d.startsWith(".") || d === "target" || d === "node_modules" ||
+    (adapter.id === "go" && GO_SKIP_DIRS.has(d))) : dirs.length) {
     return false;
   }
   const name = posix.basename(inner);
@@ -419,7 +423,7 @@ export function envKey(cfg: ReviewConfig, snapshot: string): string {
   const adapter = adapterFor(cfg);
   const rxs = adapter.manifests.map(globRegex);
   for (const rx of rxs) {
-    for (const rel of manifestFiles(work, (name) => rx.test(name))) {
+    for (const rel of manifestFiles(work, (name) => rx.test(name), adapter.id === "go" ? GO_SKIP_DIRS : undefined)) {
       h.update(Buffer.concat([Buffer.from(rel + "\0"), readFileSync(join(work, rel))]));
     }
   }
@@ -429,18 +433,20 @@ export function envKey(cfg: ReviewConfig, snapshot: string): string {
 /** The manifests and lockfiles (files whose name `match` accepts) at any depth under `dir`, sorted POSIX paths relative to
  * it, outside the folders nestedFiles leaves out. The one reading of "what an install reads" for the environment's key
  * (envKey) and the key of an image made from the code (baked.ts bakedKey). */
-export function manifestFiles(dir: string, match: (name: string) => boolean): string[] {
-  return existsSync(dir) ? nestedFiles(dir).filter((rel) => match(posix.basename(rel))) : [];
+export function manifestFiles(dir: string, match: (name: string) => boolean, skip?: ReadonlySet<string>): string[] {
+  return existsSync(dir) ? nestedFiles(dir, "", skip).filter((rel) => match(posix.basename(rel))) : [];
 }
 
 /** Files under `dir` (sorted POSIX paths relative to it), without build output, dependencies and hidden folders
  * (a repository's own target/ can hold packaged copies of its manifests). Symlinked folders are not followed. */
-function nestedFiles(dir: string, prefix = ""): string[] {
+function nestedFiles(dir: string, prefix = "", skip?: ReadonlySet<string>): string[] {
   const out: string[] = [];
   for (const e of readdirSync(join(dir, prefix), { withFileTypes: true })) {
     const rel = prefix ? `${prefix}/${e.name}` : e.name;
     if (e.isDirectory()) {
-      if (!e.name.startsWith(".") && e.name !== "target" && e.name !== "node_modules") out.push(...nestedFiles(dir, rel));
+      if (!e.name.startsWith(".") && e.name !== "target" && e.name !== "node_modules" && !skip?.has(e.name)) {
+        out.push(...nestedFiles(dir, rel, skip));
+      }
     } else out.push(rel);
   }
   return out.sort();

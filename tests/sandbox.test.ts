@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { python } from "../src/adapters/python";
-import { parseReviewConfig, parseReviewFile } from "../src/config";
+import { parseReviewConfig, parseReviewFile, reviewConfigPath } from "../src/config";
 import { ArnxError, EnvFailed, SetupRequired } from "../src/errors";
 import {
-  buildContextOf, cleanupLiveSessions, DEFAULT_LIMITS, dockerfile, ensureEnv, envKey, requireDocker, runArgv,
+  buildContextOf, cleanupLiveSessions, DEFAULT_LIMITS, dockerfile, ensureEnv, envKey, isManifest, manifestRule, requireDocker, runArgv,
   sandboxOptions, Session,
   dockerSteps, keptBox, NETWORK_OPEN, networkNotice, networkRetry,
 } from "../src/sandbox";
@@ -1317,3 +1317,68 @@ test("a container that cannot start for want of disk is named", async () => {
     .catch((e) => e);
   expect(err).toBeInstanceOf(DiskFull);
 });
+
+describe("vendored and test-data manifests", () => {
+  const GO_CFG = () => parseReviewConfig(CFG.replace("image: python:3.12-slim", "image: golang:1.24\nlanguage: go")
+    .replace("install: [pip install pytest]", "install: [go mod download]")
+    .replace("python -m pytest -q {targets}", "go test {targets}"));
+  const writeAll = (root: string, files: Record<string, string>) => {
+    for (const [f, text] of Object.entries(files)) {
+      mkdirSync(join(root, dirname(f)), { recursive: true });
+      writeFileSync(join(root, f), text);
+    }
+    return root;
+  };
+
+  test("isManifest: Go's manifests under vendor/ or testdata/ are not manifests, nested ones are", () => {
+    expect(isManifest("go.mod")).toBe(true);
+    expect(isManifest("svc/api/go.sum")).toBe(true);
+    expect(isManifest("vendor/x/go.mod")).toBe(false);
+    expect(isManifest("internal/testdata/y/go.mod")).toBe(false);
+    expect(isManifest("a/vendor/go.work.sum")).toBe(false);
+  });
+
+  test("isManifest: the other languages' manifests under vendor/ and testdata/ are unchanged", () => {
+    for (const p of ["vendor/x/Cargo.toml", "testdata/y/package.json", "vendor/requirements.txt", "testdata/pyproject.toml"]) {
+      expect(isManifest(p)).toBe(true);
+    }
+  });
+
+  test("a Go image's key ignores manifests under vendor/ and testdata/, keeps nested ones", () => {
+    const snap = writeAll(tmp(), { "app/go.mod": "module m\n", "app/go.sum": "x\n", "app/sub/go.mod": "module s\n" });
+    const cfg = GO_CFG();
+    const key = envKey(cfg, snap);
+    writeAll(snap, { "app/vendor/x/go.mod": "module v\n", "app/testdata/y/go.mod": "module t\n" });
+    expect(envKey(cfg, snap)).toBe(key);
+    writeAll(snap, { "app/sub/go.mod": "module changed\n" });
+    expect(envKey(cfg, snap)).not.toBe(key);
+  });
+
+  test("Python and Rust keys still include manifests under vendor/ and testdata/", () => {
+    const py = parseReviewConfig(CFG);
+    const rust = parseReviewConfig(CFG.replace("image: python:3.12-slim", "image: rust:1.95\nlanguage: rust")
+      .replace("install: [pip install pytest]", "install: [cargo fetch]")
+      .replace("python -m pytest -q {targets}", "cargo nextest run {targets}"));
+    const snap = writeAll(tmp(), { "app/requirements.txt": "x\n", "app/Cargo.toml": "[package]\n" });
+    const [p, r] = [envKey(py, snap), envKey(rust, snap)];
+    writeAll(snap, { "app/vendor/requirements.txt": "v\n", "app/vendor/x/Cargo.toml": "[package]\n" });
+    expect(envKey(py, snap)).not.toBe(p);
+    expect(envKey(rust, snap)).not.toBe(r);
+    const before = envKey(rust, snap);
+    writeAll(snap, { "app/testdata/y/Cargo.toml": "[package]\n" });
+    expect(envKey(rust, snap)).not.toBe(before);
+  });
+
+  test("a change to a vendored Go manifest does not key the image of a Go project (manifestRule)", () => {
+    const repo = writeAll(tmp(), { "svc/go.mod": "module m\n" });
+    mkdirSync(join(repo, ".arnx"), { recursive: true });
+    writeFileSync(reviewConfigPath(repo), "version: 1\nprojects:\n  svc:\n    root: svc\n    language: go\n    image: golang:1.24\n" +
+      "    install: [go mod download]\n    test_command: go test {targets}\n");
+    const rule = manifestRule(repo);
+    expect(rule("svc/go.mod")).toBe(true);
+    expect(rule("svc/sub/go.sum")).toBe(true);
+    expect(rule("svc/vendor/x/go.mod")).toBe(false);
+    expect(rule("svc/testdata/y/go.mod")).toBe(false);
+  });
+});
+

@@ -158,7 +158,10 @@ export function notReached(owned: string[], ev: { tests: Record<string, string>;
   const names = new Set(Object.entries(ev.tests).flatMap(([k, v]) => stringNames(v, k)));
   const sources = changedSources(owned, adapter);
   const hit = new Set([...framed(sources, ev.frames), ...(ev.ran ?? []).filter((r) => sources.includes(r))]);
-  return sources.filter((p) => !hit.has(p) && (posix.basename(p) === "lib.rs" ? !text.trim() : !referredTo(p, tests) && !namedByString(p, names)));
+  // An adapter's own rule reads the raw text (stripped text blanks Go's import blocks) and replaces the reading by name:
+  // a string like "errors" or a subtest name matches a file's stem, not the file.
+  const named = (p: string) => adapter.refersTo ? adapter.refersTo(p, ev.tests) : referredTo(p, tests) || namedByString(p, names);
+  return sources.filter((p) => !hit.has(p) && (posix.basename(p) === "lib.rs" ? !text.trim() : !named(p)));
 }
 
 /** The generated files whose tests loaded: a test file with a passed, failed or flaky test (one that only has errors,
@@ -179,7 +182,7 @@ export function loadedTests(files: Record<string, string>, c: Classified, not: s
 export function untestedFiles(owned: string[], tests: Record<string, string>, adapter: Adapter): string[] {
   const text = Object.values(tests).join("\n");
   return changedSources(owned, adapter).filter((p) => posix.basename(p) === "lib.rs" ? !text.trim()
-    : !referredTo(p, tests));
+    : !(adapter.refersTo ?? referredTo)(p, tests));
 }
 
 /** SQL a file sends to a database: a statement keyword in capitals followed by its usual partner. */
@@ -205,7 +208,7 @@ export function dbUntested(owned: string[], read: (path: string) => string | nul
   return changedSources(owned, adapter).filter((p) => {
     const body = read(p);
     if (body === null || !SQL.test(body)) return false;
-    return !referredTo(p, withEnv);
+    return !(adapter.refersTo ?? referredTo)(p, withEnv);
   });
 }
 

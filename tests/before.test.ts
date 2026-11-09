@@ -714,3 +714,34 @@ test("missingName reads the last segment of a Go undefined name", () => {
   expect(missingName("x_arnx_test.go:3:5: lib.T{}.Nope undefined (type lib.T has no field or method Nope)")).toBe("Nope");
   expect(missingName("undefined: lib.Brandnew")).toBeNull();
 });
+
+describe("foreignLoad: reading a test's body", () => {
+  const GO_GEN = "arnx_generated/z_arnx/z_arnx_test.go";
+  const go = (name: string, outcome: string, message = ""): TestResult =>
+    ({ testId: `${GO_GEN}::${name}`, fileAttr: GO_GEN, name, outcome, message });
+  const SOURCE = ["package arnx", "", 'import "testing"', "", "func TestNew(t *testing.T) {", "\tlib.Brandnew()", "}", "",
+    "func TestOld(t *testing.T) {", "\tt.Fatal(\"real failure\")", "}", ""].join("\n");
+  const load = go(GO_GEN, "failed", "z_arnx_test.go:6:5: undefined: lib.Brandnew");
+  const runs = three(run(load));
+
+  test("Go: two tests in one file, only one uses what is missing: the other is unknown, not new code", () => {
+    const newOne = judgeBefore(go("TestNew", "failed", "got"), GO_GEN, runs, false, { source: SOURCE, func: "TestNew" });
+    expect(newOne.status).toBe("new-code");
+    const oldOne = judgeBefore(go("TestOld", "failed", "real failure"), GO_GEN, runs, false, { source: SOURCE, func: "TestOld" });
+    expect(oldOne.status).toBe("unknown");
+    expect(oldOne.detail).toContain("Brandnew");
+  });
+
+  test("TypeScript keeps the default reading of the test's body: a name in a comment counts as used", () => {
+    const TS_GEN = "tests/arnx_generated/a.test.ts";
+    const ts = (name: string, outcome: string, message = ""): TestResult =>
+      ({ testId: `${TS_GEN} > ${name}`, fileAttr: TS_GEN, name, outcome, message });
+    const source = 'test("t", () => {\n  // Gadget is what this is about\n  expect(1).toBe(2);\n});\n';
+    const message = "ReferenceError: Gadget is not defined";
+    const base = three(run({ testId: TS_GEN, fileAttr: TS_GEN, name: TS_GEN, outcome: "failed", message }));
+    const b = judgeBefore(ts("t", "failed", "expected 2"), TS_GEN, base, false, { source, func: "t" });
+    expect(b.status).toBe("new-code");
+    expect(usesNew(source, "t", new Set(["Gadget"]))).toBe("Gadget");
+  });
+});
+

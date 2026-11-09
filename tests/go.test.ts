@@ -1,7 +1,9 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { go } from "../src/adapters/go";
+import { Workspace } from "../src/agent";
 import { python } from "../src/adapters/python";
 import { reviewGroup } from "../src/check";
 import { parseReviewConfig } from "../src/config";
@@ -206,3 +208,31 @@ test("probeListed writes a probe whose file holds a subfolder, and removes it", 
   expect(seen).toEqual([true]);
   expect(existsSync(join(snap, "gen/sub_arnx/test_probe.py"))).toBe(false);
 });
+
+test("the #arnx-test listing follows Go's rule for what is a test", () => {
+  const dir = tmp();
+  writeFileSync(join(dir, "a_test.go"), "func Testdata() string { return \"\" }\nfunc TestA(t *testing.T) {}\nfunc Test_b(t *testing.T) {}\n");
+  const listing = /find .*?sed 's[^']*'/.exec(go.command("go test {targets}", [], "/dev/null", "gotest"))![0];
+  const out = spawnSync("sh", ["-c", listing], { cwd: dir, encoding: "utf8" }).stdout;
+  expect(out).toContain("func TestA(");
+  expect(out).toContain("func Test_b(");
+  expect(out).not.toContain("Testdata");
+});
+
+test("the agent's listings skip vendor/ and testdata/ for Go only", async () => {
+  const root = tmp();
+  for (const f of ["vendor/x/a.go", "testdata/b.go", "lib/c.go"]) {
+    mkdirSync(join(root, dirname(f)), { recursive: true });
+    writeFileSync(join(root, f), "package x // needle\n");
+  }
+  const goWs = new Workspace(root, { adapter: go, runner: "gotest" });
+  expect(await goWs.call("list_dir", { path: "." })).toBe("lib/");
+  const found = await goWs.call("grep", { pattern: "needle" });
+  expect(found).toContain("lib/c.go");
+  expect(found).not.toContain("vendor");
+  expect(found).not.toContain("testdata");
+  const pyWs = new Workspace(root);
+  expect(await pyWs.call("list_dir", { path: "." })).toBe("lib/\ntestdata/\nvendor/");
+  expect(await pyWs.call("grep", { pattern: "needle" })).toContain("vendor/x/a.go");
+});
+

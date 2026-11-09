@@ -6,6 +6,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFile
   writeFileSync } from "node:fs";
 import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
 import { Worker } from "node:worker_threads";
+import { GO_SKIP_DIRS } from "./adapters/go";
 import { python } from "./adapters/python";
 import type { Adapter } from "./adapters/types";
 import type { Swap } from "./boundary";
@@ -362,6 +363,11 @@ export class Workspace {
     return full;
   }
 
+  /** Whether a name a listing or a search leaves out: the shared list, and for Go vendored code and test data. */
+  private skipped(name: string): boolean {
+    return SKIP_DIRS.has(name) || (this.adapter.id === "go" && GO_SKIP_DIRS.has(name));
+  }
+
   private rel(full: string): string {
     return relative(this.root, full).split(sep).join("/");
   }
@@ -369,7 +375,7 @@ export class Workspace {
   private listDir(path: string): string {
     const full = this.resolvePath(path);
     if (!existsSync(full) || !statSync(full).isDirectory()) throw new ToolError(`not a directory: ${path}`);
-    const entries = readdirSync(full).filter((n) => !SKIP_DIRS.has(n) && !isSecretPath(n)).sort();
+    const entries = readdirSync(full).filter((n) => !this.skipped(n) && !isSecretPath(n)).sort();
     return entries.map((n) => {
       let dir = false;
       try {
@@ -472,7 +478,7 @@ export class Workspace {
       for (const name of readdirSync(dir)) {
         const p = join(dir, name);
         const st = lstatSync(p);
-        if (SKIP_DIRS.has(name)) continue;
+        if (this.skipped(name)) continue;
         if (st.isDirectory()) visit(p);
         else if (!isSecretPath(name) && (st.isFile() || (st.isSymbolicLink() && existsSync(p) && statSync(p).isFile()))) {
           out.push(p);

@@ -108,6 +108,10 @@ function foreignLoad(seen: { load?: true; message: string }[], body?: { source: 
   return used === null && testBody(body.source, body.func) !== null ? { name } : null;
 }
 
+/** The test file's path for `foreignLoad`, for Go only: a Go body needs Go's rules, every other language keeps the
+ * default reading. */
+const goPath = (file: string | null) => (file?.endsWith(".go") ? file : undefined);
+
 const unloaded = (name: string) => `its file cannot load there because \`${name}\` is missing, which this test does not use`;
 
 /** Runs that gave no report (none: null): new code when the console says the test does not build there and no run
@@ -153,7 +157,7 @@ export function judgeBefore(t: TestResult, file: string | null, runs: BeforeRun[
   const silent = silentRuns(seen);
   if (silent) return { ...silent, runs: outcomes };
   if (all("error")) {
-    const foreign = foreignLoad(seen, body, file ?? undefined);
+    const foreign = foreignLoad(seen, body, goPath(file));
     if (foreign) return withMessage({ status: "unknown", detail: unloaded(foreign.name), runs: outcomes });
     return withMessage(MISSING.test(failure)
       ? { status: "new-code", detail: `cannot load on the code before the change: what it tests is new ` +
@@ -226,7 +230,7 @@ export function judgeFix(t: TestResult, file: string | null, runs: BeforeRun[], 
   const silent = silentRuns(seen);
   if (silent) return { ...silent, runs: outcomes };
   if (all("error")) {
-    const foreign = foreignLoad(seen, body, file ?? undefined);
+    const foreign = foreignLoad(seen, body, goPath(file));
     if (foreign) return withMessage({ status: "unknown", detail: unloaded(foreign.name), runs: outcomes });
     return withMessage(MISSING.test(failure)
       ? { status: "new-code", detail: `cannot load on the code before the change: what it tests is new ` +

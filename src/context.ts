@@ -55,6 +55,12 @@ const CONST = [
   /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=/, // TS module const
   /^(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+([A-Z_][A-Z0-9_]*)\s*:/, // Rust
 ];
+// Go's definitions, read for .go files only: a top-level `func Name(`, `func (r *T) Name(`, `func Map[T any](`, and a
+// package-level const or var.
+const GO_FUNC = [/^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*[(\[]/];
+const GO_CONST = [/^(?:const|var)\s+([A-Za-z_]\w*)\b[^=\n]*=/];
+const funcs = (path: string) => path.endsWith(".go") ? GO_FUNC : FUNC;
+const consts = (path: string) => path.endsWith(".go") ? GO_CONST : CONST;
 const KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "return", "function", "constructor", "else"]);
 const indent = (s: string) => s.length - s.trimStart().length;
 
@@ -85,8 +91,9 @@ function decorated(lines: string[], at: number): Def | null {
 }
 
 /** The definition a line belongs to: the function under a decorator the line is part of, the nearest function
- * above it whose body holds it, or the module-level constant it is part of (a multi-line SQL string). */
-export function enclosing(lines: string[], at: number): Def | null {
+ * above it whose body holds it, or the module-level constant it is part of (a multi-line SQL string). `path` gives
+ * the language: Go's definitions are read for a .go file only. */
+export function enclosing(lines: string[], at: number, path = ""): Def | null {
   const dec = decorated(lines, at);
   if (dec) return dec;
   const here = lines[at - 1] ?? "";
@@ -94,12 +101,12 @@ export function enclosing(lines: string[], at: number): Def | null {
   for (let i = Math.min(at, lines.length) - 1; i >= 0; i--) {
     const l = lines[i]!;
     if (!l.trim()) continue;
-    for (const rx of FUNC) {
+    for (const rx of funcs(path)) {
       const m = rx.exec(l);
       if (m && !KEYWORDS.has(m[1]!) && (i === at - 1 || indent(l) < target)) return { name: m[1]!, kind: "function", line: i + 1 };
     }
     if (indent(l) === 0) {
-      for (const rx of CONST) {
+      for (const rx of consts(path)) {
         const m = rx.exec(l);
         if (m) return { name: m[1]!, kind: "constant", line: i + 1 };
       }
@@ -155,7 +162,7 @@ function references(files: Map<string, string>, name: string, skip: { file: stri
     lines.forEach((l, i) => {
       if (out.length > MAX_REFS || (file === skip.file && i + 1 === skip.line) || !rx.test(l)) return;
       if (COMMENT.test(l.trim())) return;
-      out.push({ file, line: i + 1, text: l.trim().slice(0, 120), in: enclosing(lines, i + 1) });
+      out.push({ file, line: i + 1, text: l.trim().slice(0, 120), in: enclosing(lines, i + 1, file) });
     });
   }
   return out;
@@ -180,7 +187,7 @@ function indexedReferences(files: Map<string, string>, linesOf: (file: string) =
     const lines = linesOf(o.file);
     if (!lines || at.has(`${o.file}:${o.line}`)) continue;
     at.add(`${o.file}:${o.line}`);
-    out.push({ file: o.file, line: o.line, text: (lines[o.line - 1] ?? "").trim().slice(0, 120), in: enclosing(lines, o.line) });
+    out.push({ file: o.file, line: o.line, text: (lines[o.line - 1] ?? "").trim().slice(0, 120), in: enclosing(lines, o.line, o.file) });
   }
   out.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line));
   for (const r of references(files, name, skip)) {
@@ -236,7 +243,7 @@ export function contextPack(root: string, diff: string, owned: string[], searchD
     const lines = body.split("\n");
     const defs = new Map<string, Def>();
     for (const at of changed.get(path) ?? []) {
-      const d = enclosing(lines, at);
+      const d = enclosing(lines, at, path);
       if (d && !defs.has(d.name)) defs.set(d.name, d);
     }
     for (const d of defs.values()) {
@@ -289,13 +296,13 @@ export function changedDefinitions(root: string, diff: string, owned: string[], 
     const lines = body.split("\n");
     const seen = new Set<number>();
     for (const at of changed.get(path) ?? []) {
-      const d = enclosing(lines, at);
+      const d = enclosing(lines, at, path);
       if (!d || seen.has(d.line)) continue;
       seen.add(d.line);
       const top = indent(lines[d.line - 1]!);
       // A function ends at the next line indented no deeper (its closing brace stays); a constant, which may be a
       // multi-line string at column 0, ends at the next top-level statement.
-      const startsStatement = (l: string) => [...FUNC, ...CONST].some((rx) => rx.test(l)) ||
+      const startsStatement = (l: string) => [...funcs(path), ...consts(path)].some((rx) => rx.test(l)) ||
         /^(?:class|import|from|export|use|pub|impl|struct|enum|type|interface|if|for|while|try|with|async|@)\b/.test(l);
       let end = d.line;
       while (end < lines.length) {

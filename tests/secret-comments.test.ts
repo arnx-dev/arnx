@@ -224,3 +224,23 @@ test("the review names the files whose comment lines were blanked", () => {
   expect(md).toContain("- Comment lines blanked as secret-looking (not sent): src/auth.ts (line 4)");
   expect(render(sampleReview())).not.toContain("Comment lines blanked");
 });
+
+test("Go: a key in a // or /* */ comment blanks that line; one in a raw string or a string withholds the file", () => {
+  const comment = blanked("lib/a.go", `package lib\n\n// key: ${GH}\nfunc F() {}\n`);
+  expect(comment.lines).toEqual([3]);
+  expect(comment.text).toContain("func F() {}");
+  expect(blanked("lib/a.go", `package lib\n\n/* ${GH} */\nfunc F() {}\n`).lines).toEqual([3]);
+  for (const line of [`const K = \`${GH}\``, `const K = "${GH}"`, `var k = \`a\n${GH}\n\``]) {
+    expect(scanKeys("lib/a.go", `package lib\n\n${line}\n`, [])).toMatchObject({ withhold: {} });
+  }
+});
+
+test("Go: // inside a string or after a rune is not a comment, and a raw string holds no escapes", () => {
+  // the key follows a string holding //, a rune holding a quote, and a raw string ending in a backslash: all code
+  for (const line of [`s := "http://x"; k := "${GH}"`, `c := '"'; k := "${GH}"`, `s := \`a\\\`; k := "${GH}"`]) {
+    expect(scanKeys("lib/a.go", `package lib\n\nfunc F() {\n\t${line}\n}\n`, [])).toMatchObject({ withhold: {} });
+  }
+  const after = blanked("lib/a.go", `package lib\n\n// a "quoted ${GH}\nvar s = "x"\n`);
+  expect(after.lines).toEqual([3]);
+});
+

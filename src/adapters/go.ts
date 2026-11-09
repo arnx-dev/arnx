@@ -2,6 +2,7 @@
 // test-only package: a file that does not compile loses only itself, and no name can collide with the project's. It
 // sees the exported API only, since arnx never places a file in a real package.
 import { posix } from "node:path";
+import { comments } from "../comments";
 import { shQuote } from "../util";
 import { parseGoReport } from "./go-report";
 import type { Adapter, Words } from "./types";
@@ -11,6 +12,11 @@ const ENDING = "_arnx_test.go";
 const LAYOUT = "<name>_arnx/<name>_arnx_test.go";
 const FILES = `${LAYOUT}, one self-contained file per folder: package arnx, import the code under test by its module ` +
   "path (exported names only), find fixtures by walking up to go.mod";
+
+/** Folders Go's toolchain leaves out of a module: vendored code and test data. */
+export const GO_SKIP_DIRS: ReadonlySet<string> = new Set(["vendor", "testdata"]);
+/** Whether a repository path lies under one of them. */
+export const goSkipped = (path: string) => path.split("/").slice(0, -1).some((d) => GO_SKIP_DIRS.has(d));
 
 const testStem = (fileName: string) => fileName.endsWith(ENDING) ? fileName.slice(0, -ENDING.length) : fileName;
 
@@ -32,7 +38,7 @@ const MODULE = "printf '\\n#arnx-module %s\\n' \"$(go mod edit -print 2>/dev/nul
 /** One `<file>:func Test...` per test function in the directories (a directory's own files only; every package: all). */
 function declarations(dirs: string[] | null): string {
   const where = dirs ? `${dirs.map(shQuote).join(" ")} -maxdepth 1` : ".";
-  return `find ${where} -type f -name '*_test.go' -exec grep -H '^func Test' {} + 2>/dev/null | sed 's/^/#arnx-test /'`;
+  return `find ${where} -type f -name '*_test.go' -exec grep -H '^func Test[^a-z]' {} + 2>/dev/null | sed 's/^/#arnx-test /'`;
 }
 
 function command(testCommand: string, targets: string[], reportPath: string): string {
@@ -52,6 +58,37 @@ function skip(source: string, names: Set<string>, reason: string): string {
     const after = rest.trim() ? `\n\t${rest.trimStart()}` : "";
     return `func ${name}(${t} *testing.T) {\n\t${t}.Skip(${JSON.stringify(reason)})${after}`;
   });
+}
+
+/** The import paths of a Go file, read from its header: comments and everything after the first declaration left out. */
+function imports(source: string): string[] {
+  let bare = "", at = 0;
+  for (const c of comments(source, "go")) {
+    bare += source.slice(at, c.start);
+    at = c.end;
+  }
+  bare += source.slice(at);
+  const first = /^(?:func|type|var|const)\b/m.exec(bare);
+  const header = first ? bare.slice(0, first.index) : bare;
+  const out: string[] = [];
+  for (const m of header.matchAll(/\bimport\s*\(([^)]*)\)/g)) {
+    for (const q of m[1]!.matchAll(/["`]([^"`\n]+)["`]/g)) out.push(q[1]!);
+  }
+  for (const m of header.matchAll(/\bimport\s+(?:[\w.]+\s+)?["`]([^"`\n]+)["`]/g)) out.push(m[1]!);
+  return out;
+}
+
+/** A Go test names a package, not a file: it refers to a file by importing a path whose last element is the file's
+ * directory. A file in the module root counts once a test exists, since the module path is not known here; vendored
+ * code, test data and the project's own _test.go files are no source to cover. */
+function refersTo(path: string, tests: Record<string, string>): boolean {
+  if (goSkipped(path) || path.endsWith("_test.go")) return true;
+  const texts = Object.values(tests).filter((t) => t.trim());
+  if (!texts.length) return false;
+  const dir = posix.dirname(path);
+  if (dir === ".") return true;
+  const last = posix.basename(dir);
+  return texts.some((t) => imports(t).some((i) => posix.basename(i) === last));
 }
 
 const ENV = ["GOTOOLCHAIN=local", "GOFLAGS=-buildvcs=false", "GOCACHE=/opt/arnx-gocache"];
@@ -91,6 +128,7 @@ export const go: Adapter = {
   acceptedPath: (_original, tag, acceptedDir, name) =>
     posix.join(acceptedDir, `r${tag}`, `${name}_arnx`, `${name}${ENDING}`),
   testStem,
+  refersTo,
   relocate: (source) => source,
   setupHints: [
     "- A Go project is a directory with a go.mod; under a go.work, one project per `use` member, each with " +

@@ -66,3 +66,10 @@ test("golden: a review.json written by Python loads", () => {
   // It predates source_files, so the load marks it as an older review.
   expect(load(join(GOLDEN, "review"))).toEqual({ ...sampleReview(), noEvidence: true });
 });
+
+test("golden: a Rust image key keeps vendored manifests, Go's skip does not reach it", () => {
+  const cfg = parseReviewConfig(SANDBOX_CFG.replace("image: python:3.12-slim", "image: rust:1.95\nlanguage: rust")
+    .replace("install: [pip install pytest]", "install: [cargo fetch]")
+    .replace("python -m pytest -q {targets}", "cargo nextest run {targets}"));
+  expect(envKey(cfg, join(GOLDEN, "envkey-rust"))).toBe(golden("envkey-rust.txt"));
+});

@@ -1,9 +1,9 @@
 // Tests that check the code's text, or only that something exists, are named as such: a change can pass them without
 // fixing the behaviour.
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { projectSource, shallowKind } from "../src/shallow";
+import { projectSource, shallowKind, testBody } from "../src/shallow";
 import { COPY_SUFFIX, readCopies, suffixReviewCopies } from "../src/testround";
 import { useTmp } from "./helpers/tmp";
 
@@ -231,3 +231,43 @@ test("a review's kept tests carry a suffix test runners do not match; older revi
   expect(Object.keys(readCopies(root, /\.test\.js$/))).toEqual(["__tests__/gen/a.test.js", "__tests__/gen/b.test.js"]);
   expect(suffixReviewCopies(repo)).toBe(0);
 });
+
+describe("Go test bodies", () => {
+  const SRC = [
+    "// Package arnx holds tests.", "package arnx", "", 'import "testing"', "",
+    "var cases = []string{\"TestOld\"}", "", "func TestNew(t *testing.T) {", "\tuseNew()", "}", "",
+    "func helper() int {", "\treturn 1", "}", "", "func TestOld(t *testing.T) {", "\tif 1 != 2 {", "\t\tt.Fatal(\"no\")", "\t}", "}", "",
+  ].join("\n");
+
+  test("a test's body runs from its func line to the next func, past a table that quotes its name", () => {
+    const body = testBody(SRC, "TestOld")!;
+    expect(body.startsWith("func TestOld(")).toBe(true);
+    expect(body).toContain("t.Fatal");
+    expect(testBody(SRC, "TestNew")).not.toContain("TestOld");
+    expect(testBody(SRC, "TestNew")).not.toContain("helper");
+    expect(testBody(SRC, "TestNew")).toContain("useNew");
+  });
+
+  test("a test that is not in the file is not found", () => {
+    expect(testBody(SRC, "TestGone")).toBeNull();
+  });
+
+  test("a Go test that reads a source file and checks its text is shallow; a fixture read is not", () => {
+    const read = (path: string) => [
+      "package arnx", "", 'import ("os"; "strings"; "testing")', "",
+      "func TestText(t *testing.T) {", `\tsrc, err := os.ReadFile("${path}")`, "\tif err != nil { t.Fatal(err) }",
+      '\tif !strings.Contains(string(src), "TODO") {', '\t\tt.Fatal("no")', "\t}", "}", "",
+    ].join("\n");
+    expect(shallowKind(read("../lib/a.go"), "TestText")).toBe("source-text");
+    expect(shallowKind(read("testdata/in.txt"), "TestText")).toBeNull();
+  });
+
+  test("a Python test holding a Go function in a string is read as Python", () => {
+    const py = 'def test_a():\n    x = """\nfunc test_a(t *testing.T) {\n}\n"""\n    assert x\n\ndef test_b():\n    pass\n';
+    const body = testBody(py, "test_a")!;
+    expect(body.startsWith("def test_a")).toBe(true);
+    expect(body).toContain("assert x");
+    expect(body).not.toContain("test_b");
+  });
+});
+
