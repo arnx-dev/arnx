@@ -24,6 +24,13 @@ const MAX_MESSAGE = 4000;
 const cap = (s: string) => (s.length > MAX_MESSAGE ? `${s.slice(0, MAX_MESSAGE)}\n...` : s);
 // The runner's own bookkeeping lines, never the test's.
 const NOISE = /^\s*(=== |--- )/;
+// Where a failure's own text starts: its file:line or a panic. Anything the test logged before (a timestamp from
+// the log package, say) differs run to run and would make the same failure look changed.
+const START = /\.go:\d+(:\d+)?: |^\s*panic:/;
+const fromFailure = (lines: string[]) => {
+  const i = lines.findIndex((l) => START.test(l));
+  return i > 0 ? lines.slice(i) : lines;
+};
 
 export function parseGoReport(text: string): TestResult[] | null {
   let modulePath = "";
@@ -35,7 +42,7 @@ export function parseGoReport(text: string): TestResult[] | null {
     if (mod) { modulePath = mod[1]!; continue; }
     const decl = /^#arnx-test (.+?\.go):func (Test\w*)\(/.exec(line);
     if (decl) {
-      const file = decl[1]!, dir = posix.dirname(file);
+      const file = posix.normalize(decl[1]!), dir = posix.dirname(file);
       if (!files.has(dir)) files.set(dir, new Set());
       files.get(dir)!.add(file);
       if (decl[2] !== "TestMain") declared.set(`${dir}\0${decl[2]}`, file);
@@ -90,7 +97,8 @@ export function parseGoReport(text: string): TestResult[] | null {
 
   for (const [key, c] of cases) {
     const file = declared.get(key)!;
-    const message = cap(c.out.filter((l) => !NOISE.test(l)).join("").trim());
+    const kept = c.out.join("").split("\n").filter((l) => !NOISE.test(l));
+    const message = cap(c.terminals.has("fail") ? fromFailure(kept).join("\n").trim() : kept.join("\n").trim());
     const t = c.terminals;
     let outcome: string, msg: string;
     if (t.has("fail")) { outcome = "failed"; msg = message || "test failed"; }

@@ -77,3 +77,27 @@ test("a failing test's message drops the --- FAIL line", () => {
   expect(firstLine("pass-fail-skip", "TestFail")).toContain("boom 1");
 });
 test("with vet off a bad format verb still runs", () => expect(outcomeOf("vet-off", "TestVetBad")).toBe("passed"));
+
+const ev = (o: object) => JSON.stringify({ Package: "example.com/events/p", ...o });
+const synth = (file: string, logged: string) =>
+  [
+    ev({ Action: "run", Test: "TestA" }),
+    ev({ Action: "output", Test: "TestA", Output: `${logged}\n` }),
+    ev({ Action: "output", Test: "TestA", Output: "    x_test.go:9: boom\n" }),
+    ev({ Action: "output", Test: "TestA", Output: "--- FAIL: TestA (0.00s)\n" }),
+    ev({ Action: "fail", Test: "TestA" }),
+    ev({ Action: "fail" }),
+    "#arnx-module example.com/events",
+    `#arnx-test ${file}:func TestA(t *testing.T) {`,
+  ].join("\n") + "\n";
+
+test("a line logged before the assertion does not change the message", () => {
+  const a = parseGoReport(synth("p/x_test.go", "2026/11/09 17:44:48 connecting"))![0]!;
+  const b = parseGoReport(synth("p/x_test.go", "2026/11/09 17:45:02 connecting"))![0]!;
+  expect(a.message).toBe(b.message);
+  expect(a.message.split("\n")[0]).toBe("x_test.go:9: boom");
+});
+test("a leading ./ on a declared path is dropped", () => {
+  const r = parseGoReport(synth("./p/x_test.go", "hi"))!;
+  expect(r.map((t) => t.testId)).toEqual(["p/x_test.go::TestA"]);
+});
