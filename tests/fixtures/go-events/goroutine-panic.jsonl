@@ -1,0 +1,16 @@
+{"Time":"2026-11-09T17:47:58.129546264Z","Action":"start","Package":"example.com/events/goroutine-panic"}
+{"Time":"2026-11-09T17:47:58.131675391Z","Action":"run","Package":"example.com/events/goroutine-panic","Test":"TestBefore"}
+{"Time":"2026-11-09T17:47:58.131689515Z","Action":"output","Package":"example.com/events/goroutine-panic","Test":"TestBefore","Output":"=== RUN   TestBefore\n"}
+{"Time":"2026-11-09T17:47:58.131723145Z","Action":"output","Package":"example.com/events/goroutine-panic","Test":"TestBefore","Output":"--- PASS: TestBefore (0.00s)\n"}
+{"Time":"2026-11-09T17:47:58.131726023Z","Action":"pass","Package":"example.com/events/goroutine-panic","Test":"TestBefore","Elapsed":0}
+{"Time":"2026-11-09T17:47:58.13173191Z","Action":"run","Package":"example.com/events/goroutine-panic","Test":"TestGoroutinePanic"}
+{"Time":"2026-11-09T17:47:58.131733668Z","Action":"output","Package":"example.com/events/goroutine-panic","Test":"TestGoroutinePanic","Output":"=== RUN   TestGoroutinePanic\n"}
+{"Time":"2026-11-09T17:47:58.134023928Z","Action":"output","Package":"example.com/events/goroutine-panic","Test":"TestGoroutinePanic","Output":"panic: kaboom in goroutine\n"}
+{"Time":"2026-11-09T17:47:58.134036633Z","Action":"output","Package":"example.com/events/goroutine-panic","Test":"TestGoroutinePanic","Output":"\n"}
+{"Time":"2026-11-09T17:47:58.134040577Z","Action":"output","Package":"example.com/events/goroutine-panic","Test":"TestGoroutinePanic","Output":"goroutine 8 [running]:\n"}
+{"Time":"2026-11-09T17:47:58.134056819Z","Action":"output","Package":"example.com/events/goroutine-panic","Test":"TestGoroutinePanic","Output":"example.com/events/goroutine-panic.TestGoroutinePanic.func1()\n"}
+{"Time":"2026-11-09T17:47:58.134067132Z","Action":"output","Package":"example.com/events/goroutine-panic","Test":"TestGoroutinePanic","Output":"\t/src/goroutine-panic/lib_test.go:11 +0x25\n"}
+{"Time":"2026-11-09T17:47:58.134071837Z","Action":"output","Package":"example.com/events/goroutine-panic","Test":"TestGoroutinePanic","Output":"created by example.com/events/goroutine-panic.TestGoroutinePanic in goroutine 7\n"}
+{"Time":"2026-11-09T17:47:58.134081561Z","Action":"output","Package":"example.com/events/goroutine-panic","Test":"TestGoroutinePanic","Output":"\t/src/goroutine-panic/lib_test.go:11 +0x1a\n"}
+{"Time":"2026-11-09T17:47:58.134363624Z","Action":"output","Package":"example.com/events/goroutine-panic","Output":"FAIL\texample.com/events/goroutine-panic\t0.005s\n"}
+{"Time":"2026-11-09T17:47:58.134405699Z","Action":"fail","Package":"example.com/events/goroutine-panic","Elapsed":0.005}

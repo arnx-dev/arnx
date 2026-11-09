@@ -13,7 +13,8 @@ Run: non-root uid 1000, `--network none`, source mounted read-only at `/src` (wo
 |---|---|
 | `pass-fail-skip` | `TestPass`, `TestFail`, `TestSkip` in one package |
 | `subtests` | `TestTop` with slash, space, nested, duplicate, failing and quoted subtests |
-| `panic` | goroutine panic: `TestPanics` has `run`, no terminal event |
+| `panic` | panic on the test's own goroutine: `TestPanics` ends in `fail`, then package `fail` |
+| `goroutine-panic` | `TestGoroutinePanic` panics from a goroutine it starts: `run`, no terminal event, then package `fail` |
 | `exit3` | `TestCrash` calls `os.Exit(3)`: `run`, no terminal event |
 | `timeout` | `-timeout 3s`; `TestHang` has `run`, no terminal event |
 | `test-compile` | undefined name in a test file: `build-fail`, package `fail` with `FailedBuild` |
