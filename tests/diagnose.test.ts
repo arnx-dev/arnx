@@ -169,3 +169,23 @@ test("Go signatures leave Python, JavaScript and Rust failures as they were", ()
   expect(classify("expected undefined: 5", NODE, tmp())).toBeNull();
   expect(classify("go.mod is great and no such thing", PY, tmp())).toBeNull();
 });
+
+test("Go-only texts classify as they did for Python, JavaScript and Rust", () => {
+  const RS = parseReviewConfig(CFG.replace("image: python:3.12-slim", "image: rust:1.80\nlanguage: rust")
+    .replace("python -m pytest -q {targets}", "cargo nextest run {targets}"));
+  const texts = ["= note: /usr/bin/ld: cannot find -lssl: No such file or directory", "/usr/bin/ld: cannot find -lpq",
+    "Error: lookup api: no such host", "no such host", "dial tcp 1.2.3.4:5432: connect: connection refused",
+    "go: downloading example.com/y v1.0.0", 'exec: "x": executable file not found in $PATH',
+    "go: go.mod requires go >= 1.99"];
+  for (const cfg of [PY, NODE, RS]) for (const m of texts) expect(classify(m, cfg, tmp())).toBeNull();
+});
+
+test("Go: a run with no report is diagnosed from its log", async () => {
+  const { parseGoReport } = await import("../src/adapters/go-report");
+  const GO = parseReviewConfig(CFG.replace("image: python:3.12-slim", "image: golang:1.22\nlanguage: go")
+    .replace("python -m pytest -q {targets}", "go test {targets}"));
+  const log = "go: go.mod requires go >= 1.99 (running go 1.22.5; GOTOOLCHAIN=local)\n";
+  expect(parseGoReport(log)).toBeNull();
+  expect(diagnose(null, GO, tmp(), log)).toMatchObject([{ kind: "wrong-image", detail: "go >= 1.99", files: [] }]);
+  expect(diagnose(null, PY, tmp(), log)).toEqual([]);
+});

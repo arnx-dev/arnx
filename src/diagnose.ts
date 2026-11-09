@@ -83,17 +83,25 @@ export function classify(message: string, cfg: ReviewConfig, snap: string): Omit
     if (name.startsWith("node:")) return null;
     return { kind: "missing-package", detail: name, evidence: lineOf(message, m.index) };
   }
+  if (cfg.language === "go" && (m = /(?:lookup ([^\s:]+)[^\n]*)?no such host/.exec(message))) {
+    const host = m[1] ?? "";
+    if (host && (LOCAL.test(host) || cfg.services.some((s) => s.name === host))) return null;
+    return { kind: "unresolved-host", detail: host, evidence: lineOf(message, m.index) };
+  }
+  if (cfg.language === "go" && (m = /dial tcp ([\w.:[\]-]+): connect: (?:connection refused|network is unreachable)/.exec(message))) {
+    return { kind: "connection-refused", detail: m[1]!, evidence: lineOf(message, m.index) };
+  }
   // Go: a module the build cannot get, a toolchain older than go.mod asks for.
-  if ((m = /missing go\.sum entry for module providing package (\S+)|go: downloading (\S+)|module lookup disabled by GOPROXY=off/.exec(message))) {
+  if (cfg.language === "go" && (m = /missing go\.sum entry for module providing package (\S+)|go: downloading (\S+)|module lookup disabled by GOPROXY=off/.exec(message))) {
     return { kind: "missing-package", detail: m[1] ?? m[2] ?? "a Go module", evidence: lineOf(message, m.index) };
   }
-  if ((m = /go(?:\.mod)? requires go (>= ?[\d.]+)/.exec(message))) {
+  if (cfg.language === "go" && (m = /go(?:\.mod)? requires go (>= ?[\d.]+)/.exec(message))) {
     return { kind: "wrong-image", detail: `go ${m[1]!}`, evidence: lineOf(message, m.index) };
   }
-  if ((m = /exec: "([^"]+)": executable file not found|C compiler "([^"]+)" not found/.exec(message))) {
+  if (cfg.language === "go" && (m = /exec: "([^"]+)": executable file not found|C compiler "([^"]+)" not found/.exec(message))) {
     return { kind: "missing-program", detail: (m[1] ?? m[2])!, evidence: lineOf(message, m.index) };
   }
-  if ((m = /cannot find -l([\w+.-]+)/.exec(message))) {
+  if (cfg.language === "go" && (m = /cannot find -l([\w+.-]+)/.exec(message))) {
     return { kind: "missing-library", detail: `lib${m[1]}`, evidence: lineOf(message, m.index) };
   }
   if ((m = /(lib[\w+.-]*?\.so(?:\.[\w.]+)?): cannot open shared object file/.exec(message))) {
@@ -110,12 +118,12 @@ export function classify(message: string, cfg: ReviewConfig, snap: string): Omit
       (m = /os\.(?:getenv|environ\.get)\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\)/.exec(message))) {
     return { kind: "missing-variable", detail: m[1]!, evidence: lineOf(message, m.index) };
   }
-  if ((m = /getaddrinfo (?:ENOTFOUND|EAI_AGAIN) ([^\s:'"]+)|Failed to resolve '([^']+)'|host='([^']+)'[^\n]*(?:NameResolutionError|Failed to resolve|Name or service not known|Temporary failure in name resolution)|Temporary failure in name resolution|Name or service not known|No address associated with hostname|nodename nor servname provided|lookup ([^\s:]+)[^\n]*no such host|no such host|DNS operation timed out|All nameservers failed to answer|The DNS query name does not exist/.exec(message))) {
-    const host = m[1] ?? m[2] ?? m[3] ?? m[4] ?? "";
+  if ((m = /getaddrinfo (?:ENOTFOUND|EAI_AGAIN) ([^\s:'"]+)|Failed to resolve '([^']+)'|host='([^']+)'[^\n]*(?:NameResolutionError|Failed to resolve|Name or service not known|Temporary failure in name resolution)|Temporary failure in name resolution|Name or service not known|No address associated with hostname|nodename nor servname provided|DNS operation timed out|All nameservers failed to answer|The DNS query name does not exist/.exec(message))) {
+    const host = m[1] ?? m[2] ?? m[3] ?? "";
     if (host && (LOCAL.test(host) || cfg.services.some((s) => s.name === host))) return null;
     return { kind: "unresolved-host", detail: host, evidence: lineOf(message, m.index) };
   }
-  if ((m = /ECONNREFUSED ([\w.:[\]-]+)|connection to server at "([^"]+)"[^\n]*(?:\n[^\n]*)?refused|dial tcp ([\w.:[\]-]+): connect: (?:connection refused|network is unreachable)|Connection refused|\[Errno 111\]/.exec(message))) {
+  if ((m = /ECONNREFUSED ([\w.:[\]-]+)|connection to server at "([^"]+)"[^\n]*(?:\n[^\n]*)?refused|Connection refused|\[Errno 111\]/.exec(message))) {
     return { kind: "connection-refused", detail: m[1] ?? m[2] ?? m[3] ?? "", evidence: lineOf(message, m.index) };
   }
   // A variable env sets, named or quoted by its value on the line that says what went wrong (not the source lines a
@@ -257,8 +265,13 @@ export function firstErrors(results: TestResult[] | null, cfg: ReviewConfig): st
 
 /** Hints for the failures outside known_failing, one per kind and detail, with the files they come from. A file that
  * does not load and matches no signature gets a hint of its own, named by its error: it hides every test in it. */
-export function diagnose(results: TestResult[] | null, cfg: ReviewConfig, snap: string): Hint[] {
+export function diagnose(results: TestResult[] | null, cfg: ReviewConfig, snap: string, log?: string): Hint[] {
   const hints = new Map<string, Hint>();
+  // No report (go prints a toolchain error on stderr only): the run's log is all there is to read, for Go.
+  if (results === null && cfg.language === "go" && log) {
+    const h = classify(log, cfg, snap);
+    return h ? [{ ...h, files: [] }] : [];
+  }
   for (const t of results ?? []) {
     if (!failed(t) || cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))) continue;
     const h = classify(t.message, cfg, snap) ??

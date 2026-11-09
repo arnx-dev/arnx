@@ -680,13 +680,21 @@ describe("judgeBefore: Go compiler text at the base", () => {
       expect(base(`dir/sub/x_arnx_test.go:3:5: ${m}`).status).toBe("new-code");
     });
   }
-  test("a Go nil dereference is an undefined value, not a missing name", () => {
-    const f = t("TestAdd", "failed", "x.go:3:5: invalid memory address or nil pointer dereference");
-    const r = (x: TestResult) => judgeBefore(f, GEN, three(run(x)));
-    expect(r(t("TestAdd", "failed", "x.go:3:5: invalid memory address or nil pointer dereference")).status).toBe("pre-existing");
-    const other = judgeBefore(t("TestAdd", "failed", "got 1, want 2"), GEN,
-      three(run(t("TestAdd", "failed", "x.go:3:5: invalid memory address or nil pointer dereference"))));
-    expect(other.status).toBe("unknown");
+  test("a Go nil dereference panic is an undefined value: a differing message is not compared away", () => {
+    const panic = "panic: runtime error: invalid memory address or nil pointer dereference\n[signal SIGSEGV]";
+    const change = t("TestAdd", "failed", "got 1, want 2");
+    const j = (runs: BeforeRun[]) => judgeBefore(change, GEN, runs);
+    // one test in the file: not enough to say the setup is missing, so nothing is claimed
+    expect(j(three(run(t("TestAdd", "failed", panic)))).status).toBe("unknown");
+    // the same text quoted by a failure that is no Go panic stays what it was
+    expect(j(three(run(t("TestAdd", "failed", "service said: invalid memory address or nil pointer dereference")))).status)
+      .toBe("changed");
+  });
+  test("a test log line (no column) that reads like the compiler is not new code", () => {
+    const change = t("TestAdd", "failed", "z_arnx_test.go:14: got 3, want 4");
+    const base = three(run(t("TestAdd", "failed", "z_arnx_test.go:12: undefined: y")));
+    expect(judgeBefore(change, GEN, base).status).toBe("changed");
+    expect(judgeFix(t("TestAdd", "passed", ""), GEN, base).status).not.toBe("new-code");
   });
   test("a test that can never build (a program imported as a package) is not new code", () => {
     const m = 'x.go:6:2: import "example.com/m" is a program, not an importable package';
@@ -698,4 +706,11 @@ describe("judgeBefore: Go compiler text at the base", () => {
     expect(js("too many arguments in call to lib.Add").status).toBe("unknown");
     expect(js("undefined: lib.Nope").status).toBe("unknown");
   });
+});
+
+test("missingName reads the last segment of a Go undefined name", () => {
+  expect(missingName("x_arnx_test.go:3:5: undefined: lib.Brandnew")).toBe("Brandnew");
+  expect(missingName("x_arnx_test.go:3:5: undefined: Local")).toBe("Local");
+  expect(missingName("x_arnx_test.go:3:5: lib.T{}.Nope undefined (type lib.T has no field or method Nope)")).toBe("Nope");
+  expect(missingName("undefined: lib.Brandnew")).toBeNull();
 });
