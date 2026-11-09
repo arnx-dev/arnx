@@ -436,8 +436,10 @@ function goProject(c: Candidate, f: ProjectFacts, mark: MarkFn): Raw {
   const tag = major > GO_MIN[0] || (major === GO_MIN[0] && minor >= GO_MIN[1]) ? v : GO_MIN.join(".");
   const p: Raw = { runner: "gotest", image: `golang:${tag}-bookworm` };
   if (f.installRoot !== c.root) p.install_root = f.installRoot;
-  // A workspace root holds no go.mod, so the test build cannot warm there: modules are fetched, tests build in the member.
-  p.install = [f.installRoot !== c.root ? "go mod download" : "go mod download && go test -run '^$' ./..."];
+  // Modules are fetched strictly; the warm-up that fills the build cache is best effort, so one package that does not
+  // build (or a vet complaint) loses only itself. A workspace root holds no go.mod: its members' packages are listed.
+  const packages = f.installRoot !== c.root ? (f.goPackages ?? ["./..."]).join(" ") : "./...";
+  p.install = [`go mod download && { go test -vet=off -run '^$' ${packages} || true; }`];
   p.test_command = "go test {targets}";
   return p;
 }

@@ -50,7 +50,7 @@ test("the table's fixed values", () => {
   const w = go.words("gotest");
   expect(w.propertyLib).toBe("testing/quick");
   expect(w.imageExample).toBe("golang:1.26-bookworm");
-  expect(w.installExample).toBe("go mod download && go test -run '^$' ./...");
+  expect(w.installExample).toBe("go mod download && { go test -vet=off -run '^$' ./... || true; }");
   expect(w.commandExample).toBe("go test {targets}");
 });
 

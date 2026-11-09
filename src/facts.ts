@@ -24,6 +24,8 @@ export interface CiJob {
   env: Record<string, string>;
   install: string[];
   test: string[];
+  /** Go test commands that no other language's test pattern matches: counted for Go projects only. */
+  goTest?: string[];
   apt: string[];
   /** The languages it sets up or tests (none named: any). */
   languages: string[];
@@ -54,6 +56,8 @@ export interface ProjectFacts {
   copy: string[];
   /** The ids of the CI jobs that run in root or name it. */
   jobs: string[];
+  /** Go: the packages a go.work lists, relative to its directory, when the project is one of its members. */
+  goPackages?: string[];
   /** Names from Facts.services this project's tests need (a CI test job or a test compose file starts them), and ones
    * its code may use (its dependencies, a compose file for running it), each with why. */
   services: Fact[];
@@ -249,12 +253,17 @@ export function readFacts(repo: string, paths: string[], candidates: Candidate[]
   const projects = candidates.map((c): ProjectFacts => {
     const ups = ancestors(c.root);
     const named = new RegExp(`(^|[\\s/'"=])${escape(c.root)}(/|\\s|$|['"])`);
+    const go = c.language === "go";
+    // A job as this project sees it: "go" in its languages and its Go test commands matter to Go projects only.
+    const view = (j: CiJob): CiJob => go ? { ...j, test: [...j.test, ...(j.goTest ?? [])] }
+      : { ...j, languages: j.languages.filter((l) => l !== "go") };
     const fits = (j: CiJob) => !j.languages.length || j.languages.includes(c.language);
+    const seen = jobs.map(view);
     // Jobs that run tests first: their versions are the ones tests run on.
     const testsFirst = (js: CiJob[]) => [...js.filter((j) => j.test.length), ...js.filter((j) => !j.test.length)];
-    const tied = testsFirst(jobs.filter((j) => fits(j) &&
+    const tied = testsFirst(seen.filter((j) => fits(j) &&
       (j.dirs.includes(c.root) || (c.root !== "." && named.test(j.text)))));
-    const above = testsFirst(jobs.filter((j) => fits(j) && !tied.includes(j) && j.dirs.some((d) => ups.includes(d))));
+    const above = testsFirst(seen.filter((j) => fits(j) && !tied.includes(j) && j.dirs.some((d) => ups.includes(d))));
     const f: ProjectFacts = { root: c.root, language: c.language,
       versions: versionsOf(ups, [...tied, ...above], jobs, docker.get(c.root) ?? [], files), manager: null,
       installRoot: c.root, lockfile: null, requirements: [], extras: [], groups: [], installable: false, nativeBuild: false,
@@ -557,6 +566,16 @@ function goFacts(f: ProjectFacts, ups: string[], { set, read }: Files) {
     }
   }
   if (set.has(at(f.installRoot, "go.sum"))) f.lockfile = "go.sum";
+  if (f.installRoot !== f.root) {
+    // Go requires the go.work line to be at least every member's: a member runs on the higher of the two.
+    const work = cleanVersion("go", goLine(read(at(f.installRoot, "go.work"))) ?? "");
+    const mine = f.versions.go?.value;
+    const newer = (a: string, b: string) => Number(a.split(".")[1]) > Number(b.split(".")[1]);
+    if (work && (!mine || newer(work, mine))) f.versions.go = { value: work, from: `${at(f.installRoot, "go.work")} go line` };
+    f.goPackages = goWorkUses(read(at(f.installRoot, "go.work")))
+      .map((u) => posix.relative(".", posix.normalize(u)))
+      .map((u) => (u === "" || u === "." ? "./..." : `./${u}/...`));
+  }
 }
 
 /** A Cargo or package.json workspace member pattern as a regex over directories. */
@@ -616,8 +635,10 @@ function dependencyNames(f: ProjectFacts, c: Candidate, { read, json, toml }: Fi
   return [...out];
 }
 
-const INSTALL = /\b(npm (ci|install|i)\b|pnpm (i|install)\b|yarn( install)?\s*($|--)|bun install|pip3? install|uv (sync|pip install)|poetry install|pipenv install|pdm (install|sync)|cargo (install|fetch|build)|go (mod download|get|install))/;
-const TEST = /\b(pytest|vitest|jest|mocha|node --test|bun test|cargo (test|nextest)|go test|(npm|pnpm|yarn|bun)( run)? test\b|tox\b|nox\b|make test)/;
+/** A Go test command: only a Go project counts it, so no other language's facts move for a job that runs it. */
+const GO_TEST = /\bgo test\b/;
+const INSTALL = /\b(npm (ci|install|i)\b|pnpm (i|install)\b|yarn( install)?\s*($|--)|bun install|pip3? install|uv (sync|pip install)|poetry install|pipenv install|pdm (install|sync)|cargo (install|fetch|build))/;
+const TEST = /\b(pytest|vitest|jest|mocha|node --test|bun test|cargo (test|nextest)|(npm|pnpm|yarn|bun)( run)? test\b|tox\b|nox\b|make test)/;
 
 /** GitHub Actions jobs: their versions, services, env and commands. */
 function githubJobs(paths: string[], yaml: (rel: string) => unknown, read: (rel: string) => string): CiJob[] {
@@ -683,6 +704,7 @@ function githubJobs(paths: string[], yaml: (rel: string) => unknown, read: (rel:
           j.text += cmd + "\n";
           if (TEST.test(cmd) || INSTALL.test(cmd)) dirs.add(here);
           if (TEST.test(cmd)) j.test.push(cmd);
+          else if (GO_TEST.test(cmd)) (j.goTest ??= []).push(cmd);
           else if (INSTALL.test(cmd)) j.install.push(cmd);
           const apt = /apt(-get)?\s+install\s+(.*)/.exec(cmd);
           if (apt) j.apt.push(...apt[2]!.split(/\s+/).filter((p) => /^[a-z0-9][a-z0-9.+-]+$/.test(p)));
@@ -750,6 +772,7 @@ function gitlabJobs(set: Set<string>, yaml: (rel: string) => unknown): CiJob[] {
     for (const line of script.flatMap(commands)) {
       j.text += line + "\n";
       if (TEST.test(line)) j.test.push(line);
+      else if (GO_TEST.test(line)) (j.goTest ??= []).push(line);
       else if (INSTALL.test(line)) j.install.push(line);
     }
     j.languages = jobLanguages(j);
