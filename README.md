@@ -29,6 +29,14 @@ No model keys? `arnx init --cloud`, then `arnx login`: [arnx cloud](docs/CLOUD.m
 and new accounts start with $5 of credit. Tests still run in your Docker. No Node? Use a
 [standalone binary](docs/WORKFLOW.md#install).
 
+Want to see it on something small first? [checkout-demo](https://github.com/arnx-dev/checkout-demo) is a tiny
+checkout with a bug we planted on purpose. In our run it took about a minute and under $0.15, setup included:
+
+    git clone https://github.com/arnx-dev/checkout-demo && cd checkout-demo
+    git switch discount-codes
+    arnx init
+    arnx review
+
 ## What `arnx review` does
 
     1. SET UP     A Docker image that can run your tests, and throwaway copies of your code
