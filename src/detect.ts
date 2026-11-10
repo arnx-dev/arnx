@@ -51,8 +51,8 @@ const LOCKS: [string, string][] = [["pnpm-lock.yaml", "pnpm"], ["yarn.lock", "ya
 const NOT_PROJECTS = new Set(["fixtures", "__fixtures__", "testdata", "test-data", "test", "tests", "__tests__", "e2e"]);
 /** Go: a go.mod under these is vendored code, not a module of the repository. */
 const GO_SKIP = new Set(["vendor", "third_party"]);
-/** Go: `go test ./...` ignores directories whose name starts with a dot. */
-const hiddenDir = (dir: string) => dir.split("/").some((s) => s.length > 1 && s.startsWith("."));
+/** Go: the go tool ignores directories whose name starts with a dot or an underscore. */
+const hiddenDir = (dir: string) => dir.split("/").some((s) => s.length > 1 && (s.startsWith(".") || s.startsWith("_")));
 const GO_TEST = /_test\.go$/;
 const MAX_LISTED = 40;
 const LANGUAGE_NAMES: Record<string, string> = { python: "Python", typescript: "JavaScript/TypeScript", rust: "Rust",

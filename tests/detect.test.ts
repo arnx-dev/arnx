@@ -219,3 +219,14 @@ test("a Go module under a hidden directory is not a project, unless a go.work us
     ".tools/x/go.mod": "module example.com/x\n", ".tools/x/x.go": "package x\n" }));
   expect(short(w)).toEqual([[".tools/x", "go", "gotest", "go"]]);
 });
+
+test("a Go module under a folder starting with _ is not a project, unless a go.work uses it", () => {
+  const d = detect(repoWith({
+    "go.mod": "module example.com/r\n", "r.go": "package r\n",
+    "_examples/demo/go.mod": "module example.com/demo\n", "_examples/demo/d.go": "package d\n" }));
+  expect(short(d)).toEqual([[".", "go", "gotest", "go"]]);
+  const w = detect(repoWith({
+    "go.work": "go 1.24\nuse ./_tools/x\n",
+    "_tools/x/go.mod": "module example.com/x\n", "_tools/x/x.go": "package x\n" }));
+  expect(short(w)).toEqual([["_tools/x", "go", "gotest", "go"]]);
+});
