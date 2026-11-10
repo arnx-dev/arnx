@@ -113,17 +113,22 @@ export const REPORT_DIR = ".arnx-run";
 
 /** Where `arnx accept` keeps tests (testround.ts DOME); `arnx check` puts each in place from there. */
 const KEPT = ".arnx/tests";
+/** The file Docker reads at the root of a build context for what to leave out of it. */
+const DOCKERIGNORE = ".dockerignore";
 
 export const projectOf = (cfg: ReviewConfig) => posix.normalize(cfg.workdir).replace(/^\.$/, "").replace(/\/$/, "");
 
 /** What in a scope is not the code under test (relative to the scope): the generated tests' folder (it changes during
  * a round), and in the repository's scope arnx's own folder, the runners' reports and the accepted tests a check put
- * in place. Neither the image key nor the image holds these: runs read tests from the mounted copy. */
+ * in place. Neither the image key nor the image holds these: runs read tests from the mounted copy. The repository's
+ * .dockerignore is left out too: Docker would apply it to arnx's build (`*` there, for a project that ships its own
+ * image, leaves the image empty); what arnx keeps out is already out of the snapshot. */
 export function notCode(cfg: ReviewConfig, snap: string, scope: string): string[] {
   const tests = posix.normalize(posix.join(projectOf(cfg), cfg.testsDir));
   const rel = (p: string) => (scope ? posix.relative(scope, p) : p);
   const kept = existsSync(join(snap, KEPT)) ? entriesUnder(join(snap, KEPT)).filter((p) => isFileOrLinkToFile(join(snap, KEPT, p))) : [];
-  return [tests, ".arnx", REPORT_DIR, ...kept].filter((p) => !scope || p.startsWith(`${scope}/`)).map(rel);
+  return [tests, ".arnx", REPORT_DIR, ...kept].filter((p) => !scope || p.startsWith(`${scope}/`)).map(rel)
+    .concat(scope ? [] : [DOCKERIGNORE]);
 }
 
 /** A copy of `context` without the paths in `skip`, made of hard links where it can (a folder of its own, removed by

@@ -106,6 +106,29 @@ test("the image is built from the build context", async () => {
   }
 });
 
+test("the project's own .dockerignore does not empty the image: the build gets the code without it", async () => {
+  const fake = join(tmp(), "docker");
+  const files = join(tmp(), "files");
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in image) exit 1;; build) for a; do ctx="$a"; done; ` +
+    `(cd "$ctx" && find . -type f | sort) > '${files}'; cat > /dev/null;; esac\nexit 0\n`);
+  chmodSync(fake, 0o755);
+  const snap = join(tmp(), "snap");
+  mkdirSync(join(snap, "pkg"), { recursive: true });
+  writeFileSync(join(snap, ".dockerignore"), "*\n");
+  writeFileSync(join(snap, "pkg", ".dockerignore"), "*\n"); // not the context's: Docker reads only the root one
+  writeFileSync(join(snap, "go.mod"), "module example.com/m\n");
+  writeFileSync(join(snap, "main.go"), "package main\n");
+  const saved = sandboxOptions.buildkit;
+  sandboxOptions.buildkit = false;
+  try {
+    await withDockerAsync(fake, () => ensureEnv(parseReviewConfig(CFG), snap, join(tmp(), "build.log")));
+  } finally {
+    sandboxOptions.buildkit = saved;
+  }
+  expect(readFileSync(files, "utf8").trim().split("\n")).toEqual(["./go.mod", "./main.go", "./pkg/.dockerignore"]);
+  expect(readFileSync(join(snap, ".dockerignore"), "utf8")).toBe("*\n"); // the snapshot keeps it
+});
+
 test("a build that keeps its output: the code that differs from what was built is newer than the build", async () => {
   const fake = join(tmp(), "docker");
   writeFileSync(fake, `#!/bin/sh\ncase "$1" in image) exit 1;; build) cat > /dev/null;; esac\nexit 0\n`);
