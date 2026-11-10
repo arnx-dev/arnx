@@ -18,6 +18,7 @@ import { gapsLine } from "./typecheck";
 import { staleLine, staleRewrites } from "./standins";
 import { isSourcePath, SOURCE } from "./untested";
 import { NOT_SET_UP } from "./draft";
+import { isDraftedGoInstall } from "./adapters/go";
 import { route } from "./route";
 
 // Rough minutes and USD per project, for the estimate shown before setup starts.
@@ -103,7 +104,7 @@ export function approvalChecks(file: ReviewFile, proofs: ProjectProof[] = [], ho
         (silent.length ? ` (${silent.length} with no reason in notes)` : "") + `: ${p.knownFailing.slice(0, 6).join(", ")}` +
         (p.knownFailing.length > 6 ? ", …" : ""));
     }
-    const hidden = p.install.filter((l) => /\|\|\s*true\b/.test(l)).length + (/\|\|\s*true\b|;\s*true\)/.test(p.testCommand) ? 1 : 0);
+    const hidden = p.install.filter((l) => /\|\|\s*true\b/.test(l) && !isDraftedGoInstall(l)).length + (/\|\|\s*true\b|;\s*true\)/.test(p.testCommand) ? 1 : 0);
     if (hidden) out.push(`${p.name}: ${hidden} command(s) ignore their own errors (|| true)`);
     const stale = holds ? staleRewrites(p.install, holds) : [];
     if (stale.length) out.push(`${p.name}: ${staleLine(p.name, stale)}`);

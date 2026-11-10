@@ -51,6 +51,8 @@ const LOCKS: [string, string][] = [["pnpm-lock.yaml", "pnpm"], ["yarn.lock", "ya
 const NOT_PROJECTS = new Set(["fixtures", "__fixtures__", "testdata", "test-data", "test", "tests", "__tests__", "e2e"]);
 /** Go: a go.mod under these is vendored code, not a module of the repository. */
 const GO_SKIP = new Set(["vendor", "third_party"]);
+/** Go: `go test ./...` ignores directories whose name starts with a dot. */
+const hiddenDir = (dir: string) => dir.split("/").some((s) => s.length > 1 && s.startsWith("."));
 const GO_TEST = /_test\.go$/;
 const MAX_LISTED = 40;
 const LANGUAGE_NAMES: Record<string, string> = { python: "Python", typescript: "JavaScript/TypeScript", rust: "Rust",
@@ -181,7 +183,7 @@ export function detect(repo: string, files?: string[]): Detection {
   const goMembers = new Set<string>();
   const goWorkDirs = new Set<string>();
   for (const p of paths) {
-    if (posix.basename(p) !== "go.work" || dirOf(p).split("/").some((s) => NOT_PROJECTS.has(s) || GO_SKIP.has(s))) continue;
+    if (posix.basename(p) !== "go.work" || dirOf(p).split("/").some((s) => NOT_PROJECTS.has(s) || GO_SKIP.has(s)) || hiddenDir(dirOf(p))) continue;
     workspaces.add(dirOf(p));
     goWorkDirs.add(dirOf(p));
     for (const u of goWorkUses(read(repo, p))) goMembers.add(posix.normalize(posix.join(dirOf(p), u)));
@@ -210,6 +212,8 @@ export function detect(repo: string, files?: string[]): Detection {
       }
     } else if (name === "go.mod") {
       if (root.split("/").some((s) => GO_SKIP.has(s))) continue;
+      // A hidden directory is skipped by ./..., unless a go.work lists the module: the developer asked for it.
+      if (hiddenDir(root) && !goMembers.has(root)) continue;
       // Under a go.work, only its `use` members are projects.
       if (ancestors(root).some((d) => goWorkDirs.has(d)) && !goMembers.has(root)) continue;
       // A stray go.mod beside no Go code is not a Go project.

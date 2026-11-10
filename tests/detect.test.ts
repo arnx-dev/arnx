@@ -208,3 +208,14 @@ test("a go.work with use . gives the root module", () => {
   }));
   expect(short(d)).toEqual([[".", "go", "gotest", "go"]]);
 });
+
+test("a Go module under a hidden directory is not a project, unless a go.work uses it", () => {
+  const d = detect(repoWith({
+    "go.mod": "module example.com/r\n", "r.go": "package r\n",
+    ".github/scripts/tool/go.mod": "module example.com/tool\n", ".github/scripts/tool/t.go": "package t\n" }));
+  expect(short(d)).toEqual([[".", "go", "gotest", "go"]]);
+  const w = detect(repoWith({
+    "go.work": "go 1.24\nuse ./.tools/x\n",
+    ".tools/x/go.mod": "module example.com/x\n", ".tools/x/x.go": "package x\n" }));
+  expect(short(w)).toEqual([[".tools/x", "go", "gotest", "go"]]);
+});

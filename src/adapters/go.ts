@@ -14,6 +14,9 @@ const FILES = `${LAYOUT}, one self-contained file per folder: package arnx, impo
   "path (exported names only), find fixtures by walking up to go.mod";
 
 /** Folders Go's toolchain leaves out of a module: vendored code and test data. */
+/** The install line arnx drafts for Go: a deliberate warm-up compile whose `|| true` is not a hidden error. */
+export const isDraftedGoInstall = (line: string) =>
+  /^go mod download && \{ go test -vet=off -run '\^\$' (\.\/[\w.\/-]*)( \.\/[\w.\/-]*)* \|\| true; \}$/.test(line);
 export const GO_SKIP_DIRS: ReadonlySet<string> = new Set(["vendor", "testdata"]);
 /** Whether a repository path lies under one of them. */
 export const goSkipped = (path: string) => path.split("/").slice(0, -1).some((d) => GO_SKIP_DIRS.has(d));

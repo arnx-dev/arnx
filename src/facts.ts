@@ -559,14 +559,17 @@ export function goWorkUses(text: string): string[] {
 function goFacts(f: ProjectFacts, ups: string[], { set, read }: Files) {
   f.manager = { value: "go", from: at(f.root, "go.mod") };
   // The go.work that lists this module installs for all its members: install runs there, tests from inside the member.
+  let member = false;
   for (const d of ups) {
     if (set.has(at(d, "go.work")) && goWorkUses(read(at(d, "go.work"))).some((u) => posix.normalize(posix.join(d, u)) === f.root)) {
       f.installRoot = d;
+      member = true;
       break;
     }
   }
   if (set.has(at(f.installRoot, "go.sum"))) f.lockfile = "go.sum";
-  if (f.installRoot !== f.root) {
+  // The root module may itself be a member (`use .`): it shares the workspace's environment like the others.
+  if (member) {
     // Go requires the go.work line to be at least every member's: a member runs on the higher of the two.
     const work = cleanVersion("go", goLine(read(at(f.installRoot, "go.work"))) ?? "");
     const mine = f.versions.go?.value;

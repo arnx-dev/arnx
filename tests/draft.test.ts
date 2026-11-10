@@ -653,6 +653,19 @@ describe("Go projects", () => {
   });
 });
 
+test("a go.work that uses . drafts the root with the same environment as the other members", () => {
+  const d = detect(repoWith({
+    "go.work": "go 1.25\n\nuse (\n\t.\n\t./a\n)\n",
+    "go.mod": "module example.com/r\n\ngo 1.22\n", "r.go": "package r\n", "r_test.go": "package r\n",
+    "a/go.mod": "module example.com/a\n\ngo 1.24\n", "a/a.go": "package a\n", "a/a_test.go": "package a\n" }));
+  const ps = projects(d);
+  const root = ps.main ?? Object.values(ps).find((p) => p.root === ".")!;
+  expect(root.image).toBe("golang:1.25-bookworm");
+  expect(root.install).toEqual(ps.a.install);
+  expect(root.install).toEqual(["go mod download && { go test -vet=off -run '^$' ./... ./a/... || true; }"]);
+  expect(root.image).toBe(ps.a.image);
+});
+
 test("a drafted Go workspace member passes the config check", () => {
   const d = detect(repoWith({
     "go.work": "go 1.25\n\nuse ./a\n",

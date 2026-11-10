@@ -438,7 +438,7 @@ function goProject(c: Candidate, f: ProjectFacts, mark: MarkFn): Raw {
   if (f.installRoot !== c.root) p.install_root = f.installRoot;
   // Modules are fetched strictly; the warm-up that fills the build cache is best effort, so one package that does not
   // build (or a vet complaint) loses only itself. A workspace root holds no go.mod: its members' packages are listed.
-  const packages = f.installRoot !== c.root ? (f.goPackages ?? ["./..."]).join(" ") : "./...";
+  const packages = (f.goPackages ?? ["./..."]).join(" ");
   p.install = [`go mod download && { go test -vet=off -run '^$' ${packages} || true; }`];
   p.test_command = "go test {targets}";
   return p;
