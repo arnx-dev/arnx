@@ -1,7 +1,9 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseGoReport } from "../src/adapters/go-report";
+import { type BeforeRun, judgeBefore } from "../src/before";
+import { parseBaseline } from "../src/baseline";
 
 const FIX = join(import.meta.dir, "fixtures", "go-events");
 const SRC = join(FIX, "src");
@@ -141,4 +143,85 @@ test("a package Go names by its pattern still reports on its file", () => {
   const f = "arnx_generated/_u_arnx/_u_arnx_test.go";
   expect(r.map((t) => [t.name, t.fileAttr, t.outcome])).toEqual([[f, f, "failed"]]);
   expect(r[0]!.message).toContain("no Go files");
+});
+
+// A failure's first line is what tells it apart (before.ts compares it, the baseline keeps it): real `go test -json`
+// runs of tests/fixtures/go-failures, twice the same (a, b) and once with other values (variant).
+const FAIL = join(import.meta.dir, "fixtures", "go-failures");
+function failRun(run: "a" | "b" | "variant") {
+  const decl: string[] = [];
+  const walk = (rel: string) => {
+    for (const e of readdirSync(join(FAIL, "src", rel), { withFileTypes: true })) {
+      const p = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith("_test.go")) {
+        for (const l of readFileSync(join(FAIL, "src", p), "utf8").split("\n")) if (l.startsWith("func Test")) decl.push(`#arnx-test ${p}:${l}`);
+      }
+    }
+  };
+  walk("");
+  return parseGoReport(readFileSync(join(FAIL, `run-${run}.jsonl`), "utf8") +
+    ["#arnx-module example.com/failures", ...decl].join("\n") + "\n")!;
+}
+const failOf = (run: "a" | "b" | "variant", name: string) => failRun(run).find((t) => t.name === name)!;
+const headOf = (run: "a" | "b" | "variant", name: string) => failOf(run, name).message.split("\n")[0]!;
+
+describe("a Go failure's first line", () => {
+  test("a location chain takes its message from the lines under it", () => {
+    const h = headOf("a", "TestListing");
+    expect(h.startsWith("check.go:19: chain_test.go:18:")).toBe(true);
+    expect(h).toContain('-["docs/","lib/"]');
+    expect(h).toContain('+["docs/"]');
+    expect(h).not.toContain("\u001b"); // colour codes
+  });
+  test("a bare location with testify's block takes Error and Messages", () => {
+    expect(headOf("a", "TestReadsOutput")).toBe("testify_test.go:20: Received unexpected error: open testdata/missing.txt: " +
+      "no such file or directory (reading the output)");
+    const eq = headOf("a", "TestEqualValue");
+    expect(eq.startsWith('testify_test.go:25: Not equal: expected: "alpha" actual : "beta"')).toBe(true);
+    expect(eq).not.toContain("Error Trace");
+    expect(eq).not.toContain("comparing the value"); // the t.Log before it
+  });
+  test("a line logged before the error is not the failure", () =>
+    expect(headOf("a", "TestUpload")).toBe("upload_test.go:18: Error occurred [open testdata/picture.png: no such file or directory]"));
+  test("a plain message stays as it is; of a log and an error, the line nearest the end is the failure", () => {
+    expect(headOf("a", "TestIsLocal")).toBe("plain_test.go:7: expected true, received false");
+    expect(headOf("a", "TestDecode")).toBe("plain_test.go:13: bad json");
+  });
+  test("failing subtests each give their failure, in name order; passing ones and the parent's log do not", () =>
+    expect(headOf("a", "TestTable")).toBe("table_test.go:17: Not equal: expected: 1 actual : 2 | table_test.go:22: wrong count: 3"));
+  test("addresses, durations, temporary paths and local ports are evened out", () => {
+    const h = headOf("a", "TestSlowHandler");
+    expect(h).toBe("volatile_test.go:17: request to http://127.0.0.1:<port> for /tmp/<tmp>/001 failed: handler 0x… after <duration>");
+    expect(headOf("b", "TestSlowHandler")).toBe(h);
+    expect(failOf("a", "TestSlowHandler").message).toMatch(/after \d+\.\d+ms/); // the output itself is kept as it was
+  });
+  test("a panic is the failure, whatever the test logged before", () =>
+    expect(firstLine("panic", "TestPanics")).toBe("panic: kaboom [recovered, repanicked]"));
+  test("the first line is one bounded line", () => {
+    for (const t of failRun("a")) {
+      const h = t.message.split("\n")[0]!;
+      expect(h.length).toBeLessThanOrEqual(500);
+    }
+  });
+});
+
+describe("before and after on Go failures", () => {
+  const runOf = (r: "a" | "b" | "variant"): BeforeRun => ({ results: failRun(r), output: "", timedOut: false });
+  const file = (name: string) => failOf("a", name).fileAttr;
+  test("two testify failures at the same line do not compare the same", () => {
+    for (const name of ["TestEqualValue", "TestListing"]) {
+      expect(judgeBefore(failOf("variant", name), file(name), [runOf("a"), runOf("a")]).status).toBe("changed");
+    }
+  });
+  test("the same failure in two runs with other addresses, ports, paths and timings compares the same", () => {
+    for (const name of ["TestSlowHandler", "TestEqualValue", "TestUpload", "TestTable"]) {
+      expect(judgeBefore(failOf("b", name), file(name), [runOf("a"), runOf("a")]).status).toBe("pre-existing");
+    }
+  });
+  test("a baseline recorded with the old first lines still loads", () => {
+    const old = `{"version":1,"projects":{"main":[{"id":"p/x_test.go::TestA","file":"p/x_test.go","first":"x_test.go:438:"},` +
+      `{"id":"p/x_test.go::TestB","file":"p/x_test.go","first":"helper.go:36: x_test.go:120:"}]}}`;
+    expect(parseBaseline(old).get("main")!.map((t) => t.first)).toEqual(["x_test.go:438:", "helper.go:36: x_test.go:120:"]);
+  });
 });
