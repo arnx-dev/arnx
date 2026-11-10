@@ -273,6 +273,52 @@ test("a backend whose tests need three or more services goes under uncovered, na
   expect(projects(two).server.services).toEqual(["postgres", "redis"]);
 });
 
+/** Two Python projects, one at the root and one in sub/, with `steps` as the one CI job (it starts `services`). */
+function twoProjects(steps: string, services = ["postgres:16", "mysql:8", "redis:7"]) {
+  const ci = "on: push\njobs:\n  integration:\n    runs-on: ubuntu-latest\n    services:\n" +
+    services.map((s) => `      ${s.split(":")[0]}:\n        image: ${s}\n`).join("") + `    steps:\n${steps}`;
+  const d = detect(repoWith({ "pyproject.toml": "[project]\nname='x'\n", "tests/test_a.py": "",
+    "sub/pyproject.toml": "[project]\nname='sub'\n", "sub/tests/test_b.py": "", ".github/workflows/ci.yml": ci }));
+  const of = (root: string) => d.facts!.projects.find((p) => p.root === root)!;
+  return { d, root: of("."), sub: of("sub") };
+}
+const CHECKOUT = "      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n" +
+  "        with: { python-version: '3.12' }\n";
+
+test("a job that tests only in a sub-folder is not the root project's, whatever else it runs without a folder", () => {
+  const sub = "      - name: test\n        working-directory: sub\n        run: pytest\n";
+  for (const steps of [`${CHECKOUT}      - run: git checkout -\n${sub}`, `${CHECKOUT}      - run: cd sub && pytest\n`,
+    `${CHECKOUT}      - run: |\n          cd sub\n          pip install -e .\n          pytest\n`]) {
+    const { d, root, sub: inSub } = twoProjects(steps);
+    expect([root.jobs, root.services]).toEqual([[], []]);
+    expect(inSub.jobs).toEqual([".github/workflows/ci.yml:integration"]);
+    const doc = draftReview(d)!.doc as Record<string, any>;
+    expect(Object.keys(doc.projects)).toEqual(["main"]);
+    expect(doc.projects.main.services).toBeUndefined();
+    expect(doc.uncovered.map((u: { path: string }) => u.path)).toEqual(["/sub/"]);
+  }
+});
+
+test("a job that tests at the root and in a sub-folder is both projects'", () => {
+  const { root, sub } = twoProjects(`${CHECKOUT}      - run: pytest\n      - run: pytest\n        working-directory: sub\n`,
+    ["postgres:16", "redis:7"]);
+  for (const p of [root, sub]) {
+    expect(p.jobs).toEqual([".github/workflows/ci.yml:integration"]);
+    expect(p.services.map((s) => s.value)).toEqual(["postgres", "redis"]);
+  }
+});
+
+test("a job that installs and tests at the root is the root project's, with its services", () => {
+  const { root, sub } = twoProjects(`${CHECKOUT}      - run: git checkout -\n      - run: pip install -e .\n` +
+    "      - run: pytest\n");
+  expect(root.jobs).toEqual([".github/workflows/ci.yml:integration"]);
+  expect(root.services.map((s) => s.value)).toEqual(["postgres", "mysql", "redis"]);
+  expect(sub.jobs).toEqual([]);
+  // A job that neither installs nor tests anywhere stays where it runs.
+  const other = twoProjects(`${CHECKOUT}      - run: make check\n        working-directory: sub\n`);
+  expect([other.root.jobs, other.sub.jobs]).toEqual([[], [".github/workflows/ci.yml:integration"]]);
+});
+
 test("try_project refuses such a project while it lists three or more services", async () => {
   const repo = repoWith({ "server/pyproject.toml": "[project]\nname='server'\n", "server/tests/test_a.py": "",
     ".github/workflows/ci.yml": MANY_CI });
