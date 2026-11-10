@@ -168,7 +168,9 @@ export function parseGoReport(text: string): TestResult[] | null {
     if (ev.Action === "fail") c.failed.add(ev.Test);
     if (ev.Action === "output") {
       c.out.push(ev.Output ?? "");
-      c.own.set(ev.Test, [...(c.own.get(ev.Test) ?? []), ev.Output ?? ""]);
+      const own = c.own.get(ev.Test);
+      if (own) own.push(ev.Output ?? "");
+      else c.own.set(ev.Test, [ev.Output ?? ""]);
     } else if (!ev.Test.includes("/") && (ev.Action === "pass" || ev.Action === "fail" || ev.Action === "skip")) c.terminals.add(ev.Action);
     // a failing subtest is reported through its parent, whose own terminal event fails with it
   }

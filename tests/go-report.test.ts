@@ -225,3 +225,15 @@ describe("before and after on Go failures", () => {
     expect(parseBaseline(old).get("main")!.map((t) => t.first)).toEqual(["x_test.go:438:", "helper.go:36: x_test.go:120:"]);
   });
 });
+
+test("a failing test with a long output is read in linear time", () => {
+  const ev = (o: object) => JSON.stringify({ Package: "example.com/events", ...o });
+  const lines = [ev({ Action: "start" }), ev({ Action: "run", Test: "TestLong" })];
+  for (let i = 0; i < 50000; i++) lines.push(ev({ Action: "output", Test: "TestLong", Output: `    long_test.go:${i}: line ${i}\n` }));
+  lines.push(ev({ Action: "fail", Test: "TestLong" }), ev({ Action: "fail" }));
+  lines.push("#arnx-module example.com/events", "#arnx-test long_test.go:func TestLong(t *testing.T) {");
+  const t = performance.now();
+  const r = parseGoReport(lines.join("\n") + "\n")!;
+  expect(performance.now() - t).toBeLessThan(5000);
+  expect(r[0]!.message.split("\n")[0]).toBe("long_test.go:49999: line 49999");
+});
