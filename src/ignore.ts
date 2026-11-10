@@ -134,12 +134,46 @@ export const DEFAULT_IGNORE = `# Data, dumps and images: kept out of everything 
 !testdata/
 `;
 
+const globRe = (path: string) => new RegExp(`^${path.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, "[^/]*")
+  .replace(/\?/g, "[^/]")}(?:/.*)?$`);
+
+/** The files code reads as part of itself, which no ignore may take out of the sandbox: what a Go `//go:embed`
+ * names (a file, a glob or a folder, next to the source), and a relative `.json` a JS or TS file imports. */
+export function codeNeeds(repo: string, files: string[]): Set<string> {
+  const out = new Set<string>();
+  const read = (rel: string) => {
+    try {
+      return statSync(join(repo, rel)).size > 1_000_000 ? "" : readFileSync(join(repo, rel), "utf8");
+    } catch {
+      return "";
+    }
+  };
+  for (const rel of files) {
+    const dir = posix.dirname(rel);
+    if (rel.endsWith(".go")) {
+      for (const m of read(rel).matchAll(/^\s*\/\/go:embed\s+(.+)$/gm)) {
+        for (const t of m[1]!.matchAll(/"((?:[^"\\]|\\.)*)"|`([^`]*)`|(\S+)/g)) {
+          const re = globRe(posix.join(dir, (t[1] ?? t[2] ?? t[3]!).replace(/^all:/, "")));
+          for (const f of files) if (re.test(f)) out.add(f);
+        }
+      }
+    } else if (/\.[cm]?[jt]sx?$/.test(rel)) {
+      for (const m of read(rel).matchAll(/(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)["'](\.{1,2}\/[^"']+\.json)["']/g)) {
+        out.add(posix.normalize(posix.join(dir, m[1]!)));
+      }
+    }
+  }
+  return out;
+}
+
 /** DEFAULT_IGNORE, then the other data-like files this repository has (large JSON, names with dump, export or
- * backup) that its patterns do not cover. */
+ * backup) that its patterns do not cover, then the files code embeds or imports that its patterns would take out. */
 export function initialIgnore(repo: string, untracked = false): string {
   const covered = matcher(DEFAULT_IGNORE);
   const more = proposeIgnore(repo, untracked).files.filter((f) => !covered(f));
-  return DEFAULT_IGNORE + (more.length ? `# Other data-like files here:\n${more.map((f) => `/${f}\n`).join("")}` : "");
+  const kept = [...codeNeeds(repo, lsFiles(repo))].filter(covered).sort();
+  return DEFAULT_IGNORE + (more.length ? `# Other data-like files here:\n${more.map((f) => `/${f}\n`).join("")}` : "") +
+    (kept.length ? `# The code embeds or imports these, so they stay:\n${kept.map((f) => `!/${f}\n`).join("")}` : "");
 }
 
 /** Files that look like data (exports, dumps, databases), and an .arnxignore that keeps them out. The files are those
@@ -153,7 +187,11 @@ export function proposeIgnore(repo: string, untracked = false): { files: string[
     { encoding: "utf8" }).stdout ?? "").trim();
   const ignored = loadIgnore(repo);
   const files: string[] = [], leftOut: string[] = [];
-  for (const rel of new Set([...lsFiles(repo), ...others])) {
+  const all = [...new Set([...lsFiles(repo), ...others])];
+  const needed = codeNeeds(repo, all);
+  for (const rel of all) {
+    // A file the code embeds or imports is part of the code.
+    if (needed.has(rel)) continue;
     // .arnx/ is arnx's own state; no snapshot keeps it.
     if (ignored(rel) || rel.startsWith(".arnx/")) continue;
     const name = posix.basename(rel).toLowerCase();
