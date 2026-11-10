@@ -1,8 +1,38 @@
 // File writes and reads in a tree a test may have changed: a run can leave a link, a FIFO or a folder it took the write bit
 // from, so nothing here follows a link out of the tree or trusts what it finds there.
 import { chmodSync, closeSync, constants, copyFileSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readlinkSync,
-  readSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeSync } from "node:fs";
+  readSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
+
+/** Every entry under `root` (relative, "/"-separated, folders too), like a recursive readdir that never goes into a link:
+ * a link to a folder is listed, not entered, so a loop (`a/b -> ..`, `x -> x`) ends. A missing root has no entries. */
+export function entriesUnder(root: string): string[] {
+  const out: string[] = [];
+  const visit = (rel: string) => {
+    let names: string[];
+    try {
+      names = readdirSync(rel ? join(root, rel) : root);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const r = rel ? `${rel}/${name}` : name;
+      out.push(r);
+      if (lstatSync(join(root, r), { throwIfNoEntry: false })?.isDirectory()) visit(r);
+    }
+  };
+  visit("");
+  return out;
+}
+
+/** Whether `p` is a file, or a link that ends at one; a broken or looping link is not. */
+export function isFileOrLinkToFile(p: string): boolean {
+  try {
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
 
 const inside = (root: string, p: string) => p === root || p.startsWith(root + sep);
 

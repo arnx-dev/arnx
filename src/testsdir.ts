@@ -3,6 +3,7 @@
 // collect. Configuration written in JavaScript is code: only literal values are read, and anything else leaves the
 // default to try_project's one-line test, as before.
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import { entriesUnder } from "./safefs";
 import { join, posix } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { adapterFor } from "./adapters";
@@ -113,7 +114,7 @@ interface Reader { covers: (file: string) => boolean; candidates: string[]; why:
 
 function holdsWritable(abs: string, writable: RegExp): boolean {
   if (!existsSync(abs)) return false;
-  return readdirSync(abs, { recursive: true }).some((n) => writable.test(posix.basename(String(n))));
+  return entriesUnder(abs).some((n) => writable.test(posix.basename(n)));
 }
 
 // ---- vitest -------------------------------------------------------------------------------------------------------

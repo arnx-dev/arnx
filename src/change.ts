@@ -19,7 +19,7 @@ import { isGenerated, isLockfile, loadIgnore, looksGenerated } from "./ignore";
 import { BIG_KEYS_MOST, excludePathspecs, fakeKeys, filePin, holdsOnlyPublicPem, holdsPrivateKey, isCertainRule, isCodePath, isKeyFileName, isSecretPath,
   type KeyScan, keyTokens, MAY_HOLD_KEY, mayShowPrivateKey, privateKeyIn, scanKeys, type SecretPin, standInsFor, suspects, usedAsName,
   secretFileValues, WORD_RULE } from "./secrets";
-import { realFolders, writeNew } from "./safefs";
+import { entriesUnder, isFileOrLinkToFile, realFolders, writeNew } from "./safefs";
 import { buildContextDir, manifestRule, REPORT_DIR, type Runner } from "./sandbox";
 import { standInsSetting } from "./settings";
 import { DIFF_SECTION, splitLines } from "./util";
@@ -1069,9 +1069,9 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
       }
     }
     if (existsSync(reports)) {
-      for (const name of readdirSync(reports, { recursive: true }).map(String)) {
+      for (const name of entriesUnder(reports)) {
         const p = join(reports, name);
-        const text = statSync(p).isFile() ? textOf(p) : null;
+        const text = isFileOrLinkToFile(p) ? textOf(p) : null;
         if (text === null) continue;
         const clean = stripSandbox(text, xmlPrints);
         if (clean !== text) writeFileSync(p, clean);

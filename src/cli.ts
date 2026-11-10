@@ -1310,17 +1310,20 @@ class Commands {
     const repo = this.repo();
     if (a.values.remove) return this.disallowSecret(repo, a.positionals);
     if (!a.positionals.length) throw new ArnxError("name the files to allow: arnx allow-secret PATH...");
-    const pins = a.positionals.map((p) => {
-      if (!existsSync(resolve(this.d.cwd, p))) throw new ArnxError(`${p}: no such file`);
+    // Each path is judged alone: those that qualify are allowed, each that does not is named, and only none at all fails.
+    const skipped: string[] = [];
+    const pins = a.positionals.flatMap((p) => {
+      const skip = (why: string) => { skipped.push(`${p}: ${why}`); return []; };
+      if (!existsSync(resolve(this.d.cwd, p))) return skip("no such file");
       const full = realpathSync(resolve(this.d.cwd, p));
-      if (!full.startsWith(repo + sep)) throw new ArnxError(`${p} is outside the repository`);
+      if (!full.startsWith(repo + sep)) return skip("outside the repository");
       const rel = relative(repo, full).split(sep).join("/");
       // A file left out whatever it holds, by its name or its size, is pinned as it stands.
       const tooBig = statSync(full).size > changeLimits.maxScanBytes;
       const whole = isSecretPath(rel) || tooBig || readFileSync(full).subarray(0, 8000).includes(0);
       const text = tooBig ? "" : readFileSync(full, "utf8");
       const hits = secretHits(text);
-      if (!hits.length && !whole) throw new ArnxError(`${rel} holds nothing that looks like a key; nothing to allow`);
+      if (!hits.length && !whole) return skip("holds nothing that looks like a key; nothing to allow");
       const shown = hits.slice(0, 5).map((h) => `${h.label} line ${h.line}`).join(", ") + (hits.length > 5 ? ", …" : "");
       if (hits.length) this.d.out(`! ${rel}: ${hits.length} key-like string${hits.length === 1 ? "" : "s"} (${shown})`);
       // Each side of a change must be allowed: the file as it stands, as committed, before the last commit, where its branch
@@ -1329,8 +1332,10 @@ class Commands {
         ? [git(repo, ["show", `${rev}:${rel}`], [0, 128])] : []) : [];
       const before = (existsSync(reviewConfigPath(repo)) ? readSecretPins(repo) : []).find((x) => x.path === rel)?.matches ?? [];
       const wholePins = whole ? [pinOfFile(full)!, ...earlier.filter(Boolean).map(filePin)] : [];
-      return { path: rel, matches: [...new Set([...secretPins(text), ...earlier.flatMap(secretPins), ...wholePins, ...before])].sort(), hits, whole };
+      return [{ path: rel, matches: [...new Set([...secretPins(text), ...earlier.flatMap(secretPins), ...wholePins, ...before])].sort(), hits, whole }];
     });
+    if (!pins.length) throw new ArnxError(skipped.join("\n"));
+    for (const line of skipped) this.d.out(`! ${line}`);
     const path = reviewConfigPath(repo);
     const seed = !existsSync(path) || isSeedFile(repo);
     mkdirSync(join(repo, ".arnx"), { recursive: true });
@@ -1344,7 +1349,8 @@ class Commands {
     this.d.out(`Next: ${seed ? "arnx setup" : "arnx review"}`);
     // Never the matched text, nor its pins: where each key-like string is, and what kind it looks like.
     this.emit("ok", 0, { files: pins.map((p) => ({ path: p.path, matches: p.hits.length,
-      labels: p.hits.map((h) => ({ label: h.label, line: h.line })) })), review_yaml: REVIEW_FILE,
+      labels: p.hits.map((h) => ({ label: h.label, line: h.line })) })), ...skipped.length ? { not_allowed: skipped } : {},
+      review_yaml: REVIEW_FILE,
       next: [seed ? "arnx setup" : "arnx review"] });
     return 0;
   }

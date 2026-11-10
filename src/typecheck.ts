@@ -4,7 +4,7 @@
 // deterministic, so once is enough. It is information: it never changes a test's outcome, a finding, whether a run
 // reported, or the exit code.
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import type { ReviewConfig } from "./config";
 import { ArnxError } from "./errors";
@@ -329,7 +329,7 @@ export function workspaceNames(snap: string): string[] {
           const name = (JSON.parse(read(at)) as { name?: unknown }).name;
           if (typeof name === "string") out.push(name);
         } catch { /* not a manifest */ }
-      } else if (depth < 4 && statSync(join(snap, at), { throwIfNoEntry: false })?.isDirectory()) walk(at, depth + 1);
+      } else if (depth < 4 && lstatSync(join(snap, at), { throwIfNoEntry: false })?.isDirectory()) walk(at, depth + 1);
     }
   };
   walk("", 0);

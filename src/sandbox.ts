@@ -15,7 +15,7 @@ import type { CopyOnly } from "./baked";
 import type { Swap } from "./boundary";
 import { digest, loadReviewFile, type ReviewConfig } from "./config";
 import { ArnxError, EnvFailed, SetupRequired } from "./errors";
-import { removeTree } from "./safefs";
+import { entriesUnder, isFileOrLinkToFile, removeTree } from "./safefs";
 import { envValue, globRegex } from "./secrets";
 import { pyJson, randomHex, shQuote, sleep } from "./util";
 
@@ -122,8 +122,7 @@ export const projectOf = (cfg: ReviewConfig) => posix.normalize(cfg.workdir).rep
 export function notCode(cfg: ReviewConfig, snap: string, scope: string): string[] {
   const tests = posix.normalize(posix.join(projectOf(cfg), cfg.testsDir));
   const rel = (p: string) => (scope ? posix.relative(scope, p) : p);
-  const kept = existsSync(join(snap, KEPT)) ? (readdirSync(join(snap, KEPT), { recursive: true }) as string[])
-    .map((p) => p.split("\\").join("/")).filter((p) => statSync(join(snap, KEPT, p)).isFile()) : [];
+  const kept = existsSync(join(snap, KEPT)) ? entriesUnder(join(snap, KEPT)).filter((p) => isFileOrLinkToFile(join(snap, KEPT, p))) : [];
   return [tests, ".arnx", REPORT_DIR, ...kept].filter((p) => !scope || p.startsWith(`${scope}/`)).map(rel);
 }
 
@@ -350,9 +349,9 @@ function newerThanImage(cfg: ReviewConfig, snapshot: string): void {
 /** Copies every file that can key an image (any language's manifests, at any depth) from `snapshot` to `dest`:
  * keys computed there stay as the snapshot was before runs wrote into it (cargo writes a missing Cargo.lock). */
 export function copyManifests(snapshot: string, dest: string): void {
-  for (const rel of readdirSync(snapshot, { recursive: true }) as string[]) {
-    if (!isManifest(rel.split("\\").join("/"))) continue;
-    if (!statSync(join(snapshot, rel), { throwIfNoEntry: false })?.isFile()) continue;
+  for (const rel of entriesUnder(snapshot)) {
+    if (!isManifest(rel)) continue;
+    if (!isFileOrLinkToFile(join(snapshot, rel))) continue;
     mkdirSync(dirname(join(dest, rel)), { recursive: true });
     copyFileSync(join(snapshot, rel), join(dest, rel));
   }

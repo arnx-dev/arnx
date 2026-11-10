@@ -538,3 +538,30 @@ test("a file over the cap is left out and named the same way, and can be allowed
     changeLimits.maxScanBytes = was;
   }
 });
+
+test("allow-secret with several paths allows each that qualifies and names each that does not", async () => {
+  const { readSecretPins } = await import("../src/config");
+  const repo = project({ "a.txt": pem, "b.txt": pem, "plain.txt": "nothing here\n" });
+  const all = new Cli({ cwd: repo });
+  expect(await all.run("allow-secret", "a.txt", "b.txt")).toBe(0);
+  expect(readSecretPins(repo).map((p) => p.path).sort()).toEqual(["a.txt", "b.txt"]);
+  expect(all.stdout).not.toContain("nothing to allow");
+
+  const repo2 = project({ "a.txt": pem, "plain.txt": "nothing here\n", "b.txt": pem });
+  const mixed = new Cli({ cwd: repo2 });
+  expect(await mixed.run("allow-secret", "a.txt", "plain.txt", "gone.txt", "b.txt")).toBe(0);
+  expect(readSecretPins(repo2).map((p) => p.path).sort()).toEqual(["a.txt", "b.txt"]);
+  expect(mixed.stdout).toContain("! plain.txt: holds nothing that looks like a key");
+  expect(mixed.stdout).toContain("! gone.txt: no such file");
+  expect(mixed.stdout).toContain("Allowed in");
+});
+
+test("allow-secret with no path that qualifies names each one and exits 2", async () => {
+  const { readSecretPins } = await import("../src/config");
+  const repo = project({ "p.txt": "one\n", "q.txt": "two\n" });
+  const none = new Cli({ cwd: repo });
+  expect(await none.run("allow-secret", "p.txt", "q.txt")).toBe(2);
+  expect(none.stderr + none.stdout).toContain("p.txt: holds nothing that looks like a key; nothing to allow");
+  expect(none.stderr + none.stdout).toContain("q.txt: holds nothing that looks like a key; nothing to allow");
+  expect(readSecretPins(repo)).toEqual([]);
+});
