@@ -673,3 +673,15 @@ test("a drafted Go workspace member passes the config check", () => {
   const cfg = parseReviewFile(draftYaml(d).replace(/^#.*\n/gm, ""));
   expect(cfg.projects.map((p) => [p.name, p.runner, p.installRoot])).toEqual([["a", "gotest", "."]]);
 });
+
+test("a Go job that tests only in a sub-folder is not the root module's", () => {
+  const ci = "on: push\njobs:\n  integration:\n    runs-on: ubuntu-latest\n    services:\n" +
+    "      postgres:\n        image: postgres:16\n      mysql:\n        image: mysql:8\n      redis:\n        image: redis:7\n" +
+    "    steps:\n      - uses: actions/checkout@v4\n      - run: git checkout -\n" +
+    "      - run: |\n          cd sub\n          go mod download\n          go test ./...\n";
+  const d = detect(repoWith({ "go.mod": "module example.com/root\n\ngo 1.24\n", "a_test.go": "package root\n",
+    "sub/go.mod": "module example.com/sub\n\ngo 1.24\n", "sub/b_test.go": "package sub\n", ".github/workflows/ci.yml": ci }));
+  const of = (root: string) => d.facts!.projects.find((p) => p.root === root)!;
+  expect([of(".").jobs, of(".").services]).toEqual([[], []]);
+  expect(of("sub").jobs).toEqual([".github/workflows/ci.yml:integration"]);
+});

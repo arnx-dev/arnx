@@ -640,6 +640,7 @@ function dependencyNames(f: ProjectFacts, c: Candidate, { read, json, toml }: Fi
 
 /** A Go test command: only a Go project counts it, so no other language's facts move for a job that runs it. */
 const GO_TEST = /\bgo test\b/;
+const GO_INSTALL = /\bgo mod download\b/;
 const INSTALL = /\b(npm (ci|install|i)\b|pnpm (i|install)\b|yarn( install)?\s*($|--)|bun install|pip3? install|uv (sync|pip install)|poetry install|pipenv install|pdm (install|sync)|cargo (install|fetch|build))/;
 const TEST = /\b(pytest|vitest|jest|mocha|node --test|bun test|cargo (test|nextest)|(npm|pnpm|yarn|bun)( run)? test\b|tox\b|nox\b|make test)/;
 
@@ -705,7 +706,7 @@ function githubJobs(paths: string[], yaml: (rel: string) => unknown, read: (rel:
           }
           const cmd = resolve(line) ?? line;
           j.text += cmd + "\n";
-          if (TEST.test(cmd) || INSTALL.test(cmd)) dirs.add(here);
+          if (TEST.test(cmd) || GO_TEST.test(cmd) || INSTALL.test(cmd) || GO_INSTALL.test(cmd)) dirs.add(here);
           if (TEST.test(cmd)) j.test.push(cmd);
           else if (GO_TEST.test(cmd)) (j.goTest ??= []).push(cmd);
           else if (INSTALL.test(cmd)) j.install.push(cmd);
