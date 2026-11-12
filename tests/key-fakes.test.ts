@@ -565,3 +565,18 @@ test("allow-secret with no path that qualifies names each one and exits 2", asyn
   expect(none.stderr + none.stdout).toContain("q.txt: holds nothing that looks like a key; nothing to allow");
   expect(readSecretPins(repo)).toEqual([]);
 });
+
+const LAST_LINE_LINES = [0, 1, 2].map((i) => String(i + 1).repeat(64));
+const LAST_LINE = "abcdefghijklmnopqrstuvwxyzabcdef";
+test("a key's last line of letters alone is replaced", () => {
+  const doc = [HDR, ...LAST_LINE_LINES, LAST_LINE, END, ""].join("\n");
+  expect(secrets.keyTokens(doc)).toContain(LAST_LINE);
+  expect(fakeKeys(doc).text).not.toContain(LAST_LINE);
+});
+test("the same with CRLF line ends", () => {
+  expect(fakeKeys([HDR, ...LAST_LINE_LINES, LAST_LINE, END, ""].join("\r\n")).text).not.toContain(LAST_LINE);
+});
+test("a placeholder between header and END keeps its words", () => {
+  const doc = [HDR, "yourprivatekeygoeshere", END, ""].join("\n");
+  expect(fakeKeys(doc)).toEqual({ text: doc, count: 0 });
+});
