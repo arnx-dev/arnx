@@ -807,8 +807,8 @@ export function takeSnapshot(repo: string, head: string | null, dest: string, al
   if (head === null) {
     const paths = workingTreeFiles(repo, !!o.untracked).files.filter((p) => !ignored(p) || sandbox.has(p));
     if (paths.length > limit) {
-      throw new ArnxError(`the working tree has ${paths.length} files; arnx copies up to ${limit}. ` +
-        "Add large generated directories to .gitignore");
+      throw new ArnxError(`the working tree has ${paths.length} files outside .arnxignore; arnx copies up to ${limit}. ` +
+        "Add large vendored or generated folders to .arnxignore (.gitignore cannot help a tracked file)");
     }
     for (const rel of paths) {
       const src = join(repo, rel);
@@ -825,8 +825,12 @@ export function takeSnapshot(repo: string, head: string | null, dest: string, al
       else copyFileSync(src, out);
     }
   } else {
-    const count = names(git(repo, ["ls-tree", "-r", "-z", "--name-only", head])).length;
-    if (count > limit) throw new ArnxError(`the commit has more than ${limit} files`);
+    const count = names(git(repo, ["ls-tree", "-r", "-z", "--name-only", head]))
+      .filter((p) => !ignored(p) || sandbox.has(p)).length;
+    if (count > limit) {
+      throw new ArnxError(`the commit has ${count} files outside .arnxignore; arnx copies up to ${limit}. ` +
+        "Add large vendored or generated folders to .arnxignore");
+    }
     const archive = spawnSync("git", ["-C", repo, "archive", "--format=tar", head], { maxBuffer: MAX_BUFFER });
     if (archive.status !== 0) throw new ArnxError(`git archive failed: ${String(archive.stderr).trim().slice(0, 300)}`);
     // -m: files get the extraction time, not the commit time. An environment image can carry a build made after the
