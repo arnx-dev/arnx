@@ -159,6 +159,8 @@ test("models flipped by hand, no cloud consent: without a terminal arnx stops (e
   // accept turns answers into tests with a model: the same gate (--no-answers calls none).
   save(sampleReview({ id: "20261020-a1b2c3", questions: ["Q?"] }), join(repo, ".arnx", "reviews", "20261020-a1b2c3"),
     "d");
+  const md = join(repo, ".arnx", "reviews", "20261020-a1b2c3", "review.md");
+  writeFileSync(md, readFileSync(md, "utf8").replace("Answer:", "Answer: yes"));
   expect(await plain.run("accept")).toBe(3);
   expect(plain.stderr).toContain("arnx consent --cloud");
   expect(c.seen).toHaveLength(0);

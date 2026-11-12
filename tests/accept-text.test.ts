@@ -26,7 +26,7 @@ const sessions = (cases: [string, string, string, string][]): SessionFactory => 
 
 /** A repository with an approved environment and a review of four findings in two issues, all pre-filled real. */
 async function reviewed(o: { cases?: [string, string, string, string][]; questions?: string[];
-  real?: boolean } = {}): Promise<{ repo: string; rdir: string; cli: Cli }> {
+  real?: boolean; command?: string } = {}): Promise<{ repo: string; rdir: string; cli: Cli }> {
   const repo = gitRepo(tmp());
   const cli = new Cli({ cwd: repo, check: true, checkSessions: sessions(o.cases ?? []),
     env: { ANTHROPIC_API_KEY: "a" } });
@@ -36,7 +36,7 @@ projects:
   shop:
     root: .
     image: python:3.12-slim
-    test_command: python -m pytest {targets}
+    test_command: ${o.command ?? "python -m pytest {targets}"}
 `), "Dev", "2026-10-12"));
   commit(repo, "layout");
   const rdir = join(repo, ".arnx", "reviews", RID);
@@ -154,4 +154,25 @@ test("accept --no-check: the accepted tests fail until the fix, not run", async 
     "Then: arnx check",
     "Commit the fix and the accepted tests together.",
   ].join("\n"));
+});
+
+test("accept with nothing to answer needs no model key", async () => {
+  const { repo } = await reviewed({ cases: OWNER });
+  const bare = new Cli({ cwd: repo, check: true, checkSessions: sessions(OWNER), env: {} });
+  expect(await bare.run("accept")).toBe(0);
+  expect(bare.stderr).not.toMatch(/key/i);
+  expect(bare.stdout).toContain("✓ Accepted 4 tests");
+});
+
+test("accept says the one-line exclude when the project's command has it", async () => {
+  const { cli } = await reviewed({ cases: OWNER, command: "python -m pytest --ignore=.arnx {targets}" });
+  expect(await cli.run("accept", "--no-answers")).toBe(0);
+  expect(cli.stdout).toContain("Your own test run collects .arnx/ too (shop): exclude it there, as test_command in " +
+    "review.yaml does.");
+});
+
+test("accept stays quiet about the runner when the command leaves .arnx alone", async () => {
+  const { cli } = await reviewed({ cases: OWNER });
+  expect(await cli.run("accept", "--no-answers")).toBe(0);
+  expect(cli.stdout).not.toContain("collects .arnx/");
 });

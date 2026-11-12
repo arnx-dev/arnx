@@ -208,7 +208,7 @@ checked, and review.md and review.json (`types_unchecked`) record it. Run your o
 2. `arnx accept <id>` (without an id: the review started last). Tests behind findings marked real are copied into
    `.arnx/tests/`, at the path each runs from: `.arnx/tests/<project root>/tests/arnx/r<id>/` (`accepted_tests_dir`
    in `.arnx/config.toml`; at that default a TypeScript project uses `__tests__/arnx/r<id>/`, and a Rust crate
-   `tests/arnx_<id>_<name>.rs`). Your own test run never collects them there, so they cannot change it; only
+   `tests/arnx_<id>_<name>.rs`). pytest, node --test and nextest leave that folder out; for a runner that collects it, such as vitest, accept shows the one-line exclude. Only
    `arnx check` puts them in place, in a throwaway copy. Each file is named after the problem it
    protects (`test_deep_json_recursion.py`); answered questions become tests of the behaviour you described (one model
    round each, run in parallel; `answer_model` in `.arnx/config.toml` can pick a cheaper model; `--no-answers` skips

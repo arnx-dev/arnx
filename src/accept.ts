@@ -79,6 +79,23 @@ export function rewritesOf(review: Review, marks: Marks): Rewrite[] {
   return out;
 }
 
+/** Whether accept has a model round to run: an answered question (the rule accept uses), or a rewrite of a test the
+ * owner marked wrong. Without one, accept needs no model and no key. */
+export function hasAnswers(rdir: string): boolean {
+  const review = load(rdir);
+  const marks = parseMarks(readFileSync(join(rdir, "review.md"), "utf8"), review.findings.map((f) => f.id),
+    { reasons: true });
+  const answered = Object.keys(marks.answers).some((qid) => Number(qid.slice(1)) - 1 >= 0 &&
+    Number(qid.slice(1)) - 1 < review.questions.length);
+  return answered || rewritesOf(review, marks).length > 0;
+}
+
+/** Names of the projects whose test command mentions `.arnx`: setup proved that their runner collects it, so the
+ * command carries the exclude. The developer's own test run needs the same one. */
+export function projectsCollectingArnx(file: ReviewFile): string[] {
+  return file.projects.filter((p) => p.testCommand.includes(".arnx")).map((p) => p.name);
+}
+
 export interface AcceptResult {
   review: Review;
   marks: Marks;

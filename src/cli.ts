@@ -11,7 +11,8 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { accept, findAccepted, findReview, makeAnswerRunner, recordChosen } from "./accept";
+import { accept, findAccepted, findReview, hasAnswers, makeAnswerRunner, projectsCollectingArnx, recordChosen }
+  from "./accept";
 import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, contradictionLines,
   failingList, keepEdits, mayContradict, recordAnswerWatch,
   legacyAccepted, moveOut,
@@ -1675,13 +1676,15 @@ class Commands {
     // Answers and the closing check run in the sandbox: a changed review.yaml is proven again first (after the
     // consent the answers need).
     const again = `arnx accept${a.positionals[0] ? ` ${a.positionals[0]}` : ""}`;
-    if (a.values["no-answers"] && !a.values["no-check"] && this.d.check !== false) await this.reprove(repo, a, again);
+    // With nothing to answer no model runs: no consent, no key, no proof for the answers.
+    const answering = !a.values["no-answers"] && hasAnswers(rdir);
+    if (!answering && !a.values["no-check"] && this.d.check !== false) await this.reprove(repo, a, again);
     const progress = new Progress(this.progressLine, { quiet: a.values.quiet as boolean | undefined,
       live: this.d.live ?? null, cost: costSince() });
     let runner = null;
     let billed = false; // arnx cloud turns the answers into tests: their cost is what it billed
     let unpriced = false; // the answer model has no price: its cost is unknown
-    if (!a.values["no-answers"]) {
+    if (answering) {
       s = await this.agreed(repo, s, mode); // answers are turned into tests by a model
       await this.reprove(repo, a, again);
       const cloud = await this.cloudBrain(repo, s, mode);
@@ -1818,6 +1821,16 @@ class Commands {
       this.d.out("");
       this.d.out(c.bold(real.length ? "Next: commit the fix and the accepted tests together"
         : "Next: commit the accepted tests"));
+    }
+    let collecting: string[] = [];
+    try {
+      collecting = projectsCollectingArnx(loadReviewFile(repo, { requireApproved: false }));
+    } catch {
+      // a repository without a readable review.yaml has no runner to name; accept is done
+    }
+    if (collecting.length) {
+      this.d.out(`Your own test run collects .arnx/ too (${collecting.join(", ")}): exclude it there, as test_command ` +
+        "in review.yaml does.");
     }
     const rel = (p: string) => relative(repo, p).split(sep).join("/");
     // The same next steps as the text above.

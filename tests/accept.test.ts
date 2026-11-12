@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type AnswerOutcome, accept, findReview, precisionOf } from "../src/accept";
+import { type AnswerOutcome, accept, findReview, hasAnswers, precisionOf, projectsCollectingArnx } from "../src/accept";
+import { parseReviewFile } from "../src/config";
 import { python } from "../src/adapters/python";
 import { ArnxError } from "../src/errors";
 import { save } from "../src/report";
@@ -243,4 +244,29 @@ test("an unclaimed test is not kept in an accepted file", async () => {
   expect(kept).not.toContain("test_neg");
   expect(kept).not.toContain("test_zero");
   expect(JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")).unclaimed).toHaveLength(2);
+});
+
+test("projectsCollectingArnx names a project whose test command leaves .arnx out", () => {
+  const file = parseReviewFile(`version: 1
+projects:
+  web:
+    root: web
+    image: python:3.12-slim
+    test_command: python -m pytest --ignore=.arnx {targets}
+  api:
+    root: api
+    image: python:3.12-slim
+    test_command: python -m pytest {targets}
+`);
+  expect(projectsCollectingArnx(file)).toEqual(["web"]);
+});
+
+test("hasAnswers is false for a review with no answered question, true with one", () => {
+  const repo = gitRepo(tmp());
+  const rdir = savedReview(repo);
+  expect(hasAnswers(rdir)).toBe(false);
+  mark(rdir, "real", "real");
+  expect(hasAnswers(rdir)).toBe(false);
+  mark(rdir, "real", "real", "Yes, strings are allowed.");
+  expect(hasAnswers(rdir)).toBe(true);
 });

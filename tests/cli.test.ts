@@ -238,7 +238,10 @@ test("accept with answers needs the model's key, not a consent", async () => {
   await cli.run("init");
   const config = join(repo, ".arnx", "config.toml");
   writeFileSync(config, readFileSync(config, "utf8").split("\n").filter((l) => !l.startsWith("consent_at")).join("\n"));
-  save(bare({ questions: ["Q?"] }), join(repo, ".arnx", "reviews", RID), "d");
+  const rdir = join(repo, ".arnx", "reviews", RID);
+  save(bare({ questions: ["Q?"] }), rdir, "d");
+  const md = join(rdir, "review.md");
+  writeFileSync(md, readFileSync(md, "utf8").replace("Answer:", "Answer: yes"));
   expect(await cli.run("accept")).toBe(3);
   expect(cli.stderr).toContain("missing ANTHROPIC_API_KEY");
   expect(cli.stderr).not.toContain("consent");
