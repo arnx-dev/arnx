@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { PROVIDER_CONCURRENCY, withProviderSlot } from "../src/provider";
+import { PROVIDER_CONCURRENCY, callsInFlight, withProviderSlot } from "../src/provider";
+import { sleep } from "../src/util";
 
 /** A work function that stays pending until released, so a test controls when each slot frees. */
 function gate() {
@@ -73,4 +74,59 @@ test("withProviderSlot: a throwing work releases its slot", async () => {
   expect(running).toBe(PROVIDER_CONCURRENCY);
   g2.release();
   await Promise.all(more);
+});
+
+test("a cancelled waiter rejects at once and takes no slot", async () => {
+  const g = gate();
+  const holders = Array.from({ length: PROVIDER_CONCURRENCY }, () => withProviderSlot("p-cancel", () => g.open));
+  await tick();
+  const ac = new AbortController();
+  let ran = false;
+  const waiter = withProviderSlot("p-cancel", async () => { ran = true; }, { signal: ac.signal, cancelled: () => new Error("gone") });
+  const outcome = waiter.then(() => "ok", (e: Error) => e.message);
+  await tick();
+  ac.abort();
+  expect(await outcome).toBe("gone");
+  expect(ran).toBe(false);
+  expect(callsInFlight()).toEqual([["p-cancel", PROVIDER_CONCURRENCY]]);
+  g.release();
+  await Promise.all(holders);
+  expect(callsInFlight()).toEqual([]);
+});
+
+test("a waiter already cancelled never queues", async () => {
+  const g = gate();
+  const holders = Array.from({ length: PROVIDER_CONCURRENCY }, () => withProviderSlot("p-pre", () => g.open));
+  const ac = new AbortController();
+  ac.abort();
+  await expect(withProviderSlot("p-pre", async () => 1, { signal: ac.signal })).rejects.toBeDefined();
+  g.release();
+  await Promise.all(holders);
+  expect(callsInFlight()).toEqual([]);
+});
+
+test("the next waiter still runs after a cancelled one", async () => {
+  const g = gate();
+  const holders = Array.from({ length: PROVIDER_CONCURRENCY }, () => withProviderSlot("p-next", () => g.open));
+  await tick();
+  const ac = new AbortController();
+  const a = withProviderSlot("p-next", async () => "a", { signal: ac.signal }).catch(() => "cancelled");
+  const b = withProviderSlot("p-next", async () => "b");
+  await tick();
+  ac.abort();
+  g.release();
+  expect(await a).toBe("cancelled");
+  expect(await b).toBe("b");
+  await Promise.all(holders);
+  expect(callsInFlight()).toEqual([]);
+});
+
+test("sleep ends on abort", async () => {
+  const ac = new AbortController();
+  const t0 = performance.now();
+  const p = sleep(10_000, ac.signal);
+  ac.abort();
+  await p;
+  expect(performance.now() - t0).toBeLessThan(1000);
+  await sleep(10_000, ac.signal); // already aborted: returns at once
 });
