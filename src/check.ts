@@ -3,7 +3,7 @@
 // tests behind findings marked real fail; fixing the code turns them green, and this is how to see it without setting up the services by hand.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
@@ -19,8 +19,9 @@ import { load, type Review } from "./report";
 import type { Say } from "./progress";
 import { sayingDocker, type SessionFactory } from "./sandbox";
 import type { Env, Settings } from "./settings";
-import { deepestHolder, DOME, dockerSession, keptTestFiles, legacyKeptFiles, placeKept, runName, runPath, storedName,
-  swapFiles, swapIn } from "./testround";
+import { runName, storedName } from "./kept";
+import { collect, deepestHolder, DOME, dockerSession, keptTestFiles, legacyKeptFiles, placeKept, runPath, swapFiles, swapIn }
+  from "./testround";
 
 export const CHECK_TIMEOUT = 900;
 
@@ -668,10 +669,6 @@ export function recordAccepted(repo: string, review: string, tests: Record<strin
 export function changeEditsAccepted(repo: string, change: { base: string; head: string | null }): string[] {
   const revs = change.head ? [change.base, change.head] : [change.base];
   const status = git(repo, ["diff", "-z", "--name-status", "--no-renames", ...revs, "--", DOME]).split("\0");
-  const out: string[] = [];
-  for (let i = 0; i + 1 < status.length; i += 2) {
-    if (status[i] !== "A") out.push(status[i + 1]!);
-  }
   const at = (rev: string) => git(repo, ["show", `${rev}:${ACCEPTED_RECORD}`], [0, 128]);
   const path = join(repo, ACCEPTED_RECORD);
   const records = [at(change.base), change.head ? at(change.head) : existsSync(path) ? readFileSync(path, "utf8") : ""]
@@ -683,10 +680,14 @@ export function changeEditsAccepted(repo: string, change: { base: string; head: 
       }
     });
   const [before, after] = records;
-  if (before && Object.entries(before).some(([p, pin]) => !after?.[p] || after[p]!.sha256 !== pin.sha256 ||
-    testsOf(after[p]!.tests) !== testsOf(pin.tests))) {
-    out.push(ACCEPTED_RECORD);
+  // An older kept file arnx stored under its new name (storeOlderKept), its pin moved with it unchanged, is no edit.
+  const same = (a: Pin | undefined, b: Pin) => !!a && a.sha256 === b.sha256 && testsOf(a.tests) === testsOf(b.tests);
+  const moved = (p: string) => isOlderKept(p) && !!before?.[p] && same(after?.[`${DOME}/${storedName(runPath(p))}`], before[p]!);
+  const out: string[] = [];
+  for (let i = 0; i + 1 < status.length; i += 2) {
+    if (status[i] !== "A" && !(status[i] === "D" && moved(status[i + 1]!))) out.push(status[i + 1]!);
   }
+  if (before && Object.entries(before).some(([p, pin]) => !moved(p) && !same(after?.[p], pin))) out.push(ACCEPTED_RECORD);
   return out.sort();
 }
 
@@ -718,7 +719,11 @@ export function changedAccepted(repo: string, local: string | null = null): Chan
   const onHead = touched(repo, ["HEAD"], gone);
   const out: ChangedTest[] = [];
   for (const path of paths) {
-    const [w, c, l] = [now[path], head[path], mine[path]];
+    // An older kept file's pin moved with it to its stored name (storeOlderKept) is checked there, against this one.
+    if (!now[path] && isOlderKept(path) && now[`${DOME}/${storedName(runPath(path))}`]) continue;
+    const older = isStoredKept(path) ? `${DOME}/${runPath(path)}` : null;
+    const [w, c, l] = [now[path], head[path] ?? (older ? head[older] : undefined),
+      mine[path] ?? (older ? mine[older] : undefined)];
     const review = w?.review ?? c?.review ?? l?.review ?? "";
     if (!w) {
       const removed = l ? !l.removed && (!!c || existsSync(join(repo, path)) || !anywhere.has(path) || onHead.has(path))
@@ -779,6 +784,63 @@ export function keepEdits(repo: string, local: string | null = null): KeptEdits 
   writeLocal(local, repo, (p) => changed.find((c) => c.path === p)!.review, pins);
   writeRecord(repo, rec);
   return { changed, restoredTests };
+}
+
+/** A file under .arnx/tests/ stored by the name it runs by (by an older arnx), or by its stored name (kept.ts). */
+const isOlderKept = (p: string) => p.startsWith(`${DOME}/`) && runName(p) === p;
+const isStoredKept = (p: string) => p.startsWith(`${DOME}/`) && runName(p) !== p;
+
+/** What storeOlderKept did: older kept files now under their stored names (or removed beside an identical stored one),
+ * and those left as they are beside a stored one that differs. */
+export interface StoredOlder { stored: string[]; both: string[] }
+
+/** Kept files an older arnx left under .arnx/tests/ by the names they run by, where a project's runner, type checker or
+ * linter can pick them up: each renamed to its stored name, its pin moved with it (the content, and so its sha256, is
+ * unchanged; `local`: this machine's record, localPinsPath). One beside a stored file of the same name is removed when
+ * the two are identical, else both are left. A file changedAccepted reports is left where it is: its pin is not
+ * trusted, and moving it would make it so. Only .arnx/ is touched. */
+export function storeOlderKept(repo: string, local: string | null = null): StoredOlder {
+  const out: StoredOlder = { stored: [], both: [] };
+  if (!existsSync(join(repo, DOME))) return out;
+  const older = collect(join(repo, DOME), "", /./).filter((p) => runName(p) === p);
+  if (!older.length) return out;
+  const changed = new Set(changedAccepted(repo, local).map((c) => c.path));
+  const rec = readRecord(repo);
+  const pins: Record<string, Pin | null> = {};
+  const review: Record<string, string> = {};
+  for (const rel of older) {
+    const from = `${DOME}/${rel}`, to = `${DOME}/${storedName(rel)}`;
+    if (changed.has(from)) continue;
+    if (!existsSync(join(repo, to))) renameSync(join(repo, from), join(repo, to));
+    else if (readFileSync(join(repo, from)).equals(readFileSync(join(repo, to)))) rmSync(join(repo, from));
+    else {
+      out.both.push(from);
+      continue;
+    }
+    out.stored.push(from);
+    const pin = rec.files[from];
+    if (!pin) continue;
+    delete rec.files[from];
+    pins[from] = null;
+    rec.files[to] ??= pin;
+    pins[to] = rec.files[to]!;
+    review[from] = pin.review;
+    review[to] = rec.files[to]!.review;
+  }
+  if (Object.keys(pins).length) {
+    writeLocal(local, repo, (p) => review[p]!, pins);
+    writeRecord(repo, rec);
+  }
+  return out;
+}
+
+/** The line check and accept print after storeOlderKept (empty when it did nothing). */
+export function storedOlderText(r: StoredOlder): string {
+  const n = (k: number) => `${k} older kept file${k === 1 ? "" : "s"}`;
+  return [r.stored.length ? `Stored ${n(r.stored.length)} out of your test runs.` : "",
+    r.both.length ? `${n(r.both.length)} differ${r.both.length === 1 ? "s" : ""} from ${r.both.length === 1 ? "its" : "their"} ` +
+      `stored copy; left as ${r.both.length === 1 ? "it is" : "they are"}: ${r.both.slice(0, 3).join(", ")}` +
+      `${r.both.length > 3 ? ", …" : ""}` : ""].filter(Boolean).join("\n");
 }
 
 const LABEL: Record<ChangedTest["change"], string> = { modified: "modified", deleted: "deleted ", repinned: "repinned",

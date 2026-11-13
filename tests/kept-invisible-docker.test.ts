@@ -2,7 +2,7 @@
 // as before it, since accept stores each kept file under a name none of them picks up; `arnx check` still runs the
 // kept test (red until the bug is fixed). Real images and tools, scripted models. Run with ARNX_DOCKER_TESTS=1.
 import { describe, expect, test } from "bun:test";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { accept } from "../src/accept";
@@ -37,16 +37,17 @@ function markReal(rdir: string): void {
   writeFileSync(md, blankMarks(readFileSync(md, "utf8")).replace("Mark: [ ] real", "Mark: [x] real"));
 }
 
-/** The project's own commands, each in the approved image, on the repository as it is (.arnx/ included, as a
- * developer's checkout holds it): each command's exit code, and its output when it is not 0. */
+/** The project's own commands, each in the approved image, on the repository as a developer's checkout holds it:
+ * arnx's snapshot leaves .arnx/ out, so all of it is copied back in (kept tests, reviews with their copies of the
+ * generated tests, review.yaml, setup's files; only run/, check's logs, is left out). Each command's exit code, and its
+ * output when it is not 0. */
 async function ownRun(repo: string, commands: string[]): Promise<Record<string, number | null | string>> {
   const cfg = loadReviewFile(repo).projects[0]!;
   const snap = join(mkdtempSync(join(tmpdir(), "arnx-own-")), "repo");
   try {
     snapshot(repo, null, snap, [], { untracked: true });
-    if (existsSync(join(repo, ".arnx", "tests"))) {
-      cpSync(join(repo, ".arnx", "tests"), join(snap, ".arnx", "tests"), { recursive: true });
-    }
+    cpSync(join(repo, ".arnx"), join(snap, ".arnx"), { recursive: true,
+      filter: (p) => p !== join(repo, ".arnx", "run") });
     return await dockerSession(cfg, snap, join(tmp(), "build.log"), async (s) => {
       const out: Record<string, number | null | string> = {};
       for (const c of commands) {
@@ -71,7 +72,7 @@ projects:
     image: node:22-bookworm-slim
     install: ["mkdir -p /opt/deps && cp package.json /opt/deps/ && cd /opt/deps && npm install --no-audit --no-fund && chmod -R a+rwX /opt/deps"]
     deps_dir: /opt/deps
-    test_command: npx vitest run --exclude '.arnx/**' {targets}
+    test_command: npx vitest run {targets}
 `;
 const TS_FILES: Record<string, string> = {
   "package.json": JSON.stringify({ name: "calc", private: true, type: "module", scripts: { test: "vitest run" },

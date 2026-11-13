@@ -85,10 +85,8 @@ test("accept stores every kept file with the .arnx suffix", async () => {
   const rdir = savedReview(repo);
   mark(rdir, "real", "noise");
   const result = await accept(repo, rdir, SETTINGS);
-  const dest = join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3");
-  // The test and its support file alike: no runner, type checker or linter of the project picks either up.
-  expect(readdirSync(dest).sort()).toEqual(["conftest.py.arnx", "test_add_subtracts.py.arnx"]);
-  expect(result.kept).toEqual([join(dest, "conftest.py.arnx"), join(dest, "test_add_subtracts.py.arnx")]);
+  // The test and its support file alike (both on disk: test_accept_copies_real_tests_and_removes_the_rest): no runner,
+  // type checker or linter of the project picks either up, and where each generated file went names the stored one.
   expect(result.moved).toEqual({ [`${WD}/test_add.py`]: ".arnx/tests/tests/arnx/r20261011_a1b2c3/test_add_subtracts.py.arnx",
     [`${WD}/conftest.py`]: ".arnx/tests/tests/arnx/r20261011_a1b2c3/conftest.py.arnx" });
 });

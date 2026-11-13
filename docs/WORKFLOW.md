@@ -248,7 +248,9 @@ unchanged); decide which one holds. `arnx check --json` prints the result as JSO
 Tests an older arnx kept inside your projects (`tests/arnx/`, with expected-fail markers) are in your own test run:
 `arnx check` runs nothing until `arnx accept --move` moves them to `.arnx/tests/` (stored with `.arnx` appended),
 removes their markers and pins them there. Commit the move. Files an older arnx kept in `.arnx/tests/` under the names
-they run by still run in `arnx check`; `arnx accept --again` of their review stores them with `.arnx` appended.
+they run by are stored with `.arnx` appended by the next `arnx check` or `arnx accept`, each pin moved with its file
+(one edited since accept is refused first, as any accepted test is). Commit the renamed files and
+`.arnx/accepted-tests.json`.
 
 Accept before fixing: a test you saw fail before the fix and pass after it is good evidence that the fix changed the
 behaviour it checks, provided the test checks the right thing (that is what your mark says).

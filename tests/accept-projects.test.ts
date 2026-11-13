@@ -154,6 +154,6 @@ test("accept lists where each accepted test went, under its project's root", asy
   const cli = new Cli({ cwd: repo });
   await cli.run("init");
   expect(await cli.run("accept", RID, "--no-answers")).toBe(0);
-  expect(cli.stdout).toContain("  kept: .arnx/tests/parser/__tests__/arnx/r20261012_abcdef/parser_wrong.test.ts");
+  expect(cli.stdout).toContain("  kept: .arnx/tests/parser/__tests__/arnx/r20261012_abcdef/parser_wrong.test.ts.arnx\n");
   expect(cli.stdout).not.toContain("accepted_tests_dir"); // the path says it
 });

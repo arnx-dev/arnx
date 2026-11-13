@@ -13,6 +13,7 @@ import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { accept, findAccepted, findReview, hasAnswers, makeAnswerRunner, recordChosen } from "./accept";
 import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, contradictionLines,
+  storedOlderText, storeOlderKept,
   failingList, keepEdits, mayContradict, recordAnswerWatch,
   legacyAccepted, moveOut,
   localPinsPath, TESTS_CHANGED } from "./check";
@@ -1745,6 +1746,8 @@ class Commands {
     }
     for (const [qid, ids] of byAnswer) this.d.out(`${ids.join(", ")} set aside: your answer to ${qid} has its own test`);
     for (const p of tests) this.d.out(`  kept: ${relative(repo, p)}`);
+    const older = storedOlderText(result.storedOlder);
+    if (older) this.d.out(older);
     if (result.fixOverrides.length) {
       this.d.out(`Fix prompt: yours for ${result.fixOverrides.join(", ")} (${PROMPTS_FILE})`);
     }
@@ -2005,6 +2008,9 @@ class Commands {
       else this.d.out(colorLines(changedSummary(changed, repo), paint(!!this.d.color)));
       return TESTS_CHANGED;
     }
+    // Kept files an older arnx stored by the names they run by: out of the project's runs, before anything runs.
+    const older = storedOlderText(storeOlderKept(repo, localPinsPath(this.d.env, repo)));
+    if (older && !json) this.d.out(older);
     // Accepted tests an older arnx kept in the projects' own test folders: their runs collect them.
     const legacy = [...legacyAccepted(repo, s).keys()];
     if (legacy.length) {

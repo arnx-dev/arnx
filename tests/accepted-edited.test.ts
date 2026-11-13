@@ -4,7 +4,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { ACCEPTED_RECORD, changeEditsAccepted, recordAccepted } from "../src/check";
+import { ACCEPTED_RECORD, changeEditsAccepted, recordAccepted, storeOlderKept } from "../src/check";
 import { parseReviewConfig, reviewConfigPath, stamp } from "../src/config";
 import { runReview } from "../src/reviewer";
 import { defaultSettings } from "../src/settings";
@@ -37,6 +37,16 @@ function acceptedRepo(): string {
 
 const change = (repo: string, head: string | null = "HEAD") =>
   ({ base: runGit(repo, "rev-parse", head ? "HEAD~1" : "HEAD").trim(), head });
+
+test("older kept files stored under their stored names, pins moved with them, are no edit; a forged one still is", () => {
+  const repo = acceptedRepo(); // KEPT is stored as an older arnx stored it: by the name it runs by
+  expect(storeOlderKept(repo).stored).toEqual([KEPT]);
+  expect(changeEditsAccepted(repo, change(repo, null))).toEqual([]);
+  // the same move, the stored file weakened and its pin forged with it
+  write(repo, `${KEPT}.arnx`, "def test_total():\n    assert True\n");
+  recordAccepted(repo, RID, { [`${KEPT}.arnx`]: ["test_total"] });
+  expect(changeEditsAccepted(repo, change(repo, null))).toEqual([ACCEPTED_RECORD, KEPT]);
+});
 
 test("an edited or deleted accepted test, or a changed pin, is named; only added ones are not", () => {
   const repo = acceptedRepo();

@@ -1,6 +1,6 @@
 // Accepted tests live in .arnx/tests/, at the path each runs from, stored with .arnx appended, so the project's own
-// tools never pick them up; check puts them in place in its throwaway copy only. Tests an older arnx kept inside the project (with an
-// expected-fail marker) block check until `arnx accept --move` moves them.
+// tools never pick them up; check puts them in place in its throwaway copy only. Tests an older arnx kept inside the
+// project (with an expected-fail marker) block check until `arnx accept --move` moves them.
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -133,37 +133,41 @@ test("accept --again of a review an older arnx accepted moves its files out of t
   expect(changedAccepted(repo, localPinsPath(env, repo)).filter((c) => c.path === RUN)).toEqual([]);
 });
 
-// setup proves the place: its whole-suite run carries a one-line test in .arnx/tests/, which must not run.
+// setup proves the place: its whole-suite run carries a one-line test in .arnx/tests/, stored as accept stores kept
+// files, which no runner picks up.
 const SUITE_YAML = "version: 1\nprojects:\n  app:\n    root: .\n    image: python:3.12\n" +
   "    test_command: python -m pytest -q {targets}\n";
 
-test("setup refuses a project whose own test run collects .arnx/ (a canary placed there ran), and passes otherwise",
+test("setup's canary is stored as accept stores kept files; a runner that ran it anyway is noted, never refused",
   async () => {
   const { parseReviewFile: parse } = await import("../src/config");
-  const { runSuite } = await import("../src/setup");
+  const { ARNX_COLLECTED, runSuite } = await import("../src/setup");
   const { fakeFactory } = await import("./helpers/fakes");
   const cfg = parse(SUITE_YAML).projects[0]!;
   for (const collects of [false, true]) {
     const snap = gitRepo(tmp());
     mkdirSync(join(snap, "tests"), { recursive: true });
     writeFileSync(join(snap, "tests", "test_own.py"), "def test_own():\n    pass\n");
-    // A whole-suite run reports the project's own test, and the canary too when the runner collects hidden folders.
-    const canary = join(snap, ".arnx", "tests", "tests", "arnx_generated", "test_arnx_probe.py");
+    // A whole-suite run reports the project's own test, and the canary too when (unlike any known runner) it
+    // collects a file stored with .arnx appended.
+    const canary = join(snap, ".arnx", "tests", "tests", "arnx_generated", "test_arnx_probe.py.arnx");
+    let placed = false;
     const script = (command: string): [string, string, boolean] => {
       const cases: [string, string, string, string][] = [["tests/test_own.py", "test_own", "passed", ""]];
-      if (collects && !command.includes("{targets}") && existsSync(canary)) {
-        cases.push([".arnx/tests/tests/arnx_generated/test_arnx_probe.py", "test_arnx_probe", "passed", ""]);
+      if (!command.includes("{targets}") && existsSync(canary)) {
+        placed = true;
+        if (collects) cases.push([".arnx/tests/tests/arnx_generated/test_arnx_probe.py.arnx", "test_arnx_probe", "failed", "x"]);
       }
       return [junitXml(cases), "", false];
     };
-    const [ok, summary] = await runSuite(cfg, snap, join(tmp(), "b.log"), { sessionFactory: fakeFactory(script) });
+    const [ok, summary, , , , , counts] = await runSuite(cfg, snap, join(tmp(), "b.log"),
+      { sessionFactory: fakeFactory(script) });
+    expect(placed).toBe(true);
     expect(existsSync(canary)).toBe(false); // removed after the run
-    if (collects) {
-      expect(ok).toBe(false);
-      expect(summary).toStartWith("the project's test run collects files under .arnx/");
-    } else {
-      expect(ok).toBe(true);
-    }
+    // Nothing for the developer to do either way: the suite passes, and what ran under .arnx/ does not count.
+    expect([ok, counts.passed, counts.failed]).toEqual([true, 1, []]);
+    expect(summary.endsWith(ARNX_COLLECTED)).toBe(collects);
+    expect(summary).not.toMatch(/exclude|norecursedirs/);
   }
 });
 

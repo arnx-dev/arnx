@@ -28,9 +28,9 @@ import { keyReruns } from "./realkey";
 import { dockerCapacity, type Limits, sandboxesFit, sayingDocker, type SessionFactory } from "./sandbox";
 import { refString, type Settings } from "./settings";
 import { agentUse, logUsage } from "./usage";
-import { acceptedDirFor, collect, DOME, dockerSession, readCopies, runName, runPath, storedName, testRound, writeDirOf }
-  from "./testround";
-import { acceptedTestIds, recordAccepted, testsByFile } from "./check";
+import { runName, storedName } from "./kept";
+import { acceptedDirFor, collect, DOME, dockerSession, readCopies, runPath, testRound, writeDirOf } from "./testround";
+import { acceptedTestIds, recordAccepted, storeOlderKept, type StoredOlder, testsByFile } from "./check";
 import { isoSeconds } from "./util";
 import { inPool } from "./challenge";
 import { sliceDiff, treeValues, workingTreeFiles } from "./change";
@@ -119,6 +119,8 @@ export interface AcceptResult {
   precision: Precision;
   /** The fix prompt's keys .arnx/prompts.toml overrode (fix-prompt.md names them too). */
   fixOverrides: string[];
+  /** Kept files an older arnx stored by the names they run by, now under their stored names (storeOlderKept). */
+  storedOlder: StoredOlder;
 }
 
 export type MarkSource = "default" | "chosen";
@@ -444,6 +446,9 @@ export async function accept(repo: string, rdir: string, settings: Settings,
     throw new ArnxError(`review ${review.id} was already accepted; pass --again to apply edited marks`);
   }
   const say = (m: string) => o.progress?.(m);
+  // Kept files an older arnx stored by the names they run by go out of the project's runs first; this review's own
+  // are then written again under the same stored names.
+  const storedOlder = storeOlderKept(repo, o.pins ?? null);
   const marks = parseMarks(readFileSync(join(rdir, "review.md"), "utf8"), review.findings.map((f) => f.id),
     { reasons: true });
   const projects = projectsOf(repo, rdir, review, settings);
@@ -616,7 +621,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   const red = review.findings.filter((f) => keeps.findings[f.id] === "real")
     .map((f) => ({ id: f.id, testId: f.testId, project: f.project, explanation: f.explanation }));
   const result = { review, marks, kept, answers, rewrites, setAside, dest, red, moved, sources,
-    precision: precisionOf(log), fixOverrides: prompts.overridden.filter((k) => !isModelKey(k)) };
+    precision: precisionOf(log), fixOverrides: prompts.overridden.filter((k) => !isModelKey(k)), storedOlder };
   // A coding agent reads this. The review is masked already; answers and reasons are the user's own, and any may quote a
   // value of today's tree.
   const fix = maskedCopy(new Boundary(treeValues(repo)), fixPrompt(result, settings, prompts));

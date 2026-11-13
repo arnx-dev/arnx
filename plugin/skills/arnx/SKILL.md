@@ -88,14 +88,14 @@ After the user says they accepted:
 
 ## 5. Run the full suites
 
-A passing `arnx check` covers only the accepted tests; the project's own runner never runs them. For each project
+A passing `arnx check` covers only the accepted tests; the project's own runner never runs them (`arnx check` also
+stores any an older arnx kept under the names they run by out of its sight). For each project
 the change touched (its `root` in `.arnx/review.yaml`), run its whole suite the way the project runs it (README, CI,
 Makefile; `test_command` in review.yaml names the runner and `image` the environment).
 
 - All pass: say so, with the counts.
 - A test fails: your fix or the code broke it (accepted tests are never part of this run); fix the code and go back
-  to 4.3. Never edit accepted tests. A fix to the project's own tests
-  is the user's call: propose it, do not make it.
+  to 4.3. Never edit accepted tests. A fix to the project's own tests is the user's call: propose it, do not make it.
 - You cannot run a suite (no environment, Docker not reachable): say which, and ask the user to run it. Never call
   the work done without it.
 

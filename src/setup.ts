@@ -54,6 +54,7 @@ import { agentUse, logUsage } from "./usage";
 import { randomHex } from "./util";
 import { VERSION } from "./version";
 import { acceptedPins, type AcceptedPins } from "./check";
+import { storedName } from "./kept";
 import { collect, DOME, dockerSession, isKeptPath, ownTestsInWriteDir, ownTestsProblem, probeRun, swapIn, writeDirOf }
   from "./testround";
 import { type TestsDirChoice, testsDirFor } from "./testsdir";
@@ -268,6 +269,9 @@ export function hasOwnTests(cfg: ReviewConfig, snap: string): boolean {
 /** The summary of a project with no tests of its own whose environment arnx's one-line test proved. */
 export const NO_OWN_TESTS = "no tests of its own; arnx's one-line test runs";
 
+/** Said after a suite's counts when its runner also ran a file under .arnx/ (left out of them). */
+export const ARNX_COLLECTED = "; note: the runner also ran a file under .arnx/, left out of these counts";
+
 /** Most failing files run apart from the rest of the suite to look for order dependence (one extra run). */
 const APART_MAX = 20;
 
@@ -333,10 +337,10 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
           : `${plural(seen.tests, "test")} listed`}, ${plural(sample.files.length, "small file")} ran: `;
       }
     }
-    // A whole-suite run carries a canary: one-line tests where arnx keeps accepted tests (.arnx/tests/), which the
-    // project's own run must never collect.
+    // A whole-suite run carries a canary: one-line tests where arnx keeps accepted tests (.arnx/tests/), stored as
+    // accept stores them, which proves the project's own run never collects a kept file.
     const canary = targets.length || sample ? [] : adapterFor(cfg).probes(cfg.runner)
-      .map((p) => ({ path: join(snap, DOME, writeDirOf(cfg), p.file), source: p.source }));
+      .map((p) => ({ path: join(snap, DOME, writeDirOf(cfg), storedName(p.file)), source: p.source }));
     for (const c of canary) {
       mkdirSync(dirname(c.path), { recursive: true });
       writeFileSync(c.path, c.source);
@@ -355,14 +359,13 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
       source: { repo: leftOut.repo, head: null }, fakedKeys: leftOut.fakedKeys, tests: rerunCandidates([reported]), all: [reported],
       target: (t) => t.fileAttr || null, budget: leftOut.reruns ?? keyReruns(), timeout: SUITE_TIMEOUT, ...(boundary ? { id: (x: string) => boundary.mask(x) } : {}) })
       : undefined;
-    const all = reported && leftOut ? markUnproven(reported, { leftOut: leftOut.secret, fakedKeys: leftOut.fakedKeys, all: leftOut.all,
+    let all = reported && leftOut ? markUnproven(reported, { leftOut: leftOut.secret, fakedKeys: leftOut.fakedKeys, all: leftOut.all,
       ...(real ? { real } : {}) }) : reported;
-    if ((all ?? []).some((t) => [t.fileAttr, t.testId].some((x) => x && /(?:^|\/)\.arnx\//.test(x)))) {
-      return [false, "the project's test run collects files under .arnx/ (a test arnx placed in .arnx/tests/ ran). " +
-        "arnx keeps its accepted tests there so your own run never runs them: make the runner leave .arnx/ out " +
-        "(pytest: norecursedirs or testpaths; vitest, jest: exclude), then run setup again", tailOf(result.output), [],
-        [], "", { ...none, stoppedAt: "config" }] as Out;
-    }
+    // A runner that still picks up a file under .arnx/ (the canary, under its stored name) is noted, never the
+    // developer's to change: what it ran there does not count, and arnx keeps working (check runs kept files by name).
+    const inArnx = (t: TestResult) => [t.fileAttr, t.testId].some((x) => x && /(?:^|\/)\.arnx\//.test(x));
+    const collectsArnx = (all ?? []).some(inArnx);
+    if (collectsArnx) all = all!.filter((t) => !inArnx(t));
     // A project with no tests of its own has no suite to run: arnx's one-line test, which reviews depend on anyway,
     // proves the environment instead.
     if (!targets.length && !all?.length && cfg.language !== "rust" && !hasOwnTests(cfg, snap)) {
@@ -395,7 +398,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     }
     const fetched = all === null ? npxDownload(result.output) : null;
     const summary = fetched ? `the suite produced no report: ${npxText(fetched)}`
-      : all === null ? noReport(result, cfg) : listed + verdict;
+      : all === null ? noReport(result, cfg) : listed + verdict + (collectsArnx ? ARNX_COLLECTED : "");
     // Accepted tests that fail as pinned are not the environment's to fix: diagnosis and retries leave them out.
     const results = withoutAccepted(all, cfg, accepted, acceptedTestsDir);
     let said = "";

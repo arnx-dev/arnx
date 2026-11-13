@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import { type AgentResult, StopRound, Workspace } from "./agent";
 import { adapterFor, getAdapter } from "./adapters";
+import { runName } from "./kept";
 import { DEFAULT_ACCEPTED_DIR } from "./adapters/types";
 import { absentFromSnapshot, bakedError, bakedIn, imageFiles, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
   from "./baked";
@@ -196,24 +197,10 @@ export function isKeptPath(cfg: ReviewConfig, path: string, acceptedTestsDir?: s
 }
 
 /** Where `arnx accept` keeps tests: each at the path it runs from (`api/tests/arnx/r…/test_x.py`) under this
- * folder, stored under a name no test runner, type checker or linter picks up (KEPT_SUFFIX), so the project's own
+ * folder, stored under a name no test runner, type checker or linter picks up (kept.ts), so the project's own
  * tools never import, collect, check or run one. Only `arnx check` puts them in place, under the names they run by, in
  * its throwaway copy of the repository. */
 export const DOME = ".arnx/tests";
-
-/** What `arnx accept` appends to the whole name of every file it keeps under DOME (`x.test.ts` → `x.test.ts.arnx`,
- * `conftest.py` → `conftest.py.arnx`). Files an older arnx kept without it are read too. */
-export const KEPT_SUFFIX = ".arnx";
-
-/** The name a kept file is stored under in DOME, from the name it runs by. */
-export function storedName(run: string): string {
-  return run + KEPT_SUFFIX;
-}
-
-/** The name a kept file runs by, from the name it is stored under (one an older arnx stored as it runs is that). */
-export function runName(stored: string): string {
-  return stored.endsWith(KEPT_SUFFIX) ? stored.slice(0, -KEPT_SUFFIX.length) : stored;
-}
 
 /** The path a kept file runs from (repository-relative): its path under DOME, under its run name. */
 export const runPath = (p: string): string => p.startsWith(`${DOME}/`) ? runName(p.slice(DOME.length + 1)) : p;
@@ -262,7 +249,7 @@ function keptIn(root: string, cfg: ReviewConfig, acceptedTestsDir?: string, all 
                 projects: readonly ReviewConfig[] = [cfg]): string[] {
   const adapter = adapterFor(cfg);
   const base = getAdapter(cfg.language);
-  // Names as they run: a kept file stored with KEPT_SUFFIX is told by the name it runs by.
+  // Names as they run: a kept file stored with its suffix (kept.ts) is told by the name it runs by.
   const writable = (n: string) => adapter.writable.test(runName(n)) || base.writable.test(runName(n));
   const isTest = (n: string) => adapter.isTestFile(runName(n)) || base.isTestFile(runName(n));
   const inRoots = acceptedRoots(cfg, acceptedTestsDir).filter((d) => existsSync(join(root, d)))
