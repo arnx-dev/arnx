@@ -103,7 +103,7 @@ Go works, but it is new, so here is where it stands:
 - **Nested packages.** A package such as `a/internal/b` is covered by a project at `a`, whose module root holds
   `go.mod`; under a `go.work`, only its `use` members are projects.
 - **Image.** Setup picks a `golang:<major.minor>-bookworm` image from the `go` line of `go.mod` (1.24 at least).
-- **Little tested.** Our runs are small modules and test fixtures, not large real-world ones.
+- **Least tried.** We have run it on public Go modules, from small libraries to large repositories; tell us what broke.
 
 ### Rust crates
 

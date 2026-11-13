@@ -19,7 +19,7 @@ Or the standalone binary, no Node needed (the user picks `darwin-arm64`, `darwin
     curl -fLO https://github.com/arnx-dev/arnx/releases/latest/download/arnx-linux-x64 && chmod +x arnx-linux-x64 && mv arnx-linux-x64 /usr/local/bin/arnx
 
 The macOS binaries are not signed yet: one downloaded in a browser is quarantined, and
-`xattr -d com.apple.quarantine /usr/local/bin/arnx` releases it. On Windows, arnx runs in WSL 2 (the Linux line).
+`xattr -d com.apple.quarantine /usr/local/bin/arnx` releases it. No Windows build; WSL 2 with Docker Desktop should work, but we have not tested it.
 
 Check it: `arnx --version`.
 

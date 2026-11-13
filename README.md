@@ -55,8 +55,7 @@ some confirmed issues tested behaviour we intended. Deciding is your part.
 
 ## Install
 
-You need **Docker** running (every test runs in it; arnx does not install it) and macOS or Linux (on Windows, WSL 2 with
-Docker Desktop's WSL integration). With npm (Node 20 or later):
+You need **Docker** running (every test runs in it; arnx does not install it) and macOS or Linux. No Windows build; WSL 2 with Docker Desktop should work, but we have not tested it. With npm (Node 20 or later):
 
     npm install -g @arnx-dev/arnx
 
@@ -189,7 +188,7 @@ broke and how long setup took.
 
 ## Go is early
 
-Go works, but it is new and little tried on large modules. Generated tests are test-only packages, one folder
+Go works, but it is the least tried of arnx's languages: we have run it on public Go modules, from small libraries to large repositories. Generated tests are test-only packages, one folder
 each (`<name>_arnx/<name>_arnx_test.go`), so they reach your module's exported names only: a bug in `package main` or
 behind an unexported function is reached through an exported one, or not at all. A nested package such as
 `a/internal/b` needs a project at `a`. Setup runs in a `golang:<major.minor>-bookworm` image, taken from your `go.mod` (1.24 at least).
@@ -199,7 +198,7 @@ Point arnx at your module and tell us what broke.
 
 - Changes up to 200 KB per review; review a long branch in parts with `--range A..B`. Lockfiles and generated files (bundles, snapshots, protocol output, files marked `linguist-generated`) stay in the sandbox (readable there) but are not counted and not in the diff sent.
 - Python, JavaScript/TypeScript, Rust and Go only (`arnx init` and `arnx doctor` say so for a repository in another
-  language, before anything is sent). No Windows build: use WSL 2.
+  language, before anything is sent). No Windows build; WSL 2 is untested.
 - Setup records the tests your suite fails today, one by one, in `.arnx/baseline.json`, and later proofs do not
   count them. A failure that looks like the environment (a missing service, package or variable) goes back to the
   setup agent first; what it cannot fix in the sandbox is recorded with its cause, listed under "Worth a look".
