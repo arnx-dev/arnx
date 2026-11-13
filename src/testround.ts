@@ -21,7 +21,7 @@ import { holdsIn, staleLine, staleRewrites, standInsLine, writeStandIns } from "
 import { fallbackImage } from "./envprune";
 import { filesAt, snapshot, takeSnapshot, type Withheld, withSandboxFiles } from "./change";
 import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
-import { EnvFailed } from "./errors";
+import { ArnxError, EnvFailed } from "./errors";
 import { markUnproven } from "./diagnose";
 import { type KeyReruns, keyReruns, type RealOutcomes, rerunCandidates, rerunWithRealKeys } from "./realkey";
 import { clip, emit, testMessage } from "./events";
@@ -215,12 +215,18 @@ export function keptTestFiles(repo: string, cfg: ReviewConfig, acceptedTestsDir?
 }
 
 /** Puts every file under the repository's DOME into `snap` (a throwaway copy of it) at the path it runs from, under its
- * run name; the run paths placed. A file stored both ways is placed from the newer, suffixed one. */
+ * run name; the run paths placed. A file stored both ways is placed once, only when both copies are the same: of two
+ * that differ, arnx never picks the one that runs (check refuses them first, as changedAccepted names them). */
 export function placeKept(repo: string, snap: string): string[] {
   if (!existsSync(join(repo, DOME))) return [];
   const stored = collect(join(repo, DOME), "", /./);
-  // The old-named first, so a suffixed file with the same run name is written over it.
-  for (const rel of [...stored].sort((a, b) => Number(a !== runName(a)) - Number(b !== runName(b)))) {
+  const differ = stored.filter((p) => p !== runName(p) && stored.includes(runName(p)) &&
+    !readFileSync(join(repo, DOME, p)).equals(readFileSync(join(repo, DOME, runName(p)))));
+  if (differ.length) {
+    throw new ArnxError(`a kept test is stored under two names that differ (${differ.map((p) => `${DOME}/${p}`).join(", ")} ` +
+      "and the same without .arnx): delete the copy you do not want, then run this again");
+  }
+  for (const rel of stored) {
     const to = join(snap, runName(rel));
     mkdirSync(dirname(to), { recursive: true });
     copyFileSync(join(repo, DOME, rel), to);

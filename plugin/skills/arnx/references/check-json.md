@@ -28,6 +28,7 @@ kept, as stored.
 | `changed` | array | Accepted test files edited or deleted since `arnx accept` recorded them, or whose entry in `.arnx/accepted-tests.json` was changed or removed: see [Each changed file](#each-changed-file). Non-empty only with `tests-changed`. |
 | `stand_ins_shown` | boolean | A message holds a stand-in for a value that looks like a secret: go by the test's file and line. |
 | `may_contradict` | array | Pairs of an answer's test and an accepted test that may ask for opposite things: see [Each possible contradiction](#each-possible-contradiction). Empty when none. Never changes `result` or the exit code. |
+| `stored_older` | number | Kept files an older arnx left under the names they run by, which this check renamed (`.arnx` appended) with their pins in `.arnx/accepted-tests.json`. Commit the renamed files and the record. 0 when none. |
 
 ## Each project
 
@@ -60,7 +61,7 @@ kept, as stored.
 |---|---|---|
 | `path` | string | The accepted file, relative to the repository. |
 | `review` | string | The review whose `arnx accept` wrote it. |
-| `change` | string | `modified` or `deleted` (the file differs from its recorded sha256, or is gone), `repinned` (its entry in `.arnx/accepted-tests.json`, its sha256 or its `tests`, was changed, and not by `arnx accept` on this machine) or `unpinned` (its entry was removed, or the whole file). |
+| `change` | string | `modified` or `deleted` (the file differs from its recorded sha256, or is gone), `repinned` (its entry in `.arnx/accepted-tests.json`, its sha256 or its `tests`, was changed, and not by `arnx accept` on this machine), `unpinned` (its entry was removed, or the whole file) or `duplicate` (one test stored under two names, with and without `.arnx`, that differ, one of them pinned: both are listed, and nothing runs until the user deletes one). |
 
 ## Each possible contradiction
 

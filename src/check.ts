@@ -548,7 +548,7 @@ interface Pin { sha256: string; review: string; tests?: string[] }
 interface AcceptedRecord { schema_version: 1; files: Record<string, Pin> }
 /** modified/deleted: the file differs from its pin, or is gone. repinned: the pin itself was changed, and not by arnx
  * on this machine. unpinned: its entry was removed from the record (or the record deleted). */
-export const CHANGES = ["modified", "deleted", "repinned", "unpinned"] as const;
+export const CHANGES = ["modified", "deleted", "repinned", "unpinned", "duplicate"] as const;
 export interface ChangedTest { path: string; review: string; change: typeof CHANGES[number] }
 
 /** What arnx wrote to the record on this machine: per file, every sha256 and accepted-test list it pinned (a branch
@@ -687,6 +687,15 @@ export function changeEditsAccepted(repo: string, change: { base: string; head: 
   for (let i = 0; i + 1 < status.length; i += 2) {
     if (status[i] !== "A" && !(status[i] === "D" && moved(status[i + 1]!))) out.push(status[i + 1]!);
   }
+  // A file added beside a pinned one of the same run name (under the other name) that stays pinned: it could run in
+  // its place. Untracked too, for a change of the working tree.
+  const tree = (rev: string) => new Set(git(repo, ["ls-tree", "-r", "-z", "--name-only", rev, "--", DOME]).split("\0"));
+  const [atBase, atHead] = [tree(change.base), change.head ? tree(change.head) : null];
+  for (const p of Object.keys(before ?? {}).filter((x) => x.startsWith(`${DOME}/`) && after?.[x])) {
+    const other = isOlderKept(p) ? `${DOME}/${storedName(runPath(p))}` : `${DOME}/${runPath(p)}`;
+    const there = atHead ? atHead.has(other) : existsSync(join(repo, other));
+    if (!out.includes(other) && there && !atBase.has(other)) out.push(other);
+  }
   if (before && Object.entries(before).some(([p, pin]) => !moved(p) && !same(after?.[p], pin))) out.push(ACCEPTED_RECORD);
   return out.sort();
 }
@@ -719,8 +728,9 @@ export function changedAccepted(repo: string, local: string | null = null): Chan
   const onHead = touched(repo, ["HEAD"], gone);
   const out: ChangedTest[] = [];
   for (const path of paths) {
-    // An older kept file's pin moved with it to its stored name (storeOlderKept) is checked there, against this one.
-    if (!now[path] && isOlderKept(path) && now[`${DOME}/${storedName(runPath(path))}`]) continue;
+    // An older kept file's pin moved with it to its stored name (storeOlderKept), unchanged, is checked there.
+    const movedTo = isOlderKept(path) ? now[`${DOME}/${storedName(runPath(path))}`] : undefined;
+    if (!now[path] && movedTo && [head[path]?.sha256, ...mine[path]?.sha256 ?? []].includes(movedTo.sha256)) continue;
     const older = isStoredKept(path) ? `${DOME}/${runPath(path)}` : null;
     const [w, c, l] = [now[path], head[path] ?? (older ? head[older] : undefined),
       mine[path] ?? (older ? mine[older] : undefined)];
@@ -740,7 +750,24 @@ export function changedAccepted(repo: string, local: string | null = null): Chan
     if (!existsSync(full)) out.push({ path, review, change: "deleted" });
     else if (sha256(full) !== w.sha256) out.push({ path, review, change: "modified" });
   }
+  // One run name, two files that differ (stored with .arnx appended and by the older name), one of them pinned: only
+  // one runs, and it must be the pinned one. Neither is chosen: both are named.
+  for (const [older, stored] of keptPairs(repo)) {
+    const pin = now[older] ?? head[older] ?? now[stored] ?? head[stored];
+    if (!pin || sha256(join(repo, older)) === sha256(join(repo, stored))) continue;
+    for (const p of [older, stored]) {
+      if (!out.some((c) => c.path === p)) out.push({ path: p, review: pin.review, change: "duplicate" });
+    }
+  }
   return out;
+}
+
+/** Kept files under .arnx/tests/ that exist both by the older name and by the stored name: [older, stored] paths. */
+function keptPairs(repo: string): [string, string][] {
+  if (!existsSync(join(repo, DOME))) return [];
+  const files = new Set(collect(join(repo, DOME), "", /./));
+  return [...files].filter((p) => runName(p) === p && files.has(storedName(p)))
+    .map((p) => [`${DOME}/${p}`, `${DOME}/${storedName(p)}`]);
 }
 
 /** The accepted files that match their trusted pin, which approve and setup let fail (their bugs are not fixed yet),
@@ -762,6 +789,12 @@ export interface KeptEdits { changed: ChangedTest[]; restoredTests: string[] }
  * else the last arnx wrote here) is recorded instead. */
 export function keepEdits(repo: string, local: string | null = null): KeptEdits {
   const changed = changedAccepted(repo, local);
+  // Which of two copies is the test is the owner's to say, by deleting the other: recording both would keep both.
+  const twice = changed.filter((c) => c.change === "duplicate").map((c) => c.path);
+  if (twice.length) {
+    throw new ArnxError(`a test is stored under two names that differ (${twice.join(", ")}): delete the copy you do not ` +
+      "want, then run this again");
+  }
   const restoredTests: string[] = [];
   if (!changed.length) return { changed, restoredTests };
   const rec = readRecord(repo);
@@ -811,9 +844,15 @@ export function storeOlderKept(repo: string, local: string | null = null): Store
   for (const rel of older) {
     const from = `${DOME}/${rel}`, to = `${DOME}/${storedName(rel)}`;
     if (changed.has(from)) continue;
-    if (!existsSync(join(repo, to))) renameSync(join(repo, from), join(repo, to));
-    else if (readFileSync(join(repo, from)).equals(readFileSync(join(repo, to)))) rmSync(join(repo, from));
-    else {
+    let done: "moved" | "differ" | "gone";
+    try {
+      done = moveOlder(join(repo, from), join(repo, to));
+    } catch (e) {
+      // Moved meanwhile (another check or accept at the same time): already stored.
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw e;
+    }
+    if (done === "differ") {
       out.both.push(from);
       continue;
     }
@@ -834,6 +873,18 @@ export function storeOlderKept(repo: string, local: string | null = null): Store
   return out;
 }
 
+/** An older kept file at `from` to its stored name `to`: renamed, or removed beside an identical one ("gone"), or left
+ * beside one that differs. */
+function moveOlder(from: string, to: string): "moved" | "differ" | "gone" {
+  if (!existsSync(to)) {
+    renameSync(from, to);
+    return "moved";
+  }
+  if (!readFileSync(from).equals(readFileSync(to))) return "differ";
+  rmSync(from);
+  return "gone";
+}
+
 /** The line check and accept print after storeOlderKept (empty when it did nothing). */
 export function storedOlderText(r: StoredOlder): string {
   const n = (k: number) => `${k} older kept file${k === 1 ? "" : "s"}`;
@@ -844,10 +895,11 @@ export function storedOlderText(r: StoredOlder): string {
 }
 
 const LABEL: Record<ChangedTest["change"], string> = { modified: "modified", deleted: "deleted ", repinned: "repinned",
-  unpinned: "unpinned" };
+  unpinned: "unpinned", duplicate: "twice   " };
 const WHY: Record<ChangedTest["change"], string> = { modified: "", deleted: "",
   repinned: `: its entry in ${ACCEPTED_RECORD} changed, not by arnx on this machine`,
-  unpinned: `: its entry in ${ACCEPTED_RECORD} was removed` };
+  unpinned: `: its entry in ${ACCEPTED_RECORD} was removed`,
+  duplicate: ": one test stored under two names that differ" };
 
 /** Whether `git checkout` brings back the accepted version of a changed file: HEAD has it as its trusted pin says. */
 function restorable(repo: string, c: ChangedTest): boolean {
@@ -863,7 +915,7 @@ function restorable(repo: string, c: ChangedTest): boolean {
 export function changedSummary(changed: ChangedTest[], repo: string): string {
   const kinds = new Set(changed.map((c) => c.change));
   const only = kinds.size === 1 ? [...kinds][0]! : null;
-  const verb = !only || only === "modified" ? "changed" : only;
+  const verb = !only || only === "modified" || only === "duplicate" ? "changed" : only;
   const one = changed.length === 1;
   const lines = [`✗ ${count(changed.length, "accepted test file")} ${verb} since arnx accept; nothing ran:`,
     ...changed.map((c) => `  ${LABEL[c.change]} ${c.path}${WHY[c.change]}`)];
@@ -872,13 +924,15 @@ export function changedSummary(changed: ChangedTest[], repo: string): string {
     const mine = changed.filter((c) => c.review === r);
     const it = mine.length === 1 ? "it" : "them";
     const what = reviews.length === 1 ? it : `the file${mine.length === 1 ? "" : "s"} of review ${r}`;
-    const paths = mine.every((c) => restorable(repo, c)) ? mine.map((c) => c.path) : [];
+    const paths = mine.every((c) => c.change !== "duplicate" && restorable(repo, c)) ? mine.map((c) => c.path) : [];
     if (paths.length && mine.some((c) => c.change === "repinned" || c.change === "unpinned")) {
       paths.push(ACCEPTED_RECORD);
     }
     lines.push(`To restore ${what}: arnx accept --again ${r} (rewrites ${it} from the review; your edits are lost)` +
       (paths.length ? `, or git checkout -- ${paths.join(" ")}` : ""));
   }
+  if (kinds.has("duplicate")) lines.push("A test stored under two names: delete the copy you do not want, then arnx check");
+  if (only === "duplicate") return lines.join("\n");
   lines.push(only === "deleted"
     ? `To keep ${one ? "it" : "them"} deleted: arnx accept --keep-edits (drops ${one ? "it" : "them"} from the accepted tests)`
     : `To keep your edit${one ? "" : "s"}: arnx accept --keep-edits (records ${one ? "it" : "them"} as the new ` +
@@ -891,7 +945,7 @@ export const CHECK_SCHEMA_VERSION = 1;
 const RESULTS = ["pass", "fail", "no-report", "nothing-accepted", "tests-changed"] as const;
 
 export function checkJson(results: ProjectCheck[], code: number, changed: ChangedTest[] = [],
-  contradict: MayContradict[] = []): string {
+  contradict: MayContradict[] = [], storedOlder = 0): string {
   return JSON.stringify({ schema_version: CHECK_SCHEMA_VERSION, command: "check",
     result: RESULTS[code] ?? "fail", exit_code: code,
     projects: results.map((r) => {
@@ -907,5 +961,6 @@ export function checkJson(results: ProjectCheck[], code: number, changed: Change
         ...(r.couldNotRun ? { could_not_run: r.couldNotRun.map((x) => ({ test_id: x.testId, needs: x.needs, ...(x.faked ? { faked_key: true } : {}),
           ...(x.notRerun ? { not_rerun: true } : {}) })) } : {}) };
     }),
-    changed, may_contradict: contradict, stand_ins_shown: results.some((r) => !!r.standInsShown) }, null, 2);
+    changed, may_contradict: contradict, stand_ins_shown: results.some((r) => !!r.standInsShown),
+    stored_older: storedOlder }, null, 2);
 }

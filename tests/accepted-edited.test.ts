@@ -48,6 +48,14 @@ test("older kept files stored under their stored names, pins moved with them, ar
   expect(changeEditsAccepted(repo, change(repo, null))).toEqual([ACCEPTED_RECORD, KEPT]);
 });
 
+test("a copy added under the other name beside a pinned kept file is named, though it is only added", () => {
+  const repo = acceptedRepo(); // KEPT pinned by its older name
+  write(repo, `${KEPT}.arnx`, "def test_total():\n    assert True\n");
+  expect(changeEditsAccepted(repo, change(repo, null))).toEqual([`${KEPT}.arnx`]);
+  commit(repo, "a weaker copy");
+  expect(changeEditsAccepted(repo, change(repo))).toEqual([`${KEPT}.arnx`]);
+});
+
 test("an edited or deleted accepted test, or a changed pin, is named; only added ones are not", () => {
   const repo = acceptedRepo();
   // accept's own output: a new test and its entry

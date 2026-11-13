@@ -162,15 +162,23 @@ test("check also runs a kept file stored without the suffix", async () => {
     [[".arnx/tests/svc/tests/arnx/r1/test_old.py", ".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py.arnx"], 1, 1, undefined]]);
 });
 
-test("a kept file stored both ways runs once, from the suffixed one", async () => {
-  // An older arnx's copy beside the one accept stores now: the newer is placed and listed, the older passed over.
-  const repo = repoWithStored({ ".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py": "def test_old(): pass\n" });
+test("a kept file stored both ways runs once when the copies are the same; two that differ are never chosen between",
+  async () => {
+  // An older arnx's copy beside the one accept stores now, the same: placed once, listed once.
+  const repo = repoWithStored({ ".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py": "def test_bug(): assert 0\n" });
   let placed = "";
-  const results = await check(repo, SETTINGS, { sessionFactory: async (_c, snap, _l, body) => {
+  const session: SessionFactory = async (_c, snap, _l, body) => {
     placed = readFileSync(join(snap, "svc/tests/arnx/r1/test_r1_calc.py"), "utf8");
     return body(new FakeSession(snap, () => [junitXml([["tests/arnx/r1/test_r1_calc.py", "test_bug", "failed", "assert 0"]]),
       "", false]));
-  } });
+  };
+  const results = await check(repo, SETTINGS, { sessionFactory: session });
   expect(placed).toBe("def test_bug(): assert 0\n");
   expect(results[0]!.files).toEqual([".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py.arnx"]);
+  // Copies that differ: nothing runs, both are named.
+  writeFileSync(join(repo, ".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py"), "def test_bug(): pass\n");
+  placed = "";
+  await expect(check(repo, SETTINGS, { sessionFactory: session })).rejects.toThrow(
+    "stored under two names that differ (.arnx/tests/svc/tests/arnx/r1/test_r1_calc.py.arnx and the same without .arnx)");
+  expect(placed).toBe("");
 });

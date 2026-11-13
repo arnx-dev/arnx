@@ -2009,8 +2009,8 @@ class Commands {
       return TESTS_CHANGED;
     }
     // Kept files an older arnx stored by the names they run by: out of the project's runs, before anything runs.
-    const older = storedOlderText(storeOlderKept(repo, localPinsPath(this.d.env, repo)));
-    if (older && !json) this.d.out(older);
+    const stored = storeOlderKept(repo, localPinsPath(this.d.env, repo));
+    if (!json && storedOlderText(stored)) this.d.out(storedOlderText(stored));
     // Accepted tests an older arnx kept in the projects' own test folders: their runs collect them.
     const legacy = [...legacyAccepted(repo, s).keys()];
     if (legacy.length) {
@@ -2037,7 +2037,7 @@ class Commands {
     const lines = text.split("\n");
     const at = lines.at(-1)!.startsWith("Next:") ? lines.length - 1 : lines.length;
     lines.splice(at, 0, ...contradictionLines(pairs));
-    if (json) this.emitRaw(checkJson(results, code, [], pairs));
+    if (json) this.emitRaw(checkJson(results, code, [], pairs, stored.stored.length));
     else this.d.out(colorLines(lines.join("\n"), paint(!!this.d.color)));
     await this.sendTelemetry("check", () => checkData(results, code, (performance.now() - started) / 1000));
     return code;

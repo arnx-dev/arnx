@@ -4,7 +4,8 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { ACCEPTED_RECORD, changedAccepted, localPinsPath, recordAccepted, TESTS_CHANGED } from "../src/check";
+import { ACCEPTED_RECORD, changedAccepted, localPinsPath, recordAccepted, storedOlderText, storeOlderKept, TESTS_CHANGED }
+  from "../src/check";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { save } from "../src/report";
 import type { SessionFactory } from "../src/sandbox";
@@ -89,6 +90,15 @@ test("check stores older kept files under their stored names, pins moved, and ru
   expect(cli.stdout).not.toContain("Stored");
 });
 
+test("check --json says how many older kept files it stored", async () => {
+  const env = { XDG_CONFIG_HOME: tmp() };
+  const { repo, cli } = await repoWithReview(env);
+  olderReview(repo, env);
+  cli.out.length = 0;
+  expect(await cli.run("check", "--json", "--quiet")).toBe(1);
+  expect(JSON.parse(cli.stdout).stored_older).toBe(2);
+});
+
 test("committed older kept files are stored without a record on this machine, and check trusts the moved pins", async () => {
   // A fresh clone or CI: no record of the pins outside the repository, only the committed ones.
   const { repo, cli } = await repoWithReview({});
@@ -132,7 +142,7 @@ test("accept --again of a review an older arnx kept in .arnx/tests/: the old nam
   expect(changedAccepted(repo, localPinsPath(env, repo))).toEqual([]);
 });
 
-test("an older kept file beside an identical stored one is removed; one that differs is left, and said", async () => {
+test("an older kept file beside an identical stored one is removed; two unpinned that differ are left, and said", async () => {
   const env = { XDG_CONFIG_HOME: tmp() };
   const { repo, cli } = await repoWithReview(env);
   expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
@@ -142,12 +152,13 @@ test("an older kept file beside an identical stored one is removed; one that dif
   expect(cli.stdout).toContain("Stored 1 older kept file out of your test runs.");
   expect([existsSync(join(repo, OLD)), existsSync(join(repo, KEPT))]).toEqual([false, true]);
   expect(Object.keys(record(repo))).toEqual([KEPT]);
-  put(repo, OLD, "def test_a():\n    assert True\n"); // not the same
-  cli.out.length = 0;
-  expect(await cli.run("check")).toBe(1);
-  expect(cli.stdout).toContain(`1 older kept file differs from its stored copy; left as it is: ${OLD}`);
-  expect([existsSync(join(repo, OLD)), existsSync(join(repo, KEPT))]).toEqual([true, true]);
-  expect(readFileSync(join(repo, KEPT), "utf8")).toBe(BODY);
+  // Two copies that differ and that no pin covers: left as they are, and said (one pinned: refused, below).
+  put(repo, ".arnx/tests/tests/arnx/r1/test_q.py", "def test_q(): pass\n");
+  put(repo, ".arnx/tests/tests/arnx/r1/test_q.py.arnx", "def test_q(): assert 0\n");
+  const r = storeOlderKept(repo, localPinsPath(env, repo));
+  expect(r).toEqual({ stored: [], both: [".arnx/tests/tests/arnx/r1/test_q.py"] });
+  expect(storedOlderText(r)).toBe("1 older kept file differs from its stored copy; left as it is: " +
+    ".arnx/tests/tests/arnx/r1/test_q.py");
 });
 
 test("an older kept file edited since accept makes check refuse (exit 4), and it is not moved", async () => {
@@ -165,4 +176,69 @@ test("an older kept file edited since accept makes check refuse (exit 4), and it
   // accept does not move it either: its pin is not trusted.
   expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
   expect(existsSync(join(repo, OTHER))).toBe(true);
+});
+
+// For every run name, the file that runs is the pinned one: two copies that differ, one pinned, are refused (exit 4),
+// both named, and nothing runs.
+test("a weakened copy under the stored name beside a pinned older file is refused (exit 4), both named", async () => {
+  const env = { XDG_CONFIG_HOME: tmp() };
+  const seen: string[] = [];
+  const { repo, cli } = await repoWithReview(env, seen);
+  olderReview(repo, env);
+  commit(repo, "accepted by an older arnx");
+  put(repo, `${OTHER}.arnx`, "def test_z():\n    assert 1\n"); // no pin touched, the original left as it is
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain(`  twice    ${OTHER}: one test stored under two names that differ`);
+  expect(cli.stdout).toContain(`  twice    ${OTHER}.arnx: one test stored under two names that differ`);
+  expect(cli.stdout).toContain("delete the copy you do not want");
+  expect(seen).toEqual([]);
+  expect([existsSync(join(repo, OTHER)), existsSync(join(repo, `${OTHER}.arnx`))]).toEqual([true, true]);
+  // --keep-edits does not choose either.
+  expect(await cli.run("accept", "--keep-edits")).not.toBe(0);
+  expect(cli.stderr).toContain("stored under two names that differ");
+});
+
+test("an unpinned older copy beside a pinned stored file is refused (exit 4), both named", async () => {
+  const env = { XDG_CONFIG_HOME: tmp() };
+  const seen: string[] = [];
+  const { repo, cli } = await repoWithReview(env, seen);
+  expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
+  put(repo, OLD, "def test_a():\n    assert True\n");
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain(`twice    ${OLD}:`);
+  expect(cli.stdout).toContain(`twice    ${KEPT}:`);
+  expect(seen).toEqual([]);
+  // Deleting the unpinned copy settles it.
+  rmSync(join(repo, OLD));
+  expect(await cli.run("check")).toBe(1);
+  expect(seen).toEqual([BODY]);
+});
+
+test("a pinned older file deleted with its entry, beside a stored copy pinned apart, is refused (exit 4)", async () => {
+  const env = { XDG_CONFIG_HOME: tmp() };
+  const seen: string[] = [];
+  const { repo, cli } = await repoWithReview(env, seen);
+  olderReview(repo, env);
+  commit(repo, "accepted by an older arnx");
+  // A weaker copy under the stored name, pinned as if accept wrote it; the pinned original and its entry gone.
+  put(repo, `${OTHER}.arnx`, "def test_z():\n    assert 1\n");
+  recordAccepted(repo, "20261001-0b0b0b", { [`${OTHER}.arnx`]: ["test_z"], [OTHER_CONF]: [] });
+  rmSync(join(repo, OTHER));
+  expect(Object.keys(record(repo))).not.toContain(OTHER);
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toMatch(new RegExp(`(unpinned|deleted ) ${OTHER.replaceAll(".", "\\.")}(:|\\n)`));
+  expect(seen).toEqual([]);
+});
+
+test("a pinned older file deleted, its entry kept, beside a stored copy, is deleted (exit 4)", async () => {
+  const env = { XDG_CONFIG_HOME: tmp() };
+  const seen: string[] = [];
+  const { repo, cli } = await repoWithReview(env, seen);
+  olderReview(repo, env);
+  put(repo, `${OTHER}.arnx`, "def test_z():\n    assert 1\n");
+  rmSync(join(repo, OTHER));
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain(`deleted  ${OTHER}`);
+  expect(seen).toEqual([]);
 });

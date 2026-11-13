@@ -71,7 +71,8 @@ After the user says they accepted:
 
 1. `arnx check --json` runs the accepted tests (kept in `.arnx/tests/` under names no runner, type checker or linter
    picks up) on your working tree. Those of the issues just marked real fail: expected, and the list to fix. Fields:
-   [references/check-json.md](references/check-json.md).
+   [references/check-json.md](references/check-json.md). `stored_older` above 0: check renamed older kept files;
+   tell the user to commit them with `.arnx/accepted-tests.json`.
 2. `arnx prompt <id>` prints the fix prompt (also `.arnx/reviews/<id>/fix-prompt.md`): the failing tests, each bug,
    the user's answers as intended behaviour, and the rules. Fix from it, and only what it lists. Fix the **code
    under test**, never the tests. If a fix depends on what the code is meant to do and no answer says, do not guess:
@@ -88,8 +89,7 @@ After the user says they accepted:
 
 ## 5. Run the full suites
 
-A passing `arnx check` covers only the accepted tests; the project's own runner never runs them (`arnx check` also
-stores any an older arnx kept under the names they run by out of its sight). For each project
+A passing `arnx check` covers only the accepted tests; the project's own runner never sees them. For each project
 the change touched (its `root` in `.arnx/review.yaml`), run its whole suite the way the project runs it (README, CI,
 Makefile; `test_command` in review.yaml names the runner and `image` the environment).
 
