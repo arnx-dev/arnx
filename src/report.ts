@@ -421,7 +421,7 @@ function why(stop: string, r?: Review): string {
   if (stop.startsWith("api_error: ")) return `the reviewer's model call failed (${stop.slice("api_error: ".length)})`;
   if (stop === "budget") {
     return "the review budget ran out before the reviewer finished (raise `review_usd` under [budget] in " +
-      `.arnx/config.toml${r && billedByCloud(r) ? ", or top up: arnx credits" : ""}, then run arnx review again)`;
+      `.arnx/config.toml${r && billedByCloud(r) ? ", or use your own keys: arnx cloud off" : ""}, then run arnx review again)`;
   }
   if (stop === "max_turns") return "the reviewer ran out of turns";
   if (stop === "refusal") return "the model refused the request";

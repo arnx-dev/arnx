@@ -181,7 +181,7 @@ test("a final, then a follow-up the budget cut: a budget stop, said in the repor
   expect(review.projectStats?.[0]?.stop).toBe("budget");
   expect(c.seen.find((x) => x.path.endsWith("/finish"))!.body).toMatchObject({ stop: "budget" });
   expect(summary(review, "review.md")).toContain("the review budget ran out before the reviewer finished (raise " +
-    "`review_usd` under [budget] in .arnx/config.toml, or top up: arnx credits, then run arnx review again)");
+    "`review_usd` under [budget] in .arnx/config.toml, or use your own keys: arnx cloud off, then run arnx review again)");
 });
 
 test("a cloud round that ends with an empty report and no test run is incomplete", async () => {
@@ -264,14 +264,16 @@ function cloudRepo(c: FakeCloud): Cli {
   return new Cli({ cwd: repo, env: { HOME: home, ARNX_CLOUD_URL: c.url }, sleep: async () => {} });
 }
 
-test("402 at the review's start stops with exit 3, the balance and the top-up link", async () => {
+test("402 at the review's start stops with exit 3, the balance and the own-keys path", async () => {
   const c = cloud = fakeCloud({ fail: { "POST /v1/reviews": [{ status: 402, body: { code: "insufficient_credits",
     message: "Your arnx cloud balance is too low to start a review.", balance_micro_usd: 120_000,
     needed_micro_usd: 380_000, topup_url: "https://arnx.dev/credits" } }] } });
   const cli = cloudRepo(c);
   expect(await cli.run("review", "--quiet")).toBe(3);
-  expect(cli.stderr).toContain("too low to start a review. Balance $0.12; $0.38 more lets this start. Top up at " +
-    "https://arnx.dev/credits");
+  expect(cli.stderr).toContain("too low to start a review. Balance $0.12; $0.38 more lets this start. " +
+    "arnx works with your own model keys: `arnx cloud off`, then export ANTHROPIC_API_KEY (or another provider's key).");
+  expect(cli.stderr).not.toContain("Top up");
+  expect(cli.stderr).not.toContain("arnx.dev/credits");
   expect(c.seen.some((x) => x.path.endsWith("/agent"))).toBe(false);
 });
 

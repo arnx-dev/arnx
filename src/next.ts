@@ -120,7 +120,7 @@ function step(repo: string): Omit<Next, "phase"> & { phase?: string } {
     }
     // A review its budget cut short: what it proved stands; the rest needs a bigger budget and another review.
     const note = cut ? { note: "it stopped at its budget: what it proved stands; for the rest, raise `review_usd` " +
-      "(or top up arnx cloud) and run arnx review again" } : {};
+      "(or use your own keys: arnx cloud off) and run arnx review again" } : {};
     return settled
       ? { where: `review ${id}: every issue comes marked real`, command: `arnx accept ${id}`,
         why: `\`arnx triage ${id}\` first to change a mark`, ...note }

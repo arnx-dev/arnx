@@ -254,8 +254,7 @@ export class CloudClient {
     if (e.code === "not_open") return new CloudNotOpen(NOT_OPEN, part);
     if (e.code === "insufficient_credits" || a.status === 402) {
       return new SetupRequired(`${e.message} Balance ${usd(e.balance_micro_usd ?? 0)}; ${usd(e.needed_micro_usd ?? 0)} ` +
-        `more lets this start. Top up at ${e.topup_url ?? "https://arnx.dev/credits"} (\`arnx credits\` shows the ` +
-        "balance); `arnx review --resume` continues an interrupted review after a top-up");
+        `more lets this start. ${OWN_KEYS}`);
     }
     if (e.code === "unsupported_cli") {
       const needs = e.min_cli_version ? `arnx ${e.min_cli_version} or later` : "a newer arnx";
@@ -334,6 +333,10 @@ async function readStream(res: Response, c: CallOptions): Promise<Answer> {
 
 // --- account and login ---------------------------------------------------------------------------------------------------
 
+/** What a user with no arnx cloud credit can do. */
+const OWN_KEYS = "arnx works with your own model keys: `arnx cloud off`, then export ANTHROPIC_API_KEY (or another " +
+  "provider's key).";
+
 export interface Account { account_id: string; email?: string; balance_micro_usd: number; held_micro_usd: number;
   topup_url: string }
 
@@ -342,11 +345,10 @@ export interface Account { account_id: string; email?: string; balance_micro_usd
 export function describeAccount(a: Account): string[] {
   if (a.balance_micro_usd < 0) {
     return [`✗ Outstanding balance: ${usd(-a.balance_micro_usd)} (a review's overage)`,
-      "New arnx cloud reviews are paused until you top up.", `Top up: ${a.topup_url}`];
+      `New arnx cloud reviews are paused. ${OWN_KEYS}`];
   }
   return [`arnx cloud · ${a.email ?? a.account_id}`, `  Available: ${usd(a.balance_micro_usd)}`,
-    ...a.held_micro_usd ? [`  Reserved:  ${usd(a.held_micro_usd)} (reviews in progress)`] : [],
-    `Top up: ${a.topup_url}`];
+    ...a.held_micro_usd ? [`  Reserved:  ${usd(a.held_micro_usd)} (reviews in progress)`] : []];
 }
 
 export interface LoginDeps {

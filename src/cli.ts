@@ -786,7 +786,7 @@ class Commands {
     try {
       const acct = await this.cloudClient(url, token, s, mode).call<Account>("GET", "/v1/account");
       out.push([acct.balance_micro_usd > 0, "Credits", `${usd(acct.balance_micro_usd)} available` +
-        (acct.balance_micro_usd > 0 ? "" : `; top up at ${acct.topup_url}`)]);
+        (acct.balance_micro_usd > 0 ? "" : "; own keys: arnx cloud off")]);
     } catch (e) {
       if (!(e instanceof ArnxError)) throw e;
       out.push([false, "Credits", oneLine(e.message)]);
@@ -1939,7 +1939,7 @@ class Commands {
       const acct = await this.cloudClient(url, token, s, mode).call<Account>("GET", "/v1/account");
       if (acct.balance_micro_usd > 0) return n;
       return { phase: n.phase, where: `${n.where}; the arnx cloud balance is ${usd(acct.balance_micro_usd)}`,
-        command: "arnx credits", why: `top up at ${acct.topup_url}`, then: n.command };
+        command: "arnx credits", why: "or use your own keys: arnx cloud off", then: n.command };
     } catch (e) {
       if (!(e instanceof ArnxError)) throw e;
       return { ...n, why: `${n.why} (arnx cloud could not be asked for the balance: ${oneLine(e.message)})` };

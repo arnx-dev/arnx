@@ -139,12 +139,12 @@ The code to enter and the page to open are on stderr while it waits.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `balance_usd` | number | The available balance (the text's "Available"); negative is a debt (nothing new starts until a top-up). |
+| `balance_usd` | number | The available balance (the text's "Available"); negative is a debt (nothing new starts until it is cleared). |
 | `held_usd` | number | Reserved by reviews in progress (not spendable; `balance_usd` already leaves it out). |
 | `reserved_usd` | number | The same as `held_usd`, under the text's name ("Reserved"). |
 | `email` | string or null | The account's email. |
 | `account_id` | string | The account. |
-| `topup_url` | string | Where to top up. |
+| `topup_url` | string | The account link. |
 
 | `result` | Exit | When |
 |---|---|---|

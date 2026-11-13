@@ -78,7 +78,7 @@ directly. Other providers and models: [docs/MODELS.md](docs/MODELS.md).
 
     arnx init                           # writes .arnx/config.toml and .arnxignore
 
-**With arnx cloud.** No model keys; new accounts start with $5 of credit.
+**With arnx cloud.** No model keys; the first 100 accounts get $5 of credit.
 
     arnx init --cloud                   # writes the config for arnx cloud
     arnx login                          # a device login: open the link it shows, enter the code
