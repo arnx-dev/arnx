@@ -191,3 +191,25 @@ test("a saved review with no source_files does not read Complete", () => {
   expect(text).toContain("Older review: this arnx did not record which files its tests reached.");
   expect(text).not.toContain("Complete");
 });
+
+const statusOfRender = (r: ReturnType<typeof sampleReview>) =>
+  render(r).split("## Status\n\n")[1]!.split("\n\n")[0]!.split("\n");
+
+test("a review with findings the second opinion did not check is not Complete", () => {
+  const judged = sampleReview({ sourceFiles: 2 });
+  expect(statusOfRender(judged)[0]).toStartWith("Complete:");
+  const r = sampleReview({ sourceFiles: 2, findings: [f("F1", "test_a", "confirmed", "real"),
+    { ...f("F2", "test_b", null, CUT), status: "not-checked" } as never] });
+  const lines = statusOfRender(r);
+  expect(lines[0]).toStartWith("Tested; not all checked: the change was tested; every run reported its tests.");
+  expect(lines.some((l) => l.startsWith("Complete"))).toBe(false);
+  expect(lines.some((l) => l.startsWith("Not checked by the second opinion: F2"))).toBe(true);
+});
+
+test("an older review with unchecked findings reads Older review, not Tested; not all checked", () => {
+  const r = sampleReview({ noEvidence: true, findings: [f("F1", "test_b", null, CUT)] });
+  const lines = statusOfRender(r);
+  expect(lines[0]).toStartWith("Older review:");
+  expect(lines.some((l) => l.startsWith("Tested; not all checked") || l.startsWith("Complete"))).toBe(false);
+  expect(lines.some((l) => l.startsWith("Not checked by the second opinion"))).toBe(true);
+});
