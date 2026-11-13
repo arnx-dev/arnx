@@ -12,6 +12,7 @@ import { isKeptPath } from "../src/testround";
 import { FakeSession } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -45,6 +46,7 @@ test("check finds the tests accept kept in a Rust crate and runs only them", asy
   writeFileSync(join(repo, "calc/tests/arnx_generated_left.rs"), "#[test]\nfn g() {}\n"); // a round's leftover
   writeFileSync(join(repo, "calc/tests/common/arnx_helper.rs"), "pub fn h() {}\n"); // not built by cargo
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(CONFIG), "Dev", "2026-10-12"));
+  pinKept(repo);
   commit(repo, "layout");
   const seen: string[] = [];
   const session: SessionFactory = async (_c, snap, _l, body) => {

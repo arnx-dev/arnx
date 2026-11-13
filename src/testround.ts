@@ -215,31 +215,38 @@ export function keptTestFiles(repo: string, cfg: ReviewConfig, acceptedTestsDir?
   return stored.filter((p) => p !== runName(p) || !suffixed.has(p)).map((p) => `${DOME}/${p}`);
 }
 
-/** Puts every file under the repository's DOME into `snap` (a throwaway copy of it) at the path it runs from, under its
- * run name; the run paths placed. A file stored both ways is placed once, only when both copies are the same: of two
- * that differ, arnx never picks the one that runs (check refuses them first, as changedAccepted names them). */
-export function placeKept(repo: string, snap: string): string[] {
+/** Puts the kept files `pinned` names (repository-relative paths under DOME, as the record holds them) into `snap` (a
+ * throwaway copy of the repository) at the path each runs from, under its run name; the run paths placed. Nothing else
+ * under DOME is placed, nothing is placed over what the copy already holds, and every file is read as changedAccepted
+ * hashed it: never through a link, so what runs is what was checked. Two pinned files of one run name that differ are
+ * refused, never chosen between. */
+export function placeKept(repo: string, snap: string, pinned: ReadonlySet<string>): string[] {
   const dome = join(repo, DOME);
   if (!existsSync(dome)) return [];
-  // Read as changedAccepted hashes them: never through a link, so what runs is what was checked.
-  const all = new Set(entriesUnder(dome));
-  const same = (a: Buffer | string, b: Buffer | string) => typeof a !== "string" && typeof b !== "string" && a.equals(b);
-  const differ = [...all].filter((p) => runName(p) === p && all.has(storedName(p)) &&
-    !same(regularBytes(dome, p), regularBytes(dome, storedName(p))));
+  const mine = [...pinned].filter((p) => p.startsWith(`${DOME}/`)).map((p) => p.slice(DOME.length + 1)).sort();
+  const bytes = new Map(mine.map((rel) => [rel, regularBytes(dome, rel)] as const));
+  const same = (a?: Buffer | string, b?: Buffer | string) => typeof a !== "string" && typeof b !== "string" && !!a && !!b &&
+    a.equals(b);
+  const differ = mine.filter((p) => runName(p) === p && bytes.has(storedName(p)) && !same(bytes.get(p), bytes.get(storedName(p))));
   if (differ.length) {
     throw new ArnxError(`a kept test is stored under two names that differ (${differ.map((p) => `${DOME}/${storedName(p)}`)
       .join(", ")} and the same without .arnx): delete the copy you do not want, then run this again`);
   }
-  const placed: string[] = [];
-  for (const rel of collect(dome, "", /./)) {
-    const bytes = regularBytes(dome, rel);
-    if (typeof bytes === "string") continue; // gone meanwhile, or no longer a regular file: nothing of it runs
+  const placed = new Set<string>();
+  for (const rel of mine) {
+    const b = bytes.get(rel)!;
+    // Gone meanwhile, or no longer a regular file: nothing of it runs (changedAccepted names it).
+    if (typeof b === "string" || placed.has(runName(rel))) continue;
     const to = join(snap, runName(rel));
+    if (lstatSync(to, { throwIfNoEntry: false })) {
+      throw new ArnxError(`${DOME}/${rel} runs from ${runName(rel)}, which your project already has: arnx never puts a ` +
+        "kept test over a file of the project");
+    }
     mkdirSync(dirname(to), { recursive: true });
-    writeFileSync(to, bytes, { mode: (lstatSync(join(dome, rel), { throwIfNoEntry: false })?.mode ?? 0o644) & 0o777 });
-    placed.push(runName(rel));
+    writeFileSync(to, b, { mode: (lstatSync(join(dome, rel), { throwIfNoEntry: false })?.mode ?? 0o644) & 0o777 });
+    placed.add(runName(rel));
   }
-  return [...new Set(placed)].sort();
+  return [...placed].sort();
 }
 
 /** The project among `projects` whose folder holds `path` (repository-relative), the deepest one. */

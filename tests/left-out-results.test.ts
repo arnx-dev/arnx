@@ -16,6 +16,7 @@ import { fakeFactory, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { RecordingAgent, RecordingJson } from "./helpers/recording";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -140,6 +141,7 @@ function kept(): string {
   const repo = repoWith();
   mkdirSync(join(repo, ".arnx/tests/tests/arnx/r1"), { recursive: true });
   writeFileSync(join(repo, `.arnx/tests/${KEPT}`), "import lib\n\ndef test_kept():\n    assert lib\n");
+  pinKept(repo);
   return repo;
 }
 for (const [name, message] of [["at the top of the test file", LOAD], ["inside the test", LAZY]] as const) {

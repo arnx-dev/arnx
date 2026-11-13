@@ -13,7 +13,7 @@ import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { accept, findAccepted, findReview, hasAnswers, makeAnswerRunner, recordChosen } from "./accept";
 import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, contradictionLines,
-  storedOlderText, storeOlderKept,
+  linkedDome, storedOlderText, storeOlderKept,
   failingList, keepEdits, mayContradict, recordAnswerWatch,
   legacyAccepted, moveOut,
   localPinsPath, TESTS_CHANGED } from "./check";
@@ -1675,6 +1675,10 @@ class Commands {
     if (a.values["keep-edits"]) return this.keepEdits(a);
     if (a.values.move) return this.moveOut(a);
     const repo = this.repo();
+    // accept writes under .arnx/: never through a link there.
+    const linked = linkedDome(repo);
+    if (linked) throw new ArnxError(`${linked} is a link (or not a folder): arnx writes nothing through it; replace it with ` +
+      "the folder itself, then run accept again");
     const { s: file, mode } = this.settings(repo, a);
     let s = file;
     const rdir = findReview(repo, a.positionals[0] ?? null);
@@ -1996,9 +2000,17 @@ class Commands {
     if (a.positionals.length && !a.values.review) throw new ArnxError("a review id goes with --review: " +
       `arnx check --review ${a.positionals[0]}`);
     const repo = this.repo();
+    const json = !!a.values.json;
+    // A link at .arnx or .arnx/tests: nothing is read, moved or written through it, review copies included.
+    const linked = linkedDome(repo);
+    if (linked) {
+      const changed = [{ path: linked, review: "", change: "modified" as const }];
+      if (json) this.emitRaw(checkJson([], TESTS_CHANGED, changed));
+      else this.d.out(colorLines(changedSummary(changed, repo), paint(!!this.d.color)));
+      return TESTS_CHANGED;
+    }
     suffixReviewCopies(repo);
     const s = loadSettings(repo);
-    const json = !!a.values.json;
     if (a.values.review) return this.recheck(a, repo, s, json);
     // Accepted tests edited or deleted since accept are not run: passing them would prove nothing. Nor are they when
     // their pins were changed or removed by anything but arnx.

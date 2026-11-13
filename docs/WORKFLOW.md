@@ -235,7 +235,10 @@ nothing, and a coding agent told to make `arnx check` pass cannot do it that way
 test does not help either: a sha256 there counts only when it is the committed one or one `arnx accept` wrote on this
 machine (it keeps a copy in `~/.config/arnx/pins/`, outside the repository); a changed or removed entry exits 4 too.
 A fresh clone or CI has no such copy and trusts the committed record, so a commit that edits both shows only in its
-diff: `arnx review` of that change names the accepted tests and pins it edits or removes.
+diff: `arnx review` of that change names the accepted tests and pins it edits or removes. `arnx check` runs only
+pinned files, read as regular files (never through a link) and never placed over a file of your project: a file under
+`.arnx/tests/` that accept did not write, or a link there, exits 4 too. An accepted test that ends skipped does not
+pass (exit 1).
 Changed by mistake: `arnx accept --again <id>` copies the review's tests back (your edits are lost); `arnx check`
 also names `git checkout -- <file>` when the committed copy is the accepted one. Changed on purpose:
 `arnx accept --keep-edits` records the accepted tests as they are now. An answer's test can ask for the opposite of an

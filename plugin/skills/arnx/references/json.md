@@ -394,7 +394,7 @@ the owner answered that question and the answer's round kept a test.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `changed` | array | The accepted test files recorded as they are now, each `{ path, change }`; `change` is `modified`, `deleted`, `repinned`, `unpinned` or `duplicate`, as in [check-json.md](check-json.md). Empty when nothing changed. |
+| `changed` | array | The accepted test files recorded as they are now, each `{ path, change }`; `change` is `modified`, `deleted`, `repinned`, `unpinned`, `duplicate`, `added` or `collides`, as in [check-json.md](check-json.md). Empty when nothing changed. |
 | `restored_tests` | array of strings | The files whose accepted-test list (`tests` in `.arnx/accepted-tests.json`) was edited: an edit there is not kept (it could relabel a failing accepted test as another one), so the list arnx wrote (HEAD's, else this machine's) is recorded again. The files themselves are recorded as they are now. Usually empty. |
 | `recorded` | string | The record, `.arnx/accepted-tests.json` (unchanged when `changed` is empty): commit it with the tests. |
 

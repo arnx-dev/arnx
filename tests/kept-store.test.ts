@@ -2,7 +2,8 @@
 // or linter can pick them up: check and accept store them under their stored names (.arnx appended), each pin moved
 // with its file, and say so in one line. A tampered one is refused, never moved.
 import { expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync }
+  from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { ACCEPTED_RECORD, changedAccepted, localPinsPath, recordAccepted, storedOlderText, storeOlderKept, TESTS_CHANGED }
   from "../src/check";
@@ -142,7 +143,7 @@ test("accept --again of a review an older arnx kept in .arnx/tests/: the old nam
   expect(changedAccepted(repo, localPinsPath(env, repo))).toEqual([]);
 });
 
-test("an older kept file beside an identical stored one is removed; two unpinned that differ are left, and said", async () => {
+test("an older kept file beside an identical stored one is removed; two unpinned that differ are named, not moved", async () => {
   const env = { XDG_CONFIG_HOME: tmp() };
   const { repo, cli } = await repoWithReview(env);
   expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
@@ -152,13 +153,16 @@ test("an older kept file beside an identical stored one is removed; two unpinned
   expect(cli.stdout).toContain("Stored 1 older kept file out of your test runs.");
   expect([existsSync(join(repo, OLD)), existsSync(join(repo, KEPT))]).toEqual([false, true]);
   expect(Object.keys(record(repo))).toEqual([KEPT]);
-  // Two copies that differ and that no pin covers: left as they are, and said (one pinned: refused, below).
+  // Two copies that differ and that no pin covers: neither moved nor removed, and check names both (not placed).
   put(repo, ".arnx/tests/tests/arnx/r1/test_q.py", "def test_q(): pass\n");
   put(repo, ".arnx/tests/tests/arnx/r1/test_q.py.arnx", "def test_q(): assert 0\n");
-  const r = storeOlderKept(repo, localPinsPath(env, repo));
-  expect(r).toEqual({ stored: [], both: [".arnx/tests/tests/arnx/r1/test_q.py"] });
-  expect(storedOlderText(r)).toBe("1 older kept file differs from its stored copy; left as it is: " +
-    ".arnx/tests/tests/arnx/r1/test_q.py");
+  expect(storeOlderKept(repo, localPinsPath(env, repo))).toEqual({ stored: [], both: [] });
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain("added    .arnx/tests/tests/arnx/r1/test_q.py:");
+  expect(cli.stdout).toContain("added    .arnx/tests/tests/arnx/r1/test_q.py.arnx:");
+  expect(storedOlderText({ stored: [], both: [".arnx/tests/tests/arnx/r1/test_q.py"] })).toBe("1 older kept file " +
+    "differs from its stored copy; left as it is: .arnx/tests/tests/arnx/r1/test_q.py");
 });
 
 test("an older kept file edited since accept makes check refuse (exit 4), and it is not moved", async () => {
@@ -255,7 +259,8 @@ test("a link at the stored name beside a pinned older file is refused (exit 4) a
   commit(repo, "a link beside the accepted test");
   expect(await cli.run("check")).toBe(TESTS_CHANGED);
   expect(cli.stdout).toContain(`modified ${OTHER}.arnx`);
-  expect(cli.stdout).toContain(`Not a regular file (a link or a folder): ${OTHER}.arnx`);
+  expect(cli.stdout).toContain("A link or a folder where a kept test belongs: delete it, then arnx check");
+  expect(cli.stdout).not.toContain("arnx accept --again");
   expect(cli.stdout).not.toContain("Stored");
   expect(seen).toEqual([]);
   expect(readFileSync(join(repo, OTHER), "utf8")).toBe("def test_z():\n    assert 0\n");
@@ -318,3 +323,97 @@ test("two copies of one test are settled by deleting one, which the refusal says
   expect(await cli.run("check")).toBe(1);
   expect(cli.stdout).toContain("Stored 2 older kept files out of your test runs.");
 });
+
+// check places only what accept pinned, never over a file of the project, and an accepted test that ends skipped
+// does not pass.
+test("an unpinned file under .arnx/tests/ is named (exit 4) and never placed: a conftest that skips everything", async () => {
+  const seen: string[] = [];
+  const { repo, cli } = await repoWithReview({}, seen);
+  expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
+  const conf = ".arnx/tests/tests/arnx/conftest.py.arnx";
+  put(repo, conf, "import pytest\ndef pytest_collection_modifyitems(items):\n    for i in items:\n" +
+    "        i.add_marker(pytest.mark.skip(reason='x'))\n");
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain(`added    ${conf}: not in ${ACCEPTED_RECORD} (arnx accept did not write it)`);
+  expect(seen).toEqual([]);
+});
+
+test("an unpinned file under .arnx/tests/ standing in for the project's code is named (exit 4)", async () => {
+  const seen: string[] = [];
+  const { repo, cli } = await repoWithReview({}, seen);
+  expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
+  put(repo, "app.py", "def add(a, b):\n    return a - b\n");
+  put(repo, ".arnx/tests/app.py.arnx", "def add(a, b):\n    return a + b\n");
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain("added    .arnx/tests/app.py.arnx:");
+  expect(seen).toEqual([]);
+});
+
+test("a pinned file that would run over a file of the project is refused (exit 4)", async () => {
+  const seen: string[] = [];
+  const { repo, cli } = await repoWithReview({}, seen);
+  expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
+  put(repo, "app.py", "def add(a, b):\n    return a - b\n");
+  put(repo, ".arnx/tests/app.py.arnx", "def add(a, b):\n    return a + b\n");
+  recordAccepted(repo, RID, { [KEPT]: ["test_a"], ".arnx/tests/app.py.arnx": [] });
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain("collides .arnx/tests/app.py.arnx: it runs from a path your project already has");
+  expect(cli.stdout).toContain("arnx never puts a kept test over a file of your project");
+  expect(seen).toEqual([]);
+  expect(readFileSync(join(repo, "app.py"), "utf8")).toBe("def add(a, b):\n    return a - b\n");
+});
+
+test("an accepted test that ends skipped does not pass (exit 1, named)", async () => {
+  const { repo } = await repoWithReview({});
+  const skipping: SessionFactory = async (_c, snap, _l, body) => body(new FakeSession(snap,
+    () => [junitXml([[RUN, "test_a", "skipped", "x"]]), "1 skipped", false]));
+  const cli = new Cli({ cwd: repo, checkSessions: skipping, env: {} });
+  expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(1);
+  expect(cli.stdout).toContain("✗ 1 accepted test skipped, so not shown to pass:\n  ✗ test_a");
+  expect(cli.stdout).toContain("A skipped accepted test proves nothing");
+  expect(cli.stdout).not.toContain("Accepted tests unchanged");
+  cli.out.length = 0;
+  expect(await cli.run("check", "--json", "--quiet")).toBe(1);
+  expect(JSON.parse(cli.stdout).projects[0].skipped_accepted).toEqual([`${RUN}::test_a`]);
+});
+
+test("an unpinned file beside a review's folder, named like it, is named as added", async () => {
+  const seen: string[] = [];
+  const { repo, cli } = await repoWithReview({}, seen);
+  expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
+  put(repo, ".arnx/tests/tests/arnx/r20261011_a1b2c3.arnx", "x\n");
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain("added    .arnx/tests/tests/arnx/r20261011_a1b2c3.arnx:");
+  expect(cli.stdout).not.toContain("two names");
+});
+
+for (const at of [".arnx/tests", ".arnx"]) {
+  test(`${at} as a link: check and accept refuse, nothing is written through it or deleted`, async () => {
+    const seen: string[] = [];
+    const { repo, cli } = await repoWithReview({}, seen);
+    const outside = join(tmp(), "outside");
+    if (at === ".arnx") {
+      // The whole folder moved elsewhere and linked back.
+      renameSync(join(repo, ".arnx"), outside);
+      symlinkSync(outside, join(repo, ".arnx"));
+    } else {
+      mkdirSync(outside, { recursive: true });
+      symlinkSync(outside, join(repo, ".arnx", "tests"));
+    }
+    const before = readdirSync(outside, { recursive: true }).map(String).sort();
+    cli.out.length = 0;
+    expect(await cli.run("check")).toBe(TESTS_CHANGED);
+    expect(cli.stdout).toContain(`modified ${at}\n`);
+    expect(cli.stdout).toContain("A link or a folder where a kept test belongs: delete it, then arnx check");
+    expect(await cli.run("accept", "--no-answers", "--no-check")).not.toBe(0);
+    expect(cli.stderr).toContain(`${at} is a link (or not a folder)`);
+    expect(readdirSync(outside, { recursive: true }).map(String).sort()).toEqual(before);
+    expect(seen).toEqual([]);
+  });
+}

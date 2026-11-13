@@ -113,12 +113,17 @@ test("check refuses a deleted accepted test; accept --again copies it back and r
   expect(runs()).toBe(1);
 });
 
-test("a test file accept never recorded is still run (kept by an older arnx)", async () => {
+test("a test file no pin covers is named and never run (exit 4)", async () => {
+  // Only pinned files are placed: one the record does not name (a record removed before it was ever committed or
+  // recorded here) is not run, and not left out unseen either.
   const { repo, cli, runs } = await accepted();
   rmSync(join(repo, ACCEPTED_RECORD));
   writeFileSync(join(repo, KEPT), "def test_a():\n    assert True\n");
-  expect(await cli.run("check")).toBe(1);
-  expect(runs()).toBe(1);
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain(`added    ${KEPT}: not in ${ACCEPTED_RECORD} (arnx accept did not write it)`);
+  expect(cli.stdout).toContain("Not written by arnx accept: delete it, then arnx check");
+  expect(runs()).toBe(0);
 });
 
 test("check --json gives each project's passed and failed tests and the overall result", async () => {

@@ -188,7 +188,8 @@ test("check runs each review's files in a run of their own: one review's conftes
   }));
   expect(await new Cli({ cwd: repo, checkSessions: sessions }).run("accept", "--no-answers", "--no-check")).toBe(0);
   mkdirSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261012_bbbbbb"), { recursive: true });
-  writeFileSync(join(repo, ".arnx", "tests", other), "def test_z():\n    assert False\n");
+  writeFileSync(join(repo, ".arnx", "tests", `${other}.arnx`), "def test_z():\n    assert False\n");
+  recordAccepted(repo, "20261012-bbbbbb", { [`.arnx/tests/${other}.arnx`]: ["test_z"] });
   const c = new Cli({ cwd: repo, checkSessions: sessions });
   expect(await c.run("check")).toBe(1);
   const runs = commands.filter((x) => x.includes("test_y") || x.includes("test_z"));

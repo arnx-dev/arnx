@@ -35,7 +35,7 @@ kept, as stored.
 | Field | Type | Meaning |
 |---|---|---|
 | `project` | string | The project's name in `.arnx/review.yaml`. |
-| `files` | array of strings | The accepted test files run, relative to the repository. |
+| `files` | array of strings | The accepted test files run, relative to the repository: only files pinned in `.arnx/accepted-tests.json` run (anything else under `.arnx/tests/` is a `changed` entry, `added`). |
 | `no_report` | boolean | The tests did not report (timed out, or the runner could not start). |
 | `no_report_reason` | string or null | With `no_report`: why (`the tests timed out after 900 s`, `the runner could not start (exit 127)`, `the runner wrote no report (exit 1)`); else null. |
 | `log` | string or null | With `no_report`: the runner's output, a file relative to the repository (`.arnx/run/check-<project>.log`); else null. |
@@ -44,6 +44,7 @@ kept, as stored.
 | `failed` | array | Tests that failed: see [Each failed test](#each-failed-test). |
 | `skipped` | number | Tests skipped: one accept could not cut out of a kept file, or (accepted by an arnx before 0.1.2) not confirmed, marked intended or noise, or set aside. |
 | `could_not_run`, `left_out`, `faked_keys` | array | Optional. `{ test_id, needs, faked_key? }`: unproven tests, which failed for a file left out as secret-looking or (`faked_key`) for a private key the sandbox holds as a fake: no failure of the code (exit 2). `needs` is the file, or `a faked file` when the failure does not show which. `{ path, line, label }`: the files left out; `line` 0 when the whole file counts (its name, its size). `faked_keys`: paths of the files holding a fake. |
+| `skipped_accepted` | array of strings | Optional. Accepted tests (named in `.arnx/accepted-tests.json`) that ended skipped: they do not pass, and the run is exit 1. arnx keeps accepted tests unskipped, so the skip came from the run (a conftest, a marker, the environment). |
 | `not_run` | array of strings | Optional. Kept test files the runner reported nothing for (its configuration leaves their name or folder out), as the paths they run from. The text says so too; the files stay in `files`. A run with any is exit 2, never `pass`. |
 
 ## Each failed test
@@ -61,7 +62,7 @@ kept, as stored.
 |---|---|---|
 | `path` | string | The accepted file, relative to the repository. |
 | `review` | string | The review whose `arnx accept` wrote it. |
-| `change` | string | `modified` or `deleted` (the file differs from its recorded sha256, or is not a regular file, such as a link or a folder; or it is gone), `repinned` (its entry in `.arnx/accepted-tests.json`, its sha256 or its `tests`, was changed, and not by `arnx accept` on this machine), `unpinned` (its entry was removed, or the whole file) or `duplicate` (one test stored under two names, with and without `.arnx`, that differ, one of them pinned: both are listed, and nothing runs until the user deletes one). |
+| `change` | string | `modified` or `deleted` (the file differs from its recorded sha256, or is not a regular file, such as a link or a folder; or it is gone), `repinned` (its entry in `.arnx/accepted-tests.json`, its sha256 or its `tests`, was changed, and not by `arnx accept` on this machine), `unpinned` (its entry was removed, or the whole file), `duplicate` (one test stored under two names, with and without `.arnx`, that differ, one of them pinned: both are listed, and nothing runs until the user deletes one), `added` (a file under `.arnx/tests/` that no entry pins: arnx accept did not write it; check never places it) or `collides` (a pinned file whose run path is a file of the project: check never places a kept test over it). A link at `.arnx` or `.arnx/tests` itself is `modified`, with that path. |
 
 ## Each possible contradiction
 

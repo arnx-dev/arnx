@@ -22,6 +22,7 @@ import { fakeFactory, FakeSession, type Script, ScriptedAgent, text, tool } from
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { RecordingAgent, RecordingJson } from "./helpers/recording";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -200,6 +201,7 @@ test("one command's steps share one cap: accept's re-prove, answer rounds and cl
   const base = writeDirOf(file.projects[0]!, "answers");
   const KEPT = "tests/arnx/r1/test_kept.py";
   put(repo, `.arnx/tests/${KEPT}`, SOURCE);
+  pinKept(repo);
   const sealed = (seen: FakeSession[]) => seen.flatMap((x) => x.sealedRuns).length;
   await withCommandReruns(async () => {
     // The re-prove: its suite fails 15 tests on the fake.
@@ -224,6 +226,7 @@ test("one command's steps share one cap: accept's re-prove, answer rounds and cl
 test("the CLI runs each command in one budget, and none outlives it", async () => {
   const repo = project();
   put(repo, ".arnx/tests/tests/arnx/r1/test_kept.py", SOURCE);
+  pinKept(repo);
   const during: (object | null)[] = [];
   const cli = new Cli({ cwd: repo, checkSessions: async (_c, snap, _l, body) => {
     during.push(commandReruns());
@@ -398,6 +401,7 @@ test("arnx check: a kept test failing on the fake and passing with the real key 
   const repo = project();
   const KEPT = "tests/arnx/r1/test_kept.py";
   put(repo, `.arnx/tests/${KEPT}`, SOURCE);
+  pinKept(repo);
   const seen: FakeSession[] = [];
   const results = await check(repo, SETTINGS, { sessionFactory: fakeFactory((_c, _n, dir) =>
     [junitXml([[KEPT, "test_add", realIn(dir) ? "passed" : "failed", "E   assert '3f' == '81'"]]), "ran\n", false], seen) });

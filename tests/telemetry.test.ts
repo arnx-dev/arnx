@@ -14,6 +14,7 @@ import { FakeSession } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { blankMarks, finding, sampleReview } from "./helpers/review";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -260,6 +261,7 @@ function readyRepo(): string {
   mkdirSync(join(repo, "svc"));
   writeFileSync(join(repo, "svc/calc.py"), "X = 1\n");
   writeFileSync(join(repo, ".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py"), "def test_ok(): pass\ndef test_bug(): assert 0\n");
+  pinKept(repo);
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(`version: 1
 projects:
   svc:

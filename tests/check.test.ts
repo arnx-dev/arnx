@@ -9,6 +9,7 @@ import { defaultSettings } from "../src/settings";
 import { FakeSession } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -20,6 +21,7 @@ function repoWithAccepted(): string {
   mkdirSync(join(repo, "svc"));
   writeFileSync(join(repo, "svc/calc.py"), "X = 1\n");
   writeFileSync(join(repo, ".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py"), "def test_ok(): pass\ndef test_bug(): assert 0\n");
+  pinKept(repo);
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(`version: 1
 projects:
   svc:
@@ -89,6 +91,7 @@ projects:
 test("a kept file the runner reports nothing for is named as not run, and stays in the file count", async () => {
   const repo = repoWithAccepted();
   writeFileSync(join(repo, ".arnx/tests/svc/tests/arnx/r1/test_other.py"), "def test_o(): pass\n");
+  pinKept(repo);
   const quiet: SessionFactory = async (_c, snap, _l, body) => body(new FakeSession(snap,
     () => [junitXml([["tests/arnx/r1/test_r1_calc.py", "test_ok", "passed", ""]]), "1 passed", false]));
   const results = await check(repo, SETTINGS, { sessionFactory: quiet });
@@ -113,6 +116,7 @@ function repoWithStored(extra: Record<string, string> = {}): string {
   writeFileSync(join(repo, dir, "test_r1_calc.py.arnx"), "def test_bug(): assert 0\n");
   writeFileSync(join(repo, dir, "conftest.py.arnx"), "import pytest\n");
   for (const [p, text] of Object.entries(extra)) writeFileSync(join(repo, p), text);
+  pinKept(repo);
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(`version: 1
 projects:
   svc:

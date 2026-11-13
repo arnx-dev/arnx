@@ -39,7 +39,9 @@ export interface ProjectCheck { /** Something in it was masked. */ standInsShown
   skipped: number; noReport: boolean; accepted?: string[]; reason?: string; log?: string | null;
   reviews?: Record<string, string>; workdir?: string;
   /** Kept test files the runner reported nothing for (its configuration leaves that name or folder out). */
-  notRun?: string[] }
+  notRun?: string[];
+  /** Accepted tests (named in the record) that ended skipped: not passing. */
+  skippedAccepted?: string[] }
 
 /** The accepted tests, as `file::test` (repository-relative, parameters dropped): those accept recorded per file in
  * ACCEPTED_RECORD, else (a record by an older arnx) from each accepted review's marks. `files`: the kept files the
@@ -114,11 +116,18 @@ function reviewOf(known: AcceptedIds, workdir: string, testId: string): string |
   return known.reviews.get(posix.normalize(posix.join(workdir, file))) ?? known.reviews.get(posix.normalize(file));
 }
 
+/** Whether a test the runner reported (its id relative to the project's workdir) is one the record or a review names
+ * as accepted (not merely in a file nothing accounts for). */
+function namedAccepted(known: AcceptedIds, workdir: string, testId: string): boolean {
+  const [file, rest] = splitId(testId);
+  return known.ids.has(testKey(posix.join(workdir, file), rest)) || known.ids.has(testKey(file, rest));
+}
+
 /** Whether a test the runner reported (its id relative to the project's workdir) is an accepted test. */
 function isAccepted(known: AcceptedIds, workdir: string, testId: string): boolean {
   const [file, rest] = splitId(testId);
   const inRepo = posix.join(workdir, file);
-  if (known.ids.has(testKey(inRepo, rest)) || known.ids.has(testKey(file, rest))) return true;
+  if (namedAccepted(known, workdir, testId)) return true;
   return !known.files.has(posix.normalize(inRepo)) && !known.files.has(posix.normalize(file));
 }
 
@@ -200,8 +209,10 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
   sweepRealKeyCopies();
   // The check's reruns with a real key, over all its projects.
   const reruns = keyReruns();
+  // Only what accept pinned runs: anything else under .arnx/tests/ is named by changedAccepted, never placed.
+  const pinned = new Set(Object.keys(readRecord(repo).files));
   for (const cfg of file.projects) {
-    const files = keptTestFiles(repo, cfg, settings.acceptedTestsDir, file.projects);
+    const files = keptTestFiles(repo, cfg, settings.acceptedTestsDir, file.projects).filter((f) => pinned.has(f));
     if (!files.length) continue;
     o.progress?.(`${cfg.name}: running ${o.what ?? "the accepted tests"}`);
     const tmp = mkdtempSync(join(tmpdir(), "arnx-check-"));
@@ -215,7 +226,7 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       const boundary = new Boundary(configSuspects(repo));
       boundary.addScrubbed(taken);
       // The accepted tests and their support files, in place in this copy only, which alone gets the real values.
-      const placed = new Set(placeKept(repo, snap));
+      const placed = new Set(placeKept(repo, snap, pinned));
       const swap = swapIn(boundary, snap, (rel) => placed.has(rel));
       // Each review's files run apart (reviewGroup); the build log is kept where a failed build's error can point to
       // it (the snapshot is removed below).
@@ -268,9 +279,14 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       const failed = ran.filter((t) => !t.needs && (t.outcome === "failed" || t.outcome === "error"));
       const reviews = Object.fromEntries(failed.map((t) => [t.testId, reviewOf(known!, cfg.workdir, t.testId)])
         .filter(([, r]) => r));
+      // An accepted test (one the record names) that ends skipped shows nothing: arnx keeps them unskipped, so it does
+      // not pass. The other tests in its file that accept skipped (not confirmed, set aside) are only counted.
+      const skippedAccepted = results.filter((t) => t.outcome === "skipped" && namedAccepted(known!, cfg.workdir, t.testId))
+        .map((t) => t.testId);
       const said = maskedCopy(boundary, { project: cfg.name, workdir: cfg.workdir, files, noReport: missing.length > 0,
         passed: ran.filter((t) => t.outcome === "passed").map((t) => t.testId), failed, reviews,
-        skipped: results.filter((t) => t.outcome === "skipped").length,
+        skipped: results.filter((t) => t.outcome === "skipped").length - skippedAccepted.length,
+        ...(skippedAccepted.length ? { skippedAccepted } : {}),
         accepted: ran.filter((t) => !t.needs && isAccepted(known!, cfg.workdir, t.testId)).map((t) => t.testId),
         ...(taken.withheld.length ? { leftOut: taken.withheld } : {}), ...(taken.fakedKeys.length ? { fakedKeys: taken.fakedKeys } : {}),
         ...(couldNotRun.length ? { couldNotRun } : {}),
@@ -449,6 +465,8 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
   const othPass = passed.length - accPass;
   const accTotal = accFail.length + accPass;
   const skipped = ran.reduce((n, r) => n + r.skipped, 0);
+  // Accepted tests that ended skipped: not passing.
+  const skipAcc = ran.flatMap((r) => (r.skippedAccepted ?? []).map((id) => `${multi ? `${r.project}: ` : ""}${id.split("::").at(-1)}`));
   // With no accepted test among them (an answer's tests alone), the rest are not "other".
   const other = accTotal ? "other " : "";
   const where = "in the accepted files";
@@ -458,10 +476,16 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
       lines.push(`✗ ${count(accFail.length, "accepted test")} still fail${accFail.length === 1 ? "s (bug" : " (bugs"} ` +
         "not fixed yet)");
       if (accPass) lines.push(`✓ ${count(accPass, "accepted test")} pass${accPass === 1 ? "es" : ""}`);
+    } else if (accTotal && skipAcc.length) {
+      lines.push(`✓ ${count(accPass, "accepted test")} pass${accPass === 1 ? "es" : ""}`);
     } else if (accTotal) {
       const too = clean && othPass ? ` (${count(othPass, "other test")} in ${accTotal === 1 ? "its file" : "their files"}` +
         " too)" : "";
       lines.push(`✓ ${accTotal === 1 ? "The accepted test passes" : `All ${accTotal} accepted tests pass`}${too}`);
+    }
+    if (skipAcc.length) {
+      lines.push(`✗ ${count(skipAcc.length, "accepted test")} skipped, so not shown to pass:`,
+        ...skipAcc.map((name) => `  ✗ ${name}`));
     }
     if (othPass && !(clean && accTotal)) {
       lines.push(`✓ ${count(othPass, `${other}test`)} ${where} pass${othPass === 1 ? "es" : ""}`);
@@ -503,7 +527,9 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
       `verified: ${timeout ? "a timeout" : "a run without a report"} is neither a fix nor a bug.`);
     return [lines.join("\n"), 2];
   }
-  if (failed.length) {
+  if (failed.length || skipAcc.length) {
+    // arnx keeps accepted tests unskipped: a skip comes from the run (a conftest, a marker, the environment).
+    if (skipAcc.length) lines.push("A skipped accepted test proves nothing: find what skips it, then arnx check.");
     // A wrong test of a real bug is marked rewrite; tests that are not findings no mark covers.
     if (accFail.length) {
       const ids = [...new Set(accFail.map((x) => x.review).filter((r): r is string => !!r))].sort();
@@ -553,7 +579,7 @@ interface Pin { sha256: string; review: string; tests?: string[] }
 interface AcceptedRecord { schema_version: 1; files: Record<string, Pin> }
 /** modified/deleted: the file differs from its pin, or is gone. repinned: the pin itself was changed, and not by arnx
  * on this machine. unpinned: its entry was removed from the record (or the record deleted). */
-export const CHANGES = ["modified", "deleted", "repinned", "unpinned", "duplicate"] as const;
+export const CHANGES = ["modified", "deleted", "repinned", "unpinned", "duplicate", "added", "collides"] as const;
 export interface ChangedTest { path: string; review: string; change: typeof CHANGES[number] }
 
 /** What arnx wrote to the record on this machine: per file, every sha256 and accepted-test list it pinned (a branch
@@ -733,6 +759,9 @@ const trustedTests = (w: Pin, c: Pin | undefined, l: LocalPins["files"][string] 
  * this machine (`local`, localPinsPath). Files accept never recorded (kept by an arnx that did not record them) are not
  * checked. */
 export function changedAccepted(repo: string, local: string | null = null): ChangedTest[] {
+  // arnx reads and writes kept tests only in real folders: a link at .arnx or .arnx/tests is refused before anything else.
+  const linked = linkedDome(repo);
+  if (linked) return [{ path: linked, review: "", change: "modified" }];
   const now = readRecord(repo).files;
   const head = committedRecord(repo);
   const mine = readLocal(local, repo).files;
@@ -767,6 +796,10 @@ export function changedAccepted(repo: string, local: string | null = null): Chan
     const at = keptSha(repo, path);
     if (at === "gone") out.push({ path, review, change: "deleted" });
     else if (at !== w.sha256) out.push({ path, review, change: "modified" });
+    // check never places a kept file over one the project has at the path it runs from.
+    else if (path.startsWith(`${DOME}/`) && lstatSync(join(repo, runPath(path)), { throwIfNoEntry: false })) {
+      out.push({ path, review, change: "collides" });
+    }
   }
   // One run name, two entries (stored with .arnx appended and by the older name), one of them pinned: only one runs,
   // and it must be the pinned one. One that is not a regular file is an edit; two files that differ are both named,
@@ -783,7 +816,28 @@ export function changedAccepted(repo: string, local: string | null = null): Chan
     if (a === "other" || b === "other" || a === b) continue;
     for (const p of [older, stored]) if (!named(p)) out.push({ path: p, review: pin.review, change: "duplicate" });
   }
+  // Anything else under .arnx/tests/ that no pin covers: arnx accept did not write it, and check places pinned files
+  // only, so it is named rather than left out unseen. An older copy beside its pinned twin, the same bytes, is not: the
+  // next check or accept removes it (storeOlderKept).
+  for (const rel of entriesUnder(join(repo, DOME))) {
+    const path = `${DOME}/${rel}`;
+    if (now[path] || named(path) || lstatSync(join(repo, path), { throwIfNoEntry: false })?.isDirectory() !== false) continue;
+    const twin = `${DOME}/${storedName(rel)}`;
+    const sha = keptSha(repo, path);
+    if (runName(rel) === rel && now[twin] && sha === keptSha(repo, twin) && sha !== "other" && sha !== "gone") continue;
+    if (sha !== "gone") out.push({ path, review: "", change: "added" });
+  }
   return out;
+}
+
+/** `.arnx` or `.arnx/tests` when either is there but not a real folder (a link, a file): nothing is read or written
+ * through it. */
+export function linkedDome(repo: string): string | null {
+  for (const p of [".arnx", DOME]) {
+    const st = lstatSync(join(repo, p), { throwIfNoEntry: false });
+    if (st && !st.isDirectory()) return p;
+  }
+  return null;
 }
 
 /** Entries under .arnx/tests/ (files, links, folders, never entered through a link) that exist both by the older name
@@ -797,6 +851,8 @@ function keptPairs(repo: string): [string, string][] {
 /** What under .arnx/tests/ is neither a regular file nor a folder (a link, a FIFO), and the pinned paths that are not
  * regular files: accept writes there, never through a link, and refuses while any is there. */
 export function irregularKept(repo: string): string[] {
+  const linked = linkedDome(repo);
+  if (linked) return [linked];
   const dome = join(repo, DOME);
   const odd = entriesUnder(dome).filter((p) => {
     const st = lstatSync(join(dome, p), { throwIfNoEntry: false });
@@ -825,19 +881,13 @@ export interface KeptEdits { changed: ChangedTest[]; restoredTests: string[] }
  * else the last arnx wrote here) is recorded instead. */
 export function keepEdits(repo: string, local: string | null = null): KeptEdits {
   const changed = changedAccepted(repo, local);
-  // Which of two copies is the test is the owner's to say, by deleting the other: recording both would keep both.
-  const twice = changed.filter((c) => c.change === "duplicate").map((c) => c.path);
-  if (twice.length) {
-    throw new ArnxError(`a test is stored under two names that differ (${twice.join(", ")}): delete the copy you do not ` +
-      "want, then run this again");
-  }
   const restoredTests: string[] = [];
   if (!changed.length) return { changed, restoredTests };
-  // A link or a folder is no edit to keep: its pin would be a file it leads to, or none.
-  const odd = changed.filter((c) => keptSha(repo, c.path) === "other").map((c) => c.path);
-  if (odd.length) {
-    throw new ArnxError(`not a regular file (a link or a folder): ${odd.join(", ")}: delete it or put the file back, ` +
-      "then run this again");
+  // Only edits are kept: of two copies the owner deletes one, a link or a folder would pin what it leads to, and a file
+  // accept did not write or one in the project's way is deleted or moved (changedSummary says which).
+  const fix = fixable(repo, changed);
+  if (fix.length < changed.length) {
+    throw new ArnxError(changedSummary(changed.filter((c) => !fix.includes(c)), repo).split("\n").slice(1).join("\n"));
   }
   const rec = readRecord(repo);
   const head = committedRecord(repo);
@@ -943,11 +993,20 @@ export function storedOlderText(r: StoredOlder): string {
 }
 
 const LABEL: Record<ChangedTest["change"], string> = { modified: "modified", deleted: "deleted ", repinned: "repinned",
-  unpinned: "unpinned", duplicate: "twice   " };
+  unpinned: "unpinned", duplicate: "twice   ", added: "added   ", collides: "collides" };
 const WHY: Record<ChangedTest["change"], string> = { modified: "", deleted: "",
   repinned: `: its entry in ${ACCEPTED_RECORD} changed, not by arnx on this machine`,
   unpinned: `: its entry in ${ACCEPTED_RECORD} was removed`,
-  duplicate: ": one test stored under two names that differ" };
+  duplicate: ": one test stored under two names that differ",
+  added: `: not in ${ACCEPTED_RECORD} (arnx accept did not write it)`,
+  collides: ": it runs from a path your project already has" };
+
+/** The changes arnx accept can restore (--again) or keep (--keep-edits): an edit, a deletion or a pin changed. A link,
+ * two copies of one test, a file accept did not write and one in the project's way are settled by hand. */
+function fixable(repo: string, changed: ChangedTest[]): ChangedTest[] {
+  return changed.filter((c) => ["modified", "deleted", "repinned", "unpinned"].includes(c.change) &&
+    !(c.change === "modified" && keptSha(repo, c.path) === "other"));
+}
 
 /** Whether `git checkout` brings back the accepted version of a changed file: HEAD has it as its trusted pin says. */
 function restorable(repo: string, c: ChangedTest): boolean {
@@ -963,15 +1022,13 @@ function restorable(repo: string, c: ChangedTest): boolean {
 export function changedSummary(changed: ChangedTest[], repo: string): string {
   const kinds = new Set(changed.map((c) => c.change));
   const only = kinds.size === 1 ? [...kinds][0]! : null;
-  const verb = !only || only === "modified" || only === "duplicate" ? "changed" : only;
-  const one = changed.length === 1;
+  const verb = only === "deleted" || only === "repinned" || only === "unpinned" ? only : "changed";
   const lines = [`✗ ${count(changed.length, "accepted test file")} ${verb} since arnx accept; nothing ran:`,
     ...changed.map((c) => `  ${LABEL[c.change]} ${c.path}${WHY[c.change]}`)];
-  const reviews = [...new Set(changed.map((c) => c.review))];
+  const fix = fixable(repo, changed);
+  const reviews = [...new Set(fix.map((c) => c.review))];
   for (const r of reviews) {
-    // Two copies of one test are settled by deleting one (below): accepting again leaves the other where it is.
-    const mine = changed.filter((c) => c.review === r && c.change !== "duplicate");
-    if (!mine.length) continue;
+    const mine = fix.filter((c) => c.review === r);
     const it = mine.length === 1 ? "it" : "them";
     const what = reviews.length === 1 ? it : `the file${mine.length === 1 ? "" : "s"} of review ${r}`;
     const paths = mine.every((c) => restorable(repo, c)) ? mine.map((c) => c.path) : [];
@@ -981,14 +1038,19 @@ export function changedSummary(changed: ChangedTest[], repo: string): string {
     lines.push(`To restore ${what}: arnx accept --again ${r} (rewrites ${it} from the review; your edits are lost)` +
       (paths.length ? `, or git checkout -- ${paths.join(" ")}` : ""));
   }
-  if (kinds.has("duplicate")) lines.push("A test stored under two names: delete the copy you do not want, then arnx check");
-  const odd = changed.filter((c) => keptSha(repo, c.path) === "other").map((c) => c.path);
-  if (odd.length) {
-    lines.push(`Not a regular file (a link or a folder): ${odd.join(", ")}; delete ${odd.length === 1 ? "it" : "them"} ` +
-      "first (arnx never reads or writes a kept test through a link)");
-  }
-  if (only === "duplicate") return lines.join("\n");
-  lines.push(only === "deleted"
+  const by = (pick: (c: ChangedTest) => boolean) => changed.filter(pick).map((c) => c.path);
+  const say = (paths: string[], text: (them: string) => string) => {
+    if (paths.length) lines.push(text(paths.length === 1 ? "it" : "them"));
+  };
+  say(by((c) => c.change === "modified" && keptSha(repo, c.path) === "other"), (them) =>
+    `A link or a folder where a kept test belongs: delete ${them}, then arnx check`);
+  say(by((c) => c.change === "duplicate"), () => "A test stored under two names: delete the copy you do not want, then arnx check");
+  say(by((c) => c.change === "added"), (them) => `Not written by arnx accept: delete ${them}, then arnx check`);
+  say(by((c) => c.change === "collides"), (them) => "arnx never puts a kept test over a file of your project: move or " +
+    `delete ${them} or that file, then arnx check`);
+  if (!fix.length) return lines.join("\n");
+  const one = fix.length === 1;
+  lines.push(fix.every((c) => c.change === "deleted")
     ? `To keep ${one ? "it" : "them"} deleted: arnx accept --keep-edits (drops ${one ? "it" : "them"} from the accepted tests)`
     : `To keep your edit${one ? "" : "s"}: arnx accept --keep-edits (records ${one ? "it" : "them"} as the new ` +
       `accepted version; it does not re-prove the bug${one ? "" : "s"})`);
@@ -1011,6 +1073,7 @@ export function checkJson(results: ProjectCheck[], code: number, changed: Change
           accepted: acc(t.testId) })),
         skipped: r.skipped,
         ...(r.notRun ? { not_run: r.notRun.map(runPath) } : {}),
+        ...(r.skippedAccepted ? { skipped_accepted: r.skippedAccepted } : {}),
         ...(r.leftOut ? { left_out: r.leftOut } : {}),
         ...(r.fakedKeys ? { faked_keys: r.fakedKeys } : {}),
         ...(r.couldNotRun ? { could_not_run: r.couldNotRun.map((x) => ({ test_id: x.testId, needs: x.needs, ...(x.faked ? { faked_key: true } : {}),

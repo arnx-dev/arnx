@@ -108,8 +108,8 @@ test("accepting again names files by the new marks, leaving no copy under a file
   // must not keep running a test the marks dropped.
   expect(readdirSync(dest).sort()).toEqual(["test_zero.py.arnx"]);
   expect(again.kept).toEqual([join(dest, "test_zero.py.arnx")]);
-  // Another file there stays, stored like every file under .arnx/tests/.
-  expect(existsSync(join(repo, ".arnx", "tests", "tests", "arnx", "mine.txt.arnx"))).toBe(true);
+  // Another file there stays as it is (no pin covers it, so nothing moves it; check names it).
+  expect(existsSync(join(repo, ".arnx", "tests", "tests", "arnx", "mine.txt"))).toBe(true);
 });
 
 test("accepting again with nothing real left removes the review's kept files and its emptied folder", async () => {
@@ -126,7 +126,7 @@ test("accepting again with nothing real left removes the review's kept files and
   expect(existsSync(join(repo, ".arnx", "tests", "tests", "arnx"))).toBe(true); // the accepted-tests folder itself stays
 });
 
-test("tests accepted under the old names keep their place, stored: a later review's names do not count them", async () => {
+test("tests accepted under the old names keep their place: a later review's names do not count them", async () => {
   const repo = gitRepo(tmp());
   const old = join(repo, ".arnx", "tests", "tests", "arnx", "r20261001_000000");
   mkdirSync(old, { recursive: true });
@@ -134,7 +134,7 @@ test("tests accepted under the old names keep their place, stored: a later revie
   const rdir = twoFiles(repo);
   marked(rdir, ["real", "noise", "noise"]);
   await accept(repo, rdir, SETTINGS);
-  expect(readdirSync(old)).toEqual(["test_20261001_000000_add.py.arnx"]);
+  expect(readdirSync(old)).toEqual(["test_20261001_000000_add.py"]); // unpinned: never moved
   expect(readdirSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3"))).toEqual(["test_add_subtracts.py.arnx"]);
 });
 
