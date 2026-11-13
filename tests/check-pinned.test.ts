@@ -326,7 +326,8 @@ test("the accepted tests edited in the record are refused (exit 4) where accept 
 
 test("the accepted tests edited in the record are refused against the committed pins", () => untested({}));
 
-test("a record of an older arnx (no accepted tests) is no alarm; accept --again adds them", async () => {
+test("a record of an older arnx (no accepted tests) is no alarm; accept --again adds them, and discarding that is an edit",
+  async () => {
   const env = withConfig();
   const { repo, cli, runs } = await accepted(env);
   const pins = localPinsPath(env, realpathSync(repo))!;
@@ -342,9 +343,13 @@ test("a record of an older arnx (no accepted tests) is no alarm; accept --again 
   expect(await cli.run("accept", "--again", "--no-answers", RID)).toBe(0);
   expect(JSON.parse(readFileSync(join(repo, ACCEPTED_RECORD), "utf8")).files[KEPT].tests).toEqual(["test_a"]);
   expect(await cli.run("check")).toBe(1);
-  runGit(repo, "checkout", "-q", "--", ACCEPTED_RECORD); // back to the older record: arnx wrote it here too
-  expect(await cli.run("check")).toBe(1);
-  expect(runs()).toBe(2);
+  // Back to the older record by discarding the accept: no commit holds the lists it drops, so it is an edit.
+  runGit(repo, "checkout", "-q", "--", ACCEPTED_RECORD);
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain(`To restore it: arnx accept --again ${RID}`);
+  expect(cli.stdout).not.toContain("git checkout");
+  expect(runs()).toBe(1);
 });
 
 test("--keep-edits keeps the accepted tests of the files it records again", async () => {

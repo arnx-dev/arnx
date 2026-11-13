@@ -106,7 +106,9 @@ are run without that check. The record is checked too: an entry's sha256, `tests
 when they are the ones committed at HEAD or ones `arnx accept` (or `--keep-edits`) wrote on this machine, which keeps
 its own copy in the user's config directory, outside the repository. An entry changed or removed any other way is
 `repinned` or `unpinned`, exit 4: an edited `tests` list could otherwise relabel a failing accepted test as another
-test.
+test. An entry without `ids` or `tests` that arnx pinned for that file (on this machine or in any commit) is trusted
+only when the fuller entry is in a commit HEAD does not reach (a branch switched away from, a stash); dropped in a
+commit, or with an accept that was never committed, it is `repinned`: restore it with `arnx accept --again <id>`.
 
 ## With --review
 

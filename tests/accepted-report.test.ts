@@ -12,7 +12,7 @@ import type { RunResult, SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { Cli } from "./helpers/cli";
 import { FakeSession } from "./helpers/fakes";
-import { commit, gitRepo } from "./helpers/gitutil";
+import { commit, gitRepo, runGit } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { blankMarks, finding, sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
@@ -222,39 +222,84 @@ test("a kept file with named tests that reports nothing names them too (exit 1)"
   expect(cli.stdout).toContain("did not run, the runner leaves it out");
 });
 
-// An older arnx accepted the file on this machine (a list without ids, or none), then 0.1.12 accepted it again with
-// ids, committed. Dropping ids (and tests) from the record is an edit, though this machine once wrote that weaker list:
-// only HEAD's own entry may have fewer lists than arnx pinned.
-for (const older of ["a list without ids", "no list"] as const) {
-  test(`dropping ids where this machine also pinned ${older} is an edit (exit 4)`, async () => {
-    const { repo, cli, env } = await kept([[RUN, "test_z[0]", "passed", ""], [RUN, "test_z[1]", "failed", "assert 0 == 2"]],
-      ["test_z[1]"]);
-    const weaken = (e: Record<string, unknown>) => {
-      delete e.ids;
-      if (older === "no list") delete e.tests;
-    };
-    // Rewrite history: the older arnx's record and this machine's copy of what it pinned, committed.
-    const rp = join(repo, ACCEPTED_RECORD);
-    const local = localPinsPath(env, repo)!;
-    const rec = JSON.parse(readFileSync(rp, "utf8"));
-    weaken(rec.files[KEPT]);
-    writeFileSync(rp, JSON.stringify(rec, null, 2) + "\n");
-    const pins = JSON.parse(readFileSync(local, "utf8"));
-    pins.files[KEPT].tests = [older === "no list" ? null : ["test_z"]];
-    writeFileSync(local, JSON.stringify(pins, null, 2) + "\n");
-    commit(repo, "older accept");
-    recordAccepted(repo, RID, { [KEPT]: ["test_z[1]"] }, local);
-    commit(repo, "accept again");
-    expect(await cli.run("check")).toBe(1);
-    // The variant failing on the bug is deselected, and ids dropped from the record.
-    const now = JSON.parse(readFileSync(rp, "utf8"));
-    weaken(now.files[KEPT]);
-    writeFileSync(rp, JSON.stringify(now, null, 2) + "\n");
-    cli.out.length = 0;
-    expect(await cli.run("check", "--json", "--quiet")).toBe(TESTS_CHANGED);
-    expect(JSON.parse(cli.stdout).changed).toEqual([{ path: KEPT, review: RID, change: "repinned" }]);
-  });
+// An entry with fewer lists (no `ids`, or no `tests`) than arnx pinned for its file, on this machine or in any commit,
+// is trusted only when the stronger version is in a commit HEAD does not reach (a branch switch, a stash). Dropped from
+// a committed record, or from one never committed (an accept discarded), it is an edit: exit 4.
+const ROWS: Row[] = [[RUN, "test_z[0]", "passed", ""], [RUN, "test_z[1]", "failed", "assert 0 == 2"]];
+const weaken = (repo: string, noList = false) => {
+  const rp = join(repo, ACCEPTED_RECORD);
+  const rec = JSON.parse(readFileSync(rp, "utf8"));
+  delete rec.files[KEPT].ids;
+  if (noList) delete rec.files[KEPT].tests;
+  writeFileSync(rp, JSON.stringify(rec, null, 2) + "\n");
+};
+/** An older arnx's accept, committed: its record without ids (or with no list), and this machine's copy of what it
+ * pinned. */
+async function olderAccept(noList = false) {
+  const k = await kept(ROWS, noList ? undefined : ["test_z"], [], true);
+  const local = localPinsPath(k.env, k.repo)!;
+  mkdirSync(dirname(local), { recursive: true });
+  writeFileSync(local, JSON.stringify({ schema_version: 1, repo: k.repo, files: { [KEPT]: { review: RID,
+    sha256: [record(k.repo)[KEPT]!.sha256], tests: [noList ? null : ["test_z"]] } } }, null, 2) + "\n");
+  return { ...k, local };
 }
+/** check refuses the entry; `git checkout` is offered only when HEAD holds the entry arnx pinned. */
+const refused = async (cli: Cli, checkout = false) => {
+  cli.out.length = 0;
+  expect(await cli.run("check", "--json", "--quiet")).toBe(TESTS_CHANGED);
+  expect(JSON.parse(cli.stdout).changed).toEqual([{ path: KEPT, review: RID, change: "repinned" }]);
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain(`To restore it: arnx accept --again ${RID}`);
+  expect(cli.stdout.includes(`git checkout -- ${KEPT} ${ACCEPTED_RECORD}`)).toBe(checkout);
+};
+
+for (const older of ["none", "a list without ids", "no list"] as const) {
+  for (const committed of [false, true]) {
+    test(`ids dropped from the record${committed ? " and committed" : ""}, this machine having pinned ${older} before: ` +
+      "an edit (exit 4)", async () => {
+      const k = older === "none" ? await kept(ROWS, ["test_z[1]"]) : await olderAccept(older === "no list");
+      if (older !== "none") {
+        recordAccepted(k.repo, RID, { [KEPT]: ["test_z[1]"] }, localPinsPath(k.env, k.repo));
+        commit(k.repo, "accept again");
+      }
+      expect(await k.cli.run("check")).toBe(1);
+      weaken(k.repo, older === "no list");
+      if (committed) commit(k.repo, "weaken");
+      await refused(k.cli, !committed);
+    });
+  }
+}
+
+test("ids dropped and committed: refused on a fresh clone too, where nothing was pinned on the machine", async () => {
+  const k = await kept(ROWS, ["test_z[1]"]);
+  weaken(k.repo);
+  commit(k.repo, "weaken");
+  const fresh = new Cli({ cwd: k.repo, checkSessions: reporting(ROWS), env: {} });
+  await refused(fresh);
+});
+
+test("a branch switch back to an older record is trusted: the ids are in a commit HEAD does not reach", async () => {
+  const k = await olderAccept();
+  runGit(k.repo, "checkout", "-q", "-b", "next");
+  recordAccepted(k.repo, RID, { [KEPT]: ["test_z[1]"] }, k.local);
+  commit(k.repo, "accept again");
+  runGit(k.repo, "checkout", "-q", "-");
+  expect(record(k.repo)[KEPT]!.ids).toBeUndefined();
+  expect(await k.cli.run("check")).toBe(1);
+  // No pins on the machine either.
+  expect(await new Cli({ cwd: k.repo, checkSessions: reporting(ROWS), env: {} }).run("check")).toBe(1);
+});
+
+test("an accept stashed away is trusted; discarded, it is an edit (exit 4)", async () => {
+  const k = await olderAccept();
+  recordAccepted(k.repo, RID, { [KEPT]: ["test_z[1]"] }, k.local);
+  runGit(k.repo, "stash", "-q");
+  expect(record(k.repo)[KEPT]!.ids).toBeUndefined();
+  expect(await k.cli.run("check")).toBe(1);
+  runGit(k.repo, "stash", "drop", "-q");
+  await refused(k.cli);
+});
 
 // vitest: a top-level title with brackets is the title's own ("adds[1]" from test.each), recorded and required whole.
 test("a JavaScript title with brackets must report whole", async () => {

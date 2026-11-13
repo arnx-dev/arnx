@@ -811,20 +811,76 @@ function touched(repo: string, revs: string[], paths: string[]): Set<string> {
     .split("\0").map((p) => p.trim()).filter(Boolean));
 }
 
-/** Whether an entry's accepted-test lists are trusted: ones arnx wrote here (`l`), else HEAD's (`c`; none: any). An
- * entry without a list (`tests`, `ids`) that HEAD's entry or one arnx pinned here has is trusted only as HEAD's own:
- * an older list arnx once wrote here would otherwise let an edit drop the exact ids (a branch switch to an older
- * record is HEAD's). */
-const trustedTests = (w: Pin, c: Pin | undefined, l: LocalPins["files"][string] | undefined) => {
+/** `f`'s value, computed on the first call only. */
+function once<T>(f: () => T): () => T {
+  let done: { value: T } | undefined;
+  return () => (done ??= { value: f() }).value;
+}
+
+/** The record's entries in every commit that changed it, by any ref (a stash too): those HEAD reaches and the others.
+ * `shallow`: the history is cut, so a version no commit seems to hold may still be in one. */
+interface RecordHistory { reached: AcceptedRecord["files"][]; elsewhere: AcceptedRecord["files"][]; shallow: boolean }
+
+/** The record's history (RecordHistory); null without commits. Read only when an entry has fewer lists than it might
+ * have had (trustedTests): two `git log` and one `git cat-file` for the whole record. */
+function recordHistory(repo: string): RecordHistory | null {
+  if (!hasCommits(repo)) return null;
+  // --full-history: a version on a branch merged since is not hidden behind a merge that kept the other side.
+  const log = (revs: string[]) => git(repo, ["log", ...revs, "--full-history", "--format=%H", "--", ACCEPTED_RECORD])
+    .split("\n").filter(Boolean);
+  const all = log(["--all"]);
+  const reached = new Set(log(["HEAD"]));
+  const out: RecordHistory = { reached: [], elsewhere: [],
+    shallow: git(repo, ["rev-parse", "--is-shallow-repository"]).trim() === "true" };
+  if (!all.length) return out;
+  const r = spawnSync("git", ["-C", repo, "cat-file", "--batch"], { input: all.map((c) => `${c}:${ACCEPTED_RECORD}\n`).join(""),
+    maxBuffer: 256 * 1024 * 1024 });
+  if (r.status !== 0) throw new ArnxError(`git cat-file failed: ${String(r.stderr).trim().slice(0, 300)}`);
+  const buf = r.stdout;
+  let at = 0;
+  for (const c of all) {
+    const nl = buf.indexOf(10, at);
+    const head = buf.subarray(at, nl).toString("utf8").split(" ");
+    at = nl + 1;
+    if (head[1] !== "blob") continue;
+    const size = Number(head[2]);
+    const text = buf.subarray(at, at + size).toString("utf8");
+    at += size + 1;
+    try {
+      (reached.has(c) ? out.reached : out.elsewhere).push(parseRecord(text).files);
+    } catch {
+      continue; // a version that does not parse holds no list
+    }
+  }
+  return out;
+}
+
+/** Whether entry `w` of `path` keeps the accepted-test lists arnx pinned: ones arnx wrote here (`l`), else HEAD's (`c`;
+ * none: any). An entry without a list (`tests`, `ids`) that arnx pinned for the file, here, at HEAD or in any commit
+ * (`history`), is trusted only when that stronger version is in a commit HEAD does not reach (a branch switch back to
+ * an older record, a stash) and the entry is HEAD's or one arnx wrote here. In HEAD's history, or in no commit (an
+ * accept discarded before it was committed), dropping it is an edit: the exact ids it drops are what keeps a variant
+ * that fails on the bug from being left out. Without commits, or in a shallow clone that finds it nowhere, only HEAD's
+ * own entry is trusted. */
+function trustedTests(w: Pin, c: Pin | undefined, l: LocalPins["files"][string] | undefined, path: string,
+  history: () => RecordHistory | null): boolean {
   const mine = l ? (Array.isArray(l.tests) ? l.tests : [null]) : [];
+  const same = (x: unknown) => listsOf(x) === listsOf(w);
+  const known = l ? mine.some(same) : !c || same(c);
   const has = listsIn(w);
-  const fewer = [...mine, c].some((x) => {
+  if (has.tests && has.ids) return known;
+  const more = (x: unknown) => {
     const k = listsIn(x);
     return (!!k.tests && !has.tests) || (!!k.ids && !has.ids);
-  });
-  if (fewer) return !!c && listsOf(c) === listsOf(w);
-  return l ? mine.some((t) => listsOf(t) === listsOf(w)) : !c || listsOf(c) === listsOf(w);
-};
+  };
+  const h = history();
+  const inCommit = (vs: AcceptedRecord["files"][]) => vs.some((v) => more(v[path]));
+  if (!mine.some(more) && !more(c) && !(h && (inCommit(h.reached) || inCommit(h.elsewhere)))) return known;
+  if (!h) return !!c && same(c);
+  if (more(c) || inCommit(h.reached)) return false;
+  if (inCommit(h.elsewhere)) return (!!c && same(c)) || mine.some(same);
+  return h.shallow && !!c && same(c);
+}
 
 /** Accepted files changed or deleted since accept recorded them, and pins changed or removed by anything but arnx on
  * this machine (`local`, localPinsPath). Files accept never recorded (kept by an arnx that did not record them) are not
@@ -842,6 +898,7 @@ export function changedAccepted(repo: string, local: string | null = null): Chan
   // committed, then deleted).
   const gone = paths.filter((p) => !now[p] && !head[p] && mine[p] && !mine[p]!.removed && !existsSync(join(repo, p)));
   const anywhere = touched(repo, ["--all"], gone);
+  const history = once(() => recordHistory(repo));
   const onHead = touched(repo, ["HEAD"], gone);
   const out: ChangedTest[] = [];
   for (const path of paths) {
@@ -859,7 +916,7 @@ export function changedAccepted(repo: string, local: string | null = null): Chan
       continue;
     }
     // Pinned here: one of the pins (and test lists) arnx wrote. Not here: the committed pin, or a file HEAD never pinned.
-    if (!trustedTests(w, c, l) || (l ? !l.sha256.includes(w.sha256) : !!c && c.sha256 !== w.sha256)) {
+    if (!trustedTests(w, c, l, path, history) || (l ? !l.sha256.includes(w.sha256) : !!c && c.sha256 !== w.sha256)) {
       out.push({ path, review, change: "repinned" });
       continue;
     }
@@ -980,13 +1037,14 @@ export function keepEdits(repo: string, local: string | null = null): KeptEdits 
   const rec = readRecord(repo);
   const head = committedRecord(repo);
   const mine = readLocal(local, repo).files;
+  const history = once(() => recordHistory(repo));
   const pins: Record<string, Pin | null> = {};
   for (const c of changed) {
     // Its accepted tests as recorded when trusted; else (edited, or the entry removed) HEAD's, else the last arnx
     // wrote here.
     const w = rec.files[c.path];
     const trusted = listsIn(head[c.path] ? head[c.path] : mine[c.path]?.tests?.at(-1));
-    const ok = w && trustedTests(w, head[c.path], mine[c.path]);
+    const ok = w && trustedTests(w, head[c.path], mine[c.path], c.path, history);
     if (w && !ok) restoredTests.push(c.path);
     const lists = ok ? listsIn(w) : trusted;
     const sha = keptSha(repo, c.path);
@@ -1099,6 +1157,9 @@ function fixable(repo: string, changed: ChangedTest[]): ChangedTest[] {
 /** Whether `git checkout` brings back the accepted version of a changed file: HEAD has it as its trusted pin says. */
 function restorable(repo: string, c: ChangedTest): boolean {
   if (!hasCommits(repo)) return false;
+  // An entry refused as it stands at HEAD (lists dropped in a commit, an accept never committed): checkout changes nothing.
+  const [w, at] = [readRecord(repo).files[c.path], committedRecord(repo)[c.path]];
+  if (c.change === "repinned" && w && at && w.sha256 === at.sha256 && listsOf(w) === listsOf(at)) return false;
   const pin = c.change === "modified" || c.change === "deleted" ? readRecord(repo).files[c.path]?.sha256
     : committedRecord(repo)[c.path]?.sha256;
   const r = spawnSync("git", ["-C", repo, "show", `HEAD:${c.path}`], { maxBuffer: 64 * 1024 * 1024 });
