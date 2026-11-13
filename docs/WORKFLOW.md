@@ -24,6 +24,21 @@ refused before anything runs. `arnx setup` sets up the whole repository and runs
 Lost? `arnx next` says where the repository is in this flow and the command to run now. `arnx doctor` says what is
 missing (keys, Docker, configuration); setup and review run the same checks first.
 
+## Install
+
+With npm (Node 20 or later):
+
+    npm install -g @arnx-dev/arnx
+
+Or a standalone binary, no Node needed (`darwin-arm64`, `darwin-x64`, `linux-x64` or `linux-arm64`):
+
+    curl -fLO https://github.com/arnx-dev/arnx/releases/latest/download/arnx-linux-x64
+    chmod +x arnx-linux-x64 && mv arnx-linux-x64 /usr/local/bin/arnx
+
+Each release lists the binaries' sha256 in `SHA256SUMS`. The macOS binaries are not signed yet: one downloaded in a
+browser is quarantined, and `xattr -d com.apple.quarantine /usr/local/bin/arnx` releases it. `arnx --version` names
+the build; `arnx doctor` checks Docker, keys and configuration.
+
 ## Projects and setup
 
 `arnx setup` reads your repository and proposes one project per unit whose tests run on their own (a package, a
