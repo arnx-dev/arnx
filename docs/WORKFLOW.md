@@ -136,7 +136,7 @@ What a review sends, and what it leaves out (untracked files, `.arnxignore`, sec
 
 ## Exit codes and JSON
 
-Exit codes: 0 fine (confirmed findings are worth a look and do not fail the run; CI reads `result` `findings` in `review --json`, or `findings[].confirmed`), 1 a finding the second opinion did not check, 2 incomplete, 3 setup needed. `arnx check`: 0 all accepted
+Exit codes: 0 fine (nothing to review, whether an empty change, lockfiles or generated files alone, or documentation alone, is fine too and runs no review; confirmed findings are worth a look and do not fail the run; CI reads `result` `findings` in `review --json`, or `findings[].confirmed`), 1 a finding the second opinion did not check, 2 incomplete, 3 setup needed. `arnx check`: 0 all accepted
 tests pass, 1 some fail, 2 some did not report, are unproven or were not run, 3 nothing accepted yet, 4 an accepted test changed since accept.
 A test file that does not finish (its tests have no result) is one error, never a finding, and makes the review incomplete. Files that time out together are run apart (180 s each, 600 s in all); files the time never reached are named as not run. A failing test in a file that hangs in a later run reads as flaky.
 

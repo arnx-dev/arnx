@@ -1,6 +1,6 @@
 // A change of documentation only is not reviewed unless --docs asks; a round whose hunt names no suspect ends there.
 import { beforeEach, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { ModelError, NoChange, OnlyDocs } from "../src/errors";
@@ -171,4 +171,50 @@ projects:
 
 test("OnlyDocs exits 0", () => {
   expect(new OnlyDocs(["docs/a.md"]).exitCode).toBe(0);
+});
+
+// One rule: nothing to review exits 0 and runs no review. The JSON status word tells the cases apart.
+async function reviewCli(): Promise<Cli> {
+  const cli = new Cli({ cwd: repo, env: { ANTHROPIC_API_KEY: "a" } });
+  expect(await cli.run("init")).toBe(0);
+  writeSettings(repo, { ...loadSettings(repo), consentAt: "2026-11-01T00:00:00+00:00" });
+  return new Cli({ cwd: repo, env: { ANTHROPIC_API_KEY: "a" } });
+}
+
+test("an empty change exits 0", async () => {
+  const cli = await reviewCli();
+  expect(await cli.run("review", "--range", "HEAD..HEAD")).toBe(0);
+  expect(cli.stderr).toContain("nothing to review");
+  const json = await reviewCli();
+  expect(await json.run("review", "--range", "HEAD..HEAD", "--json")).toBe(0);
+  expect(JSON.parse(json.stdout)).toMatchObject({ result: "clean", exit_code: 0, status: "nothing-to-review" });
+});
+
+test("a lockfile-only change exits 0 with the same status", async () => {
+  writeFileSync(join(repo, "svc/package-lock.json"), `{"lockfileVersion": 3}\n`);
+  commit(repo, "lock");
+  const cli = await reviewCli();
+  expect(await cli.run("review", "--json")).toBe(0);
+  expect(JSON.parse(cli.stdout)).toMatchObject({ result: "clean", exit_code: 0, status: "nothing-to-review" });
+});
+
+test("documentation alone still reads docs-only", async () => {
+  writeFileSync(join(repo, "svc/docs/guide.md"), "# svc\n\nmore words\n");
+  const cli = await reviewCli();
+  expect(await cli.run("review", "--json")).toBe(0);
+  expect(JSON.parse(cli.stdout)).toMatchObject({ result: "clean", exit_code: 0, status: "docs-only" });
+});
+
+test("NoChange exits 0", () => {
+  expect(new NoChange("x").exitCode).toBe(0);
+});
+
+test("a first-run review with nothing to set up writes a review-shaped JSON line", async () => {
+  rmSync(reviewConfigPath(repo), { force: true });
+  writeFileSync(join(repo, "notes.txt"), "plain text\n");
+  commit(repo, "text");
+  const cli = await reviewCli();
+  expect(await cli.run("review", "--json")).toBe(0);
+  expect(JSON.parse(cli.stdout)).toMatchObject({ command: "review", result: "clean", exit_code: 0,
+    status: "nothing-to-review" });
 });

@@ -35,7 +35,7 @@ import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewF
   projectDigest, restDigest, reviewConfigPath, secretPinsOf, stampedBaseline, stampedQuick, withoutSecretPins,
   withSecretPins } from "./config";
 import { getAdapter } from "./adapters";
-import { ArnxError, EnvFailed, internalError, OnlyDocs, SetupRequired } from "./errors";
+import { ArnxError, EnvFailed, internalError, NoChange, OnlyDocs, SetupRequired } from "./errors";
 import { type Baseline, baselinePath, parseBaseline, readBaseline, writeBaseline } from "./baseline";
 import { FILE as IGNORE_FILE, initialIgnore } from "./ignore";
 import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter, unpricedModels,
@@ -302,9 +302,9 @@ class Commands {
   }
 
   /** With --json, the error that stopped the command: result "error", its message and exit code. */
-  fail(message: string, exitCode: number): void {
-    // Documentation alone is nothing to test, not an error.
-    if (exitCode === 0) this.emit("clean", 0, { status: "docs-only", message });
+  fail(message: string, exitCode: number, status = "nothing-to-review"): void {
+    // Nothing to review (documentation alone, an empty change) is not an error.
+    if (exitCode === 0) this.emit("clean", 0, { status, message });
     else this.emit("error", exitCode, { error: message });
   }
 
@@ -966,6 +966,11 @@ class Commands {
       // Inside a review, a try that failed like any other: the review says the one next step at its end.
       if (quick && add) return finish(2, false);
       this.d.out("Next: arnx setup (sets up the whole repository)");
+      // A first-run review answers in its own shape: nothing to review, exit 0.
+      if (quick) {
+        this.emit("clean", 0, { status: "nothing-to-review", message: "nothing here arnx can test", next: ["arnx setup"] });
+        return finish(0, false);
+      }
       report("ok", 0, setupJson({ file: null, result, approved: false, auto: false, files: null, warnings: [],
         reviewYaml: null, record: null, seconds: seconds(), failure: null, next: ["arnx setup"] }));
       return finish(0, false);
@@ -2393,7 +2398,8 @@ async function run(command: string, args: Args, commands: Commands, d: CliDeps):
     const lines = e instanceof ArnxError ? [`arnx: ${e.message}`] : internalError(e, d.env);
     for (const line of lines) d.err(line);
     const code = e instanceof ArnxError ? e.exitCode : 2;
-    commands.fail(e instanceof ArnxError ? e.message : lines[0]!.replace(/^arnx: /, ""), code);
+    commands.fail(e instanceof ArnxError ? e.message : lines[0]!.replace(/^arnx: /, ""), code,
+      e instanceof OnlyDocs ? "docs-only" : e instanceof NoChange ? "nothing-to-review" : undefined);
     return code;
   }
 }
