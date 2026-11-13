@@ -4,13 +4,17 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { type AnswerOutcome, accept } from "../src/accept";
 import { ACCEPTED_RECORD, changedAccepted, localPinsPath, recordAccepted, TESTS_CHANGED } from "../src/check";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
-import type { SessionFactory } from "../src/sandbox";
+import { save } from "../src/report";
+import type { RunResult, SessionFactory } from "../src/sandbox";
+import { defaultSettings } from "../src/settings";
 import { Cli } from "./helpers/cli";
 import { FakeSession } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
+import { blankMarks, finding, sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -21,7 +25,7 @@ const BODY = "def add(a, b):\n    return a - b\n\ndef test_z():\n    assert add(
 type Row = [string, string, string, string];
 
 const record = (repo: string) => JSON.parse(readFileSync(join(repo, ACCEPTED_RECORD), "utf8")).files as
-  Record<string, { sha256: string; review: string; tests?: string[] }>;
+  Record<string, { sha256: string; review: string; tests?: string[]; ids?: string[] }>;
 const put = (repo: string, rel: string, text: string) => {
   mkdirSync(dirname(join(repo, rel)), { recursive: true });
   writeFileSync(join(repo, rel), text);
@@ -36,8 +40,10 @@ function reporting(rows: Row[], seen: string[][] = []): SessionFactory {
   };
 }
 
-/** A repository with an approved environment and one kept file pinned with `tests` (undefined: an older pin). */
-async function kept(rows: Row[], tests: string[] | undefined, seen: string[][] = []) {
+/** A repository with an approved environment and one kept file pinned with `tests`, each as the runner reported it
+ * (undefined: an older pin, with no list). `older`: a pin by an arnx that recorded names without their parameters
+ * (no `ids`), committed and never recorded on this machine. */
+async function kept(rows: Row[], tests: string[] | undefined, seen: string[][] = [], older = false) {
   const at = mkdtempSync(join(tmp(), "k-"));
   const env = { XDG_CONFIG_HOME: at };
   const repo = gitRepo(at);
@@ -51,11 +57,12 @@ projects:
     test_command: python -m pytest {targets}
 `), "Dev", "2026-10-12"));
   put(repo, KEPT, BODY);
-  // An older pin: committed without a list, never recorded on this machine.
-  recordAccepted(repo, RID, { [KEPT]: tests ?? [] }, tests ? localPinsPath(env, repo) : null);
-  if (!tests) {
+  // An older pin: committed without a list (or without exact ids), never recorded on this machine.
+  recordAccepted(repo, RID, { [KEPT]: tests ?? [] }, tests && !older ? localPinsPath(env, repo) : null);
+  if (!tests || older) {
     const rec = JSON.parse(readFileSync(join(repo, ACCEPTED_RECORD), "utf8"));
-    delete rec.files[KEPT].tests;
+    delete rec.files[KEPT].ids;
+    if (!tests) delete rec.files[KEPT].tests;
     writeFileSync(join(repo, ACCEPTED_RECORD), JSON.stringify(rec, null, 2) + "\n");
   }
   commit(repo, "accepted");
@@ -77,14 +84,55 @@ test("an accepted test the run leaves out is named and does not pass (exit 1)", 
   expect([p.missing_accepted, p.passed]).toEqual([[`${RUN}::test_z`], [`${RUN}::test_y`]]);
 });
 
-test("a parametrized accepted test reports through its variants", async () => {
-  const { cli } = await kept([[RUN, "test_z[1]", "passed", ""], [RUN, "test_z[2]", "passed", ""],
-    [RUN, "test_y", "passed", ""]], ["test_z", "test_y"]);
+// The project's configuration leaves out the one variant that fails on the bug (a deselect, a conftest, `-k` matching
+// its parameter id): the other variants pass, and the accepted one is named.
+test("a parametrized accepted test must report as the variant accept recorded (exit 1)", async () => {
+  const { repo, cli } = await kept([[RUN, "test_z[0]", "passed", ""], [RUN, "test_y", "passed", ""]],
+    ["test_z[1]", "test_y"]);
+  expect(record(repo)[KEPT]).toMatchObject({ tests: ["test_z", "test_y"], ids: ["test_z[1]", "test_y"] });
+  expect(await cli.run("check")).toBe(1);
+  expect(cli.stdout).toContain("✗ 1 accepted test did not report, so not shown to pass:\n  ✗ test_z[1]");
+  expect(cli.stdout).not.toContain("The accepted test passes");
+  expect(cli.stdout).not.toContain("Accepted tests unchanged");
+  cli.out.length = 0;
+  expect(await cli.run("check", "--json", "--quiet")).toBe(1);
+  expect(JSON.parse(cli.stdout).projects[0].missing_accepted).toEqual([`${RUN}::test_z[1]`]);
+});
+
+test("a variant the record does not list does not stand in for a missing listed one", async () => {
+  const { cli } = await kept([[RUN, "test_z[0]", "passed", ""], [RUN, "test_z[2]", "passed", ""]], ["test_z[1]"]);
+  expect(await cli.run("check")).toBe(1);
+  expect(cli.stdout).toContain("✗ 1 accepted test did not report, so not shown to pass:\n  ✗ test_z[1]");
+});
+
+test("the listed variant reporting is enough: other variants may report or not", async () => {
+  const { cli } = await kept([[RUN, "test_z[1]", "passed", ""], [RUN, "test_z[2]", "passed", ""]], ["test_z[1]"]);
+  expect(await cli.run("check")).toBe(0);
+  expect(cli.stdout).not.toContain("did not report");
+  const red = await kept([[RUN, "test_z[1]", "failed", "assert 0 == 2"]], ["test_z[1]"]);
+  expect(await red.cli.run("check")).toBe(1);
+  expect(red.cli.stdout).not.toContain("did not report");
+});
+
+test("an older record without exact ids keeps the base-name rule: any variant reports for it", async () => {
+  const { repo, cli } = await kept([[RUN, "test_z[1]", "passed", ""], [RUN, "test_z[2]", "passed", ""],
+    [RUN, "test_y", "passed", ""]], ["test_z", "test_y"], [], true);
+  expect(record(repo)[KEPT]!.ids).toBeUndefined();
   expect(await cli.run("check")).toBe(0);
   expect(cli.stdout).not.toContain("did not report");
   cli.out.length = 0;
   expect(await cli.run("check", "--json", "--quiet")).toBe(0);
   expect(JSON.parse(cli.stdout).projects[0].missing_accepted).toBeUndefined();
+});
+
+test("exact ids edited or dropped in the record are not trusted (exit 4)", async () => {
+  for (const edit of [(e: Record<string, unknown>) => { delete e.ids; }, (e: Record<string, unknown>) => { e.ids = ["test_z[0]"]; }]) {
+    const { repo, cli } = await kept([[RUN, "test_z[0]", "passed", ""]], ["test_z[1]"]);
+    const rec = JSON.parse(readFileSync(join(repo, ACCEPTED_RECORD), "utf8"));
+    edit(rec.files[KEPT]);
+    writeFileSync(join(repo, ACCEPTED_RECORD), JSON.stringify(rec, null, 2) + "\n");
+    expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  }
 });
 
 test("an older pin without a test list keeps the whole-file rule", async () => {
@@ -172,4 +220,74 @@ test("a kept file with named tests that reports nothing names them too (exit 1)"
   expect(await cli.run("check")).toBe(1);
   expect(cli.stdout).toContain("✗ 2 accepted tests did not report, so not shown to pass:\n  ✗ test_z\n  ✗ test_y");
   expect(cli.stdout).toContain("did not run, the runner leaves it out");
+});
+
+// vitest: a top-level title with brackets is the title's own ("adds[1]" from test.each), recorded and required whole.
+test("a JavaScript title with brackets must report whole", async () => {
+  const at = mkdtempSync(join(tmp(), "js-"));
+  const env = { XDG_CONFIG_HOME: at };
+  const repo = gitRepo(at);
+  const run = "__tests__/arnx/r20261001_0b0b0b/adds.test.ts";
+  const titles: [string, string][] = [["adds[0]", "passed"], ["adds[2]", "passed"]];
+  // vitest's JUnit report, written where the command's --outputFile says.
+  const vitest: SessionFactory = async (_c, snap, _l, body) => body({ run(command: string): RunResult {
+    const out = /--outputFile='?\/src\/([^'\s]+)/.exec(command)?.[1];
+    const cases = titles.map(([name, outcome]) => `<testcase classname="${run}" name="${name}" time="0.01">` +
+      `${outcome === "failed" ? '<failure message="x">x</failure>' : ""}</testcase>`).join("");
+    if (out) put(snap, out, `<?xml version="1.0"?><testsuites><testsuite name="${run}">${cases}</testsuite></testsuites>`);
+    return { exitCode: 0, output: "", timedOut: false, seconds: 0.1 };
+  } });
+  const cli = new Cli({ cwd: repo, checkSessions: vitest, env });
+  await cli.run("init");
+  writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(`version: 1
+projects:
+  web:
+    root: .
+    language: typescript
+    runner: vitest
+    image: node:22
+    test_command: npx vitest run {targets}
+`), "Dev", "2026-10-12"));
+  const keptJs = `.arnx/tests/${run}.arnx`;
+  put(repo, keptJs, 'import { expect, test } from "vitest";\n\ntest.each([0, 1, 2])("adds[%i]", (n) => {\n  ' +
+    "expect(n + 0).toBe(n);\n});\n");
+  recordAccepted(repo, RID, { [keptJs]: ["adds[1]"] }, localPinsPath(env, repo));
+  commit(repo, "accepted");
+  expect(await cli.run("check")).toBe(1);
+  expect(cli.stdout).toContain("✗ 1 accepted test did not report, so not shown to pass:\n  ✗ adds[1]");
+  titles.push(["adds[1]", "passed"]);
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(0);
+});
+
+// accept records each accepted test as the runner reported it in the review: a finding's variant with its
+// parameters, and an answer's failing test as its run reported it.
+test("accept records the exact ids of the accepted tests beside their names", async () => {
+  const repo = gitRepo(tmp());
+  const wd = "tests/arnx_generated";
+  const gen = `${wd}/test_add.py`;
+  const rid = "20261011-a1b2c3";
+  const rdir = join(repo, ".arnx", "reviews", rid);
+  save(sampleReview({ id: rid, writeDir: wd, flaky: [], questions: ["Should add round?"],
+    findings: [finding("F1", `${gen}::test_z[1]`, "test_z", gen, "assert 0 == 2", "add subtracts", "confirmed"),
+      finding("F2", `${gen}::TestAdd::test_w[a-b]`, "test_w", gen, "assert 0 == 2", "add subtracts", "confirmed")] }),
+  rdir, "diff --git a/app.py b/app.py\n");
+  put(rdir, `tests/${gen}`, "import pytest\n\n@pytest.mark.parametrize('b', [0, 1])\ndef test_z(b):\n    assert b == 0\n\n" +
+    "class TestAdd:\n    @pytest.mark.parametrize('s', ['a-b'])\n    def test_w(self, s):\n        assert False\n");
+  const md = join(rdir, "review.md");
+  writeFileSync(md, blankMarks(readFileSync(md, "utf8")).replaceAll("Mark: [ ] real", "Mark: [x] real")
+    .replace(/^Answer:$/m, "Answer: no, it truncates"));
+  const answers = async (qid: string): Promise<AnswerOutcome> => {
+    const file = `${wd}/answers/test_${qid.toLowerCase()}.py`;
+    return { qid, files: { [file]: "import pytest\n\n@pytest.mark.parametrize('x', [1])\ndef test_q(x):\n    assert False\n" },
+      keep: { [file]: new Set(["test_q"]) }, skip: {}, disagree: [`${file}::test_q[1]`], costUsd: 0, stop: "end_turn",
+      base: `${wd}/answers` };
+  };
+  await accept(repo, rdir, { ...defaultSettings(), consentAt: "2026-10-11T00:00:00Z" }, { answerRunner: answers });
+  const rec = record(repo);
+  const dest = ".arnx/tests/tests/arnx/r20261011_a1b2c3";
+  const main = Object.keys(rec).find((p) => p.startsWith(dest) && !p.includes("/answers/"))!;
+  expect([rec[main]!.tests, rec[main]!.ids]).toEqual([["test_z", "TestAdd::test_w"], ["test_z[1]", "TestAdd::test_w[a-b]"]]);
+  expect([rec[`${dest}/answers/test_q1.py.arnx`]!.tests, rec[`${dest}/answers/test_q1.py.arnx`]!.ids])
+    .toEqual([["test_q"], ["test_q[1]"]]);
 });

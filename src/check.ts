@@ -43,7 +43,7 @@ export interface ProjectCheck { /** Something in it was masked. */ standInsShown
   /** Accepted tests (named in the record) that ended skipped: not passing. */
   skippedAccepted?: string[];
   /** Accepted tests the record names in a kept file that ran, which the runner did not report (the project's own
-   * configuration left them out): not passing. */
+   * configuration left them out), each as the record names it (the exact variant when it has one): not passing. */
   missingAccepted?: string[] }
 
 /** The accepted tests, as `file::test` (repository-relative, parameters dropped): those accept recorded per file in
@@ -66,13 +66,13 @@ export function acceptedTestIds(findings: Review["findings"], marks: Record<stri
     ...Object.values(disagree).flat().map((t) => placed(moved, null, t))];
 }
 
-/** The accepted tests of each kept file: the part of its ids after `file::`, parameters dropped. */
+/** The accepted tests of each kept file: the part of its ids after `file::`, as the runner reported it (a pytest
+ * variant with its parameters, a JavaScript test's full title, a Rust test's full path). */
 export function testsByFile(paths: string[], ids: string[]): Record<string, string[]> {
   const out: Record<string, string[]> = Object.fromEntries(paths.map((p) => [p, []]));
   for (const id of ids) {
     const [file, rest] = splitId(id);
-    const name = baseName(rest);
-    if (out[file] && !out[file].includes(name)) out[file].push(name);
+    if (out[file] && !out[file].includes(rest)) out[file].push(rest);
   }
   return out;
 }
@@ -281,15 +281,20 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       }
       // A kept file the runner reported no test for was left out by its configuration: named, never silently dropped.
       const notRun = missing.length ? [] : files.filter((f) => !results.some((t) => ownerFile(t.fileAttr, [target(f)]) !== null));
-      // Every test the record names in a kept file must report (passed, failed or skipped; a parametrized one through
-      // any variant): one the project's own configuration leaves out (a deselect, a name filter, a collection hook)
-      // does not pass. A pin without a list (an older arnx's) is held to its whole file reporting (notRun).
+      // Every test the record names in a kept file must report (passed, failed or skipped) as it is named: one the
+      // project's own configuration leaves out (a deselect, a name filter, a collection hook) does not pass. The exact
+      // ids (`ids`) must each report; another variant of the same test does not stand in for one. A list without them
+      // (an older arnx's, parameters dropped) reports through any variant; a pin without a list is held to its whole
+      // file reporting (notRun).
       const missingAccepted = missing.length ? [] : files.flatMap((f) => {
-        const named = rec[f]?.tests;
+        const { ids, tests } = rec[f] ?? {};
+        const exact = Array.isArray(ids);
+        const named = exact ? ids : tests;
         if (!Array.isArray(named)) return [];
+        const key = (n: string) => exact ? n : baseName(n);
         const got = new Set(results.filter((t) => ownerFile(t.fileAttr, [target(f)]) !== null)
-          .map((t) => baseName(splitId(t.testId)[1])));
-        return [...new Set(named.map(String))].filter((n) => !got.has(baseName(n))).map((n) => `${target(f)}::${n}`);
+          .map((t) => key(splitId(t.testId)[1])));
+        return [...new Set(named.map(String))].filter((n) => !got.has(key(n))).map((n) => `${target(f)}::${n}`);
       });
       known ??= acceptedIds(repo);
       const ran = results.filter((t) => t.outcome !== "skipped");
@@ -487,8 +492,14 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
   const skipped = ran.reduce((n, r) => n + r.skipped, 0);
   // Accepted tests that ended skipped: not passing.
   const skipAcc = ran.flatMap((r) => (r.skippedAccepted ?? []).map((id) => `${multi ? `${r.project}: ` : ""}${id.split("::").at(-1)}`));
-  // Accepted tests the run left out: not passing either.
-  const missAcc = ran.flatMap((r) => (r.missingAccepted ?? []).map((id) => `${multi ? `${r.project}: ` : ""}${id.split("::").at(-1)}`));
+  // Accepted tests the run left out: not passing either. Those of a file that could not load for a file left out as
+  // secret-looking (its error is in couldNotRun) are that file's, not the configuration's.
+  const missed = ran.flatMap((r) => (r.missingAccepted ?? []).map((id) => {
+    const [file, name] = splitId(id);
+    return { name: `${multi ? `${r.project}: ` : ""}${name}`,
+      blocked: (r.couldNotRun ?? []).some((x) => splitId(x.testId)[0] === file) };
+  }));
+  const missAcc = missed.map((x) => x.name);
   // With no accepted test among them (an answer's tests alone), the rest are not "other".
   const other = accTotal ? "other " : "";
   const where = "in the accepted files";
@@ -556,9 +567,12 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
   if (failed.length || skipAcc.length || missAcc.length) {
     // arnx keeps accepted tests unskipped: a skip comes from the run (a conftest, a marker, the environment).
     if (skipAcc.length) lines.push("A skipped accepted test proves nothing: find what skips it, then arnx check.");
-    if (missAcc.length) {
+    if (missed.some((x) => !x.blocked)) {
       lines.push("An accepted test that does not report proves nothing: find what in your test configuration leaves it " +
         "out (a deselect, a name filter, a collection hook), then arnx check.");
+    }
+    if (missed.some((x) => x.blocked)) {
+      lines.push("An accepted test whose file could not load reports nothing: its file needs the one left out above.");
     }
     // A wrong test of a real bug is marked rewrite; tests that are not findings no mark covers.
     if (accFail.length) {
@@ -597,7 +611,9 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
 // Fresh clones, CI and teammates have no local record: there the committed pins are the trusted ones.
 //
 // Each entry also lists the file's accepted tests (`tests`: the names after `file::`, parameters dropped), which tells
-// check's accepted tests from the other tests in the file without .arnx/reviews/. The list is pinned with the sha256:
+// check's accepted tests from the other tests in the file without .arnx/reviews/, and the same tests as the runner
+// reported them in the review (`ids`: a variant with its parameters), each of which must report. Both are pinned with
+// the sha256 (an entry by an older arnx has no `ids`, and its `tests` report through any variant):
 // edited, it could turn a red accepted test into an "other" one, so an entry is trusted only when both its sha256 and
 // its list (absent included: an older arnx wrote none) are HEAD's or ones arnx wrote here; else it is `repinned`.
 
@@ -605,18 +621,20 @@ export const ACCEPTED_RECORD = ".arnx/accepted-tests.json";
 /** check's exit code when an accepted test file was changed or deleted since accept recorded it. */
 export const TESTS_CHANGED = 4;
 
-interface Pin { sha256: string; review: string; tests?: string[] }
+interface Pin { sha256: string; review: string; tests?: string[]; ids?: string[] }
 interface AcceptedRecord { schema_version: 1; files: Record<string, Pin> }
 /** modified/deleted: the file differs from its pin, or is gone. repinned: the pin itself was changed, and not by arnx
  * on this machine. unpinned: its entry was removed from the record (or the record deleted). */
 export const CHANGES = ["modified", "deleted", "repinned", "unpinned", "duplicate", "added", "collides"] as const;
 export interface ChangedTest { path: string; review: string; change: typeof CHANGES[number] }
 
-/** What arnx wrote to the record on this machine: per file, every sha256 and accepted-test list it pinned (a branch
- * switch brings back an older one; null: none, an entry by an older arnx), and whether it removed the entry (accept
- * --again keeping fewer files, --keep-edits of a deleted one). */
+/** What arnx wrote to the record on this machine: per file, every sha256 and accepted-test lists it pinned (a branch
+ * switch brings back an older one; null: none, an entry by an older arnx; a bare list: `tests` without `ids`), and
+ * whether it removed the entry (accept --again keeping fewer files, --keep-edits of a deleted one). */
 interface LocalPins { schema_version: 1; repo: string;
-  files: Record<string, { review: string; sha256: string[]; tests?: (string[] | null)[]; removed?: boolean }> }
+  files: Record<string, { review: string; sha256: string[]; tests?: (Lists | string[] | null)[]; removed?: boolean }> }
+/** An entry's accepted-test lists, as pinned. */
+interface Lists { tests?: string[]; ids?: string[] }
 
 /** A kept file's sha256, its bytes read without following a link (safefs.ts regularBytes), so hashing, placing and
  * counting kept files agree: "gone" when nothing is there, "other" when it is not a regular file. */
@@ -633,6 +651,17 @@ function writtenSha(repo: string, rel: string): string {
 }
 /** An accepted-test list as compared: order and repeats do not count; "" when there is none. */
 const testsOf = (tests: unknown) => Array.isArray(tests) ? JSON.stringify([...new Set(tests.map(String))].sort()) : "";
+/** An entry's lists (or one this machine's record keeps: a bare list is `tests` alone) as compared. */
+const listsOf = (x: unknown): string => {
+  const e: { tests?: unknown; ids?: unknown } = Array.isArray(x) ? { tests: x } : x && typeof x === "object" ? x : {};
+  return Array.isArray(e.ids) ? JSON.stringify([testsOf(e.tests), testsOf(e.ids)]) : testsOf(e.tests);
+};
+/** The lists of an entry (or of what this machine's record keeps), absent ones left out. */
+const listsIn = (x: unknown): Lists => {
+  const e: { tests?: unknown; ids?: unknown } = Array.isArray(x) ? { tests: x } : x && typeof x === "object" ? x : {};
+  return { ...(Array.isArray(e.tests) ? { tests: e.tests.map(String) } : {}),
+    ...(Array.isArray(e.ids) ? { ids: e.ids.map(String) } : {}) };
+};
 
 function parseRecord(text: string): AcceptedRecord {
   const d = JSON.parse(text) as Partial<AcceptedRecord>;
@@ -702,7 +731,7 @@ function writeLocal(path: string | null, repo: string, review: (p: string) => st
       // An entry pinned before arnx recorded tests keeps that pin's list (none) trusted.
       const lists = e.tests ??= e.sha256.length ? [null] : [];
       if (!e.sha256.includes(pin.sha256)) e.sha256.push(pin.sha256);
-      if (!lists.some((t) => testsOf(t) === testsOf(pin.tests))) lists.push(pin.tests ?? null);
+      if (!lists.some((t) => listsOf(t) === listsOf(pin))) lists.push(pin.ids ? listsIn(pin) : pin.tests ?? null);
       delete e.removed;
     }
   }
@@ -714,8 +743,9 @@ function writeLocal(path: string | null, repo: string, review: (p: string) => st
   }
 }
 
-/** Record what one accept wrote (repository-relative paths, each with its accepted tests: testsByFile), replacing that
- * review's earlier entries; `local`: this machine's record (localPinsPath). */
+/** Record what one accept wrote (repository-relative paths, each with its accepted tests as the runner reported them:
+ * testsByFile), replacing that review's earlier entries; `local`: this machine's record (localPinsPath). Each entry
+ * names them twice: `tests`, parameters dropped, and `ids`, exactly. */
 export function recordAccepted(repo: string, review: string, tests: Record<string, string[]>,
   local: string | null = null): void {
   const rec = readRecord(repo);
@@ -727,7 +757,7 @@ export function recordAccepted(repo: string, review: string, tests: Record<strin
     }
   }
   for (const [p, t] of Object.entries(tests)) {
-    rec.files[p] = { sha256: writtenSha(repo, p), review, tests: t };
+    rec.files[p] = { sha256: writtenSha(repo, p), review, tests: [...new Set(t.map(baseName))], ids: [...new Set(t)] };
     pins[p] = rec.files[p]!;
   }
   writeLocal(local, repo, () => review, pins);
@@ -754,7 +784,7 @@ export function changeEditsAccepted(repo: string, change: { base: string; head: 
     });
   const [before, after] = records;
   // An older kept file arnx stored under its new name (storeOlderKept), its pin moved with it unchanged, is no edit.
-  const same = (a: Pin | undefined, b: Pin) => !!a && a.sha256 === b.sha256 && testsOf(a.tests) === testsOf(b.tests);
+  const same = (a: Pin | undefined, b: Pin) => !!a && a.sha256 === b.sha256 && listsOf(a) === listsOf(b);
   const moved = (p: string) => isOlderKept(p) && !!before?.[p] && same(after?.[`${DOME}/${storedName(runPath(p))}`], before[p]!);
   const out: string[] = [];
   for (let i = 0; i + 1 < status.length; i += 2) {
@@ -780,10 +810,10 @@ function touched(repo: string, revs: string[], paths: string[]): Set<string> {
     .split("\0").map((p) => p.trim()).filter(Boolean));
 }
 
-/** Whether an entry's accepted-test list is trusted: one arnx wrote here (`l`), else HEAD's (`c`; none: any). */
+/** Whether an entry's accepted-test lists are trusted: ones arnx wrote here (`l`), else HEAD's (`c`; none: any). */
 const trustedTests = (w: Pin, c: Pin | undefined, l: LocalPins["files"][string] | undefined) => l
-  ? (Array.isArray(l.tests) ? l.tests : [null]).some((t) => testsOf(t) === testsOf(w.tests))
-  : !c || testsOf(c.tests) === testsOf(w.tests);
+  ? (Array.isArray(l.tests) ? l.tests : [null]).some((t) => listsOf(t) === listsOf(w))
+  : !c || listsOf(c) === listsOf(w);
 
 /** Accepted files changed or deleted since accept recorded them, and pins changed or removed by anything but arnx on
  * this machine (`local`, localPinsPath). Files accept never recorded (kept by an arnx that did not record them) are not
@@ -944,12 +974,12 @@ export function keepEdits(repo: string, local: string | null = null): KeptEdits 
     // Its accepted tests as recorded when trusted; else (edited, or the entry removed) HEAD's, else the last arnx
     // wrote here.
     const w = rec.files[c.path];
-    const trusted = head[c.path] ? head[c.path]!.tests : mine[c.path]?.tests?.at(-1) ?? undefined;
+    const trusted = listsIn(head[c.path] ? head[c.path] : mine[c.path]?.tests?.at(-1));
     const ok = w && trustedTests(w, head[c.path], mine[c.path]);
     if (w && !ok) restoredTests.push(c.path);
-    const tests = ok ? w.tests : trusted ?? undefined;
+    const lists = ok ? listsIn(w) : trusted;
     const sha = keptSha(repo, c.path);
-    if (sha !== "gone") rec.files[c.path] = { sha256: sha, review: c.review, ...(tests ? { tests } : {}) };
+    if (sha !== "gone") rec.files[c.path] = { sha256: sha, review: c.review, ...lists };
     else delete rec.files[c.path];
     pins[c.path] = rec.files[c.path] ?? null;
   }

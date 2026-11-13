@@ -162,6 +162,22 @@ for (const [name, message] of [["at the top of the test file", LOAD], ["inside t
   });
 }
 
+test("arnx check, an accepted test whose file could not load for a left-out file: named, with that file as the cause",
+  async () => {
+  const repo = kept();
+  const rec = JSON.parse(readFileSync(join(repo, ".arnx/accepted-tests.json"), "utf8"));
+  Object.assign(rec.files[`.arnx/tests/${KEPT}`], { tests: ["test_kept"], ids: ["test_kept"] });
+  writeFileSync(join(repo, ".arnx/accepted-tests.json"), JSON.stringify(rec, null, 2) + "\n");
+  const results = await check(repo, SETTINGS, { sessionFactory: fakeFactory(() =>
+    [junitXml([[KEPT, "tests.arnx.r1.test_kept", "error", LOAD]]), "1 error\n", false]) });
+  const [text, code] = checkSummary(results);
+  expect(code).toBe(1);
+  expect(text).toContain("✗ 1 accepted test did not report, so not shown to pass:\n  ✗ test_kept");
+  expect(text).toContain("could not run: it needs lib.py, left out as secret-looking");
+  expect(text).toContain("An accepted test whose file could not load reports nothing: its file needs the one left out above.");
+  expect(text).not.toContain("find what in your test configuration");
+});
+
 test("arnx check, a real failure beside it stays a failure, and the file is named as what it may need", async () => {
   const results = await check(kept(), SETTINGS, { sessionFactory: fakeFactory(() =>
     [junitXml([[KEPT, "test_kept", "failed", "assert 1 == 2"]]), "1 failed\n", false]) });

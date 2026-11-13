@@ -187,4 +187,57 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: kept tests are invisibl
       rmSync(join(repo, file));
     }
   }, 900_000);
+
+  test("Python: the variant of a parametrized test that fails on the bug must report; one left out is named (exit 1)",
+    async () => {
+    const repo = repoWith("py-param", PY_FILES);
+    mkdirSync(join(repo, ".arnx"));
+    writeFileSync(reviewConfigPath(repo), PY_YAML);
+    commit(repo, "arnx");
+    const [ok] = await approveFile(repo, { by: "Dev", at: "2026-11-13" });
+    expect(ok).toBe(true);
+    writeFileSync(join(repo, "calc.py"), "def add(a, b):\n    return abs(a) + b\n");
+    commit(repo, "abs");
+
+    // test_z[0] passes on the bug; test_z[1] and test_z[slow_path] fail on it.
+    const gen = `${PY_DIR}/test_param.py`;
+    const body = "import pytest\n\nfrom calc import add\n\n\n" +
+      "@pytest.mark.parametrize('a', [0, 1, pytest.param(2, id='slow_path')])\n" +
+      "def test_z(a):\n    assert add(-a, 0) == -a\n";
+    const report = text(JSON.stringify({ tests: [], suspected_defects: [{ test: `${gen}::test_z`,
+      explanation: "abs drops the sign" }], questions: [] }));
+    const agent = new ScriptedAgent([[tool("write_file", { path: gen, content: body })], [tool("run_tests")], [report],
+      [report]]);
+    const { review, rdir } = await runReview(repo, { settings: { ...SETTINGS, fixProofMax: 0 }, agentModel: agent,
+      challenger: new FakeJson([{ verdict: "confirmed", reason: "-1 becomes 1" }, { verdict: "confirmed", reason: "-2 becomes 2" }]) });
+    expect([review.missingRuns, review.findings.map((f) => f.testId.split("::").at(-1))])
+      .toEqual([0, ["test_z[1]", "test_z[slow_path]"]]);
+    const md = join(rdir, "review.md");
+    writeFileSync(md, blankMarks(readFileSync(md, "utf8")).replaceAll("Mark: [ ] real", "Mark: [x] real"));
+    const result = await accept(repo, rdir, SETTINGS);
+    const run = runPath(result.kept.map((p) => p.slice(repo.length + 1)).find((p) => p.includes("test_abs"))!);
+    const [one, slow] = [`${run}::test_z[1]`, `${run}::test_z[slow_path]`];
+    const [r] = await check(repo, SETTINGS);
+    expect([r!.failed.map((t) => t.testId).sort(), r!.missingAccepted]).toEqual([[one, slow], undefined]);
+
+    // Each leaves out what fails on the bug: before, test_z[0] passing stood in for its variants (exit 0).
+    const cases: [string, string, string[], string[]][] = [
+      ["pytest.ini", `[pytest]\naddopts = --deselect ${one} --deselect ${slow}\n`, [one, slow], []],
+      ["conftest.py", "def pytest_collection_modifyitems(items):\n" +
+        "    items[:] = [i for i in items if i.name not in ('test_z[1]', 'test_z[slow_path]')]\n", [one, slow], []],
+      // By accident: -k matches parameter ids too.
+      ["pytest.ini", "[pytest]\naddopts = -k 'not slow'\n", [slow], [one]],
+    ];
+    for (const [file, text, missing, failing] of cases) {
+      writeFileSync(join(repo, file), text);
+      const [left] = await check(repo, SETTINGS);
+      expect([text, left!.missingAccepted, left!.failed.map((t) => t.testId), left!.noReport])
+        .toEqual([text, missing, failing, false]);
+      const [said, code] = checkSummary([left!]);
+      expect([text, code]).toEqual([text, 1]);
+      expect(said).toContain(`did not report, so not shown to pass:\n${missing.map((m) => `  ✗ ${m.split("::")[1]}`).join("\n")}`);
+      expect(said).not.toContain("✓ The accepted test passes");
+      rmSync(join(repo, file));
+    }
+  }, 900_000);
 });

@@ -160,7 +160,9 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
 - Accepted tests are code a model wrote. They run only through `arnx check`, in the proven sandbox. Read them
   before you commit them.
 - `arnx check` runs your project's own code and test configuration, so a change to that configuration can change which
-  tests run; check names any accepted test that does not report, and it does not pass.
+  tests run; check names any accepted test that does not report (a parametrized one as the variant accept recorded),
+  and it does not pass. Your project's code runs inside that test run, so code there that rewrites test outcomes is
+  outside what check can see.
 - Setup asks nothing about the environment it writes: it proves it by running your suites. Its install steps, written
   by the setup agent, run with network access when the image builds; setup lists under "Worth a look" any install
   line that downloads with `curl`, `wget` or `git clone` from outside the package registries.

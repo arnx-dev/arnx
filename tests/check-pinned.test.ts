@@ -333,6 +333,7 @@ test("a record of an older arnx (no accepted tests) is no alarm; accept --again 
   for (const [path, entries] of [[join(repo, ACCEPTED_RECORD), "files"], [pins, "files"]] as const) {
     const d = JSON.parse(readFileSync(path, "utf8"));
     delete d[entries][KEPT].tests;
+    delete d[entries][KEPT].ids;
     writeFileSync(path, JSON.stringify(d, null, 2) + "\n");
   }
   commit(repo, "accepted tests, recorded by an older arnx");

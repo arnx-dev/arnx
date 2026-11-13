@@ -43,10 +43,10 @@ kept, as stored.
 | `accepted` | array of strings | The ids, of those that passed or failed, that are accepted tests: the tests behind findings marked real (and answers the code disagrees with). The rest are other tests the review wrote into the same files. Read from `.arnx/accepted-tests.json` (committed, so a fresh clone or CI tells them apart too); for a file recorded by an older arnx, from its review in `.arnx/reviews/`; with neither, every test in the file counts as accepted. |
 | `failed` | array | Tests that failed: see [Each failed test](#each-failed-test). |
 | `skipped` | number | Tests skipped: one accept could not cut out of a kept file, or (accepted by an arnx before 0.1.2) not confirmed, marked intended or noise, or set aside. |
-| `could_not_run`, `left_out`, `faked_keys` | array | Optional. `{ test_id, needs, faked_key? }`: unproven tests, which failed for a file left out as secret-looking or (`faked_key`) for a private key the sandbox holds as a fake: no failure of the code (exit 2). `needs` is the file, or `a faked file` when the failure does not show which. `{ path, line, label }`: the files left out; `line` 0 when the whole file counts (its name, its size). `faked_keys`: paths of the files holding a fake. |
+| `could_not_run`, `left_out`, `faked_keys` | array | Optional. `{ test_id, needs, faked_key? }`: unproven tests, which failed for a file left out as secret-looking or (`faked_key`) for a private key the sandbox holds as a fake: no failure of the code (exit 2; exit 1 when a file that could not load for it holds accepted tests, which are then in `missing_accepted` too). `needs` is the file, or `a faked file` when the failure does not show which. `{ path, line, label }`: the files left out; `line` 0 when the whole file counts (its name, its size). `faked_keys`: paths of the files holding a fake. |
 | `skipped_accepted` | array of strings | Optional. Accepted tests (named in `.arnx/accepted-tests.json`) that ended skipped: they do not pass, and the run is exit 1. arnx keeps accepted tests unskipped, so the skip came from the run (a conftest, a marker, the environment). |
-| `missing_accepted` | array of strings | Optional. Accepted tests (named in `.arnx/accepted-tests.json`, as `path::name` from the project's folder) that the runner did not report at all: the project's own test configuration left them out (a deselect, a name filter, a collection hook). They do not pass, and the run is exit 1. A parametrized test reports through any of its variants. A file pinned by an older arnx, with no `tests` list, is held to `not_run` alone. |
-| `not_run` | array of strings | Optional. Kept test files the runner reported nothing for (its configuration leaves their name or folder out), as the paths they run from. The text says so too; the files stay in `files`. A run with any is exit 2, never `pass`. |
+| `missing_accepted` | array of strings | Optional. Accepted tests (named in `.arnx/accepted-tests.json`, as `path::name` from the project's folder) that the runner did not report at all: the project's own test configuration left them out (a deselect, a name filter, a collection hook), or their file could not load. They do not pass, and the run is exit 1. Each is named as the runner reported it in the review (`ids`: a parametrized test's variant with its parameters, a JavaScript test's full title), and that one must report: another variant of the same test does not stand in for it. A file pinned by an older arnx with `tests` but no `ids` reports through any variant; one with no `tests` list is held to `not_run` alone. |
+| `not_run` | array of strings | Optional. Kept test files the runner reported nothing for (its configuration leaves their name or folder out), as the paths they run from. The text says so too; the files stay in `files`. A run with any is never `pass`: exit 1 when such a file has accepted tests the record names (they are in `missing_accepted` too), else exit 2. |
 
 ## Each failed test
 
@@ -87,22 +87,22 @@ passes and F3's fails: they may contradict`. Which one holds is the user's call.
 | `result` | Exit | Meaning |
 |---|---|---|
 | `pass` | 0 | Every accepted test passes: the bugs they lock are fixed. |
-| `fail` | 1 | Some accepted tests fail: a bug not fixed yet, or a change that broke what they lock. Fix the code. A test that is wrong about a real bug is the user's call: they mark its finding `rewrite` with a reason in review.md, then `arnx accept --again <id>`. |
-| `no-report` | 2 | Some tests did not report, are unproven, or a kept test file was not run (`not_run`). |
+| `fail` | 1 | Some accepted tests fail, ended skipped (`skipped_accepted`) or did not report (`missing_accepted`): a bug not fixed yet, a change that broke what they lock, or a run that left them out. Fix the code. A test that is wrong about a real bug is the user's call: they mark its finding `rewrite` with a reason in review.md, then `arnx accept --again <id>`. |
+| `no-report` | 2 | The tests gave no report (timeout, runner), some are unproven (`could_not_run`), or a kept test file pinned without a `tests` list was not run (`not_run`). |
 | `nothing-accepted` | 3 | No accepted tests yet (nothing has been through `arnx accept`). |
 | `tests-changed` | 4 | Accepted test files changed since accept, so nothing ran: a test edited until it passes proves nothing. The user restores them (`arnx accept --again <id>`, or `git checkout` when the committed copy is the accepted one: `arnx check` without `--json` names it then), or records an intended edit with `arnx accept --keep-edits`. |
 
-`.arnx/accepted-tests.json` records, for each file `arnx accept` wrote, its sha256 and its accepted tests (`tests`:
-each test's name after `file::`, parameters dropped; empty for a support file or one holding only an answer's passing
-tests):
+`.arnx/accepted-tests.json` records, for each file `arnx accept` wrote, its sha256 and its accepted tests twice: `tests`, each test's name after
+`file::` with its parameters dropped, and `ids`, each as the runner reported it in the review (a variant with its
+parameters); both empty for a support file or one holding only an answer's passing tests:
 
 ```json
 { "schema_version": 1, "files": { ".arnx/tests/tests/arnx/r20261011_a1b2c3/test_discount_over_100.py.arnx": {
-  "sha256": "9f2c…", "review": "20261011-a1b2c3", "tests": ["test_F1", "test_F2"] } } }
+  "sha256": "9f2c…", "review": "20261011-a1b2c3", "tests": ["test_F1", "test_F2"], "ids": ["test_F1", "test_F2[0-1]"] } } }
 ```
 
-An entry without `tests` (written by an older arnx) still reads. Files accept never recorded (kept by an older arnx)
-are run without that check. The record is checked too: an entry's sha256 and `tests` are trusted only
+An entry without `tests` or `ids` (written by an older arnx) still reads. Files accept never recorded (kept by an older arnx)
+are run without that check. The record is checked too: an entry's sha256, `tests` and `ids` are trusted only
 when they are the ones committed at HEAD or ones `arnx accept` (or `--keep-edits`) wrote on this machine, which keeps
 its own copy in the user's config directory, outside the repository. An entry changed or removed any other way is
 `repinned` or `unpinned`, exit 4: an edited `tests` list could otherwise relabel a failing accepted test as another
