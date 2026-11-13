@@ -242,6 +242,24 @@ const secsSince = (t0: number) => Math.round((performance.now() - t0) / 100) / 1
 export const DOCKER_DENIED = /permission denied|operation not permitted|access is denied/i;
 const DOCKER_DOWN = /cannot connect|is the docker daemon running|error during connect|connection refused|no such file or directory/i;
 
+/** What Docker says when its disk is full. */
+export const DISK_FULL = /no space left on device|not enough space on the disk|disk quota exceeded/i;
+export const diskFullMessage = (): string =>
+  "Docker is out of disk space. arnx env prune removes arnx's old images; docker system df shows what else is there.";
+
+/** Docker's disk is full: no retry or other try helps, so setup and reviews stop on it with this one line. */
+export class DiskFull extends ArnxError {
+  override name = "DiskFull";
+  constructor() {
+    super(diskFullMessage());
+  }
+}
+
+/** Throws DiskFull when `output`, from a failed Docker build or start, says the disk is full. */
+export function failIfDiskFull(output: string): void {
+  if (DISK_FULL.test(output)) throw new DiskFull();
+}
+
 export function requireDocker(): void {
   const r = docker(["info", "--format", "{{.ServerVersion}}"], { timeout: 30 });
   if (r.status === 0) return;
@@ -546,6 +564,7 @@ async function ensureBuilt(cfg: ReviewConfig, snapshot: string, logPath: string,
   stepLog({ step: "image", project: cfg.name, tag, built: true, ok: r.status === 0, secs: secsSince(t0) });
   mkdirSync(dirname(logPath), { recursive: true });
   writeFileSync(logPath, r.stdout + r.stderr);
+  if (r.status !== 0) failIfDiskFull(r.stdout + r.stderr);
   // A build that failed because the package index could not be reached is tried once more: a dropped connection is
   // not a wrong install step.
   if (r.status !== 0 && NETWORK_TROUBLE.test(r.stdout + r.stderr)) {
@@ -749,6 +768,7 @@ export class Session implements Runner {
           const env = this.realEnv(svc.env);
           for (const k of Object.keys(env).sort()) args.push("-e", `${k}=${envValue(env[k]!)}`);
           r = docker([...args, svc.image], { timeout: stepTimeout(900) });
+          if (r.status !== 0) failIfDiskFull(r.stderr);
           if (r.status !== 0) throw new ArnxError(`service ${svc.name} did not start: ${r.stderr.trim().slice(0, 300)}`);
           this.started.push(name);
           if (svc.ready) await this.waitReady(name, svc.name, svc.ready);
@@ -940,6 +960,7 @@ export class Session implements Runner {
       stepLog({ step: "container", project: this.cfg.name, ok: r.status === 0, secs: secsSince(t0) });
       if (r.status !== 0) {
         this.dropBox();
+        failIfDiskFull(r.stderr);
         return { exitCode: r.status, ...kept(r.stdout + r.stderr), timedOut: false, seconds: seconds() };
       }
     }
@@ -1003,6 +1024,8 @@ export class Session implements Runner {
         return { exitCode: null, output: cut.output + "\n[timed out]", timedOut: true, seconds,
           ...(cut.truncated ? { truncated: true } : {}) };
       }
+      // 125: Docker itself failed to start the container; a test's own exit code is not its to judge.
+      if (r.status === 125) failIfDiskFull(r.stderr);
       return { exitCode: r.status, ...kept(r.stdout + r.stderr, r.trimmed), timedOut: false, seconds };
     } finally {
       this.running.delete(entry!);

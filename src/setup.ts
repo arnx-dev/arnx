@@ -40,7 +40,7 @@ import { look, type Placement } from "./precheck";
 import { LocalBrain } from "./localbrain";
 import { promptsFor } from "./userprompts";
 import type { Say } from "./progress";
-import { copyManifests, dockerExec, dockerSteps, envKey, envTag, type ExecFactory, OutOfTime, requireTime,
+import { copyManifests, dockerExec, DiskFull, dockerSteps, envKey, envTag, type ExecFactory, OutOfTime, requireTime,
   type Runner, type RunResult, type SessionFactory, type TimeLimit, timeIsUp, withTimeLimit } from "./sandbox";
 import type { ScipIndex } from "./scip";
 import { EXEC, SetupExec, type TriedEnv } from "./setupexec";
@@ -586,6 +586,8 @@ export const TIME_LEFT_OUT = "setup reached its time limit";
 /** Why setup stops when its only projects are web UI apps whose runs failed (SetupResult stop WEB_UI_STOP). */
 export const ONLY_WEB_UI = "only web UI here, which arnx does not set up";
 export const WEB_UI_STOP = "web-ui";
+/** Setup stopped because Docker's disk is full: no try or model call can help. */
+export const DISK_FULL_STOP = "disk-full";
 /** A quick setup's stop when no project arnx can set up owns a changed file. */
 export const NOTHING_TO_TEST = "nothing-to-test";
 
@@ -1315,7 +1317,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     usesChecked: false, pathsChecked: false, pathHints: [] as UsesHint[],
     lastFile: null as string | null,
     // The project the last try was on, and whether a tool found too little time left to go on (OutOfTime).
-    current: null as string | null, outOfTime: false,
+    current: null as string | null, outOfTime: false, diskFull: false,
     // What went back to the agent once (failures that look like the environment, tests left out), per project, with the
     // run it came from: the same environment tried again goes on from that run without running the suite again.
     held: new Map<string, { env: string; files: string; shown: Set<string>; run: { digest: string; summary: string;
@@ -1672,7 +1674,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       } catch (e) {
         if (!(e instanceof ArnxError)) throw e;
         announce = null;
-        if (e instanceof OutOfTime) {
+        if (e instanceof OutOfTime || e instanceof DiskFull) {
           attempt({ ok: false, reused: false, summary: "", failing: 0, skips: 0, hints: "", error: e.message });
           throw e;
         }
@@ -2100,6 +2102,12 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         if (runs) requireTime();
         r = await run(i);
       } catch (e) {
+        if (e instanceof DiskFull) {
+          if (!state.diskFull) say(`✗ ${e.message}`);
+          state.diskFull = true;
+          state.problem = e.message;
+          throw new StopRound(`stopped: ${e.message} Setup ends here.`);
+        }
         if (!(e instanceof OutOfTime)) throw e;
         if (!state.outOfTime) say(`✗ ${e.message}`);
         state.outOfTime = true;
@@ -2160,7 +2168,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       }
       emit("setup.quick", { projects: q.names, files: o.quick.files.length });
       const said = await proposeDraft(q.yaml);
-      if (said.startsWith("accepted") || state.outOfTime || state.needed || said.startsWith("stopped")) {
+      if (said.startsWith("accepted") || state.outOfTime || state.diskFull || state.needed || said.startsWith("stopped")) {
         drafted = { finalText: "", costUsd: 0, turns: 0, stop: "end_turn", calls: 0,
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
       } else {
@@ -2180,13 +2188,13 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     logUsage(repo, "setup", [agentUse(brain.label ? `${brain.label}/setup` : refString(setupRef(settings)), result)],
       new Date());
     // A run cut short at the limit, then the agent's last word: out of time all the same.
-    const late = state.outOfTime || result.stop === "time" || (state.accepted === null && timeIsUp(limit));
+    const late = !state.diskFull && state.outOfTime || result.stop === "time" || (state.accepted === null && timeIsUp(limit));
     const capped = result.stop === "budget" || result.stop === "max_turns";
     let aside: string[] | null = null;
     // Out of time (or, after a note went back to the agent, out of budget or turns) with no file accepted. A working
     // run whose note went back to the agent stands as if tried again unchanged (a later failed try never replaces
     // it): of the last whole file and the files those runs ran with, the one that keeps the most projects is taken.
-    if (state.accepted === null && !state.needed && (late || (capped && state.standing.size))) {
+    if (state.accepted === null && !state.needed && !state.diskFull && (late || (capped && state.standing.size))) {
       const proven = new Map(state.proven);
       const stood = [...state.standing.values()];
       stood.forEach((x) => x.prove());
@@ -2222,7 +2230,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const webOnly = state.accepted === null && !state.needed && !late && last.length > 0 &&
       last.every((n) => state.webUi.has(n));
     if (webOnly) state.problem = onlyWebUi(last);
-    const stop = state.needed ? "stopped" : late ? "time" : webOnly ? WEB_UI_STOP : result.stop;
+    const stop = state.diskFull ? DISK_FULL_STOP : state.needed ? "stopped" : late ? "time" : webOnly ? WEB_UI_STOP : result.stop;
     const running = stop === "time" && !state.accepted && state.current && !state.proven.has(state.current)
       ? state.current : null;
     emit("setup.completed", { ok: state.accepted !== null, stop, cost_usd: result.costUsd,

@@ -60,7 +60,7 @@ import { providerHost, resolveProvider } from "./providers";
 import { filePin, isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageFiles, coverageMap, describeCoverage, entryHoldsTests, type NeededFile, type ProjectProof,
   NOTHING_TO_TEST, proofBefore, type ProofBefore, rerecordBaseline, runSetup, type SetupResult, type SetupRun, stillRed,
-  WEB_UI_STOP } from "./setup";
+  DISK_FULL_STOP, WEB_UI_STOP } from "./setup";
 import { withRepoHolds } from "./standins";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, notTestedRecord, PROVEN_BASELINE,
   PROVEN_COPY, proofState, quickCoverageLine, repoTypecheckGaps, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
@@ -2144,6 +2144,7 @@ export function setupFailure(r: SetupResult, budgetUsd: number, minutes: number,
       json: { kind: "time", reason: `reached the ${minutes}-minute limit (last: ${r.problem || r.summary})`,
         failing: [] } };
   }
+  if (r.stop === DISK_FULL_STOP) return { text: r.problem, json: { kind: "environment", reason: r.problem, failing: [] } };
   if (r.failing.length) {
     const n = r.failing.length;
     const more = n - SHOWN_FAILING;

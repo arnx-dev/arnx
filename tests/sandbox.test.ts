@@ -4,13 +4,13 @@ import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, statSync, uti
 import { join } from "node:path";
 import { python } from "../src/adapters/python";
 import { parseReviewConfig, parseReviewFile } from "../src/config";
-import { ArnxError, SetupRequired } from "../src/errors";
+import { ArnxError, EnvFailed, SetupRequired } from "../src/errors";
 import {
   buildContextOf, cleanupLiveSessions, DEFAULT_LIMITS, dockerfile, ensureEnv, envKey, requireDocker, runArgv,
   sandboxOptions, Session,
   dockerSteps, keptBox, NETWORK_OPEN, networkNotice, networkRetry,
 } from "../src/sandbox";
-import { dockerCapacity, sandboxesFit } from "../src/sandbox";
+import { dockerCapacity, DISK_FULL, DiskFull, diskFullMessage, sandboxesFit } from "../src/sandbox";
 import { withSandboxFiles } from "../src/change";
 import { probeRun } from "../src/testround";
 import { runTypecheck } from "../src/typecheck";
@@ -1251,4 +1251,49 @@ test("sandboxesFit counts CPUs and memory, never below one", () => {
   expect(sandboxesFit({ cpus: 1, memoryBytes: gb }, 5)).toBe(1);
   expect(sandboxesFit({ cpus: 64, memoryBytes: 512 * gb }, 5)).toBe(5);
   expect(sandboxesFit({ cpus: 8, memoryBytes: 64 * gb }, 5, { cpus: "2", memory: "1024m", pids: 1, tmp: "1g" })).toBe(4);
+});
+
+// ---- A full Docker disk is named, not shown as a failed build. ----
+
+const fullDisk = (output: string) => {
+  const fake = join(tmp(), "fake-docker-disk");
+  const count = join(tmp(), "disk-builds");
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in\n  image) exit 1;;\n  build) echo x >> ${count}; echo '${output}'; exit 1;;\nesac\nexit 0\n`);
+  chmodSync(fake, 0o755);
+  return { fake, count };
+};
+
+test("a build that ran out of disk is named", async () => {
+  const { fake, count } = fullDisk("#9 ERROR: failed to copy: write /var/lib/docker/overlay2/x/diff/a.so: no space left on device");
+  const err = await withDockerAsync(fake, () => ensureEnv(parseReviewConfig(CFG), tmp(), join(tmp(), "build.log")))
+    .catch((e) => e);
+  expect(err).toBeInstanceOf(DiskFull);
+  expect(err.message).toBe(diskFullMessage());
+  expect(err).not.toBeInstanceOf(EnvFailed);
+  expect(readFileSync(count, "utf8").trim().split("\n")).toHaveLength(1); // no second try
+});
+
+test("the disk message names the way out", () => {
+  expect(diskFullMessage()).toContain("Docker is out of disk space");
+  expect(diskFullMessage()).toContain("arnx env prune");
+  for (const s of ["no space left on device", "There is not enough space on the disk", "Disk quota exceeded"]) {
+    expect(DISK_FULL.test(s)).toBe(true);
+  }
+});
+
+test("an ordinary build failure is not called a full disk", async () => {
+  const { fake } = fullDisk("npm ERR! 404 Not Found - GET https://registry.npmjs.org/nope");
+  const err = await withDockerAsync(fake, () => ensureEnv(parseReviewConfig(CFG), tmp(), join(tmp(), "build.log")))
+    .catch((e) => e);
+  expect(err).toBeInstanceOf(EnvFailed);
+  expect(err.message).toContain("building the test environment failed");
+});
+
+test("a container that cannot start for want of disk is named", async () => {
+  const fake = join(tmp(), "fake-docker-run");
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in run) echo 'docker: Error response from daemon: no space left on device.' >&2; exit 125;; esac\nexit 0\n`);
+  chmodSync(fake, 0o755);
+  const err = await withDockerAsync(fake, () => new Session("img", parseReviewConfig(CFG), tmp()).run("pytest -q", 60))
+    .catch((e) => e);
+  expect(err).toBeInstanceOf(DiskFull);
 });

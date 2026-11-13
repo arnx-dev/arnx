@@ -8,7 +8,7 @@ import { runAgent, Workspace } from "../src/agent";
 import { setupFailure } from "../src/cli";
 import { parseReviewConfig, parseReviewFile } from "../src/config";
 import { PRICES } from "../src/llm";
-import { ensureEnv, OutOfTime, sandboxOptions, Session, stepTimeout, timeLimit, withTimeLimit } from "../src/sandbox";
+import { DiskFull, diskFullMessage, ensureEnv, OutOfTime, sandboxOptions, Session, stepTimeout, timeLimit, withTimeLimit } from "../src/sandbox";
 import { defaultSettings, loadSettings } from "../src/settings";
 import { runSetup, TIME_LEFT_OUT } from "../src/setup";
 import { setupPreview } from "../src/setupview";
@@ -510,4 +510,19 @@ projects:
     sessionFactory: fastExceptWeb(clock), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
   expect([r.ok, r.stop]).toEqual([true, "time"]);
   expect(parseReviewFile(r.yamlText!).projects.map((p) => p.name)).toEqual(["lib"]);
+});
+
+test("a full Docker disk ends setup at once: no further tries, no more model calls", async () => {
+  const repo = twoProjects();
+  let builds = 0;
+  const factory = async <T>(_cfg: { name: string }, _snap: string, _log: string, _body: (r: Runner) => Promise<T>) => {
+    builds++;
+    throw new DiskFull();
+  };
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("try_project", { yaml: TWO, project: "web" })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"), sessionFactory: factory });
+  expect([r.ok, r.stop, builds, model.calls.length]).toEqual([false, "disk-full", 1, 1]);
+  expect(r.problem).toBe(diskFullMessage());
+  expect(setupFailure(r, 3, 40).text).toBe(diskFullMessage());
 });
