@@ -95,7 +95,7 @@ failing tests in those files.
 
 ### Go modules
 
-Go works, but it is new, so here is where it stands:
+Go works, but it is arnx's newest language, so here is where it stands:
 
 - **Exported names only.** Each generated test is its own test-only package in a folder of its own
   (`<name>_arnx/<name>_arnx_test.go`), so it sees your module's exported API; `package main` and unexported code are
@@ -103,7 +103,7 @@ Go works, but it is new, so here is where it stands:
 - **Nested packages.** A package such as `a/internal/b` is covered by a project at `a`, whose module root holds
   `go.mod`; under a `go.work`, only its `use` members are projects.
 - **Image.** Setup picks a `golang:<major.minor>-bookworm` image from the `go` line of `go.mod` (1.24 at least).
-- **Least tried.** We have run it on public Go modules, from small libraries to large repositories; tell us what broke.
+- **Newest.** Tried on public Go modules, small libraries to large repositories; tell us what broke.
 
 ### Rust crates
 
