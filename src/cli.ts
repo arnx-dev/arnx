@@ -11,8 +11,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { accept, findAccepted, findReview, hasAnswers, makeAnswerRunner, projectsCollectingArnx, recordChosen }
-  from "./accept";
+import { accept, findAccepted, findReview, hasAnswers, makeAnswerRunner, recordChosen } from "./accept";
 import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, contradictionLines,
   failingList, keepEdits, mayContradict, recordAnswerWatch,
   legacyAccepted, moveOut,
@@ -1826,16 +1825,6 @@ class Commands {
       this.d.out("");
       this.d.out(c.bold(real.length ? "Next: commit the fix and the accepted tests together"
         : "Next: commit the accepted tests"));
-    }
-    let collecting: string[] = [];
-    try {
-      collecting = projectsCollectingArnx(loadReviewFile(repo, { requireApproved: false }));
-    } catch {
-      // a repository without a readable review.yaml has no runner to name; accept is done
-    }
-    if (collecting.length) {
-      this.d.out(`Your own test run collects .arnx/ too (${collecting.join(", ")}): exclude it there, as test_command ` +
-        "in review.yaml does.");
     }
     const rel = (p: string) => relative(repo, p).split(sep).join("/");
     // The same next steps as the text above.

@@ -1,9 +1,10 @@
 // accept: read the user's marks and answers from review.md. Tests behind findings marked real are copied into
 // .arnx/tests/ (DOME), each at the path it runs from (accepted_tests_dir under its project's root: tests/arnx/r<review
 // id>/ by default, __tests__/arnx/ for TypeScript at that default; each file named after what it protects), with every
-// other test in the same file that did not pass in every run removed. The project's own test run never sees them:
-// only `arnx check` puts them in place, in a throwaway copy. Answered questions become tests through one agent round on the current working
-// tree, and so does each issue marked rewrite (the bug is real, its test wrong), from the owner's reason. A finding's
+// other test in the same file that did not pass in every run removed. Each file, support files too, is stored with
+// .arnx appended to its name (storedName), which no test runner, type checker or linter of the project picks up: only
+// `arnx check` puts them in place under the names they run by, in a throwaway copy. Answered questions become tests
+// through one agent round on the current working tree, and so does each issue marked rewrite (the bug is real, its test wrong), from the owner's reason. A finding's
 // test is set aside when the owner's answer to the question it assumed has a test of its own, or when it is rewritten.
 // Every mark is appended to .arnx/precision.jsonl.
 import { Boundary, maskedCopy, STAND_INS_NOTE } from "./boundary";
@@ -27,7 +28,8 @@ import { keyReruns } from "./realkey";
 import { dockerCapacity, type Limits, sandboxesFit, sayingDocker, type SessionFactory } from "./sandbox";
 import { refString, type Settings } from "./settings";
 import { agentUse, logUsage } from "./usage";
-import { acceptedDirFor, collect, DOME, dockerSession, readCopies, testRound, writeDirOf } from "./testround";
+import { acceptedDirFor, collect, DOME, dockerSession, readCopies, runName, runPath, storedName, testRound, writeDirOf }
+  from "./testround";
 import { acceptedTestIds, recordAccepted, testsByFile } from "./check";
 import { isoSeconds } from "./util";
 import { inPool } from "./challenge";
@@ -94,12 +96,6 @@ export function hasAnswers(rdir: string): boolean {
   const answered = Object.keys(marks.answers).some((qid) => Number(qid.slice(1)) - 1 >= 0 &&
     Number(qid.slice(1)) - 1 < review.questions.length);
   return answered || rewritesOf(review, marks).length > 0;
-}
-
-/** Names of the projects whose test command mentions `.arnx`: setup proved that their runner collects it, so the
- * command carries the exclude. The developer's own test run needs the same one. */
-export function projectsCollectingArnx(file: ReviewFile): string[] {
-  return file.projects.filter((p) => p.testCommand.includes(".arnx")).map((p) => p.name);
 }
 
 export interface AcceptResult {
@@ -355,11 +351,11 @@ function exportTests(adapter: Adapter, files: Record<string, string>, base: stri
       taken.add(posix.basename(target));
     }
     text = adapter.relocate(text, posix.dirname(posix.relative(d.rootRel, path)), posix.dirname(target));
-    const out = join(d.root, target);
+    const out = join(d.root, storedName(target));
     mkdirSync(dirname(out), { recursive: true });
     writeFileSync(out, text);
     written.push(out);
-    if (moved) moved[path] = posix.join(DOME, d.rootRel, target);
+    if (moved) moved[path] = posix.join(DOME, d.rootRel, storedName(target));
   }
   return written;
 }
@@ -452,13 +448,14 @@ export async function accept(repo: string, rdir: string, settings: Settings,
     { reasons: true });
   const projects = projectsOf(repo, rdir, review, settings);
   const tag = review.id.replaceAll("-", "_");
-  // This review's own kept files: in its r<tag>/ folder, or (Rust) named arnx_<tag>_* or arnx_<tag>.rs.
-  const own = (p: string) => p.split("/").includes(`r${tag}`) || posix.basename(p).startsWith(`arnx_${tag}_`) ||
-    posix.basename(p) === `arnx_${tag}.rs`;
-  // File names already used in the repository: pytest imports test files by name, so a kept file must not share
-  // one with the owner's tests or an earlier review's (this review's own are replaced, so they keep their names).
+  // This review's own kept files: in its r<tag>/ folder, or (Rust) named arnx_<tag>_* or arnx_<tag>.rs, by run name.
+  const own = (p: string) => p.split("/").includes(`r${tag}`) || posix.basename(runName(p)).startsWith(`arnx_${tag}_`) ||
+    posix.basename(runName(p)) === `arnx_${tag}.rs`;
+  // File names already used in the repository, kept files by the names they run by: pytest imports test files by
+  // name, so a kept file must not share one with the owner's tests or an earlier review's (this review's own are
+  // replaced, so they keep their names).
   const taken = new Set(workingTreeFiles(repo).files.filter((p) => (!p.startsWith(".arnx/") ||
-    p.startsWith(`${DOME}/`)) && !own(p)).map((p) => posix.basename(p)));
+    p.startsWith(`${DOME}/`)) && !own(p)).map((p) => posix.basename(runPath(p))));
   const before = existsSync(done)
     ? JSON.parse(readFileSync(done, "utf8")) as { moved?: Record<string, string>; kept?: string[] } : {};
   const earlier = before.moved ?? {};

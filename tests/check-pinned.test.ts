@@ -17,9 +17,9 @@ import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
 const RID = "20261011-a1b2c3";
-/** Where the accepted test runs from, and where accept keeps it (.arnx/tests/, out of the project's own run). */
+/** Where the accepted test runs from, and where accept keeps it (.arnx/tests/, under a name no runner picks up). */
 const RUN = "tests/arnx/r20261011_a1b2c3/test_y.py";
-const KEPT = `.arnx/tests/${RUN}`;
+const KEPT = `.arnx/tests/${RUN}.arnx`;
 
 /** A fake sandbox where the accepted test fails, counting its runs. */
 function failing(): { sessions: SessionFactory; runs: () => number } {
@@ -66,6 +66,14 @@ test("accept records the sha256 of each file it keeps", async () => {
   expect(rec.files[KEPT].review).toBe(RID);
   expect(rec.files[KEPT].sha256).toMatch(/^[0-9a-f]{64}$/);
   expect(rec.files[KEPT].tests).toEqual(["test_a"]);
+});
+
+test("an edited suffixed accepted test makes check refuse (exit 4)", async () => {
+  const { repo, cli, runs } = await accepted();
+  expect(KEPT.endsWith(".py.arnx")).toBe(true);
+  writeFileSync(join(repo, KEPT), "def test_a():\n    assert True\n");
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(runs()).toBe(0);
 });
 
 test("check refuses an edited accepted test (exit 4) and runs nothing; --keep-edits records it", async () => {

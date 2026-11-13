@@ -46,7 +46,7 @@ test("accept keeps each project's tests under that project's root", async () => 
   writeFileSync(join(rdir, "review.md"), parts[0] + "Mark: [ ] real  [ ] intended  [x] noise" + parts[1] +
     "Mark: [x] real  [ ] intended  [ ] noise" + parts[2]);
   const result = await accept(repo, rdir, SETTINGS);
-  const kept = join(repo, ".arnx", "tests", "services", "pay", "tests", "arnx", "r20261012_abcdef", "test_pay_wrong.py");
+  const kept = join(repo, ".arnx", "tests", "services", "pay", "tests", "arnx", "r20261012_abcdef", "test_pay_wrong.py.arnx");
   expect(result.kept).toEqual([kept]);
   expect(readFileSync(kept, "utf8")).toBe(SRC); // no marker: it is red in check only
   expect(existsSync(join(repo, "services", "feed", "tests", "arnx"))).toBe(false);
@@ -135,8 +135,8 @@ test("a configured accepted_tests_dir holds every project's accepted tests, a Ty
   const { repo, rdir } = mixed();
   const result = await accept(repo, rdir, { ...SETTINGS, acceptedTestsDir: "test/locks" });
   const rel = result.kept.map((p) => p.slice(repo.length + 1)).sort();
-  expect(rel).toEqual([".arnx/tests/parser/test/locks/r20261012_abcdef/parser_wrong.test.ts",
-    ".arnx/tests/services/pay/test/locks/r20261012_abcdef/test_pay_wrong.py"]);
+  expect(rel).toEqual([".arnx/tests/parser/test/locks/r20261012_abcdef/parser_wrong.test.ts.arnx",
+    ".arnx/tests/services/pay/test/locks/r20261012_abcdef/test_pay_wrong.py.arnx"]);
   // Its import is moved with it.
   expect(readFileSync(join(repo, rel[0]!), "utf8")).toContain("require('../../../index')");
 });
@@ -145,8 +145,8 @@ test("with the default accepted_tests_dir, a TypeScript project keeps them under
   const { repo, rdir } = mixed();
   const result = await accept(repo, rdir, SETTINGS);
   expect(result.kept.map((p) => p.slice(repo.length + 1)).sort()).toEqual([
-    ".arnx/tests/parser/__tests__/arnx/r20261012_abcdef/parser_wrong.test.ts",
-    ".arnx/tests/services/pay/tests/arnx/r20261012_abcdef/test_pay_wrong.py"]);
+    ".arnx/tests/parser/__tests__/arnx/r20261012_abcdef/parser_wrong.test.ts.arnx",
+    ".arnx/tests/services/pay/tests/arnx/r20261012_abcdef/test_pay_wrong.py.arnx"]);
 });
 
 test("accept lists where each accepted test went, under its project's root", async () => {

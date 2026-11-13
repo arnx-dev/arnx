@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type AnswerOutcome, accept, answerConcurrency, findReview, hasAnswers, precisionOf, projectsCollectingArnx } from "../src/accept";
-import { parseReviewFile } from "../src/config";
+import { type AnswerOutcome, accept, answerConcurrency, findReview, hasAnswers, precisionOf } from "../src/accept";
 import { python } from "../src/adapters/python";
 import { ArnxError } from "../src/errors";
 import { save } from "../src/report";
@@ -66,8 +65,8 @@ test("test_accept_copies_real_tests_and_removes_the_rest", async () => {
   mark(rdir, "real", "noise");
   const result = await accept(repo, rdir, SETTINGS);
   const dest = join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3");
-  const testFile = join(dest, "test_add_subtracts.py");
-  expect(readdirSync(dest).sort()).toEqual(["conftest.py", "test_add_subtracts.py"]);
+  const testFile = join(dest, "test_add_subtracts.py.arnx");
+  expect(readdirSync(dest).sort()).toEqual(["conftest.py.arnx", "test_add_subtracts.py.arnx"]);
   // The confirmed bug's test is kept as it is (red in check until fixed; the project's own run never sees it); the
   // noise (F2) and the flaky test are not kept at all (they stay in the review), nor is the class F2's test left empty.
   expect(readFileSync(testFile, "utf8")).toBe('"""Generated."""\nfrom __future__ import annotations\n\n' +
@@ -77,8 +76,35 @@ test("test_accept_copies_real_tests_and_removes_the_rest", async () => {
   expect(lines.map((l) => [l.item, l.mark ?? null])).toEqual([["F1", "real"], ["F2", "noise"], ["Q1", null], ["Q2", null]]);
   expect(lines[0].verdict).toBe("confirmed");
   expect(lines[2].answered).toBe(false);
-  expect(result.kept).toEqual([join(dest, "conftest.py"), testFile]);
+  expect(result.kept).toEqual([join(dest, "conftest.py.arnx"), testFile]);
   await expect(accept(repo, rdir, SETTINGS)).rejects.toThrow(/--again/);
+});
+
+test("accept stores every kept file with the .arnx suffix", async () => {
+  const repo = gitRepo(tmp());
+  const rdir = savedReview(repo);
+  mark(rdir, "real", "noise");
+  const result = await accept(repo, rdir, SETTINGS);
+  const dest = join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3");
+  // The test and its support file alike: no runner, type checker or linter of the project picks either up.
+  expect(readdirSync(dest).sort()).toEqual(["conftest.py.arnx", "test_add_subtracts.py.arnx"]);
+  expect(result.kept).toEqual([join(dest, "conftest.py.arnx"), join(dest, "test_add_subtracts.py.arnx")]);
+  expect(result.moved).toEqual({ [`${WD}/test_add.py`]: ".arnx/tests/tests/arnx/r20261011_a1b2c3/test_add_subtracts.py.arnx",
+    [`${WD}/conftest.py`]: ".arnx/tests/tests/arnx/r20261011_a1b2c3/conftest.py.arnx" });
+});
+
+test("the pins name the stored files", async () => {
+  const repo = gitRepo(tmp());
+  const rdir = savedReview(repo);
+  mark(rdir, "real", "noise");
+  await accept(repo, rdir, SETTINGS);
+  const dir = ".arnx/tests/tests/arnx/r20261011_a1b2c3";
+  const files = JSON.parse(readFileSync(join(repo, ".arnx", "accepted-tests.json"), "utf8")).files as
+    Record<string, { sha256: string; tests: string[] }>;
+  expect(Object.keys(files)).toEqual([`${dir}/conftest.py.arnx`, `${dir}/test_add_subtracts.py.arnx`]);
+  const sha = new Bun.CryptoHasher("sha256").update(readFileSync(join(repo, dir, "test_add_subtracts.py.arnx")))
+    .digest("hex");
+  expect(files[`${dir}/test_add_subtracts.py.arnx`]).toMatchObject({ sha256: sha, tests: ["test_add"] });
 });
 
 test("test_nothing_real_copies_nothing", async () => {
@@ -106,7 +132,7 @@ test("test_answers_become_tests", async () => {
   };
   const result = await accept(repo, rdir, SETTINGS, { answerRunner: runner });
   expect(seen).toEqual([["Q1", "Should add accept strings?", "No, numbers only.", "diff --git a/app.py b/app.py\n"]]);
-  const kept = join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3", "answers", "test_strings.py");
+  const kept = join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3", "answers", "test_strings.py.arnx");
   expect(existsSync(kept)).toBe(true);
   expect(readFileSync(kept, "utf8")).toBe("def test_rejects_strings():\n    pass\n\ndef test_other():\n    pass\n");
   expect(result.answers[0]!.disagree).toEqual([`${WD}/answers/test_strings.py::test_other`]);
@@ -242,26 +268,11 @@ test("an unclaimed test is not kept in an accepted file", async () => {
     .replace("Mark: [ ] real", "Mark: [x] real"));
   await accept(repo, rdir, SETTINGS);
   const dest = join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3");
-  const kept = readFileSync(join(dest, "test_add_subtracts.py"), "utf8");
+  const kept = readFileSync(join(dest, "test_add_subtracts.py.arnx"), "utf8");
   expect(kept).toContain("def test_add");
   expect(kept).not.toContain("test_neg");
   expect(kept).not.toContain("test_zero");
   expect(JSON.parse(readFileSync(join(rdir, "review.json"), "utf8")).unclaimed).toHaveLength(2);
-});
-
-test("projectsCollectingArnx names a project whose test command leaves .arnx out", () => {
-  const file = parseReviewFile(`version: 1
-projects:
-  web:
-    root: web
-    image: python:3.12-slim
-    test_command: python -m pytest --ignore=.arnx {targets}
-  api:
-    root: api
-    image: python:3.12-slim
-    test_command: python -m pytest {targets}
-`);
-  expect(projectsCollectingArnx(file)).toEqual(["web"]);
 });
 
 test("hasAnswers is false for a review with no answered question, true with one", () => {

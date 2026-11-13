@@ -1,9 +1,9 @@
-// check: run the accepted tests (kept in .arnx/tests/, out of the project's own test run) of every project in its
-// approved sandbox, on the working tree as it is now, and say which still fail. After `arnx accept` the tests behind findings marked real
-// fail; fixing the code turns them green, and this is how to see it without setting up the services by hand.
+// check: run the accepted tests (kept in .arnx/tests/, under names the project's own tools never pick up) of every
+// project in its approved sandbox, on the working tree as it is now, and say which still fail. After `arnx accept` the
+// tests behind findings marked real fail; fixing the code turns them green, and this is how to see it without setting up the services by hand.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
@@ -19,7 +19,8 @@ import { load, type Review } from "./report";
 import type { Say } from "./progress";
 import { sayingDocker, type SessionFactory } from "./sandbox";
 import type { Env, Settings } from "./settings";
-import { collect, deepestHolder, DOME, dockerSession, keptTestFiles, legacyKeptFiles, runPath, swapFiles, swapIn } from "./testround";
+import { deepestHolder, DOME, dockerSession, keptTestFiles, legacyKeptFiles, placeKept, runName, runPath, storedName,
+  swapFiles, swapIn } from "./testround";
 
 export const CHECK_TIMEOUT = 900;
 
@@ -137,9 +138,10 @@ export function legacyAccepted(repo: string, settings: Settings): Map<string, Re
 }
 
 /** `arnx accept --move`: move the accepted files an older arnx kept inside the projects (legacyAccepted) to the same
- * path under .arnx/tests/, out of the projects' own test runs, without their expected-fail markers (a red test is
- * red only in check now), and pin them there (`local`: this machine's record, localPinsPath). Folders left empty are
- * removed. Accepted files changed since accept are not moved: they block (ArnxError) until restored or kept. */
+ * path under .arnx/tests/, stored as accept stores them (storedName), out of the projects' own tools, without their
+ * expected-fail markers (a red test is red only in check now), and pin them there (`local`: this machine's record,
+ * localPinsPath). Folders left empty are removed. Accepted files changed since accept are not moved: they block
+ * (ArnxError) until restored or kept. */
 export function moveOut(repo: string, settings: Settings, local: string | null = null): Record<string, string> {
   const files = legacyAccepted(repo, settings);
   const changed = changedAccepted(repo, local).filter((c) => files.has(c.path));
@@ -149,7 +151,7 @@ export function moveOut(repo: string, settings: Settings, local: string | null =
   const review: Record<string, string> = {};
   const moved: Record<string, string> = {};
   for (const [p, cfg] of files) {
-    const to = `${DOME}/${p}`;
+    const to = `${DOME}/${storedName(p)}`;
     const text = readFileSync(join(repo, p), "utf8");
     mkdirSync(dirname(join(repo, to)), { recursive: true });
     writeFileSync(join(repo, to), adapterFor(cfg).unmark(text).text);
@@ -177,13 +179,13 @@ export function moveOut(repo: string, settings: Settings, local: string | null =
 /** The review a kept file came from: its r<tag>/ folder, or Rust's arnx_<tag>[_name].rs ("" for neither). check runs
  * each review's files in a run of their own, so one review's conftest or setup code cannot reach another's tests. */
 export function reviewGroup(path: string): string {
-  const rust = /(?:^|\/)arnx_(\d{8}_[0-9a-f]{6})(?:_[^/]*)?\.rs$/.exec(path);
+  const rust = /(?:^|\/)arnx_(\d{8}_[0-9a-f]{6})(?:_[^/]*)?\.rs$/.exec(runName(path));
   return /(?:^|\/)(r\d{8}_[0-9a-f]{6})\//.exec(path)?.[1] ?? (rust ? `r${rust[1]}` : "");
 }
 
-/** Run each project's accepted tests: each is copied from .arnx/tests/ to the path it runs from in a throwaway copy
- * of the working tree, and run there, each review's files in a run of their own; a confirmed bug's test is red while
- * the bug is open. */
+/** Run each project's accepted tests: each is copied from .arnx/tests/ to the path it runs from, under the name it runs
+ * by, in a throwaway copy of the working tree, and run there, each review's files in a run of their own; a confirmed
+ * bug's test is red while the bug is open. */
 export async function check(repo: string, settings: Settings, o: { sessionFactory?: SessionFactory;
   progress?: Say; what?: string; pins?: string | null } = {}): Promise<ProjectCheck[]> {
   const file = loadReviewFile(repo);
@@ -207,8 +209,7 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       const boundary = new Boundary(configSuspects(repo));
       boundary.addScrubbed(taken);
       // The accepted tests and their support files, in place in this copy only, which alone gets the real values.
-      cpSync(join(repo, DOME), snap, { recursive: true });
-      const placed = new Set(collect(join(repo, DOME), "", /./));
+      const placed = new Set(placeKept(repo, snap));
       const swap = swapIn(boundary, snap, (rel) => placed.has(rel));
       // Each review's files run apart (reviewGroup); the build log is kept where a failed build's error can point to
       // it (the snapshot is removed below).

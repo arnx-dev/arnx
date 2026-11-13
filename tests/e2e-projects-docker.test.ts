@@ -193,10 +193,10 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: projects", () => {
 
     markReal(rdir);
     const result = await accept(repo, rdir, SETTINGS);
-    const kept = result.kept.find((p) => basename(p).endsWith(".test.js"))!;
-    // Kept in .arnx/tests/ at the path it runs from, as written: no marker.
+    const kept = result.kept.find((p) => basename(p).endsWith(".test.js.arnx"))!;
+    // Kept in .arnx/tests/ at the path it runs from, stored with .arnx appended, as written: no marker.
     expect(relative(repo, kept)).toMatch(
-      /^\.arnx\/tests\/services\/pay\/__tests__\/arnx\/r[0-9_a-f]+\/floor_drops_a_cent\.test\.js$/);
+      /^\.arnx\/tests\/services\/pay\/__tests__\/arnx\/r[0-9_a-f]+\/floor_drops_a_cent\.test\.js\.arnx$/);
     expect(readFileSync(kept, "utf8")).toContain('require("../../../pay")');
     expect(readFileSync(kept, "utf8")).not.toContain("// arnx review");
     const cfg = parseReviewFile(readFileSync(reviewConfigPath(repo), "utf8")).projects.find((p) => p.name === "pay")!;
@@ -242,7 +242,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: projects", () => {
     markReal(rdir);
     const result = await accept(repo, rdir, SETTINGS);
     expect(result.kept.map((p) => relative(repo, p))).toEqual([
-      expect.stringMatching(/^\.arnx\/tests\/tests\/arnx_\d{8}_[0-9a-f]{6}_add_subtracts\.rs$/)]);
+      expect.stringMatching(/^\.arnx\/tests\/tests\/arnx_\d{8}_[0-9a-f]{6}_add_subtracts\.rs\.arnx$/)]);
     // adds_zero passed in every run, so nothing is cut out, and nothing is added: cargo never builds it there.
     expect(readFileSync(result.kept[0]!, "utf8")).toBe(RUST_TEST);
     // arnx check puts it in tests/ of its copy and runs it: the bug's test fails, the other passes.

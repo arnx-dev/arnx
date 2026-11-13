@@ -16,6 +16,7 @@ import type { Swap } from "./boundary";
 import { digest, loadReviewFile, type ReviewConfig } from "./config";
 import { ArnxError, EnvFailed, SetupRequired } from "./errors";
 import { entriesUnder, isFileOrLinkToFile, removeTree } from "./safefs";
+import { runName } from "./testround";
 import { envValue, globRegex } from "./secrets";
 import { pyJson, randomHex, shQuote, sleep } from "./util";
 
@@ -111,7 +112,8 @@ export const networkNotice = { said: false };
 export const OUTPUT_LIMIT = 200_000;
 export const REPORT_DIR = ".arnx-run";
 
-/** Where `arnx accept` keeps tests (testround.ts DOME); `arnx check` puts each in place from there. */
+/** Where `arnx accept` keeps tests (testround.ts DOME); `arnx check` puts each in place from there, under its run
+ * name. */
 const KEPT = ".arnx/tests";
 /** The file Docker reads at the root of a build context for what to leave out of it. */
 const DOCKERIGNORE = ".dockerignore";
@@ -126,7 +128,8 @@ export const projectOf = (cfg: ReviewConfig) => posix.normalize(cfg.workdir).rep
 export function notCode(cfg: ReviewConfig, snap: string, scope: string): string[] {
   const tests = posix.normalize(posix.join(projectOf(cfg), cfg.testsDir));
   const rel = (p: string) => (scope ? posix.relative(scope, p) : p);
-  const kept = existsSync(join(snap, KEPT)) ? entriesUnder(join(snap, KEPT)).filter((p) => isFileOrLinkToFile(join(snap, KEPT, p))) : [];
+  const kept = existsSync(join(snap, KEPT)) ? entriesUnder(join(snap, KEPT)).filter((p) => isFileOrLinkToFile(join(snap, KEPT, p)))
+    .map(runName) : [];
   return [tests, ".arnx", REPORT_DIR, ...kept].filter((p) => !scope || p.startsWith(`${scope}/`)).map(rel)
     .concat(scope ? [] : [DOCKERIGNORE]);
 }

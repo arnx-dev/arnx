@@ -2,8 +2,8 @@
 // run what it wrote `runs` times in the sandbox and classify; for a review, tests that failed in every run (and, for
 // the fix proof, some that passed in every run) then run on the code before the change. Used by review and by
 // answered questions.
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync }
-  from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync,
+  writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import { type AgentResult, StopRound, Workspace } from "./agent";
@@ -191,22 +191,54 @@ export function isKeptPath(cfg: ReviewConfig, path: string, acceptedTestsDir?: s
   const under = (d: string) => d === "." || path.startsWith(`${d}/`);
   if (acceptedRoots(cfg, acceptedTestsDir).some(under)) return true;
   const kept = adapterFor(cfg).kept;
-  return !!kept && kept.name.test(posix.basename(path)) &&
+  return !!kept && kept.name.test(posix.basename(runName(path))) &&
     kept.dirs.some((d) => posix.dirname(path) === posix.normalize(posix.join(cfg.workdir, d)).replace(/\/$/, ""));
 }
 
 /** Where `arnx accept` keeps tests: each at the path it runs from (`api/tests/arnx/r…/test_x.py`) under this
- * folder, which test runners leave out (setup proves it), so the project's own test run never imports, collects or runs
- * one. Only `arnx check` puts them in place, in its throwaway copy of the repository. */
+ * folder, stored under a name no test runner, type checker or linter picks up (KEPT_SUFFIX), so the project's own
+ * tools never import, collect, check or run one. Only `arnx check` puts them in place, under the names they run by, in
+ * its throwaway copy of the repository. */
 export const DOME = ".arnx/tests";
 
-/** The path a kept file runs from (repository-relative): its path under DOME. */
-export const runPath = (p: string): string => p.startsWith(`${DOME}/`) ? p.slice(DOME.length + 1) : p;
+/** What `arnx accept` appends to the whole name of every file it keeps under DOME (`x.test.ts` → `x.test.ts.arnx`,
+ * `conftest.py` → `conftest.py.arnx`). Files an older arnx kept without it are read too. */
+export const KEPT_SUFFIX = ".arnx";
 
-/** The test files `arnx accept` kept for this project that exist, relative to the repository (under DOME). */
+/** The name a kept file is stored under in DOME, from the name it runs by. */
+export function storedName(run: string): string {
+  return run + KEPT_SUFFIX;
+}
+
+/** The name a kept file runs by, from the name it is stored under (one an older arnx stored as it runs is that). */
+export function runName(stored: string): string {
+  return stored.endsWith(KEPT_SUFFIX) ? stored.slice(0, -KEPT_SUFFIX.length) : stored;
+}
+
+/** The path a kept file runs from (repository-relative): its path under DOME, under its run name. */
+export const runPath = (p: string): string => p.startsWith(`${DOME}/`) ? runName(p.slice(DOME.length + 1)) : p;
+
+/** The test files `arnx accept` kept for this project that exist, relative to the repository (under DOME, as stored).
+ * A file stored both ways (an older arnx's beside a newer one) counts once, as the newer one. */
 export function keptTestFiles(repo: string, cfg: ReviewConfig, acceptedTestsDir?: string,
                               projects: readonly ReviewConfig[] = [cfg]): string[] {
-  return keptIn(join(repo, DOME), cfg, acceptedTestsDir, false, projects).map((p) => `${DOME}/${p}`);
+  const stored = keptIn(join(repo, DOME), cfg, acceptedTestsDir, false, projects);
+  const suffixed = new Set(stored.filter((p) => p !== runName(p)).map(runName));
+  return stored.filter((p) => p !== runName(p) || !suffixed.has(p)).map((p) => `${DOME}/${p}`);
+}
+
+/** Puts every file under the repository's DOME into `snap` (a throwaway copy of it) at the path it runs from, under its
+ * run name; the run paths placed. A file stored both ways is placed from the newer, suffixed one. */
+export function placeKept(repo: string, snap: string): string[] {
+  if (!existsSync(join(repo, DOME))) return [];
+  const stored = collect(join(repo, DOME), "", /./);
+  // The old-named first, so a suffixed file with the same run name is written over it.
+  for (const rel of [...stored].sort((a, b) => Number(a !== runName(a)) - Number(b !== runName(b)))) {
+    const to = join(snap, runName(rel));
+    mkdirSync(dirname(to), { recursive: true });
+    copyFileSync(join(repo, DOME, rel), to);
+  }
+  return [...new Set(stored.map(runName))].sort();
 }
 
 /** The project among `projects` whose folder holds `path` (repository-relative), the deepest one. */
@@ -230,8 +262,9 @@ function keptIn(root: string, cfg: ReviewConfig, acceptedTestsDir?: string, all 
                 projects: readonly ReviewConfig[] = [cfg]): string[] {
   const adapter = adapterFor(cfg);
   const base = getAdapter(cfg.language);
-  const writable = (n: string) => adapter.writable.test(n) || base.writable.test(n);
-  const isTest = (n: string) => adapter.isTestFile(n) || base.isTestFile(n);
+  // Names as they run: a kept file stored with KEPT_SUFFIX is told by the name it runs by.
+  const writable = (n: string) => adapter.writable.test(runName(n)) || base.writable.test(runName(n));
+  const isTest = (n: string) => adapter.isTestFile(runName(n)) || base.isTestFile(runName(n));
   const inRoots = acceptedRoots(cfg, acceptedTestsDir).filter((d) => existsSync(join(root, d)))
     .flatMap((d) => collect(root, d, /./).filter((p) => all || writable(posix.basename(p))))
     .filter((p) => all || isTest(posix.basename(p)));
@@ -240,7 +273,7 @@ function keptIn(root: string, cfg: ReviewConfig, acceptedTestsDir?: string, all 
       (all || writable(posix.basename(p))) && (all || isTest(posix.basename(p)))) : [];
   const own = (adapter.kept?.dirs ?? []).map((d) => posix.normalize(posix.join(cfg.workdir, d)).replace(/\/$/, ""))
     .filter((d) => existsSync(join(root, d)))
-    .flatMap((d) => readdirSync(join(root, d)).filter((n) => adapter.kept!.name.test(n) &&
+    .flatMap((d) => readdirSync(join(root, d)).filter((n) => adapter.kept!.name.test(runName(n)) &&
       lstatSync(join(root, d, n)).isFile()).map((n) => posix.join(d, n)));
   return [...new Set([...inRoots, ...sat, ...own])].sort();
 }

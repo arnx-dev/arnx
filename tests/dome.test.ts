@@ -1,5 +1,5 @@
-// Accepted tests live in .arnx/tests/, at the path each runs from, so the project's own test run never collects them;
-// check puts them in place in its throwaway copy only. Tests an older arnx kept inside the project (with an
+// Accepted tests live in .arnx/tests/, at the path each runs from, stored with .arnx appended, so the project's own
+// tools never pick them up; check puts them in place in its throwaway copy only. Tests an older arnx kept inside the project (with an
 // expected-fail marker) block check until `arnx accept --move` moves them.
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -18,7 +18,8 @@ import { useTmp } from "./helpers/tmp";
 const tmp = useTmp();
 const RID = "20261011-a1b2c3";
 const RUN = "tests/arnx/r20261011_a1b2c3/test_y.py";
-const KEPT = `.arnx/tests/${RUN}`;
+/** Where accept keeps it: at the path it runs from under .arnx/tests/, with .arnx appended. */
+const KEPT = `.arnx/tests/${RUN}.arnx`;
 const MARKER = `@pytest.mark.xfail(strict=True, reason='arnx review ${RID}: F1 not fixed yet')\n`;
 
 /** A fake sandbox where the accepted test fails; `seen` gets the copy's file at RUN as the run saw it ("" if absent). */
@@ -97,10 +98,10 @@ test("check runs nothing while an older arnx's tests are in the project's folder
   expect(cli.stdout).toContain(`  ${RUN} → ${KEPT}`);
   // Without its marker (red only in check now), its folders gone, pinned where it is now: check trusts it.
   expect(readFileSync(join(repo, KEPT), "utf8")).toBe("import pytest\ndef test_a():\n    assert False\n");
-  expect(existsSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3", "conftest.py"))).toBe(true);
+  expect(existsSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3", "conftest.py.arnx"))).toBe(true);
   expect(existsSync(join(repo, "tests", "arnx"))).toBe(false);
   expect(Object.keys(JSON.parse(readFileSync(join(repo, ACCEPTED_RECORD), "utf8")).files).sort())
-    .toEqual([".arnx/tests/tests/arnx/r20261011_a1b2c3/conftest.py", KEPT]);
+    .toEqual([".arnx/tests/tests/arnx/r20261011_a1b2c3/conftest.py.arnx", KEPT]);
   expect(changedAccepted(repo, localPinsPath(env, repo))).toEqual([]);
   expect(await cli.run("check")).toBe(1);
   expect(seen.at(-1)).toBe("import pytest\ndef test_a():\n    assert False\n");

@@ -10,9 +10,10 @@ holds the error object every arnx command gives ([json.md](json.md)): `schema_ve
 With or without `--review`, when `.arnx/review.yaml` changed since its last proof, check proves it again first and the
 object (an error one too) also has `reproved`: `{ changes, no_copy }`, as in [json.md](json.md).
 
-`arnx check` runs the accepted tests (what `arnx accept` kept in `.arnx/tests/`, each at the path it runs from) of
-every project in the proven sandbox, on the working tree as it is now. Test ids are relative to the project, at
-the path each test runs from; `files` are where they are kept.
+`arnx check` runs the accepted tests (what `arnx accept` kept in `.arnx/tests/`, each at the path it runs from, stored
+with `.arnx` appended to its name) of every project in the proven sandbox, on the working tree as it is now. Test ids
+are relative to the project, at the path each test runs from, under the name it runs by; `files` are where they are
+kept, as stored.
 `arnx check --review [id] --json` runs a review's confirmed tests instead: see [With --review](#with---review).
 
 ## Fields
@@ -93,7 +94,7 @@ each test's name after `file::`, parameters dropped; empty for a support file or
 tests):
 
 ```json
-{ "schema_version": 1, "files": { ".arnx/tests/tests/arnx/r20261011_a1b2c3/test_discount_over_100.py": {
+{ "schema_version": 1, "files": { ".arnx/tests/tests/arnx/r20261011_a1b2c3/test_discount_over_100.py.arnx": {
   "sha256": "9f2c…", "review": "20261011-a1b2c3", "tests": ["test_F1", "test_F2"] } } }
 ```
 

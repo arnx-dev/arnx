@@ -71,13 +71,13 @@ test("a kept file is named after its first finding marked real: its problem's ti
   const result = await accept(repo, rdir, SETTINGS);
   const dest = join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3");
   // test_add.py: F1 is noise, so F2 names it; its group has no title and F2 no explanation: its test's name.
-  expect(readdirSync(dest).sort()).toEqual(["test_deep_json_recursion_crashes_the_app.py", "test_zero.py"]);
-  expect(result.moved).toEqual({ [`${WD}/test_add.py`]: ".arnx/tests/tests/arnx/r20261011_a1b2c3/test_zero.py",
-    [`${WD}/test_more.py`]: ".arnx/tests/tests/arnx/r20261011_a1b2c3/test_deep_json_recursion_crashes_the_app.py" });
+  expect(readdirSync(dest).sort()).toEqual(["test_deep_json_recursion_crashes_the_app.py.arnx", "test_zero.py.arnx"]);
+  expect(result.moved).toEqual({ [`${WD}/test_add.py`]: ".arnx/tests/tests/arnx/r20261011_a1b2c3/test_zero.py.arnx",
+    [`${WD}/test_more.py`]: ".arnx/tests/tests/arnx/r20261011_a1b2c3/test_deep_json_recursion_crashes_the_app.py.arnx" });
   const accepted = JSON.parse(readFileSync(join(rdir, "accepted.json"), "utf8"));
   expect(accepted.moved).toEqual(result.moved);
   expect(readFileSync(join(rdir, "fix-prompt.md"), "utf8")).toContain(
-    "- Accepted test, in\n  `.arnx/tests/tests/arnx/r20261011_a1b2c3/test_deep_json_recursion_crashes_the_app.py`:\n" +
+    "- Accepted test, in\n  `.arnx/tests/tests/arnx/r20261011_a1b2c3/test_deep_json_recursion_crashes_the_app.py.arnx`:\n" +
     "  - `test_deep_json` (F3)");
 });
 
@@ -90,8 +90,8 @@ test("two kept files with one name get _2; so does a name another file in the re
   marked(rdir, ["real", "noise", "real"]);
   await accept(repo, rdir, SETTINGS);
   // pytest imports test files by name: a second test_add_subtracts.py anywhere would clash with the owner's own.
-  expect(readdirSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3")).sort()).toEqual(["test_add_subtracts_2.py",
-    "test_add_subtracts_3.py"]);
+  expect(readdirSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3")).sort()).toEqual(["test_add_subtracts_2.py.arnx",
+    "test_add_subtracts_3.py.arnx"]);
 });
 
 test("accepting again names files by the new marks, leaving no copy under a file's old name", async () => {
@@ -100,14 +100,14 @@ test("accepting again names files by the new marks, leaving no copy under a file
   marked(rdir, ["real", "noise", "real"]);
   await accept(repo, rdir, SETTINGS);
   const dest = join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3");
-  expect(readdirSync(dest).sort()).toEqual(["test_add_subtracts.py", "test_deep_json.py"]);
+  expect(readdirSync(dest).sort()).toEqual(["test_add_subtracts.py.arnx", "test_deep_json.py.arnx"]);
   writeFileSync(join(repo, ".arnx", "tests", "tests", "arnx", "mine.txt"), "x\n");
   marked(rdir, ["noise", "real", "noise"]);
   const again = await accept(repo, rdir, SETTINGS, { again: true });
   // test_add.py is now named after F2; test_more.py is no longer kept, so its earlier copy is removed too: arnx check
   // must not keep running a test the marks dropped.
-  expect(readdirSync(dest).sort()).toEqual(["test_zero.py"]);
-  expect(again.kept).toEqual([join(dest, "test_zero.py")]);
+  expect(readdirSync(dest).sort()).toEqual(["test_zero.py.arnx"]);
+  expect(again.kept).toEqual([join(dest, "test_zero.py.arnx")]);
   expect(existsSync(join(repo, ".arnx", "tests", "tests", "arnx", "mine.txt"))).toBe(true);
 });
 
@@ -134,7 +134,7 @@ test("tests accepted under the old names keep their place: a later review's name
   marked(rdir, ["real", "noise", "noise"]);
   await accept(repo, rdir, SETTINGS);
   expect(existsSync(join(old, "test_20261001_000000_add.py"))).toBe(true);
-  expect(readdirSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3"))).toEqual(["test_add_subtracts.py"]);
+  expect(readdirSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3"))).toEqual(["test_add_subtracts.py.arnx"]);
 });
 
 test("a file holding tests of several problems is named after the review; one problem's file keeps its title", async () => {
@@ -146,13 +146,13 @@ test("a file holding tests of several problems is named after the review; one pr
   const result = await accept(repo, rdir, SETTINGS);
   const dir = ".arnx/tests/tests/arnx/r20261011_a1b2c3";
   // test_add.py holds F1 (Deep JSON recursion) and F2 (Zero is not handled): no one title fits it.
-  expect(readdirSync(join(repo, dir)).sort()).toEqual(["test_r20261011_a1b2c3.py", "test_zero_is_not_handled.py"]);
-  expect(result.moved).toEqual({ [`${WD}/test_add.py`]: `${dir}/test_r20261011_a1b2c3.py`,
-    [`${WD}/test_more.py`]: `${dir}/test_zero_is_not_handled.py` });
+  expect(readdirSync(join(repo, dir)).sort()).toEqual(["test_r20261011_a1b2c3.py.arnx", "test_zero_is_not_handled.py.arnx"]);
+  expect(result.moved).toEqual({ [`${WD}/test_add.py`]: `${dir}/test_r20261011_a1b2c3.py.arnx`,
+    [`${WD}/test_more.py`]: `${dir}/test_zero_is_not_handled.py.arnx` });
   expect(JSON.parse(readFileSync(join(repo, ".arnx", "accepted-tests.json"), "utf8")).files).toContainKey(
-    `${dir}/test_r20261011_a1b2c3.py`);
+    `${dir}/test_r20261011_a1b2c3.py.arnx`);
   expect(readFileSync(join(rdir, "fix-prompt.md"), "utf8")).toContain(
-    `  - in \`${dir}/test_r20261011_a1b2c3.py\`:\n    - \`test_zero\` (F2)`);
+    `  - in \`${dir}/test_r20261011_a1b2c3.py.arnx\`:\n    - \`test_zero\` (F2)`);
 });
 
 test("two files named after the review get _2; a problem's tests marked noise do not count", async () => {
@@ -171,10 +171,10 @@ test("two files named after the review get _2; a problem's tests marked noise do
     "def test_deep_json():\n    assert 0\n\ndef test_wide_json():\n    assert 0\n");
   marked(rdir, ["real", "real", "real", "real"]);
   await accept(repo, rdir, SETTINGS);
-  expect(readdirSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3")).sort()).toEqual(["test_r20261011_a1b2c3.py",
-    "test_r20261011_a1b2c3_2.py"]);
+  expect(readdirSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3")).sort()).toEqual(["test_r20261011_a1b2c3.py.arnx",
+    "test_r20261011_a1b2c3_2.py.arnx"]);
   marked(rdir, ["real", "noise", "real", "real"]);
   await accept(repo, rdir, SETTINGS, { again: true });
-  expect(readdirSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3")).sort()).toEqual(["test_add_subtracts.py",
-    "test_r20261011_a1b2c3.py"]);
+  expect(readdirSync(join(repo, ".arnx", "tests", "tests", "arnx", "r20261011_a1b2c3")).sort()).toEqual(["test_add_subtracts.py.arnx",
+    "test_r20261011_a1b2c3.py.arnx"]);
 });

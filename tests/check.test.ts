@@ -1,6 +1,6 @@
 // check: the accepted tests run in the approved sandbox on the working tree as it is, and say what still fails.
 import { expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { check, checkJson, checkSummary } from "../src/check";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
@@ -101,4 +101,76 @@ test("a kept file the runner reports nothing for is named as not run, and stays 
   expect(text).not.toContain("Accepted tests unchanged");
   expect(text).not.toContain("Commit the fixes");
   expect(JSON.parse(checkJson(results, code)).result).toBe("no-report");
+});
+
+/** A repository whose accepted files are stored as accept stores them (`.arnx` appended), plus `extra` as given. */
+function repoWithStored(extra: Record<string, string> = {}): string {
+  const repo = gitRepo(tmp());
+  const dir = ".arnx/tests/svc/tests/arnx/r1";
+  mkdirSync(join(repo, dir), { recursive: true });
+  mkdirSync(join(repo, "svc"));
+  writeFileSync(join(repo, "svc/calc.py"), "X = 1\n");
+  writeFileSync(join(repo, dir, "test_r1_calc.py.arnx"), "def test_bug(): assert 0\n");
+  writeFileSync(join(repo, dir, "conftest.py.arnx"), "import pytest\n");
+  for (const [p, text] of Object.entries(extra)) writeFileSync(join(repo, p), text);
+  writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(`version: 1
+projects:
+  svc:
+    root: svc
+    image: python:3.12-slim
+    test_command: python -m pytest {targets}
+`), "Dev", "2026-10-12"));
+  commit(repo, "layout");
+  return repo;
+}
+
+/** What the run saw: the copy's files under the kept folder, and the commands. */
+function watching(seen: { files: string[]; commands: string[] }, report: [string, string, string, string][]): SessionFactory {
+  return async (_c, snap, _l, body) => {
+    const s = new FakeSession(snap, () => [junitXml(report), "", false]);
+    seen.files.push(...readdirSync(join(snap, "svc/tests/arnx/r1")).sort());
+    const r = await body(s);
+    seen.commands.push(...s.commands);
+    return r;
+  };
+}
+
+test("check places suffixed files under their run names", async () => {
+  const repo = repoWithStored();
+  const seen = { files: [] as string[], commands: [] as string[] };
+  const results = await check(repo, SETTINGS, { sessionFactory: watching(seen,
+    [["tests/arnx/r1/test_r1_calc.py", "test_bug", "failed", "assert 0"]]) });
+  // In the copy only: each file under the name it runs by, the support file too; nothing suffixed beside them.
+  expect(seen.files).toEqual(["conftest.py", "test_r1_calc.py"]);
+  expect(seen.commands.join(" ")).toContain("tests/arnx/r1/test_r1_calc.py");
+  expect(seen.commands.join(" ")).not.toContain("test_r1_calc.py.arnx");
+  expect(results.map((r) => [r.files, r.failed.length, r.notRun])).toEqual([
+    [[".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py.arnx"], 1, undefined]]);
+  // The repository keeps the stored names only.
+  expect(existsSync(join(repo, "svc/tests"))).toBe(false);
+});
+
+test("check also runs a kept file stored without the suffix", async () => {
+  // An older arnx's file, beside one stored as accept stores them now: both run, each under its run name.
+  const repo = repoWithStored({ ".arnx/tests/svc/tests/arnx/r1/test_old.py": "def test_old(): pass\n" });
+  const seen = { files: [] as string[], commands: [] as string[] };
+  const results = await check(repo, SETTINGS, { sessionFactory: watching(seen,
+    [["tests/arnx/r1/test_r1_calc.py", "test_bug", "failed", "assert 0"], ["tests/arnx/r1/test_old.py", "test_old", "passed", ""]]) });
+  expect(seen.files).toEqual(["conftest.py", "test_old.py", "test_r1_calc.py"]);
+  expect(seen.commands.join(" ")).toContain("tests/arnx/r1/test_old.py");
+  expect(results.map((r) => [r.files, r.passed.length, r.failed.length, r.notRun])).toEqual([
+    [[".arnx/tests/svc/tests/arnx/r1/test_old.py", ".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py.arnx"], 1, 1, undefined]]);
+});
+
+test("a kept file stored both ways runs once, from the suffixed one", async () => {
+  // An older arnx's copy beside the one accept stores now: the newer is placed and listed, the older passed over.
+  const repo = repoWithStored({ ".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py": "def test_old(): pass\n" });
+  let placed = "";
+  const results = await check(repo, SETTINGS, { sessionFactory: async (_c, snap, _l, body) => {
+    placed = readFileSync(join(snap, "svc/tests/arnx/r1/test_r1_calc.py"), "utf8");
+    return body(new FakeSession(snap, () => [junitXml([["tests/arnx/r1/test_r1_calc.py", "test_bug", "failed", "assert 0"]]),
+      "", false]));
+  } });
+  expect(placed).toBe("def test_bug(): assert 0\n");
+  expect(results[0]!.files).toEqual([".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py.arnx"]);
 });

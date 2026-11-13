@@ -69,8 +69,8 @@ answers are theirs: do not write them, and do not treat a mark you suggested as 
 
 After the user says they accepted:
 
-1. `arnx check --json` runs the accepted tests (kept in `.arnx/tests/`, out of the project's own runner) on your
-   working tree. Those of the issues just marked real fail: expected, and the list to fix. Fields:
+1. `arnx check --json` runs the accepted tests (kept in `.arnx/tests/` under names no runner, type checker or linter
+   picks up) on your working tree. Those of the issues just marked real fail: expected, and the list to fix. Fields:
    [references/check-json.md](references/check-json.md).
 2. `arnx prompt <id>` prints the fix prompt (also `.arnx/reviews/<id>/fix-prompt.md`): the failing tests, each bug,
    the user's answers as intended behaviour, and the rules. Fix from it, and only what it lists. Fix the **code
@@ -90,12 +90,11 @@ After the user says they accepted:
 
 A passing `arnx check` covers only the accepted tests; the project's own runner never runs them. For each project
 the change touched (its `root` in `.arnx/review.yaml`), run its whole suite the way the project runs it (README, CI,
-Makefile; `test_command` in review.yaml names the runner and `image` the environment), accepted tests included.
+Makefile; `test_command` in review.yaml names the runner and `image` the environment).
 
 - All pass: say so, with the counts.
-- A test fails: run it again without the new accepted folder (pytest `--ignore`, the runner's exclude). Passes
-  without it: the accepted tests broke it; report the failing tests and the accepted file. Fails either way: your fix
-  or the code broke it; fix the code and go back to 4.3. Never edit accepted tests. A fix to the project's own tests
+- A test fails: your fix or the code broke it (accepted tests are never part of this run); fix the code and go back
+  to 4.3. Never edit accepted tests. A fix to the project's own tests
   is the user's call: propose it, do not make it.
 - You cannot run a suite (no environment, Docker not reachable): say which, and ask the user to run it. Never call
   the work done without it.

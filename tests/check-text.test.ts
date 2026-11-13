@@ -19,7 +19,7 @@ const tmp = useTmp();
 const RID = "20261011-a1b2c3";
 /** Where the accepted file runs from (the runner reports it), and where accept keeps it. */
 const RUN = "tests/arnx/r20261011_a1b2c3/test_r20261011_a1b2c3.py";
-const KEPT = `.arnx/tests/${RUN}`;
+const KEPT = `.arnx/tests/${RUN}.arnx`;
 const IDS = ["F1", "F2", "F3", "F4"];
 const group = (findings: string[], title: string): Group =>
   ({ findings, title, input: "", actual: "", expected: "", consequence: "" });

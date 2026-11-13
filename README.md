@@ -89,7 +89,7 @@ Then, in both cases:
     arnx review                         # writes tests for the change and runs them: 2 issues confirmed (4 findings)
                                         # the first one sets up, in a few minutes, only the projects the change touches
     arnx triage                         # mark real / intended / noise / rewrite, answer questions
-    arnx accept                         # tests of real issues are kept in .arnx/tests/, apart from your own
+    arnx accept                         # tests of real issues are kept in .arnx/tests/, out of your own tools' sight
     arnx prompt                         # the fix prompt for your coding agent
     arnx check                          # runs the accepted tests; green means they pass now
 
@@ -130,8 +130,8 @@ More in [docs/WORKFLOW.md](docs/WORKFLOW.md).
 2. **review** writes tests for the change, runs them 3 times, runs the failures on the code before the change, asks
    a second model, and writes `.arnx/reviews/<id>/review.md` with what was tested and what was not.
 3. **triage** (or edit review.md) marks each issue and answers arnx's questions; answers become tests too.
-4. **accept** keeps tests of real issues in `.arnx/tests/`, apart from your own tests (if your runner collects dot folders, accept shows the one-line exclude), and pins
-   each file's sha256 in `.arnx/accepted-tests.json`. Tests of other issues are left out.
+4. **accept** keeps tests of real issues in `.arnx/tests/`, under names no test runner, type checker or linter picks
+   up (`.arnx` appended: `x.test.ts.arnx`), and pins each file's sha256 in `.arnx/accepted-tests.json`. Tests of other issues are left out.
 5. **prompt** gives the fix prompt; **check** puts the accepted tests in place in a throwaway copy and runs them: a
    bug's test fails until the fix. A pinned test that was edited makes `check` refuse (exit 4): a test changed until
    it passes shows nothing. arnx never edits your code or your tests.

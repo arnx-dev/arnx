@@ -100,8 +100,8 @@ const MARKS = { F1: "real", F2: "real", F3: "noise", F4: "noise", F5: "real", F6
 /** Where each kept file runs from (check puts it there; the runner reports it so), and where accept keeps it. */
 const runEach = `__tests__/arnx/${TAG}/topup_each.test.ts`;
 const runPlain = `__tests__/arnx/${TAG}/topup_plain.test.ts`;
-const keptEach = `.arnx/tests/${runEach}`;
-const keptPlain = `.arnx/tests/${runPlain}`;
+const keptEach = `.arnx/tests/${runEach}.arnx`;
+const keptPlain = `.arnx/tests/${runPlain}.arnx`;
 
 for (const oldFunc of [false, true]) {
   test(`accept removes a noise finding's test inside a describe block and records each kept test by its name${

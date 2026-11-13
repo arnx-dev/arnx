@@ -86,6 +86,25 @@ test("accepted tests in .arnx/tests/ stay when .arnx/ goes, unless --tests (an e
   }
 });
 
+test("remove lists suffixed kept files", async () => {
+  const sha = (text: string) => new Bun.CryptoHasher("sha256").update(text).digest("hex");
+  const repo = gitRepo(join(tmp(), "w"));
+  const env = { XDG_CONFIG_HOME: join(tmp(), "xdg") };
+  // As accept stores them: the test and its support file, each with .arnx appended.
+  const kept = [".arnx/tests/tests/arnx/r1/conftest.py.arnx", ".arnx/tests/tests/arnx/r1/test_a.py.arnx"];
+  for (const p of kept) put(join(repo, p), "def test_a(): pass\n");
+  put(join(repo, ".arnx", "accepted-tests.json"), record(Object.fromEntries(kept.map((p) =>
+    [p, { sha256: sha("def test_a(): pass\n"), review: "r1" }]))));
+  const listed = new Cli({ cwd: repo, env });
+  await withDocker("/nonexistent/docker", () => listed.run("remove", "--json"));
+  expect(JSON.parse(listed.stdout).kept_tests).toEqual(kept);
+  const all = new Cli({ cwd: repo, env });
+  await withDocker("/nonexistent/docker", () => all.run("remove", "--tests", "--json"));
+  const j = JSON.parse(all.stdout);
+  expect(j.kept_tests).toEqual([]);
+  for (const p of kept) expect(j.deleted).toContain(p);
+});
+
 test("S4 a symlinked ancestor folder does not lead to deleting files outside the repository", async () => {
   const { base, repo, env } = setup();
   const outside = join(base, "outside");

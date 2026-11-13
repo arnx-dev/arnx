@@ -75,18 +75,18 @@ test("a test that assumed an answer is set aside when the owner's answer has its
   expect(seen).toEqual([["Q1", "Should add round?", "no, it truncates", "answers/Q1", "main"]]);
   expect(result.setAside).toEqual({ F2: "Q1" });
   // F2's test leaves the kept file (the answer's test replaces it); it is no accepted test.
-  const kept = readFileSync(join(repo, DEST, "test_add_subtracts.py"), "utf8");
+  const kept = readFileSync(join(repo, DEST, "test_add_subtracts.py.arnx"), "utf8");
   expect(kept).not.toContain("def test_b");
   expect(kept).not.toContain("not confirmed");
-  expect(record(repo)[`${DEST}/test_add_subtracts.py`].tests).toEqual(["test_a"]);
-  expect(record(repo)[`${DEST}/answers/test_q1.py`].tests).toEqual(["test_q1"]);
+  expect(record(repo)[`${DEST}/test_add_subtracts.py.arnx`].tests).toEqual(["test_a"]);
+  expect(record(repo)[`${DEST}/answers/test_q1.py.arnx`].tests).toEqual(["test_q1"]);
   expect(result.red.map((r) => r.id)).toEqual(["F1"]);
   const prompt = readFileSync(join(rdir, "fix-prompt.md"), "utf8");
   expect(prompt).toContain("`test_a` (F1)");
   expect(prompt).not.toContain("`test_b`");
   expect(prompt).toContain("- F2: its test assumed an answer the owner gave differently (Q1); the answer's test " +
     "replaces it.");
-  expect(prompt).toContain(`- Fails now: \`${DEST}/answers/test_q1.py::test_q1\``);
+  expect(prompt).toContain(`- Fails now: \`${DEST}/answers/test_q1.py.arnx::test_q1\``);
 });
 
 test("an answer that kept no test sets nothing aside: the finding's test stays accepted", async () => {
@@ -96,7 +96,7 @@ test("an answer that kept no test sets nothing aside: the finding's test stays a
   const result = await accept(repo, rdir, SETTINGS, { answerRunner: runner([], { none: true }) });
   expect(result.setAside).toEqual({});
   // Two problems in one file: it is named after the review.
-  expect(record(repo)[`${DEST}/test_r20261011_a1b2c3.py`].tests).toEqual(["test_a", "test_b"]);
+  expect(record(repo)[`${DEST}/test_r20261011_a1b2c3.py.arnx`].tests).toEqual(["test_a", "test_b"]);
   expect(readFileSync(join(rdir, "fix-prompt.md"), "utf8")).toContain("- F2 assumed an answer to Q1; see the " +
     "owner's answer below.");
 });
@@ -118,9 +118,9 @@ test("rewrite: the issue's test is set aside and one answer round writes a test 
     answer: `${REWRITE_PREFIX}it checks the log line; check that add(2, 3) returns 5` }]);
   expect(result.setAside).toEqual({ F1: "R1", F2: "R1" });
   // Nothing of the old tests is kept; the rewrite's test is, under answers/, and recorded as failing until fixed.
-  expect(existsSync(join(repo, DEST, "test_add_subtracts.py"))).toBe(false);
-  expect(Object.keys(record(repo))).toEqual([`${DEST}/answers/test_r1.py`]);
-  expect(record(repo)[`${DEST}/answers/test_r1.py`].tests).toEqual(["test_r1"]);
+  expect(existsSync(join(repo, DEST, "test_add_subtracts.py.arnx"))).toBe(false);
+  expect(Object.keys(record(repo))).toEqual([`${DEST}/answers/test_r1.py.arnx`]);
+  expect(record(repo)[`${DEST}/answers/test_r1.py.arnx`].tests).toEqual(["test_r1"]);
   expect(result.answers.map((a) => a.qid)).toEqual(["R1"]);
   const done = JSON.parse(readFileSync(join(rdir, "accepted.json"), "utf8"));
   expect(done.set_aside).toEqual({ F1: "R1", F2: "R1" });
@@ -133,7 +133,7 @@ test("rewrite: the issue's test is set aside and one answer round writes a test 
   expect(prompt).toContain("- F1: its test was wrong; the owner's rewrite (R1, below) replaces it.");
   expect(prompt).toContain("- R1: add subtracts. Expected: add(2, 3) is 5 (rewrite of F1, F2)\n" +
     "  - Owner: \"it checks the log line; check that add(2, 3) returns 5\"\n" +
-    `  - Fails now: \`${DEST}/answers/test_r1.py::test_r1\``);
+    `  - Fails now: \`${DEST}/answers/test_r1.py.arnx::test_r1\``);
   expect(prompt).not.toContain("## Not bugs");
   // The precision log: rewrite is the mark, and it counts as real.
   const lines = readFileSync(join(repo, ".arnx", "precision.jsonl"), "utf8").trim().split("\n");
@@ -147,9 +147,9 @@ test("rewrite: the issue's test is set aside and one answer round writes a test 
   expect(again).toEqual([]);
   expect(back.rewrites).toEqual([]);
   expect(back.setAside).toEqual({});
-  expect(existsSync(join(repo, DEST, "answers", "test_r1.py"))).toBe(false);
-  expect(record(repo)[`${DEST}/test_add_subtracts.py`].tests).toEqual(["test_a", "test_b"]);
-  expect(Object.keys(record(repo))).toEqual([`${DEST}/test_add_subtracts.py`]);
+  expect(existsSync(join(repo, DEST, "answers", "test_r1.py.arnx"))).toBe(false);
+  expect(record(repo)[`${DEST}/test_add_subtracts.py.arnx`].tests).toEqual(["test_a", "test_b"]);
+  expect(Object.keys(record(repo))).toEqual([`${DEST}/test_add_subtracts.py.arnx`]);
   expect(readFileSync(join(rdir, "fix-prompt.md"), "utf8")).not.toContain("R1");
 });
 
@@ -162,13 +162,13 @@ test("rewrite marked on one finding: only its test is set aside, and leaves the 
   // Marked one by one, the "issue" is the finding: its explanation is the title, with no expected behaviour.
   expect(seen).toEqual([["R1", "add drops one.", `${REWRITE_PREFIX}compare the sum, not the message`, "answers/R1",
     "main"]]);
-  const kept = readFileSync(join(repo, DEST, "test_add_subtracts.py"), "utf8");
+  const kept = readFileSync(join(repo, DEST, "test_add_subtracts.py.arnx"), "utf8");
   expect(kept).not.toContain("def test_b");
   expect(kept).toContain("def test_a");
   expect(kept).not.toContain("xfail");
-  expect(record(repo)[`${DEST}/test_add_subtracts.py`].tests).toEqual(["test_a"]);
+  expect(record(repo)[`${DEST}/test_add_subtracts.py.arnx`].tests).toEqual(["test_a"]);
   // Its test passes on the code: kept to lock it, not an accepted (failing) test.
-  expect(record(repo)[`${DEST}/answers/test_r1.py`].tests).toEqual([]);
+  expect(record(repo)[`${DEST}/answers/test_r1.py.arnx`].tests).toEqual([]);
   expect(result.red.map((r) => r.id)).toEqual(["F1"]);
 });
 
@@ -189,8 +189,8 @@ test("a review.md with three boxes accepts as it did before rewrite existed", as
   const result = await accept(repo, rdir, SETTINGS);
   expect(result.setAside).toEqual({});
   expect(result.rewrites).toEqual([]);
-  expect(readFileSync(join(repo, DEST, "test_add_subtracts.py"), "utf8")).not.toContain("def test_b");
-  expect(record(repo)[`${DEST}/test_add_subtracts.py`].tests).toEqual(["test_a"]);
+  expect(readFileSync(join(repo, DEST, "test_add_subtracts.py.arnx"), "utf8")).not.toContain("def test_b");
+  expect(record(repo)[`${DEST}/test_add_subtracts.py.arnx`].tests).toEqual(["test_a"]);
 });
 
 test("precision counts a rewrite mark as real", () => {

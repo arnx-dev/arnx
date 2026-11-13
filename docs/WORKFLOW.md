@@ -208,8 +208,10 @@ checked, and review.md and review.json (`types_unchecked`) record it. Run your o
 2. `arnx accept <id>` (without an id: the review started last). Tests behind findings marked real are copied into
    `.arnx/tests/`, at the path each runs from: `.arnx/tests/<project root>/tests/arnx/r<id>/` (`accepted_tests_dir`
    in `.arnx/config.toml`; at that default a TypeScript project uses `__tests__/arnx/r<id>/`, and a Rust crate
-   `tests/arnx_<id>_<name>.rs`). pytest, node --test and nextest leave that folder out; for a runner that collects it, such as vitest, accept shows the one-line exclude. Only
-   `arnx check` puts them in place, in a throwaway copy. Each file is named after the problem it
+   `tests/arnx_<id>_<name>.rs`). Each file, support files such as `conftest.py` too, is stored with `.arnx` appended
+   to its name (`test_x.py.arnx`), which no test runner, type checker or linter picks up: your own test run, `tsc` and
+   eslint never see them, whatever their configuration. Only `arnx check` puts them in place, under the names they
+   run by, in a throwaway copy. Each file is named after the problem it
    protects (`test_deep_json_recursion.py`); answered questions become tests of the behaviour you described (one model
    round each, run in parallel; `answer_model` in `.arnx/config.toml` can pick a cheaper model; `--no-answers` skips
    them). Only the tests you keep go in: those of findings marked intended or noise, flaky ones and those set aside
@@ -218,8 +220,6 @@ checked, and review.md and review.json (`types_unchecked`) record it. Run your o
    A test that assumed an answer you gave differently is left out too when your answer got a test of its own. The test
    of a bug not fixed yet is kept as it is: it fails in `arnx check` until the fix. Accept then runs the accepted tests
    and lists the ones that fail now (`--no-check` skips the run). Your code is not changed and nothing is committed.
-   `arnx setup` proves the place: its run of your suite carries a one-line test in `.arnx/tests/`, and setup stops
-   if your runner collects it (a pytest `norecursedirs`, say, that drops the default hidden-folder rule).
 3. Fix the code, or hand `arnx prompt` (also in `.arnx/reviews/<id>/fix-prompt.md`; `accept --copy` puts it on the
    clipboard) to your coding agent: the failing tests, what each bug is, your answers, and the rules (yours with
    `arnx prompts copy fix.rules`). `arnx check` runs the accepted tests in the proven sandbox, services included,
@@ -246,8 +246,9 @@ unchanged); decide which one holds. `arnx check --json` prints the result as JSO
 (each project's passed and failed tests, the overall result, the changed files) for programs and coding agents.
 
 Tests an older arnx kept inside your projects (`tests/arnx/`, with expected-fail markers) are in your own test run:
-`arnx check` runs nothing until `arnx accept --move` moves them to `.arnx/tests/`, removes their markers and pins
-them there. Commit the move.
+`arnx check` runs nothing until `arnx accept --move` moves them to `.arnx/tests/` (stored with `.arnx` appended),
+removes their markers and pins them there. Commit the move. Files an older arnx kept in `.arnx/tests/` under the names
+they run by still run in `arnx check`; `arnx accept --again` of their review stores them with `.arnx` appended.
 
 Accept before fixing: a test you saw fail before the fix and pass after it is good evidence that the fix changed the
 behaviour it checks, provided the test checks the right thing (that is what your mark says).

@@ -156,7 +156,7 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   `.arnx/review.yaml` unless listed under `allow_env_names` or set to `arnx:generated` (64 hex digits arnx makes) or
   `arnx:generated:base64` (32 bytes, URL-safe base64): throwaway values, the same in every run.
 - arnx never edits your code or your tests. `accept` writes only into `.arnx/` (accepted tests in `.arnx/tests/`,
-  apart from your own tests; accept shows the one-line exclude if your runner collects dot folders).
+  stored under names no test runner, type checker or linter picks up; `arnx check` runs them in a throwaway copy).
 - Accepted tests are code a model wrote. They run only through `arnx check`, in the proven sandbox. Read them
   before you commit them.
 - Setup asks nothing about the environment it writes: it proves it by running your suites. Its install steps, written
