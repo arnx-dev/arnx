@@ -111,6 +111,44 @@ test("skip keeps what followed the brace on a line of its own", () => {
     .toBe('func TestA(t *testing.T) {\n\tt.Skip("why")\n\t// note\n\tf()\n}\n');
 });
 
+const gofmtOk = (source: string): boolean => {
+  const r = spawnSync("gofmt", ["-e"], { input: source, encoding: "utf8" });
+  return r.error ? true : r.status === 0;
+};
+
+test("skip handles a brace with no space", () => {
+  const out = go.skip("package a\n\nfunc TestA(t *testing.T){\n\tf()\n}\n", new Set(["TestA"]), "why");
+  expect(out).toBe('package a\n\nfunc TestA(t *testing.T) {\n\tt.Skip("why")\n\tf()\n}\n');
+  expect(gofmtOk(out)).toBe(true);
+  expect(go.skip("func TestA(t *testing.T){}\n", new Set(["TestA"]), "why")).toBe('func TestA(t *testing.T) {\n\tt.Skip("why")\n\t}\n');
+});
+
+test("skip handles an unnamed parameter", () => {
+  const skipA = (source: string) => go.skip(source, new Set(["TestA"]), "why");
+  const out = skipA("package a\n\nfunc TestA(*testing.T) {\n\tf()\n}\n");
+  expect(out).toBe('package a\n\nfunc TestA(t *testing.T) {\n\tt.Skip("why")\n\tf()\n}\n');
+  expect(gofmtOk(out)).toBe(true);
+  expect(skipA("func TestA(*testing.T){\n}\n")).toBe('func TestA(t *testing.T) {\n\tt.Skip("why")\n}\n');
+});
+
+test("skip gives an unnamed or blank parameter a name the body does not use", () => {
+  const skipA = (source: string) => go.skip(source, new Set(["TestA"]), "why");
+  for (const sig of ["*testing.T", "_ *testing.T"]) {
+    const out = skipA(`package a\n\nfunc TestA(${sig}) {\n\tt := 1\n\t_ = t\n}\n`);
+    expect(out).toContain('func TestA(arnxT *testing.T) {\n\tarnxT.Skip("why")\n\tt := 1');
+    expect(gofmtOk(out)).toBe(true);
+  }
+  // A `t` in another test does not matter.
+  expect(skipA("func TestA(*testing.T) {\n}\n\nfunc TestB(t *testing.T) {\n\tt.Log()\n}\n")).toContain("func TestA(t *testing.T)");
+});
+
+test("CRLF sources are skipped the same way", () => {
+  const skipA = (source: string) => go.skip(source, new Set(["TestA"]), "why");
+  expect(skipA("func TestA(t *testing.T) {\r\n\tf()\r\n}\r\n")).toBe('func TestA(t *testing.T) {\n\tt.Skip("why")\r\n\tf()\r\n}\r\n');
+  expect(skipA("func TestA(*testing.T){\r\n}\r\n")).toBe('func TestA(t *testing.T) {\n\tt.Skip("why")\r\n}\r\n');
+  expect(gofmtOk(skipA("package a\r\n\r\nfunc TestA(t *testing.T){\r\n\tf()\r\n}\r\n"))).toBe(true);
+});
+
 test("a test command needs go test and {targets}", () => {
   expect(go.validateCommand("go test ./...", "gotest").length).toBeGreaterThan(0);
   expect(go.validateCommand("pytest {targets}", "gotest").length).toBeGreaterThan(0);

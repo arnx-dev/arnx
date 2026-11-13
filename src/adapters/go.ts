@@ -52,11 +52,17 @@ function command(testCommand: string, targets: string[], reportPath: string): st
     `{ ${MODULE}; ${declarations(dirs)}; } >> ${report}; exit $s`;
 }
 
-/** `t.Skip("<reason>")` as the first statement of each named test; a blank parameter gets a name so the call compiles. */
+/** `t.Skip("<reason>")` as the first statement of each named test; a missing or blank parameter gets a name, one the
+ * body does not already use, so the call compiles. */
 function skip(source: string, names: Set<string>, reason: string): string {
-  return source.replace(/^func (Test[^\s(]*)\((\w+) \*testing\.T\) \{([^\n]*)/gm, (whole, name: string, param: string, rest: string) => {
+  return source.replace(/^func (Test[^\s(]*)\((?:(\w+) )?\*testing\.T\)\s*\{([^\r\n]*)/gm, (whole, name: string, param: string | undefined, rest: string, at: number) => {
     if (!names.has(name)) return whole;
-    const t = param === "_" ? "t" : param;
+    let t = param && param !== "_" ? param : "t";
+    if (t !== param) {
+      const end = source.slice(at + whole.length).search(/^}/m);
+      const body = end < 0 ? source.slice(at) : source.slice(at, at + whole.length + end);
+      if (/\bt\b/.test(body.slice(whole.length - rest.length))) t = "arnxT";
+    }
     // A one-line body must not stay on the call's line: Go needs a statement end between them.
     const after = rest.trim() ? `\n\t${rest.trimStart()}` : "";
     return `func ${name}(${t} *testing.T) {\n\t${t}.Skip(${JSON.stringify(reason)})${after}`;
