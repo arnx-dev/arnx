@@ -1,7 +1,7 @@
 // Test results from the adapter's report, classified over repeated runs: a test that fails in every run is a
 // finding; errors, flaky tests and runs without a report never are.
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { adapterFor } from "./adapters";
 import type { TestResult } from "./adapters/types";
 import type { ReviewConfig } from "./config";
@@ -141,7 +141,15 @@ export async function runTests(session: Runner, snap: string, cfg: ReviewConfig,
   const text = file !== report && session.clean ? session.clean(raw) : raw;
   if (file !== report) rmSync(file, { force: true });
   const exists = (rel: string) => existsSync(join(snap, cfg.workdir, rel));
-  const parsed = adapter.parseReport(text, cfg.runner, cfg.workdir, exists);
+  const lines = new Map<string, string[] | null>();
+  const sourceLine = (rel: string, line: number) => {
+    if (rel.startsWith("..") || isAbsolute(rel)) return null;
+    if (!lines.has(rel)) {
+      try { lines.set(rel, readFileSync(join(snap, cfg.workdir, rel), "utf8").split("\n")); } catch { lines.set(rel, null); }
+    }
+    return lines.get(rel)?.[line - 1] ?? null;
+  };
+  const parsed = adapter.parseReport(text, cfg.runner, cfg.workdir, exists, sourceLine);
   return [result, parsed && adapter.messagesFrom ? adapter.messagesFrom(parsed, result.output, cfg.runner) : parsed];
 }
 

@@ -124,7 +124,7 @@ export const go: Adapter = {
     ? [] : ["test_command: must run go test and contain {targets}"],
   runs: () => /\bgo\s+test\b/,
   command,
-  parseReport: (text) => parseGoReport(text),
+  parseReport: (text, _runner, _root, _exists, sourceLine) => parseGoReport(text, { sourceLine }),
   skip,
   // Cutting a test can leave an unused import, which does not compile: accept skips instead.
   drop: (source, names) => ({ text: source, left: names }),

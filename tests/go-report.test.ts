@@ -237,3 +237,42 @@ test("a failing test with a long output is read in linear time", () => {
   expect(performance.now() - t).toBeLessThan(5000);
   expect(r[0]!.message.split("\n")[0]).toBe("long_test.go:49999: line 49999");
 });
+
+// Which line of the test calls t.Errorf and which t.Log decides the fingerprint (the failing line, not the last one).
+const logged = (...out: string[]) => [
+  ev({ Action: "run", Test: "TestA" }),
+  ...out.map((o) => ev({ Action: "output", Test: "TestA", Output: `${o}\n` })),
+  ev({ Action: "output", Test: "TestA", Output: "--- FAIL: TestA (0.00s)\n" }),
+  ev({ Action: "fail", Test: "TestA" }),
+  ev({ Action: "fail" }),
+  "#arnx-test p/x_test.go:func TestA(t *testing.T) {",
+];
+const SOURCE: Record<string, string> = {
+  "p/x_test.go:12": '\tt.Errorf("want %d, got %d", 3, got)',
+  "p/x_test.go:13": '\tt.Error("second")',
+  "p/x_test.go:14": '\tt.Log("done")',
+};
+const sourceLine = (file: string, line: number) => SOURCE[`${file}:${line}`] ?? null;
+const first = (r: ReturnType<typeof run>) => r[0]!.message.split("\n")[0]!;
+
+describe("fingerprint", () => {
+  test("an error followed by a log line fingerprints as the error", () => {
+    const lines = logged("    x_test.go:12: want 3, got 4", "    x_test.go:14: done");
+    expect(first(parseGoReport([...lines, "#arnx-module example.com/events"].join("\n") + "\n", { sourceLine })!))
+      .toContain("want 3, got 4");
+  });
+  test("with no source reader, the last entry is kept", () => {
+    const lines = logged("    x_test.go:12: want 3, got 4", "    x_test.go:14: done");
+    expect(first(run(...lines))).toBe("x_test.go:14: done");
+  });
+  test("a log line between two errors keeps the last error", () => {
+    const lines = logged("    x_test.go:12: want 3, got 4", "    x_test.go:14: done", "    x_test.go:13: second", "    x_test.go:14: done");
+    expect(first(parseGoReport([...lines, "#arnx-module example.com/events"].join("\n") + "\n", { sourceLine })!))
+      .toBe("x_test.go:13: second");
+  });
+  test("when no entry's source line is a failing call, the last entry is kept", () => {
+    const lines = logged("    x_test.go:14: done", "    x_test.go:99: later");
+    expect(first(parseGoReport([...lines, "#arnx-module example.com/events"].join("\n") + "\n", { sourceLine })!))
+      .toBe("x_test.go:99: later");
+  });
+});

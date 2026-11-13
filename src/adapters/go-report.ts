@@ -58,7 +58,12 @@ const steady =(s: string) => s
   .replace(/\b(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1?\]):\d{2,5}\b/g, "$1:<port>")
   .replace(/\s+/g, " ").trim();
 
-interface Entry { text: string; testify: boolean }
+interface Entry { text: string; testify: boolean; file: string; line: number }
+
+/** The source line of a test file (its path from the project root, a 1-based line), null when it cannot be read. */
+export type SourceLine = (file: string, line: number) => string | null;
+// A call that fails the test, as opposed to t.Log, t.Logf or t.Skip.
+const FAILING_CALL = /\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\(/;
 
 /** A (sub)test's output as entries: a `file.go:N:` line and the lines indented under it. */
 function entries(lines: string[]): Entry[] {
@@ -67,6 +72,7 @@ function entries(lines: string[]): Entry[] {
     const m = ENTRY.exec(lines[i]!);
     if (!m) continue;
     const indent = m[1]!.length;
+    const at = m[2]!.lastIndexOf(":"), file = m[2]!.slice(0, at), line = Number(m[2]!.slice(at + 1));
     const under: string[] = [];
     while (i + 1 < lines.length && (!lines[i + 1]!.trim() || /^\s*/.exec(lines[i + 1]!)![0].length > indent)) under.push(lines[++i]!);
     if (under.some((l) => /^\s*Error Trace:/.test(l))) {
@@ -79,16 +85,16 @@ function entries(lines: string[]): Entry[] {
       }
       const messages = join1(fields.get("Messages") ?? []);
       const error = join1([m[3] ?? "", ...(fields.get("Error") ?? []).filter((l) => !DIFF_HEAD.test(l))]);
-      out.push({ text: `${m[2]}: ${error}${messages ? ` (${messages})` : ""}`, testify: true });
+      out.push({ text: `${m[2]}: ${error}${messages ? ` (${messages})` : ""}`, testify: true, file, line });
     } else {
-      out.push({ text: `${m[2]}: ${join1([m[3] ?? "", ...under.filter((l) => !DIFF_HEAD.test(l))])}`, testify: false });
+      out.push({ text: `${m[2]}: ${join1([m[3] ?? "", ...under.filter((l) => !DIFF_HEAD.test(l))])}`, testify: false, file, line });
     }
   }
   return out;
 }
 
 /** The one line that tells this failure apart, null when the output has none (a bare t.Fail). */
-function fingerprint(c: Case): string | null {
+function fingerprint(c: Case, sourceLine?: SourceLine): string | null {
   const panic = c.out.join("").split("\n").find((l) => /^panic: /.test(l));
   if (panic) return clip(steady(panic), FIRST_MAX);
   const names = [...c.failed].sort((a, b) => b.split("/").length - a.split("/").length);
@@ -97,14 +103,16 @@ function fingerprint(c: Case): string | null {
     const es = entries((c.own.get(n) ?? []).join("").split("\n").filter((l) => !NOISE.test(l)));
     const below = [...gave.keys()].some((k) => k.startsWith(`${n}/`) && gave.get(k)!.length);
     const testify = es.filter((e) => e.testify);
-    const chosen = testify.length ? testify : below || !es.length ? [] : [es.at(-1)!];
+    // Without testify blocks: the last entry whose source line fails the test (a t.Log after it must not win).
+    const failing = sourceLine ? es.filter((e) => FAILING_CALL.test(sourceLine(posix.join(c.dir, e.file), e.line) ?? "")) : [];
+    const chosen = testify.length ? testify : below || !es.length ? [] : [failing.at(-1) ?? es.at(-1)!];
     gave.set(n, chosen.map((e) => clip(steady(e.text), ENTRY_MAX)));
   }
   const parts = [...gave.keys()].sort().flatMap((n) => gave.get(n)!);
   return parts.length ? clip(parts.join(" | "), FIRST_MAX) : null;
 }
 
-export function parseGoReport(text: string): TestResult[] | null {
+export function parseGoReport(text: string, o: { sourceLine?: SourceLine } = {}): TestResult[] | null {
   let modulePath = "";
   const files = new Map<string, Set<string>>(); // dir -> files declaring a test function
   const unread = new Set<string>(); // dirs with a listed test line whose name cannot be read
@@ -180,7 +188,7 @@ export function parseGoReport(text: string): TestResult[] | null {
     const kept = c.out.join("").split("\n").filter((l) => !NOISE.test(l));
     let message = cap(c.terminals.has("fail") ? fromFailure(kept).join("\n").trim() : kept.join("\n").trim());
     const t = c.terminals;
-    const first = t.has("fail") ? fingerprint(c) : null;
+    const first = t.has("fail") ? fingerprint(c, o.sourceLine) : null;
     if (first && message.split("\n")[0] !== first) message = `${first}\n${message}`;
     let outcome: string, msg: string;
     if (t.has("fail")) { outcome = "failed"; msg = message || "test failed"; }

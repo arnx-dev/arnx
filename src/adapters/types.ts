@@ -83,8 +83,10 @@ export interface Adapter {
   serialFlag?(testCommand: string, read: (rel: string) => string | null, runner: string): string | null;
   /** Parse the report file the command wrote; null when it is unreadable. projectRoot is the project's directory
    * relative to the repository root; `exists` tells whether a path relative to it is a file in the snapshot (Rust
-   * finds the source file of a test inside src/ by its module path). */
-  parseReport(text: string, runner: string, projectRoot: string, exists?: (rel: string) => boolean): TestResult[] | null;
+   * finds the source file of a test inside src/ by its module path); `sourceLine` reads one line (1-based) of a file
+   * relative to it, null when unreadable (Go tells the line that failed a test from the one that logged). */
+  parseReport(text: string, runner: string, projectRoot: string, exists?: (rel: string) => boolean,
+              sourceLine?: (file: string, line: number) => string | null): TestResult[] | null;
   /** The parsed results with the failure messages the report left empty filled from the run's output (bun's JUnit
    * report holds none); absent for runners whose report has them. */
   messagesFrom?(results: TestResult[], output: string, runner: string): TestResult[];
