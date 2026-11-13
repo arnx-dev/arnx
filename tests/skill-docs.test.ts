@@ -137,7 +137,7 @@ test("review-json.md names each fix-proof status review.json can write", () => {
 // --- check --json -----------------------------------------------------------------------------------------------------
 
 const project: ProjectCheck = { project: "svc", files: ["svc/tests/arnx/r1/test_x.py"], passed: ["a"], skipped: 1, notRun: [".arnx/tests/svc/tests/arnx/r1/test_y.py"],
-  skippedAccepted: ["t::c"],
+  skippedAccepted: ["t::c"], missingAccepted: ["t::d"],
   noReport: false, failed: [{ testId: "t::b", fileAttr: "", name: "b", outcome: "failed", message: "assert 0" }] };
 const changed: ChangedTest[] = [{ path: "tests/arnx/r1/test_x.py", review: "r1", change: "modified" }];
 const contradiction: MayContradict = { answer: "Q1", accepted: "F3", review: "r1", accepted_review: "r1",
@@ -186,11 +186,12 @@ test("check --json results match exit codes as check-json.md says", () => {
     expect(JSON.parse(checkJson([], code as number, code === 4 ? changed : [])).result).toBe(result);
   }
   expect(checkSummary([])[1]).toBe(3);
-  expect(checkSummary([{ ...project, failed: [], notRun: [], skippedAccepted: [] }])[1]).toBe(0);
-  // An accepted test that ended skipped does not pass: exit 1.
-  expect(checkSummary([{ ...project, failed: [], notRun: [] }])[1]).toBe(1);
+  expect(checkSummary([{ ...project, failed: [], notRun: [], skippedAccepted: [], missingAccepted: [] }])[1]).toBe(0);
+  // An accepted test that ended skipped, or that did not report, does not pass: exit 1.
+  expect(checkSummary([{ ...project, failed: [], notRun: [], missingAccepted: [] }])[1]).toBe(1);
+  expect(checkSummary([{ ...project, failed: [], notRun: [], skippedAccepted: [] }])[1]).toBe(1);
   // A kept file the runner left out is exit 2, never a pass.
-  expect(checkSummary([{ ...project, failed: [], skippedAccepted: [] }])[1]).toBe(2);
+  expect(checkSummary([{ ...project, failed: [], skippedAccepted: [], missingAccepted: [] }])[1]).toBe(2);
   expect(checkSummary([{ ...project, noReport: true }])[1]).toBe(2);
 });
 

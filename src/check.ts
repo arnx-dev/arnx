@@ -21,7 +21,7 @@ import { load, type Review } from "./report";
 import type { Say } from "./progress";
 import { sayingDocker, type SessionFactory } from "./sandbox";
 import type { Env, Settings } from "./settings";
-import { runName, storedName } from "./kept";
+import { isKeptJunk, runName, storedName } from "./kept";
 import { collect, deepestHolder, DOME, dockerSession, keptTestFiles, legacyKeptFiles, placeKept, runPath, swapFiles, swapIn }
   from "./testround";
 
@@ -41,7 +41,10 @@ export interface ProjectCheck { /** Something in it was masked. */ standInsShown
   /** Kept test files the runner reported nothing for (its configuration leaves that name or folder out). */
   notRun?: string[];
   /** Accepted tests (named in the record) that ended skipped: not passing. */
-  skippedAccepted?: string[] }
+  skippedAccepted?: string[];
+  /** Accepted tests the record names in a kept file that ran, which the runner did not report (the project's own
+   * configuration left them out): not passing. */
+  missingAccepted?: string[] }
 
 /** The accepted tests, as `file::test` (repository-relative, parameters dropped): those accept recorded per file in
  * ACCEPTED_RECORD, else (a record by an older arnx) from each accepted review's marks. `files`: the kept files the
@@ -142,7 +145,7 @@ export function legacyAccepted(repo: string, settings: Settings): Map<string, Re
   const out = new Map<string, ReviewConfig>();
   for (const cfg of projects) for (const p of legacyKeptFiles(repo, cfg, settings.acceptedTestsDir)) out.set(p, cfg);
   for (const p of Object.keys(readRecord(repo).files)) {
-    if (p.startsWith(`${DOME}/`) || out.has(p) || !existsSync(join(repo, p))) continue;
+    if (p.startsWith(`${DOME}/`) || out.has(p) || isKeptJunk(p) || !existsSync(join(repo, p))) continue;
     const cfg = deepestHolder(projects, p);
     if (cfg) out.set(p, cfg);
   }
@@ -151,8 +154,11 @@ export function legacyAccepted(repo: string, settings: Settings): Map<string, Re
 
 /** `arnx accept --move`: move the accepted files an older arnx kept inside the projects (legacyAccepted) to the same
  * path under .arnx/tests/, stored as accept stores them (storedName), out of the projects' own tools, without their
- * expected-fail markers (a red test is red only in check now), and pin them there (`local`: this machine's record,
- * localPinsPath). Folders left empty are removed. Accepted files changed since accept are not moved: they block
+ * expected-fail markers (a red test is red only in check now), and pin them there, each one (`local`: this machine's
+ * record, localPinsPath): they came from arnx's own accepted folder. One an older arnx did not pin is pinned as it
+ * pinned then (no test list: every test in it counts as accepted), under its folder's review. Python's byte-code cache
+ * and OS or editor leftovers (isKeptJunk) are not moved: the project's own runs make them. Folders left empty are
+ * removed. Accepted files changed since accept are not moved: they block
  * (ArnxError) until restored or kept. */
 export function moveOut(repo: string, settings: Settings, local: string | null = null): Record<string, string> {
   const files = legacyAccepted(repo, settings);
@@ -177,12 +183,14 @@ export function moveOut(repo: string, settings: Settings, local: string | null =
     }
     moved[p] = to;
     const pin = rec.files[p];
-    if (!pin) continue;
-    delete rec.files[p];
-    rec.files[to] = { ...pin, sha256: writtenSha(repo, to) };
-    pins[p] = null;
+    if (pin) {
+      delete rec.files[p];
+      pins[p] = null;
+    }
+    const from = pin?.review ?? reviewGroup(p).slice(1).replace("_", "-");
+    rec.files[to] = { ...(pin ?? { review: from }), sha256: writtenSha(repo, to) };
     pins[to] = rec.files[to]!;
-    review[p] = review[to] = pin.review;
+    review[p] = review[to] = from;
   }
   if (Object.keys(pins).length) {
     writeLocal(local, repo, (p) => review[p]!, pins);
@@ -210,7 +218,8 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
   // The check's reruns with a real key, over all its projects.
   const reruns = keyReruns();
   // Only what accept pinned runs: anything else under .arnx/tests/ is named by changedAccepted, never placed.
-  const pinned = new Set(Object.keys(readRecord(repo).files));
+  const rec = readRecord(repo).files;
+  const pinned = new Set(Object.keys(rec));
   for (const cfg of file.projects) {
     const files = keptTestFiles(repo, cfg, settings.acceptedTestsDir, file.projects).filter((f) => pinned.has(f));
     if (!files.length) continue;
@@ -272,6 +281,16 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
       }
       // A kept file the runner reported no test for was left out by its configuration: named, never silently dropped.
       const notRun = missing.length ? [] : files.filter((f) => !results.some((t) => ownerFile(t.fileAttr, [target(f)]) !== null));
+      // Every test the record names in a kept file must report (passed, failed or skipped; a parametrized one through
+      // any variant): one the project's own configuration leaves out (a deselect, a name filter, a collection hook)
+      // does not pass. A pin without a list (an older arnx's) is held to its whole file reporting (notRun).
+      const missingAccepted = missing.length ? [] : files.flatMap((f) => {
+        const named = rec[f]?.tests;
+        if (!Array.isArray(named)) return [];
+        const got = new Set(results.filter((t) => ownerFile(t.fileAttr, [target(f)]) !== null)
+          .map((t) => baseName(splitId(t.testId)[1])));
+        return [...new Set(named.map(String))].filter((n) => !got.has(baseName(n))).map((n) => `${target(f)}::${n}`);
+      });
       known ??= acceptedIds(repo);
       const ran = results.filter((t) => t.outcome !== "skipped");
       const couldNotRun = ran.filter((t) => t.needs).map((t) => ({ testId: t.testId, needs: t.needs!, ...(t.fakedKey ? { faked: true } : {}),
@@ -287,6 +306,7 @@ export async function check(repo: string, settings: Settings, o: { sessionFactor
         passed: ran.filter((t) => t.outcome === "passed").map((t) => t.testId), failed, reviews,
         skipped: results.filter((t) => t.outcome === "skipped").length - skippedAccepted.length,
         ...(skippedAccepted.length ? { skippedAccepted } : {}),
+        ...(missingAccepted.length ? { missingAccepted } : {}),
         accepted: ran.filter((t) => !t.needs && isAccepted(known!, cfg.workdir, t.testId)).map((t) => t.testId),
         ...(taken.withheld.length ? { leftOut: taken.withheld } : {}), ...(taken.fakedKeys.length ? { fakedKeys: taken.fakedKeys } : {}),
         ...(couldNotRun.length ? { couldNotRun } : {}),
@@ -467,6 +487,8 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
   const skipped = ran.reduce((n, r) => n + r.skipped, 0);
   // Accepted tests that ended skipped: not passing.
   const skipAcc = ran.flatMap((r) => (r.skippedAccepted ?? []).map((id) => `${multi ? `${r.project}: ` : ""}${id.split("::").at(-1)}`));
+  // Accepted tests the run left out: not passing either.
+  const missAcc = ran.flatMap((r) => (r.missingAccepted ?? []).map((id) => `${multi ? `${r.project}: ` : ""}${id.split("::").at(-1)}`));
   // With no accepted test among them (an answer's tests alone), the rest are not "other".
   const other = accTotal ? "other " : "";
   const where = "in the accepted files";
@@ -476,7 +498,7 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
       lines.push(`✗ ${count(accFail.length, "accepted test")} still fail${accFail.length === 1 ? "s (bug" : " (bugs"} ` +
         "not fixed yet)");
       if (accPass) lines.push(`✓ ${count(accPass, "accepted test")} pass${accPass === 1 ? "es" : ""}`);
-    } else if (accTotal && skipAcc.length) {
+    } else if (accTotal && (skipAcc.length || missAcc.length)) {
       lines.push(`✓ ${count(accPass, "accepted test")} pass${accPass === 1 ? "es" : ""}`);
     } else if (accTotal) {
       const too = clean && othPass ? ` (${count(othPass, "other test")} in ${accTotal === 1 ? "its file" : "their files"}` +
@@ -486,6 +508,10 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
     if (skipAcc.length) {
       lines.push(`✗ ${count(skipAcc.length, "accepted test")} skipped, so not shown to pass:`,
         ...skipAcc.map((name) => `  ✗ ${name}`));
+    }
+    if (missAcc.length) {
+      lines.push(`✗ ${count(missAcc.length, "accepted test")} did not report, so not shown to pass:`,
+        ...missAcc.map((name) => `  ✗ ${name}`));
     }
     if (othPass && !(clean && accTotal)) {
       lines.push(`✓ ${count(othPass, `${other}test`)} ${where} pass${othPass === 1 ? "es" : ""}`);
@@ -527,9 +553,13 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
       `verified: ${timeout ? "a timeout" : "a run without a report"} is neither a fix nor a bug.`);
     return [lines.join("\n"), 2];
   }
-  if (failed.length || skipAcc.length) {
+  if (failed.length || skipAcc.length || missAcc.length) {
     // arnx keeps accepted tests unskipped: a skip comes from the run (a conftest, a marker, the environment).
     if (skipAcc.length) lines.push("A skipped accepted test proves nothing: find what skips it, then arnx check.");
+    if (missAcc.length) {
+      lines.push("An accepted test that does not report proves nothing: find what in your test configuration leaves it " +
+        "out (a deselect, a name filter, a collection hook), then arnx check.");
+    }
     // A wrong test of a real bug is marked rewrite; tests that are not findings no mark covers.
     if (accFail.length) {
       const ids = [...new Set(accFail.map((x) => x.review).filter((r): r is string => !!r))].sort();
@@ -818,10 +848,13 @@ export function changedAccepted(repo: string, local: string | null = null): Chan
   }
   // Anything else under .arnx/tests/ that no pin covers: arnx accept did not write it, and check places pinned files
   // only, so it is named rather than left out unseen. An older copy beside its pinned twin, the same bytes, is not: the
-  // next check or accept removes it (storeOlderKept).
+  // next check or accept removes it (storeOlderKept). Nor are OS and editor leftovers (isKeptJunk), or a link in place
+  // of a folder whose pinned files are named above (the refusal names the link).
   for (const rel of entriesUnder(join(repo, DOME))) {
     const path = `${DOME}/${rel}`;
-    if (now[path] || named(path) || lstatSync(join(repo, path), { throwIfNoEntry: false })?.isDirectory() !== false) continue;
+    if (now[path] || named(path) || isKeptJunk(rel) ||
+      lstatSync(join(repo, path), { throwIfNoEntry: false })?.isDirectory() !== false) continue;
+    if (out.some((c) => c.path.startsWith(`${path}/`))) continue;
     const twin = `${DOME}/${storedName(rel)}`;
     const sha = keptSha(repo, path);
     if (runName(rel) === rel && now[twin] && sha === keptSha(repo, twin) && sha !== "other" && sha !== "gone") continue;
@@ -843,7 +876,7 @@ export function linkedDome(repo: string): string | null {
 /** Entries under .arnx/tests/ (files, links, folders, never entered through a link) that exist both by the older name
  * and by the stored name: [older, stored] paths. */
 function keptPairs(repo: string): [string, string][] {
-  const all = new Set(entriesUnder(join(repo, DOME)));
+  const all = new Set(entriesUnder(join(repo, DOME)).filter((p) => !isKeptJunk(p)));
   return [...all].filter((p) => runName(p) === p && all.has(storedName(p)))
     .map((p) => [`${DOME}/${p}`, `${DOME}/${storedName(p)}`]);
 }
@@ -856,10 +889,24 @@ export function irregularKept(repo: string): string[] {
   const dome = join(repo, DOME);
   const odd = entriesUnder(dome).filter((p) => {
     const st = lstatSync(join(dome, p), { throwIfNoEntry: false });
-    return !!st && !st.isFile() && !st.isDirectory();
+    return !isKeptJunk(p) && !!st && !st.isFile() && !st.isDirectory();
   }).map((p) => `${DOME}/${p}`);
-  const pinned = Object.keys(readRecord(repo).files).filter((p) => keptSha(repo, p) === "other");
+  // A pinned file behind a link in place of its folder: the link is what to delete.
+  const pinned = Object.keys(readRecord(repo).files).filter((p) => keptSha(repo, p) === "other")
+    .map((p) => linkOnTheWay(repo, p) ?? p);
   return [...new Set([...odd, ...pinned])].sort();
+}
+
+/** The first folder on the way to `rel` (repository-relative) that is a link, else null: deleting a file through it
+ * would delete what it leads to. */
+function linkOnTheWay(repo: string, rel: string): string | null {
+  const parts = rel.split("/");
+  for (let i = 1; i < parts.length; i++) {
+    const st = lstatSync(join(repo, ...parts.slice(0, i)), { throwIfNoEntry: false });
+    if (!st || (!st.isDirectory() && !st.isSymbolicLink())) return null;
+    if (st.isSymbolicLink()) return parts.slice(0, i).join("/");
+  }
+  return null;
 }
 
 /** The accepted files that match their trusted pin, which approve and setup let fail (their bugs are not fixed yet),
@@ -927,7 +974,7 @@ export interface StoredOlder { stored: string[]; both: string[] }
 export function storeOlderKept(repo: string, local: string | null = null): StoredOlder {
   const out: StoredOlder = { stored: [], both: [] };
   if (!existsSync(join(repo, DOME))) return out;
-  const older = collect(join(repo, DOME), "", /./).filter((p) => runName(p) === p);
+  const older = collect(join(repo, DOME), "", /./).filter((p) => runName(p) === p && !isKeptJunk(p));
   if (!older.length) return out;
   const changed = new Set(changedAccepted(repo, local).map((c) => c.path));
   const rec = readRecord(repo);
@@ -1042,8 +1089,13 @@ export function changedSummary(changed: ChangedTest[], repo: string): string {
   const say = (paths: string[], text: (them: string) => string) => {
     if (paths.length) lines.push(text(paths.length === 1 ? "it" : "them"));
   };
-  say(by((c) => c.change === "modified" && keptSha(repo, c.path) === "other"), (them) =>
+  // A file behind a link in place of its folder is deleted by deleting the link, never through it.
+  const odd = by((c) => c.change === "modified" && keptSha(repo, c.path) === "other");
+  const links = [...new Set(odd.map((p) => linkOnTheWay(repo, p)).filter((p): p is string => !!p))];
+  say(odd.filter((p) => !linkOnTheWay(repo, p)), (them) =>
     `A link or a folder where a kept test belongs: delete ${them}, then arnx check`);
+  say(links, (them) => `A link where a folder of kept tests belongs: delete the link${links.length === 1 ? "" : "s"} ` +
+    `${links.join(", ")} (not the files through ${them}), then arnx check`);
   say(by((c) => c.change === "duplicate"), () => "A test stored under two names: delete the copy you do not want, then arnx check");
   say(by((c) => c.change === "added"), (them) => `Not written by arnx accept: delete ${them}, then arnx check`);
   say(by((c) => c.change === "collides"), (them) => "arnx never puts a kept test over a file of your project: move or " +
@@ -1074,6 +1126,7 @@ export function checkJson(results: ProjectCheck[], code: number, changed: Change
         skipped: r.skipped,
         ...(r.notRun ? { not_run: r.notRun.map(runPath) } : {}),
         ...(r.skippedAccepted ? { skipped_accepted: r.skippedAccepted } : {}),
+        ...(r.missingAccepted ? { missing_accepted: r.missingAccepted } : {}),
         ...(r.leftOut ? { left_out: r.leftOut } : {}),
         ...(r.fakedKeys ? { faked_keys: r.fakedKeys } : {}),
         ...(r.couldNotRun ? { could_not_run: r.couldNotRun.map((x) => ({ test_id: x.testId, needs: x.needs, ...(x.faked ? { faked_key: true } : {}),

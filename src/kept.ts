@@ -16,3 +16,13 @@ export function storedName(run: string): string {
 export function runName(stored: string): string {
   return stored.endsWith(KEPT_SUFFIX) ? stored.slice(0, -KEPT_SUFFIX.length) : stored;
 }
+
+/** OS and editor leftovers and Python's byte-code cache (`.DS_Store`, `Thumbs.db`, `name~`, `.name.swp`/`.swo`,
+ * anything in `__pycache__/`, `*.pyc`; `rel` is a POSIX path): arnx never writes one, so under .arnx/tests/ check and
+ * accept ignore them (never placed, pinned or named), and `arnx accept --move` leaves them where they are. */
+export function isKeptJunk(rel: string): boolean {
+  const parts = rel.split("/");
+  const name = parts.at(-1) ?? "";
+  return parts.includes("__pycache__") || name === ".DS_Store" || name === "Thumbs.db" || name.endsWith("~") ||
+    /^\..*\.sw[po]$/.test(name) || name.endsWith(".pyc");
+}

@@ -237,8 +237,9 @@ machine (it keeps a copy in `~/.config/arnx/pins/`, outside the repository); a c
 A fresh clone or CI has no such copy and trusts the committed record, so a commit that edits both shows only in its
 diff: `arnx review` of that change names the accepted tests and pins it edits or removes. `arnx check` runs only
 pinned files, read as regular files (never through a link) and never placed over a file of your project: a file under
-`.arnx/tests/` that accept did not write, or a link there, exits 4 too. An accepted test that ends skipped does not
-pass (exit 1).
+`.arnx/tests/` that accept did not write, or a link there, exits 4 too (OS and editor leftovers such as `.DS_Store`,
+`*.swp`, `name~` and Python's `__pycache__` are ignored). An accepted test that ends skipped, or that the run does not
+report at all (your test configuration deselects, filters or drops it), does not pass (exit 1).
 Changed by mistake: `arnx accept --again <id>` copies the review's tests back (your edits are lost); `arnx check`
 also names `git checkout -- <file>` when the committed copy is the accepted one. Changed on purpose:
 `arnx accept --keep-edits` records the accepted tests as they are now. An answer's test can ask for the opposite of an
@@ -250,7 +251,7 @@ unchanged); decide which one holds. `arnx check --json` prints the result as JSO
 
 Tests an older arnx kept inside your projects (`tests/arnx/`, with expected-fail markers) are in your own test run:
 `arnx check` runs nothing until `arnx accept --move` moves them to `.arnx/tests/` (stored with `.arnx` appended),
-removes their markers and pins them there. Commit the move. Files an older arnx kept in `.arnx/tests/` under the names
+removes their markers and pins every file it moves there (Python's `__pycache__` stays where it is). Commit the move. Files an older arnx kept in `.arnx/tests/` under the names
 they run by are stored with `.arnx` appended by the next `arnx check` or `arnx accept`, each pin moved with its file
 (one edited since accept is refused first, as any accepted test is). Commit the renamed files and
 `.arnx/accepted-tests.json`.

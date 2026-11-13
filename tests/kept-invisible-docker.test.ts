@@ -7,13 +7,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { accept } from "../src/accept";
 import { snapshot } from "../src/change";
-import { check } from "../src/check";
+import { check, checkSummary } from "../src/check";
 import { loadReviewFile, reviewConfigPath } from "../src/config";
 import { exitCode } from "../src/report";
 import { runReview } from "../src/reviewer";
 import { defaultSettings } from "../src/settings";
 import { approveFile } from "../src/setup";
-import { dockerSession } from "../src/testround";
+import { dockerSession, runPath } from "../src/testround";
 import { FakeJson, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, initRepo } from "./helpers/gitutil";
 import { blankMarks } from "./helpers/review";
@@ -170,5 +170,21 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: kept tests are invisibl
       expect.stringMatching(/^\.arnx\/tests\/tests\/arnx\/r[0-9_a-f]+\/test_abs_drops_the_sign\.py\.arnx$/)]);
     const [r] = await check(repo, SETTINGS);
     expect(r!.failed.map((t) => [t.testId.split("::").at(-1), t.outcome])).toEqual([["test_adds_negative_numbers", "failed"]]);
+
+    // The project's own configuration leaves the red accepted test out: pytest reports nothing for it, and check
+    // names it and does not pass (exit 1), never "The accepted test passes".
+    const run = runPath(result.kept.map((p) => p.slice(repo.length + 1)).find((p) => p.includes("test_abs"))!);
+    const id = `${run}::test_adds_negative_numbers`;
+    for (const [file, body] of [["pytest.ini", `[pytest]\naddopts = --deselect ${id}\n`],
+      ["conftest.py", "def pytest_collection_modifyitems(items):\n" +
+        "    items[:] = [i for i in items if i.name != 'test_adds_negative_numbers']\n"]] as const) {
+      writeFileSync(join(repo, file), body);
+      const [left] = await check(repo, SETTINGS);
+      expect([file, left!.missingAccepted, left!.failed.length, left!.noReport]).toEqual([file, [id], 0, false]);
+      const [said, code] = checkSummary([left!]);
+      expect([file, code]).toEqual([file, 1]);
+      expect(said).toContain("✗ 1 accepted test did not report, so not shown to pass:\n  ✗ test_adds_negative_numbers");
+      rmSync(join(repo, file));
+    }
   }, 900_000);
 });

@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import { type AgentResult, StopRound, Workspace } from "./agent";
 import { adapterFor, getAdapter } from "./adapters";
-import { runName, storedName } from "./kept";
+import { isKeptJunk, runName, storedName } from "./kept";
 import { entriesUnder, regularBytes } from "./safefs";
 import { DEFAULT_ACCEPTED_DIR } from "./adapters/types";
 import { absentFromSnapshot, bakedError, bakedIn, imageFiles, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
@@ -283,7 +283,9 @@ function keptIn(root: string, cfg: ReviewConfig, acceptedTestsDir?: string, all 
     .filter((d) => existsSync(join(root, d)))
     .flatMap((d) => readdirSync(join(root, d)).filter((n) => adapter.kept!.name.test(runName(n)) &&
       lstatSync(join(root, d, n)).isFile()).map((n) => posix.join(d, n)));
-  return [...new Set([...inRoots, ...sat, ...own])].sort();
+  // OS and editor leftovers, and the byte-code cache a project's own pytest leaves in an older accepted folder, are
+  // nobody's kept files.
+  return [...new Set([...inRoots, ...sat, ...own])].filter((p) => !isKeptJunk(p)).sort();
 }
 
 /** A kept file's folder: `<anywhere>/arnx/r<review id>/`, as accept lays them out. */
