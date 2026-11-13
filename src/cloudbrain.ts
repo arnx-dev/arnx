@@ -3,7 +3,7 @@
 // definitions, the project's facts), runs each tool call the brain asks for with its own confined tools exactly as
 // LocalBrain's are run, sends the results by id and turn, and the facts after each final. The brain answers with
 // decisions only: tool calls, reports, suspects, verdicts. What each answer billed becomes usage lines named by the
-// tier and the harness (never a model) and one per role. A review opens with a budget hold (402 there is a top-up,
+// tier and the harness (never a model) and one per role. A review opens with a budget hold (402 there means no credit left,
 // exit 3) and is always closed with finish, also when it failed or was interrupted.
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";

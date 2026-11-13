@@ -166,7 +166,7 @@ export function moveOut(repo: string, settings: Settings, local: string | null =
   if (changed.length) throw new ArnxError(changedSummary(changed, repo));
   // Written under .arnx/tests/, never through a link.
   const odd = irregularKept(repo);
-  if (odd.length) throw new ArnxError(`not a regular file (a link or a folder) where arnx keeps tests: ${odd.join(", ")}`);
+  if (odd.length) throw new ArnxError(keptAdvice(repo, odd));
   const rec = readRecord(repo);
   const pins: Record<string, Pin | null> = {};
   const review: Record<string, string> = {};
@@ -891,8 +891,7 @@ function trustedTests(w: Pin, c: Pin | undefined, l: LocalPins["files"][string] 
 const droppedLists = new WeakSet<ChangedTest>();
 
 /** Accepted files changed or deleted since accept recorded them, and pins changed or removed by anything but arnx on
- * this machine (`local`, localPinsPath). Files accept never recorded (kept by an arnx that did not record them) are not
- * checked. */
+ * this machine (`local`, localPinsPath). A file under .arnx/tests/ that accept never recorded is `added` (exit 4, not run). */
 export function changedAccepted(repo: string, local: string | null = null): ChangedTest[] {
   // arnx reads and writes kept tests only in real folders: a link at .arnx or .arnx/tests is refused before anything else.
   const linked = linkedDome(repo);
@@ -990,6 +989,19 @@ function keptPairs(repo: string): [string, string][] {
     .map((p) => [`${DOME}/${p}`, `${DOME}/${storedName(p)}`]);
 }
 
+/** What stops arnx at `odd` (irregularKept): links where a folder belongs get linkAdvice; a link or a folder where a
+ * kept test belongs is deleted. */
+export function keptAdvice(repo: string, odd: string[]): string {
+  const pinned = Object.keys(readRecord(repo).files);
+  const isFolderLink = (p: string) => p === linkedDome(repo) || pinned.some((f) => f.startsWith(`${p}/`));
+  const folders = odd.filter(isFolderLink), rest = odd.filter((p) => !isFolderLink(p));
+  const out: string[] = [];
+  if (folders.length) out.push(linkAdvice(folders));
+  if (rest.length) out.push(`not a regular file (a link or a folder) where arnx keeps tests: ${rest.slice(0, 5).join(", ")}` +
+    `${rest.length > 5 ? ", …" : ""}; delete ${rest.length === 1 ? "it" : "them"} (or put the file back), then run the command again`);
+  return out.join("\n");
+}
+
 /** What under .arnx/tests/ is neither a regular file nor a folder (a link, a FIFO), and the pinned paths that are not
  * regular files: accept writes there, never through a link, and refuses while any is there. */
 export function irregularKept(repo: string): string[] {
@@ -1004,6 +1016,12 @@ export function irregularKept(repo: string): string[] {
   const pinned = Object.keys(readRecord(repo).files).filter((p) => keptSha(repo, p) === "other")
     .map((p) => linkOnTheWay(repo, p) ?? p);
   return [...new Set([...odd, ...pinned])].sort();
+}
+
+/** The one sentence for a link (or a file) where a folder belongs: `.arnx`, `.arnx/tests` or a folder of kept tests. */
+export function linkAdvice(paths: string[]): string {
+  return `${paths.join(", ")} ${paths.length === 1 ? "is a link" : "are links"}; replace ${paths.length === 1 ? "it" : "them"} ` +
+    "with a real folder, then run the command again";
 }
 
 /** The first folder on the way to `rel` (repository-relative) that is a link, else null: deleting a file through it
@@ -1190,7 +1208,11 @@ export function changedSummary(changed: ChangedTest[], repo: string): string {
   const kinds = new Set(changed.map((c) => c.change));
   const only = kinds.size === 1 ? [...kinds][0]! : null;
   const verb = only === "deleted" || only === "repinned" || only === "unpinned" ? only : "changed";
-  const lines = [`✗ ${count(changed.length, "accepted test file")} ${verb} since arnx accept; nothing ran:`,
+  // Added, duplicate and colliding files and a link where a folder belongs are not accepted tests that changed.
+  const plain = changed.every((c) => ["modified", "deleted", "repinned", "unpinned"].includes(c.change) &&
+    ![".arnx", DOME].includes(c.path));
+  const lines = [plain ? `✗ ${count(changed.length, "accepted test file")} ${verb} since arnx accept; nothing ran:`
+    : `✗ ${count(changed.length, "path")} in .arnx differ${changed.length === 1 ? "s" : ""} from what arnx accept recorded; nothing ran:`,
     ...changed.map((c) => `  ${LABEL[c.change]} ${c.path}${WHY[c.change]}`)];
   const fix = fixable(repo, changed);
   const reviews = [...new Set(fix.map((c) => c.review))];
@@ -1211,11 +1233,11 @@ export function changedSummary(changed: ChangedTest[], repo: string): string {
   };
   // A file behind a link in place of its folder is deleted by deleting the link, never through it.
   const odd = by((c) => c.change === "modified" && keptSha(repo, c.path) === "other");
-  const links = [...new Set(odd.map((p) => linkOnTheWay(repo, p)).filter((p): p is string => !!p))];
-  say(odd.filter((p) => !linkOnTheWay(repo, p)), (them) =>
+  const links = [...new Set([...by((c) => c.change === "modified" && c.path === linkedDome(repo)),
+    ...odd.map((p) => linkOnTheWay(repo, p)).filter((p): p is string => !!p)])];
+  say(odd.filter((p) => !linkOnTheWay(repo, p) && p !== linkedDome(repo)), (them) =>
     `A link or a folder where a kept test belongs: delete ${them}, then arnx check`);
-  say(links, (them) => `A link where a folder of kept tests belongs: delete the link${links.length === 1 ? "" : "s"} ` +
-    `${links.join(", ")} (not the files through ${them}), then arnx check`);
+  if (links.length) lines.push(linkAdvice(links));
   say(by((c) => c.change === "duplicate"), () => "A test stored under two names: delete the copy you do not want, then arnx check");
   say(by((c) => c.change === "added"), (them) => `Not written by arnx accept: delete ${them}, then arnx check`);
   say(by((c) => c.change === "collides"), (them) => "arnx never puts a kept test over a file of your project: move or " +

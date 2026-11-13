@@ -13,7 +13,7 @@ import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { accept, findAccepted, findReview, hasAnswers, makeAnswerRunner, recordChosen } from "./accept";
 import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, contradictionLines,
-  linkedDome, storedOlderText, storeOlderKept,
+  linkAdvice, linkedDome, storedOlderText, storeOlderKept,
   failingList, keepEdits, mayContradict, recordAnswerWatch,
   legacyAccepted, moveOut,
   localPinsPath, TESTS_CHANGED } from "./check";
@@ -1677,8 +1677,7 @@ class Commands {
     const repo = this.repo();
     // accept writes under .arnx/: never through a link there.
     const linked = linkedDome(repo);
-    if (linked) throw new ArnxError(`${linked} is a link (or not a folder): arnx writes nothing through it; replace it with ` +
-      "the folder itself, then run accept again");
+    if (linked) throw new ArnxError(linkAdvice([linked]));
     const { s: file, mode } = this.settings(repo, a);
     let s = file;
     const rdir = findReview(repo, a.positionals[0] ?? null);
@@ -1939,7 +1938,7 @@ class Commands {
       const acct = await this.cloudClient(url, token, s, mode).call<Account>("GET", "/v1/account");
       if (acct.balance_micro_usd > 0) return n;
       return { phase: n.phase, where: `${n.where}; the arnx cloud balance is ${usd(acct.balance_micro_usd)}`,
-        command: "arnx credits", why: "or use your own keys: arnx cloud off", then: n.command };
+        command: "arnx cloud off", why: "or arnx login to another account", then: n.command };
     } catch (e) {
       if (!(e instanceof ArnxError)) throw e;
       return { ...n, why: `${n.why} (arnx cloud could not be asked for the balance: ${oneLine(e.message)})` };

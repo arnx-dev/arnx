@@ -410,9 +410,9 @@ for (const at of [".arnx/tests", ".arnx"]) {
     cli.out.length = 0;
     expect(await cli.run("check")).toBe(TESTS_CHANGED);
     expect(cli.stdout).toContain(`modified ${at}\n`);
-    expect(cli.stdout).toContain("A link or a folder where a kept test belongs: delete it, then arnx check");
+    expect(cli.stdout).toContain(`${at} is a link; replace it with a real folder, then run the command again`);
     expect(await cli.run("accept", "--no-answers", "--no-check")).not.toBe(0);
-    expect(cli.stderr).toContain(`${at} is a link (or not a folder)`);
+    expect(cli.stderr).toContain(`${at} is a link; replace it with a real folder, then run the command again`);
     expect(readdirSync(outside, { recursive: true }).map(String).sort()).toEqual(before);
     expect(seen).toEqual([]);
   });

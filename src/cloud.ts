@@ -1,6 +1,6 @@
 // arnx cloud's HTTP side, for arnx models (the arnx cloud API, v1): the account token from a device login
 // (RFC 8628), kept per user and machine, never in the repository; the calls, as JSON or as server-sent events with
-// progress lines; and what an error answer means for the user: 402 is a top-up and `unsupported_cli` an update of arnx
+// progress lines; and what an error answer means for the user: 402 means no credit left and `unsupported_cli` an update of arnx
 // (exit 3), an unreachable service or a 503 says arnx cloud is unavailable (exit 2) and, when the user's own keys are
 // set, how to use them instead. A network failure does not prove arnx cloud is closed: only its explicit `not_open`
 // answer says so (exit 2).

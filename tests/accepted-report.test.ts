@@ -208,8 +208,7 @@ test("a review's folder that is a link: the refusal says to delete the link, not
   renameSync(join(repo, folder), outside);
   symlinkSync(outside, join(repo, folder));
   expect(await cli.run("check")).toBe(TESTS_CHANGED);
-  expect(cli.stdout).toContain(`A link where a folder of kept tests belongs: delete the link ${folder} (not the files ` +
-    "through it), then arnx check");
+  expect(cli.stdout).toContain(`${folder} is a link; replace it with a real folder, then run the command again`);
   expect(cli.stdout).not.toContain("delete them");
   expect(cli.stdout).not.toContain("delete it,");
   expect(existsSync(join(outside, "test_zy.py.arnx"))).toBe(true);

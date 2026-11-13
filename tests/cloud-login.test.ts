@@ -260,7 +260,8 @@ test("next with arnx models: log in first, then credits", async () => {
   writeCredentials({ HOME: home }, { url: c.url, token: TOKEN });
   cli.out = [];
   await cli.run("next");
-  expect(cli.stdout).toContain("arnx credits");
+  expect(cli.stdout).toContain("arnx cloud off");
+  expect(cli.stdout).toContain("arnx login to another account");
   expect(cli.stdout).toContain("-$0.00");
 });
 

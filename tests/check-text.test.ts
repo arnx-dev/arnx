@@ -4,7 +4,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type ChangedTest, changedSummary, checkSummary, type ProjectCheck } from "../src/check";
+import { type ChangedTest, changedSummary, checkSummary, linkAdvice, type ProjectCheck } from "../src/check";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { type Group, save } from "../src/report";
 import type { SessionFactory } from "../src/sandbox";
@@ -308,4 +308,12 @@ test("check: the hint names the reviews whose accepted tests fail; other tests t
   expect(others.split("\n").slice(-2)).toEqual([
     "The 2 other tests that fail are not findings: marks do not cover them. Fix the code, or fix or delete them in " +
       "the file (then `arnx accept --keep-edits`).", "Next: arnx check"]);
+});
+
+test("a link where a folder belongs reads the same everywhere; an added file is not called an accepted test that changed", () => {
+  const repo = gitRepo(tmp());
+  expect(linkAdvice([".arnx"])).toBe(".arnx is a link; replace it with a real folder, then run the command again");
+  expect(linkAdvice(["a", "b"])).toBe("a, b are links; replace them with a real folder, then run the command again");
+  expect(changedSummary([{ path: ".arnx/tests/x.py.arnx", review: "", change: "added" }], repo))
+    .toContain("✗ 1 path in .arnx differs from what arnx accept recorded; nothing ran:");
 });

@@ -88,7 +88,7 @@ passes and F3's fails: they may contradict`. Which one holds is the user's call.
 |---|---|---|
 | `pass` | 0 | Every accepted test passes: the bugs they lock are fixed. |
 | `fail` | 1 | Some accepted tests fail, ended skipped (`skipped_accepted`) or did not report (`missing_accepted`): a bug not fixed yet, a change that broke what they lock, or a run that left them out. Fix the code. A test that is wrong about a real bug is the user's call: they mark its finding `rewrite` with a reason in review.md, then `arnx accept --again <id>`. |
-| `no-report` | 2 | The tests gave no report (timeout, runner), some are unproven (`could_not_run`), or a kept test file pinned without a `tests` list was not run (`not_run`). |
+| `no-report` | 2 | The tests gave no report (timeout, runner), some are unproven (`could_not_run`), or a kept test file whose record names no accepted test was not run (`not_run`). |
 | `nothing-accepted` | 3 | No accepted tests yet (nothing has been through `arnx accept`). |
 | `tests-changed` | 4 | Accepted test files changed since accept, so nothing ran: a test edited until it passes proves nothing. The user restores them (`arnx accept --again <id>`, or `git checkout` when the committed copy is the accepted one: `arnx check` without `--json` names it then), or records an intended edit with `arnx accept --keep-edits`. |
 
@@ -101,8 +101,8 @@ parameters); both empty for a support file or one holding only an answer's passi
   "sha256": "9f2c…", "review": "20261011-a1b2c3", "tests": ["test_F1", "test_F2"], "ids": ["test_F1", "test_F2[0-1]"] } } }
 ```
 
-An entry without `tests` or `ids` (written by an older arnx) still reads. Files accept never recorded (kept by an older arnx)
-are run without that check. The record is checked too: an entry's sha256, `tests` and `ids` are trusted only
+An entry without `tests` or `ids` (written by an older arnx) still reads. A file under `.arnx/tests/` that accept never recorded is `added`
+(exit 4, not run). The record is checked too: an entry's sha256, `tests` and `ids` are trusted only
 when they are the ones committed at HEAD or ones `arnx accept` (or `--keep-edits`) wrote on this machine, which keeps
 its own copy in the user's config directory, outside the repository. An entry changed or removed any other way is
 `repinned` or `unpinned`, exit 4: an edited `tests` list could otherwise relabel a failing accepted test as another

@@ -30,7 +30,7 @@ import { refString, type Settings } from "./settings";
 import { agentUse, logUsage } from "./usage";
 import { runName, storedName } from "./kept";
 import { acceptedDirFor, collect, DOME, dockerSession, readCopies, runPath, testRound, writeDirOf } from "./testround";
-import { acceptedTestIds, irregularKept, recordAccepted, storeOlderKept, type StoredOlder, testsByFile } from "./check";
+import { acceptedTestIds, irregularKept, keptAdvice, recordAccepted, storeOlderKept, type StoredOlder, testsByFile } from "./check";
 import { isoSeconds } from "./util";
 import { inPool } from "./challenge";
 import { sliceDiff, treeValues, workingTreeFiles } from "./change";
@@ -450,8 +450,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   // anything is written or deleted.
   const odd = irregularKept(repo);
   if (odd.length) {
-    throw new ArnxError(`not a regular file (a link or a folder) where arnx keeps tests: ${odd.slice(0, 5).join(", ")}` +
-      `${odd.length > 5 ? ", …" : ""}; delete ${odd.length === 1 ? "it" : "them"} (or put the file back), then run accept again`);
+    throw new ArnxError(keptAdvice(repo, odd));
   }
   // Kept files an older arnx stored by the names they run by go out of the project's runs first; this review's own
   // are then written again under the same stored names.
@@ -579,10 +578,15 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   const rel = (p: string) => relative(repo, p).split(sep).join("/");
   const now = new Set(kept.map(rel));
   for (const was of new Set([...(before.kept ?? []), ...Object.values(earlier)])) {
-    const full = join(repo, was);
-    if (!own(was) || now.has(was) || !existsSync(full)) continue;
-    rmSync(full, { force: true });
-    removeEmpty(dirname(was));
+    // An older arnx's file was just stored under its stored name (storeOlderKept): look for that one too.
+    const names = was.startsWith(`${DOME}/`) && runName(was) === was ? [was, storedName(was)] : [was];
+    if (!own(was) || names.some((n) => now.has(n))) continue;
+    for (const n of names) {
+      const full = join(repo, n);
+      if (!existsSync(full)) continue;
+      rmSync(full, { force: true });
+      removeEmpty(dirname(n));
+    }
   }
   // Where the kept files went: the deepest directory they share (the repository when nothing was kept).
   const dest = kept.length ? kept.map(dirname).reduce((a, b) => {
