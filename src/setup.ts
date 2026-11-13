@@ -1862,9 +1862,17 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     const putBack = (text: string, revert?: ReadonlySet<string>): string => {
       const blocks = new Map([...state.provenBlocks].filter(([n]) => !keep.has(n) && !state.webUi.has(n)));
       const r = restoreProven(text, blocks, { revert });
-      if (r.replaced.length) {
-        state.notice += `(${r.replaced.join(", ")} ran in this setup, but its folder overlaps a project in this file: ` +
-          "the file's project stays.)\n";
+      // A line already told (keepProven puts back twice) is not told again.
+      const tell = (line: string) => { if (!state.notice.includes(line)) state.notice += line; };
+      const kept = r.replaced.filter((n) => revert?.has(n));
+      const absent = r.replaced.filter((n) => !revert?.has(n));
+      if (absent.length) {
+        tell(`(${absent.join(", ")} ran in this setup, but its folder overlaps a project in this file: ` +
+          "the file's project stays.)\n");
+      }
+      if (kept.length) {
+        tell(`(${kept.join(", ")} ran in this setup, but its folder overlaps a project in this file: ` +
+          "the file's changed block stays.)\n");
       }
       if (!r.restored.length) return text;
       try {
@@ -1873,8 +1881,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         if (!(e instanceof ArnxError)) throw e;
         return text;
       }
-      state.notice += `(${r.restored.join(", ")} already ran in this setup and stays in the file as it ran: ` +
-        "arnx put it back.)\n";
+      tell(`(${r.restored.join(", ")} already ran in this setup and stays in the file as it ran: ` +
+        "arnx put it back.)\n");
       return r.yaml;
     };
     // At the time limit with no file accepted: the projects of the last whole file (or `file`) proven as they stand

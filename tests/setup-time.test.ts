@@ -253,18 +253,53 @@ test("at the limit, a project proven earlier keeps its proven block when a later
   expect(f.uncovered).toEqual([{ path: "/web/", reason: TIME_LEFT_OUT }]);
 });
 
-test("at the limit, a proven block that overlaps a project in the last file gives way", async () => {
+/** api and lib pass at once; web's suite runs eleven minutes and fails. */
+const apiLibThenSlowWeb = (clock: { ms: number }) =>
+  async <T>(cfg: { name: string }, snap: string, _log: string, body: (r: Runner) => Promise<T>) =>
+    body(new FakeSession(snap, () => {
+      if (cfg.name === "web") {
+        clock.ms += 11 * MIN;
+        return [junitXml([["web/tests/test_web.py", "test_f", "failed", "boom"]]), "1 failed", false];
+      }
+      const dir = cfg.name === "lib" ? "lib" : "api";
+      return [junitXml([[`${dir}/tests/test_${dir}.py`, "test_f", "passed", ""]]), "1 passed", false];
+    }));
+
+/** The last file changes api's block so that it overlaps another project; lib passed too. */
+async function overlapAtLimit(last: (three: string) => string) {
   const clock = { ms: 0 };
-  const repo = twoProjects();
-  // The last file gives api's folder to another project; api's proven block would overlap it.
-  const taken = TWO.replace("  api:\n    root: api\n", "  core:\n    root: api\n");
-  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
-    [tool("try_project", { yaml: taken, project: "web" })], [text("done")]]);
+  const repo = initRepo(join(tmp(), "three"));
+  for (const name of ["api", "lib", "web"]) {
+    mkdirSync(join(repo, name, "tests"), { recursive: true });
+    writeFileSync(join(repo, name, `${name}.py`), "def f():\n    return 1\n");
+    writeFileSync(join(repo, name, "tests", `test_${name}.py`), "def test_f():\n    assert True\n");
+  }
+  commit(repo, "three");
+  const three = TWO + TWO.slice(TWO.indexOf("  api:"), TWO.indexOf("  web:")).replace("api", "lib").replace("root: api", "root: lib");
+  const model = new ScriptedAgent([[tool("try_project", { yaml: three, project: "api" })],
+    [tool("try_project", { yaml: three, project: "lib" })], [tool("try_project", { yaml: last(three), project: "web" })],
+    [text("done")]]);
   const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"),
-    sessionFactory: apiThenSlowWeb(clock), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
-  expect(r.stop).toBe("time");
-  const names = r.yamlText ? parseReviewFile(r.yamlText).projects.map((p) => p.name) : [];
-  expect(names).not.toContain("api");
+    sessionFactory: apiLibThenSlowWeb(clock), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+  return { r, f: parseReviewFile(r.yamlText!) };
+}
+
+test("at the limit, a proven block that overlaps a project in the last file gives way", async () => {
+  // The last file gives api's folder to another project: api is not in it, and its proven block would overlap.
+  const { r, f } = await overlapAtLimit((t) => t.replace("  api:\n    root: api\n", "  core:\n    root: api\n"));
+  expect([r.ok, r.stop]).toEqual([true, "time"]);
+  expect(f.projects.map((p) => p.name)).toEqual(["lib"]);
+  expect([...r.setAside!].sort()).toEqual(["core", "web"]);
+});
+
+test("at the limit, a proven project whose changed block overlaps another gives way to the file", async () => {
+  // api is in the last file with a changed block, and web's root moved onto api's folder: putting api's proven block
+  // back would overlap web, so the file's api stays.
+  const { r, f } = await overlapAtLimit((t) => t.replace("    root: api\n", "    root: api\n    uses: [lib/lib.py]\n")
+    .replace("    root: web\n", "    root: api\n"));
+  expect([r.ok, r.stop]).toEqual([true, "time"]);
+  expect(f.projects.map((p) => p.name)).toEqual(["lib"]);
+  expect([...r.setAside!].sort()).toEqual(["api", "web"]);
 });
 
 test("at the limit, a held try and a project proven after it are both kept: the file that keeps the most is taken",
