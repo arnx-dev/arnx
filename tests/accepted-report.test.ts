@@ -252,6 +252,15 @@ const refused = async (cli: Cli, checkout = false) => {
   expect(await cli.run("check")).toBe(TESTS_CHANGED);
   expect(cli.stdout).toContain(`To restore it: arnx accept --again ${RID}`);
   expect(cli.stdout.includes(`git checkout -- ${KEPT} ${ACCEPTED_RECORD}`)).toBe(checkout);
+  // Keeping the edit would record the same dropped lists again: not offered, and refused.
+  expect(cli.stdout).not.toContain("--keep-edits");
+  const repo = cli.deps.cwd!;
+  const before = readFileSync(join(repo, ACCEPTED_RECORD), "utf8");
+  cli.out.length = 0;
+  cli.err.length = 0;
+  expect(await cli.run("accept", "--keep-edits")).toBe(2);
+  expect(cli.stderr).toContain(`arnx accept --again ${RID}`);
+  expect(readFileSync(join(repo, ACCEPTED_RECORD), "utf8")).toBe(before);
 };
 
 for (const older of ["none", "a list without ids", "no list"] as const) {
@@ -277,6 +286,26 @@ test("ids dropped and committed: refused on a fresh clone too, where nothing was
   commit(k.repo, "weaken");
   const fresh = new Cli({ cwd: k.repo, checkSessions: reporting(ROWS), env: {} });
   await refused(fresh);
+});
+
+// A kept file once pinned by the name it runs by (an older arnx stored it so), now by its stored name: the ids its
+// entry had under the other name count too.
+test("ids pinned under a kept file's other name, then dropped under its stored name: an edit (exit 4)", async () => {
+  const { repo } = await kept(ROWS, undefined);
+  const old = `.arnx/tests/${RUN}`;
+  const move = (from: string, to: string, lists: Record<string, unknown>) => {
+    renameSync(join(repo, from), join(repo, to));
+    const rp = join(repo, ACCEPTED_RECORD);
+    const rec = JSON.parse(readFileSync(rp, "utf8"));
+    rec.files[to] = { ...rec.files[from], ...lists };
+    delete rec.files[from];
+    writeFileSync(rp, JSON.stringify(rec, null, 2) + "\n");
+    commit(repo, `${from} to ${to}`);
+  };
+  move(KEPT, old, { tests: ["test_z"], ids: ["test_z[1]"] });
+  move(old, KEPT, { tests: ["test_z"], ids: undefined });
+  expect(record(repo)[KEPT]!.ids).toBeUndefined();
+  await refused(new Cli({ cwd: repo, checkSessions: reporting(ROWS), env: {} }));
 });
 
 test("a branch switch back to an older record is trusted: the ids are in a commit HEAD does not reach", async () => {

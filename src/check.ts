@@ -861,26 +861,34 @@ function recordHistory(repo: string): RecordHistory | null {
  * an older record, a stash) and the entry is HEAD's or one arnx wrote here. In HEAD's history, or in no commit (an
  * accept discarded before it was committed), dropping it is an edit: the exact ids it drops are what keeps a variant
  * that fails on the bug from being left out. Without commits, or in a shallow clone that finds it nowhere, only HEAD's
- * own entry is trusted. */
-function trustedTests(w: Pin, c: Pin | undefined, l: LocalPins["files"][string] | undefined, path: string,
-  history: () => RecordHistory | null): boolean {
+ * own entry is trusted. `names`: the file's path in the record, and the other name an older kept file had there.
+ * "dropped": refused for a list it lacks, which only `accept --again` puts back. */
+function trustedTests(w: Pin, c: Pin | undefined, l: LocalPins["files"][string] | undefined, names: string[],
+  history: () => RecordHistory | null): "trusted" | "edited" | "dropped" {
   const mine = l ? (Array.isArray(l.tests) ? l.tests : [null]) : [];
   const same = (x: unknown) => listsOf(x) === listsOf(w);
-  const known = l ? mine.some(same) : !c || same(c);
+  const known = (ok: boolean) => ok ? "trusted" as const : "edited" as const;
   const has = listsIn(w);
-  if (has.tests && has.ids) return known;
+  if (has.tests && has.ids) return known(l ? mine.some(same) : !c || same(c));
   const more = (x: unknown) => {
     const k = listsIn(x);
     return (!!k.tests && !has.tests) || (!!k.ids && !has.ids);
   };
   const h = history();
-  const inCommit = (vs: AcceptedRecord["files"][]) => vs.some((v) => more(v[path]));
-  if (!mine.some(more) && !more(c) && !(h && (inCommit(h.reached) || inCommit(h.elsewhere)))) return known;
-  if (!h) return !!c && same(c);
-  if (more(c) || inCommit(h.reached)) return false;
-  if (inCommit(h.elsewhere)) return (!!c && same(c)) || mine.some(same);
-  return h.shallow && !!c && same(c);
+  const inCommit = (vs: AcceptedRecord["files"][]) => vs.some((v) => names.some((n) => more(v[n])));
+  if (!mine.some(more) && !more(c) && !(h && (inCommit(h.reached) || inCommit(h.elsewhere)))) {
+    return known(l ? mine.some(same) : !c || same(c));
+  }
+  const fewer = (ok: boolean) => ok ? "trusted" as const : "dropped" as const;
+  if (!h) return fewer(!!c && same(c));
+  if (more(c) || inCommit(h.reached)) return "dropped";
+  if (inCommit(h.elsewhere)) return fewer((!!c && same(c)) || mine.some(same));
+  return fewer(h.shallow && !!c && same(c));
 }
+
+/** The `repinned` entries changedAccepted refused for a list they lack ("dropped" above): `--keep-edits` would record
+ * them as they are, so only `accept --again` is offered. Kept beside the objects, not in them: they are check's JSON. */
+const droppedLists = new WeakSet<ChangedTest>();
 
 /** Accepted files changed or deleted since accept recorded them, and pins changed or removed by anything but arnx on
  * this machine (`local`, localPinsPath). Files accept never recorded (kept by an arnx that did not record them) are not
@@ -916,8 +924,11 @@ export function changedAccepted(repo: string, local: string | null = null): Chan
       continue;
     }
     // Pinned here: one of the pins (and test lists) arnx wrote. Not here: the committed pin, or a file HEAD never pinned.
-    if (!trustedTests(w, c, l, path, history) || (l ? !l.sha256.includes(w.sha256) : !!c && c.sha256 !== w.sha256)) {
-      out.push({ path, review, change: "repinned" });
+    const lists = trustedTests(w, c, l, older ? [path, older] : [path], history);
+    if (lists !== "trusted" || (l ? !l.sha256.includes(w.sha256) : !!c && c.sha256 !== w.sha256)) {
+      const repinned: ChangedTest = { path, review, change: "repinned" };
+      if (lists === "dropped") droppedLists.add(repinned);
+      out.push(repinned);
       continue;
     }
     // A pinned file is a regular file, read without following a link: a link (or a folder) there is an edit.
@@ -1034,6 +1045,12 @@ export function keepEdits(repo: string, local: string | null = null): KeptEdits 
   if (fix.length < changed.length) {
     throw new ArnxError(changedSummary(changed.filter((c) => !fix.includes(c)), repo).split("\n").slice(1).join("\n"));
   }
+  // Keeping an entry that dropped a list arnx pinned would record it as it is: the review puts the list back.
+  const dropped = changed.filter((c) => droppedLists.has(c));
+  if (dropped.length) {
+    throw new ArnxError(`${dropped.map((c) => c.path).join(", ")}: ${ACCEPTED_RECORD} lost the accepted tests arnx ` +
+      `recorded; restore with ${[...new Set(dropped.map((c) => `arnx accept --again ${c.review}`))].join(", ")}`);
+  }
   const rec = readRecord(repo);
   const head = committedRecord(repo);
   const mine = readLocal(local, repo).files;
@@ -1044,7 +1061,8 @@ export function keepEdits(repo: string, local: string | null = null): KeptEdits 
     // wrote here.
     const w = rec.files[c.path];
     const trusted = listsIn(head[c.path] ? head[c.path] : mine[c.path]?.tests?.at(-1));
-    const ok = w && trustedTests(w, head[c.path], mine[c.path], c.path, history);
+    const ok = w && trustedTests(w, head[c.path], mine[c.path],
+      isStoredKept(c.path) ? [c.path, `${DOME}/${runPath(c.path)}`] : [c.path], history) === "trusted";
     if (w && !ok) restoredTests.push(c.path);
     const lists = ok ? listsIn(w) : trusted;
     const sha = keptSha(repo, c.path);
@@ -1202,9 +1220,11 @@ export function changedSummary(changed: ChangedTest[], repo: string): string {
   say(by((c) => c.change === "added"), (them) => `Not written by arnx accept: delete ${them}, then arnx check`);
   say(by((c) => c.change === "collides"), (them) => "arnx never puts a kept test over a file of your project: move or " +
     `delete ${them} or that file, then arnx check`);
-  if (!fix.length) return lines.join("\n");
-  const one = fix.length === 1;
-  lines.push(fix.every((c) => c.change === "deleted")
+  // An entry that dropped a list arnx pinned is restored by accept --again alone (keepEdits refuses it).
+  const keep = fix.filter((c) => !droppedLists.has(c));
+  if (!keep.length) return lines.join("\n");
+  const one = keep.length === 1;
+  lines.push(keep.every((c) => c.change === "deleted")
     ? `To keep ${one ? "it" : "them"} deleted: arnx accept --keep-edits (drops ${one ? "it" : "them"} from the accepted tests)`
     : `To keep your edit${one ? "" : "s"}: arnx accept --keep-edits (records ${one ? "it" : "them"} as the new ` +
       `accepted version; it does not re-prove the bug${one ? "" : "s"})`);

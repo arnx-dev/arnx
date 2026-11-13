@@ -349,6 +349,7 @@ test("a record of an older arnx (no accepted tests) is no alarm; accept --again 
   expect(await cli.run("check")).toBe(TESTS_CHANGED);
   expect(cli.stdout).toContain(`To restore it: arnx accept --again ${RID}`);
   expect(cli.stdout).not.toContain("git checkout");
+  expect(cli.stdout).not.toContain("--keep-edits");
   expect(runs()).toBe(1);
 });
 

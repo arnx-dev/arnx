@@ -235,7 +235,9 @@ nothing, and a coding agent told to make `arnx check` pass cannot do it that way
 test does not help either: a sha256 there counts only when it is the committed one or one `arnx accept` wrote on this
 machine (it keeps a copy in `~/.config/arnx/pins/`, outside the repository); a changed or removed entry exits 4 too.
 A fresh clone or CI has no such copy and trusts the committed record, so a commit that edits both shows only in its
-diff: `arnx review` of that change names the accepted tests and pins it edits or removes. `arnx check` runs only
+diff: `arnx review` of that change names the accepted tests and pins it edits or removes. In CI, check out the full
+history (`fetch-depth: 0` with actions/checkout) so `arnx check` can compare the record with its history; a shallow
+clone trusts the committed record as it is. `arnx check` runs only
 pinned files, read as regular files (never through a link) and never placed over a file of your project: a file under
 `.arnx/tests/` that accept did not write, or a link there, exits 4 too (OS and editor leftovers such as `.DS_Store`,
 `*.swp`, `name~` and Python's `__pycache__` are ignored). An accepted test that ends skipped, or that the run does not
