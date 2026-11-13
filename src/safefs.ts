@@ -94,6 +94,40 @@ export function readRegular(path: string, max: number): string | null {
   }
 }
 
+/** The bytes of the file `rel` under `root`, read without following a link: "gone" when nothing is there (or it went
+ * while being read), "other" when it is not a regular file, or a folder on the way to it is not a real one. */
+export function regularBytes(root: string, rel: string): Buffer | "gone" | "other" {
+  const path = join(root, rel);
+  let st;
+  try {
+    st = lstatSync(path, { throwIfNoEntry: false });
+  } catch {
+    return "gone"; // a file where a folder on the way should be: nothing at `rel`
+  }
+  if (!st) return "gone";
+  if (!st.isFile() || !realFolders(root, rel)) return "other";
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ENOENT" ? "gone" : "other";
+  }
+  try {
+    const at = fstatSync(fd);
+    if (!at.isFile()) return "other";
+    const buf = Buffer.alloc(at.size);
+    let got = 0;
+    while (got < at.size) {
+      const n = readSync(fd, buf, got, at.size - got, got);
+      if (!n) break;
+      got += n;
+    }
+    return buf.subarray(0, got);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** `src`'s tree at `dest` (which must not exist): folders (owner rwx added), regular files, and links whose target resolves
  * inside `dest` once all is in place. A link leading out of it, or nowhere, and a FIFO, a socket or a device are left out. */
 export function copyTreeInside(src: string, dest: string): void {

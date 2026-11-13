@@ -2,13 +2,14 @@
 // run what it wrote `runs` times in the sandbox and classify; for a review, tests that failed in every run (and, for
 // the fix proof, some that passed in every run) then run on the code before the change. Used by review and by
 // answered questions.
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync,
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync,
   writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import { type AgentResult, StopRound, Workspace } from "./agent";
 import { adapterFor, getAdapter } from "./adapters";
-import { runName } from "./kept";
+import { runName, storedName } from "./kept";
+import { entriesUnder, regularBytes } from "./safefs";
 import { DEFAULT_ACCEPTED_DIR } from "./adapters/types";
 import { absentFromSnapshot, bakedError, bakedIn, imageFiles, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
   from "./baked";
@@ -218,20 +219,27 @@ export function keptTestFiles(repo: string, cfg: ReviewConfig, acceptedTestsDir?
  * run name; the run paths placed. A file stored both ways is placed once, only when both copies are the same: of two
  * that differ, arnx never picks the one that runs (check refuses them first, as changedAccepted names them). */
 export function placeKept(repo: string, snap: string): string[] {
-  if (!existsSync(join(repo, DOME))) return [];
-  const stored = collect(join(repo, DOME), "", /./);
-  const differ = stored.filter((p) => p !== runName(p) && stored.includes(runName(p)) &&
-    !readFileSync(join(repo, DOME, p)).equals(readFileSync(join(repo, DOME, runName(p)))));
+  const dome = join(repo, DOME);
+  if (!existsSync(dome)) return [];
+  // Read as changedAccepted hashes them: never through a link, so what runs is what was checked.
+  const all = new Set(entriesUnder(dome));
+  const same = (a: Buffer | string, b: Buffer | string) => typeof a !== "string" && typeof b !== "string" && a.equals(b);
+  const differ = [...all].filter((p) => runName(p) === p && all.has(storedName(p)) &&
+    !same(regularBytes(dome, p), regularBytes(dome, storedName(p))));
   if (differ.length) {
-    throw new ArnxError(`a kept test is stored under two names that differ (${differ.map((p) => `${DOME}/${p}`).join(", ")} ` +
-      "and the same without .arnx): delete the copy you do not want, then run this again");
+    throw new ArnxError(`a kept test is stored under two names that differ (${differ.map((p) => `${DOME}/${storedName(p)}`)
+      .join(", ")} and the same without .arnx): delete the copy you do not want, then run this again`);
   }
-  for (const rel of stored) {
+  const placed: string[] = [];
+  for (const rel of collect(dome, "", /./)) {
+    const bytes = regularBytes(dome, rel);
+    if (typeof bytes === "string") continue; // gone meanwhile, or no longer a regular file: nothing of it runs
     const to = join(snap, runName(rel));
     mkdirSync(dirname(to), { recursive: true });
-    copyFileSync(join(repo, DOME, rel), to);
+    writeFileSync(to, bytes, { mode: (lstatSync(join(dome, rel), { throwIfNoEntry: false })?.mode ?? 0o644) & 0o777 });
+    placed.push(runName(rel));
   }
-  return [...new Set(stored.map(runName))].sort();
+  return [...new Set(placed)].sort();
 }
 
 /** The project among `projects` whose folder holds `path` (repository-relative), the deepest one. */

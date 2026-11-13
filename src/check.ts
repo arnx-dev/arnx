@@ -3,7 +3,8 @@
 // tests behind findings marked real fail; fixing the code turns them green, and this is how to see it without setting up the services by hand.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync }
+  from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import { adapterFor } from "./adapters";
@@ -12,6 +13,7 @@ import { A_FAKED_FILE, markUnproven, unprovenText } from "./diagnose";
 import { filesAt, git, hasCommits, takeSnapshot, type Withheld } from "./change";
 import { configSuspects, loadReviewFile, type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
 import { ArnxError } from "./errors";
+import { entriesUnder, regularBytes } from "./safefs";
 import { placed } from "./fixprompt";
 import { baseName, ownerFile, runTests, type TestResult } from "./outcomes";
 import { keyReruns, rerunCandidates, rerunWithRealKeys, sweepRealKeyCopies } from "./realkey";
@@ -147,6 +149,9 @@ export function moveOut(repo: string, settings: Settings, local: string | null =
   const files = legacyAccepted(repo, settings);
   const changed = changedAccepted(repo, local).filter((c) => files.has(c.path));
   if (changed.length) throw new ArnxError(changedSummary(changed, repo));
+  // Written under .arnx/tests/, never through a link.
+  const odd = irregularKept(repo);
+  if (odd.length) throw new ArnxError(`not a regular file (a link or a folder) where arnx keeps tests: ${odd.join(", ")}`);
   const rec = readRecord(repo);
   const pins: Record<string, Pin | null> = {};
   const review: Record<string, string> = {};
@@ -165,7 +170,7 @@ export function moveOut(repo: string, settings: Settings, local: string | null =
     const pin = rec.files[p];
     if (!pin) continue;
     delete rec.files[p];
-    rec.files[to] = { ...pin, sha256: sha256(join(repo, to)) };
+    rec.files[to] = { ...pin, sha256: writtenSha(repo, to) };
     pins[p] = null;
     pins[to] = rec.files[to]!;
     review[p] = review[to] = pin.review;
@@ -557,7 +562,19 @@ export interface ChangedTest { path: string; review: string; change: typeof CHAN
 interface LocalPins { schema_version: 1; repo: string;
   files: Record<string, { review: string; sha256: string[]; tests?: (string[] | null)[]; removed?: boolean }> }
 
-const sha256 = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
+/** A kept file's sha256, its bytes read without following a link (safefs.ts regularBytes), so hashing, placing and
+ * counting kept files agree: "gone" when nothing is there, "other" when it is not a regular file. */
+function keptSha(repo: string, rel: string): string {
+  const b = regularBytes(repo, rel);
+  return typeof b === "string" ? b : createHash("sha256").update(b).digest("hex");
+}
+
+/** The sha256 of a file arnx just wrote under .arnx/tests/ (accept, --move); one that is not a regular file stops it. */
+function writtenSha(repo: string, rel: string): string {
+  const sha = keptSha(repo, rel);
+  if (sha === "gone" || sha === "other") throw new ArnxError(`${rel} is not a regular file`);
+  return sha;
+}
 /** An accepted-test list as compared: order and repeats do not count; "" when there is none. */
 const testsOf = (tests: unknown) => Array.isArray(tests) ? JSON.stringify([...new Set(tests.map(String))].sort()) : "";
 
@@ -654,7 +671,7 @@ export function recordAccepted(repo: string, review: string, tests: Record<strin
     }
   }
   for (const [p, t] of Object.entries(tests)) {
-    rec.files[p] = { sha256: sha256(join(repo, p)), review, tests: t };
+    rec.files[p] = { sha256: writtenSha(repo, p), review, tests: t };
     pins[p] = rec.files[p]!;
   }
   writeLocal(local, repo, () => review, pins);
@@ -746,28 +763,47 @@ export function changedAccepted(repo: string, local: string | null = null): Chan
       out.push({ path, review, change: "repinned" });
       continue;
     }
-    const full = join(repo, path);
-    if (!existsSync(full)) out.push({ path, review, change: "deleted" });
-    else if (sha256(full) !== w.sha256) out.push({ path, review, change: "modified" });
+    // A pinned file is a regular file, read without following a link: a link (or a folder) there is an edit.
+    const at = keptSha(repo, path);
+    if (at === "gone") out.push({ path, review, change: "deleted" });
+    else if (at !== w.sha256) out.push({ path, review, change: "modified" });
   }
-  // One run name, two files that differ (stored with .arnx appended and by the older name), one of them pinned: only
-  // one runs, and it must be the pinned one. Neither is chosen: both are named.
+  // One run name, two entries (stored with .arnx appended and by the older name), one of them pinned: only one runs,
+  // and it must be the pinned one. One that is not a regular file is an edit; two files that differ are both named,
+  // neither chosen.
+  const named = (p: string) => out.some((c) => c.path === p);
   for (const [older, stored] of keptPairs(repo)) {
     const pin = now[older] ?? head[older] ?? now[stored] ?? head[stored];
-    if (!pin || sha256(join(repo, older)) === sha256(join(repo, stored))) continue;
-    for (const p of [older, stored]) {
-      if (!out.some((c) => c.path === p)) out.push({ path: p, review: pin.review, change: "duplicate" });
+    const [a, b] = [keptSha(repo, older), keptSha(repo, stored)];
+    // Gone meanwhile: a pinned one is named above.
+    if (!pin || a === "gone" || b === "gone") continue;
+    for (const [p, x] of [[older, a], [stored, b]] as const) {
+      if (x === "other" && !named(p)) out.push({ path: p, review: pin.review, change: "modified" });
     }
+    if (a === "other" || b === "other" || a === b) continue;
+    for (const p of [older, stored]) if (!named(p)) out.push({ path: p, review: pin.review, change: "duplicate" });
   }
   return out;
 }
 
-/** Kept files under .arnx/tests/ that exist both by the older name and by the stored name: [older, stored] paths. */
+/** Entries under .arnx/tests/ (files, links, folders, never entered through a link) that exist both by the older name
+ * and by the stored name: [older, stored] paths. */
 function keptPairs(repo: string): [string, string][] {
-  if (!existsSync(join(repo, DOME))) return [];
-  const files = new Set(collect(join(repo, DOME), "", /./));
-  return [...files].filter((p) => runName(p) === p && files.has(storedName(p)))
+  const all = new Set(entriesUnder(join(repo, DOME)));
+  return [...all].filter((p) => runName(p) === p && all.has(storedName(p)))
     .map((p) => [`${DOME}/${p}`, `${DOME}/${storedName(p)}`]);
+}
+
+/** What under .arnx/tests/ is neither a regular file nor a folder (a link, a FIFO), and the pinned paths that are not
+ * regular files: accept writes there, never through a link, and refuses while any is there. */
+export function irregularKept(repo: string): string[] {
+  const dome = join(repo, DOME);
+  const odd = entriesUnder(dome).filter((p) => {
+    const st = lstatSync(join(dome, p), { throwIfNoEntry: false });
+    return !!st && !st.isFile() && !st.isDirectory();
+  }).map((p) => `${DOME}/${p}`);
+  const pinned = Object.keys(readRecord(repo).files).filter((p) => keptSha(repo, p) === "other");
+  return [...new Set([...odd, ...pinned])].sort();
 }
 
 /** The accepted files that match their trusted pin, which approve and setup let fail (their bugs are not fixed yet),
@@ -797,12 +833,17 @@ export function keepEdits(repo: string, local: string | null = null): KeptEdits 
   }
   const restoredTests: string[] = [];
   if (!changed.length) return { changed, restoredTests };
+  // A link or a folder is no edit to keep: its pin would be a file it leads to, or none.
+  const odd = changed.filter((c) => keptSha(repo, c.path) === "other").map((c) => c.path);
+  if (odd.length) {
+    throw new ArnxError(`not a regular file (a link or a folder): ${odd.join(", ")}: delete it or put the file back, ` +
+      "then run this again");
+  }
   const rec = readRecord(repo);
   const head = committedRecord(repo);
   const mine = readLocal(local, repo).files;
   const pins: Record<string, Pin | null> = {};
   for (const c of changed) {
-    const full = join(repo, c.path);
     // Its accepted tests as recorded when trusted; else (edited, or the entry removed) HEAD's, else the last arnx
     // wrote here.
     const w = rec.files[c.path];
@@ -810,7 +851,8 @@ export function keepEdits(repo: string, local: string | null = null): KeptEdits 
     const ok = w && trustedTests(w, head[c.path], mine[c.path]);
     if (w && !ok) restoredTests.push(c.path);
     const tests = ok ? w.tests : trusted ?? undefined;
-    if (existsSync(full)) rec.files[c.path] = { sha256: sha256(full), review: c.review, ...(tests ? { tests } : {}) };
+    const sha = keptSha(repo, c.path);
+    if (sha !== "gone") rec.files[c.path] = { sha256: sha, review: c.review, ...(tests ? { tests } : {}) };
     else delete rec.files[c.path];
     pins[c.path] = rec.files[c.path] ?? null;
   }
@@ -843,15 +885,16 @@ export function storeOlderKept(repo: string, local: string | null = null): Store
   const review: Record<string, string> = {};
   for (const rel of older) {
     const from = `${DOME}/${rel}`, to = `${DOME}/${storedName(rel)}`;
-    if (changed.has(from)) continue;
-    let done: "moved" | "differ" | "gone";
+    if (changed.has(from) || changed.has(to)) continue;
+    let done: "moved" | "differ" | "gone" | "vanished";
     try {
-      done = moveOlder(join(repo, from), join(repo, to));
+      done = moveOlder(repo, from, to);
     } catch (e) {
       // Moved meanwhile (another check or accept at the same time): already stored.
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw e;
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      done = "vanished";
     }
+    if (done === "vanished") continue;
     if (done === "differ") {
       out.both.push(from);
       continue;
@@ -873,15 +916,20 @@ export function storeOlderKept(repo: string, local: string | null = null): Store
   return out;
 }
 
-/** An older kept file at `from` to its stored name `to`: renamed, or removed beside an identical one ("gone"), or left
- * beside one that differs. */
-function moveOlder(from: string, to: string): "moved" | "differ" | "gone" {
-  if (!existsSync(to)) {
-    renameSync(from, to);
+/** An older kept file at `from` to its stored name `to` (repository-relative), nothing read through a link: renamed when
+ * nothing is at `to`; removed only beside a regular file with the same bytes ("gone"); else left ("differ"; a `from`
+ * that is not a regular file is left too). "vanished": `from` went meanwhile. */
+function moveOlder(repo: string, from: string, to: string): "moved" | "differ" | "gone" | "vanished" {
+  const was = regularBytes(repo, from);
+  if (was === "gone") return "vanished";
+  if (was === "other") return "differ";
+  if (!lstatSync(join(repo, to), { throwIfNoEntry: false })) {
+    renameSync(join(repo, from), join(repo, to));
     return "moved";
   }
-  if (!readFileSync(from).equals(readFileSync(to))) return "differ";
-  rmSync(from);
+  const there = regularBytes(repo, to);
+  if (typeof there === "string" || !there.equals(was)) return "differ";
+  rmSync(join(repo, from));
   return "gone";
 }
 
@@ -921,10 +969,12 @@ export function changedSummary(changed: ChangedTest[], repo: string): string {
     ...changed.map((c) => `  ${LABEL[c.change]} ${c.path}${WHY[c.change]}`)];
   const reviews = [...new Set(changed.map((c) => c.review))];
   for (const r of reviews) {
-    const mine = changed.filter((c) => c.review === r);
+    // Two copies of one test are settled by deleting one (below): accepting again leaves the other where it is.
+    const mine = changed.filter((c) => c.review === r && c.change !== "duplicate");
+    if (!mine.length) continue;
     const it = mine.length === 1 ? "it" : "them";
     const what = reviews.length === 1 ? it : `the file${mine.length === 1 ? "" : "s"} of review ${r}`;
-    const paths = mine.every((c) => c.change !== "duplicate" && restorable(repo, c)) ? mine.map((c) => c.path) : [];
+    const paths = mine.every((c) => restorable(repo, c)) ? mine.map((c) => c.path) : [];
     if (paths.length && mine.some((c) => c.change === "repinned" || c.change === "unpinned")) {
       paths.push(ACCEPTED_RECORD);
     }
@@ -932,6 +982,11 @@ export function changedSummary(changed: ChangedTest[], repo: string): string {
       (paths.length ? `, or git checkout -- ${paths.join(" ")}` : ""));
   }
   if (kinds.has("duplicate")) lines.push("A test stored under two names: delete the copy you do not want, then arnx check");
+  const odd = changed.filter((c) => keptSha(repo, c.path) === "other").map((c) => c.path);
+  if (odd.length) {
+    lines.push(`Not a regular file (a link or a folder): ${odd.join(", ")}; delete ${odd.length === 1 ? "it" : "them"} ` +
+      "first (arnx never reads or writes a kept test through a link)");
+  }
   if (only === "duplicate") return lines.join("\n");
   lines.push(only === "deleted"
     ? `To keep ${one ? "it" : "them"} deleted: arnx accept --keep-edits (drops ${one ? "it" : "them"} from the accepted tests)`

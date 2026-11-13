@@ -2,8 +2,8 @@
 // or linter can pick them up: check and accept store them under their stored names (.arnx appended), each pin moved
 // with its file, and say so in one line. A tampered one is refused, never moved.
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { ACCEPTED_RECORD, changedAccepted, localPinsPath, recordAccepted, storedOlderText, storeOlderKept, TESTS_CHANGED }
   from "../src/check";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
@@ -241,4 +241,80 @@ test("a pinned older file deleted, its entry kept, beside a stored copy, is dele
   expect(await cli.run("check")).toBe(TESTS_CHANGED);
   expect(cli.stdout).toContain(`deleted  ${OTHER}`);
   expect(seen).toEqual([]);
+});
+
+// Every pinned path, and both entries of a kept pair, must be a regular file: a link or a folder there is an edit
+// (exit 4), read and counted the same way it would be placed, and accept writes nothing through one.
+test("a link at the stored name beside a pinned older file is refused (exit 4) and deletes nothing, with no record here",
+  async () => {
+  // CI: a fresh checkout, every run a first run, no record of the pins outside the repository.
+  const seen: string[] = [];
+  const { repo, cli } = await repoWithReview({}, seen);
+  olderReview(repo, {});
+  symlinkSync("test_z.py", join(repo, `${OTHER}.arnx`));
+  commit(repo, "a link beside the accepted test");
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain(`modified ${OTHER}.arnx`);
+  expect(cli.stdout).toContain(`Not a regular file (a link or a folder): ${OTHER}.arnx`);
+  expect(cli.stdout).not.toContain("Stored");
+  expect(seen).toEqual([]);
+  expect(readFileSync(join(repo, OTHER), "utf8")).toBe("def test_z():\n    assert 0\n");
+  expect(Object.keys(record(repo))).toContain(OTHER);
+  // accept refuses too, before writing or deleting anything.
+  cli.out.length = 0;
+  expect(await cli.run("accept", "--no-answers", "--no-check")).not.toBe(0);
+  expect(cli.stderr).toContain(`not a regular file (a link or a folder) where arnx keeps tests: ${OTHER}.arnx`);
+  expect([existsSync(join(repo, OTHER)), lstatSync(join(repo, `${OTHER}.arnx`)).isSymbolicLink(), existsSync(join(repo, KEPT))])
+    .toEqual([true, true, false]);
+});
+
+test("a pinned stored file replaced by a link to an identical copy elsewhere is refused (exit 4); accept refuses too",
+  async () => {
+  const seen: string[] = [];
+  const { repo, cli } = await repoWithReview({}, seen);
+  expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
+  commit(repo, "accepted");
+  writeFileSync(join(repo, "copy.py"), readFileSync(join(repo, KEPT)));
+  rmSync(join(repo, KEPT));
+  symlinkSync(relative(dirname(join(repo, KEPT)), join(repo, "copy.py")), join(repo, KEPT));
+  expect(readFileSync(join(repo, KEPT), "utf8")).toBe(BODY); // the same bytes, through the link
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain(`modified ${KEPT}`);
+  expect(seen).toEqual([]);
+  cli.out.length = 0;
+  expect(await cli.run("accept", "--again", "--no-answers", "--no-check")).not.toBe(0);
+  expect(cli.stderr).toContain(`where arnx keeps tests: ${KEPT}`);
+  expect(lstatSync(join(repo, KEPT)).isSymbolicLink()).toBe(true);
+  expect(readFileSync(join(repo, "copy.py"), "utf8")).toBe(BODY); // nothing written through the link
+});
+
+test("a folder at a pinned path is refused (exit 4)", async () => {
+  const seen: string[] = [];
+  const { repo, cli } = await repoWithReview({}, seen);
+  expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
+  rmSync(join(repo, KEPT));
+  mkdirSync(join(repo, KEPT));
+  writeFileSync(join(repo, KEPT, "x.py"), BODY);
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain(`modified ${KEPT}`);
+  expect(seen).toEqual([]);
+  cli.out.length = 0;
+  expect(await cli.run("accept", "--again", "--no-answers", "--no-check")).not.toBe(0);
+  expect(existsSync(join(repo, KEPT, "x.py"))).toBe(true);
+});
+
+test("two copies of one test are settled by deleting one, which the refusal says, not by accepting again", async () => {
+  const env = { XDG_CONFIG_HOME: tmp() };
+  const { repo, cli } = await repoWithReview(env);
+  olderReview(repo, env);
+  put(repo, `${OTHER}.arnx`, "def test_z():\n    assert 1\n");
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).not.toContain("arnx accept --again");
+  expect(cli.stdout).toContain("delete the copy you do not want, then arnx check");
+  rmSync(join(repo, `${OTHER}.arnx`));
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(1);
+  expect(cli.stdout).toContain("Stored 2 older kept files out of your test runs.");
 });

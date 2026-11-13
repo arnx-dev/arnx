@@ -61,7 +61,7 @@ kept, as stored.
 |---|---|---|
 | `path` | string | The accepted file, relative to the repository. |
 | `review` | string | The review whose `arnx accept` wrote it. |
-| `change` | string | `modified` or `deleted` (the file differs from its recorded sha256, or is gone), `repinned` (its entry in `.arnx/accepted-tests.json`, its sha256 or its `tests`, was changed, and not by `arnx accept` on this machine), `unpinned` (its entry was removed, or the whole file) or `duplicate` (one test stored under two names, with and without `.arnx`, that differ, one of them pinned: both are listed, and nothing runs until the user deletes one). |
+| `change` | string | `modified` or `deleted` (the file differs from its recorded sha256, or is not a regular file, such as a link or a folder; or it is gone), `repinned` (its entry in `.arnx/accepted-tests.json`, its sha256 or its `tests`, was changed, and not by `arnx accept` on this machine), `unpinned` (its entry was removed, or the whole file) or `duplicate` (one test stored under two names, with and without `.arnx`, that differ, one of them pinned: both are listed, and nothing runs until the user deletes one). |
 
 ## Each possible contradiction
 

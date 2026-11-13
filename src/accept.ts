@@ -30,7 +30,7 @@ import { refString, type Settings } from "./settings";
 import { agentUse, logUsage } from "./usage";
 import { runName, storedName } from "./kept";
 import { acceptedDirFor, collect, DOME, dockerSession, readCopies, runPath, testRound, writeDirOf } from "./testround";
-import { acceptedTestIds, recordAccepted, storeOlderKept, type StoredOlder, testsByFile } from "./check";
+import { acceptedTestIds, irregularKept, recordAccepted, storeOlderKept, type StoredOlder, testsByFile } from "./check";
 import { isoSeconds } from "./util";
 import { inPool } from "./challenge";
 import { sliceDiff, treeValues, workingTreeFiles } from "./change";
@@ -446,6 +446,13 @@ export async function accept(repo: string, rdir: string, settings: Settings,
     throw new ArnxError(`review ${review.id} was already accepted; pass --again to apply edited marks`);
   }
   const say = (m: string) => o.progress?.(m);
+  // accept writes under .arnx/tests/ and never through a link: a link (or a folder at a pinned file) stops it before
+  // anything is written or deleted.
+  const odd = irregularKept(repo);
+  if (odd.length) {
+    throw new ArnxError(`not a regular file (a link or a folder) where arnx keeps tests: ${odd.slice(0, 5).join(", ")}` +
+      `${odd.length > 5 ? ", …" : ""}; delete ${odd.length === 1 ? "it" : "them"} (or put the file back), then run accept again`);
+  }
   // Kept files an older arnx stored by the names they run by go out of the project's runs first; this review's own
   // are then written again under the same stored names.
   const storedOlder = storeOlderKept(repo, o.pins ?? null);
