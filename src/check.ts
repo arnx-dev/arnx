@@ -491,13 +491,13 @@ function summaryOf(results: ProjectCheck[]): [string, number] {
   const accTotal = accFail.length + accPass;
   const skipped = ran.reduce((n, r) => n + r.skipped, 0);
   // Accepted tests that ended skipped: not passing.
-  const skipAcc = ran.flatMap((r) => (r.skippedAccepted ?? []).map((id) => `${multi ? `${r.project}: ` : ""}${id.split("::").at(-1)}`));
+  const skipAcc = ran.flatMap((r) => (r.skippedAccepted ?? []).map((id) => `${multi ? `${r.project}: ` : ""}${splitId(id)[1]}`));
   // Accepted tests the run left out: not passing either. Those of a file that could not load for a file left out as
   // secret-looking (its error is in couldNotRun) are that file's, not the configuration's.
   const missed = ran.flatMap((r) => (r.missingAccepted ?? []).map((id) => {
     const [file, name] = splitId(id);
     return { name: `${multi ? `${r.project}: ` : ""}${name}`,
-      blocked: (r.couldNotRun ?? []).some((x) => splitId(x.testId)[0] === file) };
+      blocked: (r.couldNotRun ?? []).some((x) => ownerFile(splitId(x.testId)[0], [file]) !== null) };
   }));
   const missAcc = missed.map((x) => x.name);
   // With no accepted test among them (an answer's tests alone), the rest are not "other".
@@ -651,16 +651,17 @@ function writtenSha(repo: string, rel: string): string {
 }
 /** An accepted-test list as compared: order and repeats do not count; "" when there is none. */
 const testsOf = (tests: unknown) => Array.isArray(tests) ? JSON.stringify([...new Set(tests.map(String))].sort()) : "";
-/** An entry's lists (or one this machine's record keeps: a bare list is `tests` alone) as compared. */
-const listsOf = (x: unknown): string => {
-  const e: { tests?: unknown; ids?: unknown } = Array.isArray(x) ? { tests: x } : x && typeof x === "object" ? x : {};
-  return Array.isArray(e.ids) ? JSON.stringify([testsOf(e.tests), testsOf(e.ids)]) : testsOf(e.tests);
-};
-/** The lists of an entry (or of what this machine's record keeps), absent ones left out. */
+/** The lists of an entry, or of what this machine's record keeps (a bare list is `tests` alone; null: none), absent ones
+ * left out. */
 const listsIn = (x: unknown): Lists => {
   const e: { tests?: unknown; ids?: unknown } = Array.isArray(x) ? { tests: x } : x && typeof x === "object" ? x : {};
   return { ...(Array.isArray(e.tests) ? { tests: e.tests.map(String) } : {}),
     ...(Array.isArray(e.ids) ? { ids: e.ids.map(String) } : {}) };
+};
+/** Those lists as compared. */
+const listsOf = (x: unknown): string => {
+  const e = listsIn(x);
+  return e.ids ? JSON.stringify([testsOf(e.tests), testsOf(e.ids)]) : testsOf(e.tests);
 };
 
 function parseRecord(text: string): AcceptedRecord {
@@ -810,10 +811,20 @@ function touched(repo: string, revs: string[], paths: string[]): Set<string> {
     .split("\0").map((p) => p.trim()).filter(Boolean));
 }
 
-/** Whether an entry's accepted-test lists are trusted: ones arnx wrote here (`l`), else HEAD's (`c`; none: any). */
-const trustedTests = (w: Pin, c: Pin | undefined, l: LocalPins["files"][string] | undefined) => l
-  ? (Array.isArray(l.tests) ? l.tests : [null]).some((t) => listsOf(t) === listsOf(w))
-  : !c || listsOf(c) === listsOf(w);
+/** Whether an entry's accepted-test lists are trusted: ones arnx wrote here (`l`), else HEAD's (`c`; none: any). An
+ * entry without a list (`tests`, `ids`) that HEAD's entry or one arnx pinned here has is trusted only as HEAD's own:
+ * an older list arnx once wrote here would otherwise let an edit drop the exact ids (a branch switch to an older
+ * record is HEAD's). */
+const trustedTests = (w: Pin, c: Pin | undefined, l: LocalPins["files"][string] | undefined) => {
+  const mine = l ? (Array.isArray(l.tests) ? l.tests : [null]) : [];
+  const has = listsIn(w);
+  const fewer = [...mine, c].some((x) => {
+    const k = listsIn(x);
+    return (!!k.tests && !has.tests) || (!!k.ids && !has.ids);
+  });
+  if (fewer) return !!c && listsOf(c) === listsOf(w);
+  return l ? mine.some((t) => listsOf(t) === listsOf(w)) : !c || listsOf(c) === listsOf(w);
+};
 
 /** Accepted files changed or deleted since accept recorded them, and pins changed or removed by anything but arnx on
  * this machine (`local`, localPinsPath). Files accept never recorded (kept by an arnx that did not record them) are not

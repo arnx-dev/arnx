@@ -140,7 +140,7 @@ this change`) or lists paths in `uncovered` or `untested`:
 |---|---|---|
 | 0 | no `not-checked` finding; `confirmed` findings do not fail the run (also when `status` is `partly-covered` or `not-tested`) | all accepted tests pass |
 | 1 | a `not-checked` finding | some accepted tests fail, are skipped or do not report |
-| 2 | incomplete (or failed: the message says why) | no report, unproven tests, or a kept file not run |
+| 2 | incomplete (or failed: the message says why) | no report, unproven tests, or a kept file pinned by an older arnx not run |
 | 3 | setup needed (config, consent, keys, Docker, environment) | nothing accepted yet |
 | 4 | | an accepted test changed since accept |
 | 130 | interrupted | interrupted |

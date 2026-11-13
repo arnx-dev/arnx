@@ -222,6 +222,40 @@ test("a kept file with named tests that reports nothing names them too (exit 1)"
   expect(cli.stdout).toContain("did not run, the runner leaves it out");
 });
 
+// An older arnx accepted the file on this machine (a list without ids, or none), then 0.1.12 accepted it again with
+// ids, committed. Dropping ids (and tests) from the record is an edit, though this machine once wrote that weaker list:
+// only HEAD's own entry may have fewer lists than arnx pinned.
+for (const older of ["a list without ids", "no list"] as const) {
+  test(`dropping ids where this machine also pinned ${older} is an edit (exit 4)`, async () => {
+    const { repo, cli, env } = await kept([[RUN, "test_z[0]", "passed", ""], [RUN, "test_z[1]", "failed", "assert 0 == 2"]],
+      ["test_z[1]"]);
+    const weaken = (e: Record<string, unknown>) => {
+      delete e.ids;
+      if (older === "no list") delete e.tests;
+    };
+    // Rewrite history: the older arnx's record and this machine's copy of what it pinned, committed.
+    const rp = join(repo, ACCEPTED_RECORD);
+    const local = localPinsPath(env, repo)!;
+    const rec = JSON.parse(readFileSync(rp, "utf8"));
+    weaken(rec.files[KEPT]);
+    writeFileSync(rp, JSON.stringify(rec, null, 2) + "\n");
+    const pins = JSON.parse(readFileSync(local, "utf8"));
+    pins.files[KEPT].tests = [older === "no list" ? null : ["test_z"]];
+    writeFileSync(local, JSON.stringify(pins, null, 2) + "\n");
+    commit(repo, "older accept");
+    recordAccepted(repo, RID, { [KEPT]: ["test_z[1]"] }, local);
+    commit(repo, "accept again");
+    expect(await cli.run("check")).toBe(1);
+    // The variant failing on the bug is deselected, and ids dropped from the record.
+    const now = JSON.parse(readFileSync(rp, "utf8"));
+    weaken(now.files[KEPT]);
+    writeFileSync(rp, JSON.stringify(now, null, 2) + "\n");
+    cli.out.length = 0;
+    expect(await cli.run("check", "--json", "--quiet")).toBe(TESTS_CHANGED);
+    expect(JSON.parse(cli.stdout).changed).toEqual([{ path: KEPT, review: RID, change: "repinned" }]);
+  });
+}
+
 // vitest: a top-level title with brackets is the title's own ("adds[1]" from test.each), recorded and required whole.
 test("a JavaScript title with brackets must report whole", async () => {
   const at = mkdtempSync(join(tmp(), "js-"));
