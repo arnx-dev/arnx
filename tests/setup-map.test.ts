@@ -263,6 +263,53 @@ test("a web UI app that is the only project ends setup after its two runs", asyn
   expect([r.stop, r.problem]).toEqual(["web-ui", "only web UI here, which arnx does not set up"]);
 });
 
+test("a UI app whose two runs stop at listing says its tests did not list", async () => {
+  addWebTest();
+  const only = `version: 1\nprojects:\n${WEB}`;
+  const error = "Error: Cannot find module './setup-env' imported from vitest.config.ts";
+  class Unlisted extends VitestSession {
+    override run(command: string) {
+      const r = super.run(command);
+      return /vitest list/.test(command) ? { ...r, exitCode: 1, output: `boot noise\n${error}` } : r;
+    }
+  }
+  const sessions: SessionFactory = async (_cfg, snap, _log, body) => body(new Unlisted(snap, WEB_FAILS));
+  const m = new ScriptedAgent([
+    [tool("try_project", { yaml: only })],
+    [tool("try_project", { yaml: only.replace("{targets}", "--silent {targets}") })],
+    [tool("propose", { yaml: only })],
+    [text("unreachable")],
+  ]);
+  const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: sessions });
+  expect(r.stop).toBe("web-ui");
+  expect(r.problem).toContain("its tests did not list in 2 tries");
+  expect(r.problem).toContain(error);
+  expect(r.problem).not.toContain("only web UI here");
+});
+
+test("a UI app that never listed is still listed under uncovered as web UI", async () => {
+  addWebTest();
+  class Unlisted extends VitestSession {
+    override run(command: string) {
+      const r = super.run(command);
+      return /vitest list/.test(command) ? { ...r, exitCode: 1, output: "Error: no config" } : r;
+    }
+  }
+  const sessions: SessionFactory = async (cfg, snap, _log, body) =>
+    body(cfg.name === "web" ? new Unlisted(snap, WEB_FAILS) : apiSession(snap));
+  const m = new ScriptedAgent([
+    [tool("try_project", { yaml: bothEnv(1), project: "web" })],
+    [tool("try_project", { yaml: bothEnv(2), project: "web" })],
+    [tool("try_project", { yaml: BOTH, project: "api" })],
+    [tool("propose", { yaml: BOTH })],
+    [tool("propose", { yaml: BOTH })],
+    [text("api only.")],
+  ]);
+  const r = await runSetup(repo, defaultSettings(), m, { outDir: join(tmp(), "s"), sessionFactory: sessions });
+  expect(result(m, 2)).toContain("web is a web UI app");
+  expect(parseReviewFile(r.yamlText!).uncovered).toContainEqual({ path: "/web/", reason: "web UI" });
+});
+
 test("browser suites: Playwright, Cypress, Storybook and vitest's browser mode", () => {
   const files = ["app/playwright.config.ts", "app/tests/e2e/a.spec.ts", "site/cypress.config.js", "site/cypress/e2e/b.cy.js",
     "ui/.storybook/main.ts", "ui/src/Button.stories.tsx", "lib/vitest.config.ts", "plain/vitest.config.ts",
