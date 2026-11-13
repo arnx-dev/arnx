@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { SetupRequired } from "../src/errors";
 import { exitCode, load, render, summary } from "../src/report";
-import { runReview } from "../src/reviewer";
+import { projectConcurrency, runReview } from "../src/reviewer";
 import type { SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { FakeJson, FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -208,4 +208,11 @@ test("projects are tested two at a time, and the report keeps review order", asy
   expect(most).toBe(2);
   expect(review.projects).toEqual(["feed", "pay"]);
   expect(review.projectStats.map((p) => p.name)).toEqual(["feed", "pay"]);
+});
+
+test("projects are tested as many at a time as the Docker VM holds", () => {
+  const gb = 2 ** 30;
+  expect(projectConcurrency({ cpus: 2, memoryBytes: 4 * gb })).toBe(1);
+  expect(projectConcurrency({ cpus: 4, memoryBytes: 16 * gb })).toBe(2);
+  expect(projectConcurrency(null)).toBe(1);
 });

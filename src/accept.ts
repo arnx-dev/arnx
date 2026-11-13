@@ -24,7 +24,7 @@ import { promptsFor } from "./userprompts";
 import { defaultMarks, firstLine, groupsOf, load, type Marks, parseMarks, parseReports, type Review, wrapMarkdown }
   from "./report";
 import { keyReruns } from "./realkey";
-import { sayingDocker, type SessionFactory } from "./sandbox";
+import { dockerCapacity, type Limits, sandboxesFit, sayingDocker, type SessionFactory } from "./sandbox";
 import { refString, type Settings } from "./settings";
 import { agentUse, logUsage } from "./usage";
 import { acceptedDirFor, collect, DOME, dockerSession, readCopies, testRound, writeDirOf } from "./testround";
@@ -36,6 +36,12 @@ import { route } from "./route";
 
 /** Answer rounds at once (each a model round and three sandbox runs). */
 export const ANSWER_CONCURRENCY = 3;
+
+/** Answer rounds a Docker VM of this size runs at once: up to ANSWER_CONCURRENCY, as many as each sandbox's CPUs and
+ * memory allow; one when the size is unknown. */
+export function answerConcurrency(cap: { cpus: number; memoryBytes: number } | null, limits?: Limits): number {
+  return sandboxesFit(cap, ANSWER_CONCURRENCY, limits);
+}
 import type { Say } from "./progress";
 
 export interface AnswerOutcome {
@@ -487,8 +493,10 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   const answers: AnswerOutcome[] = [];
   const outcomes: (AnswerOutcome | undefined)[] = [];
   if (o.answerRunner) {
-    // Answer rounds run ANSWER_CONCURRENCY at a time, each in its own sandbox copy; tests are copied in round order.
-    await sayingDocker(o.progress, () => inPool(rounds.map((_x, k) => k), ANSWER_CONCURRENCY, async (k) => {
+    // Answer rounds run as many at a time as the Docker VM holds (at most ANSWER_CONCURRENCY), each in its own sandbox
+    // copy; tests are copied in round order.
+    const width = answerConcurrency(dockerCapacity());
+    await sayingDocker(o.progress, () => inPool(rounds.map((_x, k) => k), width, async (k) => {
       const { id, question, answer, project, key, rewrite } = rounds[k]!;
       // An answer already turned into tests (an earlier accept, same answer) is reused, not paid for again.
       const cache = join(rdir, "answers", id, "outcome.json");

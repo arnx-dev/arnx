@@ -255,6 +255,34 @@ export function requireDocker(): void {
   throw new SetupRequired(`Docker is not answering: ${said.trim().split("\n")[0]!.slice(0, 200)}`);
 }
 
+/** The Docker VM's CPUs and memory (`docker info`), or null when it cannot be read. For tests, ARNX_DOCKER_CAPACITY
+ * ("<cpus> <bytes>") is read first. */
+export function dockerCapacity(): { cpus: number; memoryBytes: number } | null {
+  const parse = (text: string) => {
+    const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(text);
+    const cpus = m ? Number(m[1]) : 0, memoryBytes = m ? Number(m[2]) : 0;
+    return cpus > 0 && memoryBytes > 0 ? { cpus, memoryBytes } : null;
+  };
+  const given = process.env.ARNX_DOCKER_CAPACITY;
+  if (given) return parse(given);
+  try {
+    const r = docker(["info", "--format", "{{.NCPU}} {{.MemTotal}}"], { timeout: 30 });
+    return r.status === 0 ? parse(r.stdout) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Sandboxes of `limits` the Docker VM holds at once, at most `max` and at least 1: each takes its CPUs and memory,
+ * plus half a GB for Docker itself. An unreadable VM holds one (slower, never out of memory). */
+export function sandboxesFit(cap: { cpus: number; memoryBytes: number } | null, max: number, limits: Limits = DEFAULT_LIMITS)
+  : number {
+  if (!cap) return 1;
+  const unit = { k: 2 ** 10, m: 2 ** 20, g: 2 ** 30 }[/[kmg]$/i.exec(limits.memory)?.[0].toLowerCase() as "k" | "m" | "g"] ?? 1;
+  const memory = parseFloat(limits.memory) * unit;
+  return Math.max(1, Math.min(max, Math.floor(cap.cpus / Number(limits.cpus)), Math.floor(cap.memoryBytes / (memory + 2 ** 29))));
+}
+
 const workdirIn = (root: string, workdir: string) => posix.normalize(posix.join(root, workdir));
 
 /** What a run does first for a project with deps_dir: link each node_modules under it into the same place under the

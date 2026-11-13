@@ -10,6 +10,7 @@ import {
   sandboxOptions, Session,
   dockerSteps, keptBox, NETWORK_OPEN, networkNotice, networkRetry,
 } from "../src/sandbox";
+import { dockerCapacity, sandboxesFit } from "../src/sandbox";
 import { withSandboxFiles } from "../src/change";
 import { probeRun } from "../src/testround";
 import { runTypecheck } from "../src/typecheck";
@@ -1215,4 +1216,39 @@ test("a network Docker will not describe counts as open: no answer, a failed one
 
 test("a network Docker cannot make at all stops the session, naming why", async () => {
   await expect(openingSession(`echo no addresses left >&2; exit 1`, prints(ISOLATED_CONFIG))).rejects.toThrow("no addresses left");
+});
+
+test("dockerCapacity reads NCPU and MemTotal", () => {
+  const fake = join(tmp(), "docker");
+  const say = (out: string, code: number) => {
+    writeFileSync(fake, `#!/bin/sh\ncase "$1" in info) printf '%s' '${out}'; exit ${code};; esac\nexit 0\n`);
+    chmodSync(fake, 0o755);
+  };
+  say("8 16777216000\n", 0);
+  expect(withDocker(fake, dockerCapacity)).toEqual({ cpus: 8, memoryBytes: 16777216000 });
+  say("8 16777216000\n", 1);
+  expect(withDocker(fake, dockerCapacity)).toBeNull();
+  say("Cannot connect", 0);
+  expect(withDocker(fake, dockerCapacity)).toBeNull();
+  say("0 0", 0);
+  expect(withDocker(fake, dockerCapacity)).toBeNull();
+});
+
+test("ARNX_DOCKER_CAPACITY is read before docker", () => {
+  const saved = process.env.ARNX_DOCKER_CAPACITY;
+  process.env.ARNX_DOCKER_CAPACITY = "2 4294967296";
+  try {
+    expect(withDocker(join(tmp(), "no-such-docker"), dockerCapacity)).toEqual({ cpus: 2, memoryBytes: 4294967296 });
+  } finally {
+    if (saved === undefined) delete process.env.ARNX_DOCKER_CAPACITY;
+    else process.env.ARNX_DOCKER_CAPACITY = saved;
+  }
+});
+
+test("sandboxesFit counts CPUs and memory, never below one", () => {
+  const gb = 2 ** 30;
+  expect(sandboxesFit(null, 5)).toBe(1);
+  expect(sandboxesFit({ cpus: 1, memoryBytes: gb }, 5)).toBe(1);
+  expect(sandboxesFit({ cpus: 64, memoryBytes: 512 * gb }, 5)).toBe(5);
+  expect(sandboxesFit({ cpus: 8, memoryBytes: 64 * gb }, 5, { cpus: "2", memory: "1024m", pids: 1, tmp: "1g" })).toBe(4);
 });

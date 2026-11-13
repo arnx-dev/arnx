@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type AnswerOutcome, accept, findReview, hasAnswers, precisionOf, projectsCollectingArnx } from "../src/accept";
+import { type AnswerOutcome, accept, answerConcurrency, findReview, hasAnswers, precisionOf, projectsCollectingArnx } from "../src/accept";
 import { parseReviewFile } from "../src/config";
 import { python } from "../src/adapters/python";
 import { ArnxError } from "../src/errors";
@@ -269,4 +269,16 @@ test("hasAnswers is false for a review with no answered question, true with one"
   expect(hasAnswers(rdir)).toBe(false);
   mark(rdir, "real", "real", "Yes, strings are allowed.");
   expect(hasAnswers(rdir)).toBe(true);
+});
+
+test("answer rounds fit a small Docker VM", () => {
+  const gb = 2 ** 30;
+  expect(answerConcurrency({ cpus: 2, memoryBytes: 4 * gb })).toBe(1);
+  expect(answerConcurrency({ cpus: 4, memoryBytes: 8 * gb })).toBe(1);
+  expect(answerConcurrency({ cpus: 8, memoryBytes: 16 * gb })).toBe(3);
+  expect(answerConcurrency({ cpus: 16, memoryBytes: 64 * gb })).toBe(3);
+});
+
+test("an unreadable Docker size runs one round at a time", () => {
+  expect(answerConcurrency(null)).toBe(1);
 });
