@@ -431,7 +431,7 @@ test("a hold below the cap (the balance allows less) is said once; a full hold s
   const capped: string[] = [];
   await brainFor(c, capped).start(start(3));
   expect(capped.filter((m) => m.includes("caps this review"))).toEqual(["Your arnx cloud balance caps this review at " +
-    "$2.00 (your cap is $3.00): it may stop early; `arnx credits` tops up"]);
+    "$2.00 (your cap is $3.00): it may stop early; own keys: arnx cloud off"]);
   const full: string[] = [];
   await brainFor(c, full).start(start(1));
   expect(full.some((m) => m.includes("caps this review"))).toBe(false);

@@ -186,7 +186,7 @@ export class CloudBrain implements Brain {
     // arnx cloud holds what the balance allows: below the cap, the review can stop early.
     if (r.hold_micro_usd < micro(x.budgetUsd)) {
       this.o.progress?.(`Your arnx cloud balance caps this review at ${usd(r.hold_micro_usd)} (your cap is ` +
-        `${usd(micro(x.budgetUsd))}): it may stop early; \`arnx credits\` tops up`);
+        `${usd(micro(x.budgetUsd))}): it may stop early; own keys: arnx cloud off`);
     }
     return { reviewId: r.review_id };
   }
