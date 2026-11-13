@@ -1,10 +1,15 @@
 // The report says only what happened: a finding the second opinion never saw is not confirmed, a test that fails before
 // the change and passes after it is not always a fix, and what already failed is named, not only counted.
 import { expect, test } from "bun:test";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { judgeFix, newNames, vacuousBefore, type Before, type BeforeRun } from "../src/before";
-import { adjudicate, CONFIRMED_FAILS, exitCode, findingStatus, neededQuestions, nextSteps, render, summary, summaryRows, yourCall,
+import { adjudicate, CONFIRMED_FAILS, exitCode, findingStatus, load, neededQuestions, nextSteps, render, save, summary, summaryRows, yourCall,
   type SuspectOutcome } from "../src/report";
 import { finding, sampleReview } from "./helpers/review";
+import { useTmp } from "./helpers/tmp";
+
+const tmp = useTmp();
 
 const f = (id: string, test: string, verdict: string | null, reason = "") =>
   ({ ...finding(id, `t.py::${test}`, test, "t.py", "assert 1 == 2", `what ${id} says`), verdict, reason });
@@ -172,4 +177,17 @@ test("review --json result: findings whenever a confirmed finding exists, clean 
   const disputed = sampleReview({ findings: [f("F1", "test_a", "disputed", "no")], questions: [], questionProjects: [] });
   const [r2, c2] = reviewJson(disputed, "m", "j");
   expect([r2, c2]).toEqual(["clean", 0]);
+});
+
+test("a saved review with no source_files does not read Complete", () => {
+  const r = sampleReview({ findings: [], passed: 3, sourceFiles: 2 });
+  save(r, tmp(), "diff text");
+  expect(render(load(tmp()))).toContain("Complete:");
+  const file = join(tmp(), "review.json");
+  const json = JSON.parse(readFileSync(file, "utf8"));
+  delete json.source_files;
+  writeFileSync(file, JSON.stringify(json));
+  const text = render(load(tmp()));
+  expect(text).toContain("Older review: this arnx did not record which files its tests reached.");
+  expect(text).not.toContain("Complete");
 });

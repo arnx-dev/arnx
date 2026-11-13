@@ -233,6 +233,9 @@ export interface Review {
   untested?: Untested[];
   /** Unique changed source files across the whole change, tested or not (absent in older reviews). */
   sourceFiles?: number;
+  /** A saved review written before `source_files` existed: nothing records which files its tests reached, so it never
+   * reads Complete (set when it is loaded; absent otherwise). */
+  noEvidence?: boolean;
   /** What the hunt suspected and what each suspect's test showed (absent when no hunt ran). */
   suspects?: SuspectOutcome[];
   /** Time spent in stages worth measuring, in seconds: the before/after check, summed over projects (absent when it
@@ -518,6 +521,7 @@ function statusLines(r: Review): string[] {
       "nothing about this change."
     : cov.m ? `Partly covered: arnx saw no test reach ${cov.m} of the ${cov.n} changed source file${cov.n === 1 ? "" : "s"} below, so finding ` +
       "nothing there says nothing about them. Check them yourself, or review them on their own with `arnx review --range`."
+    : r.noEvidence ? "Older review: this arnx did not record which files its tests reached."
     : `Complete: ${r.projects.length > 1 ? `${r.projects.length} projects tested${names}` : "the change was tested"}; ` +
       "every run reported its tests."];
   out.push(...(r.providerFailures ?? []).map(failureLine));
@@ -1331,6 +1335,7 @@ export function load(rdir: string): Review {
   if (data.unclaimed) r.unclaimed = (data.unclaimed as object[]).map((u) => rekey(u, camel) as { project: string; testId: string; message: string });
   r.groups = (data.groups ?? []) as Group[];
   r.checked = (data.checked ?? []) as Checked[];
+  if (data.source_files === undefined) r.noEvidence = true;
   // The count of changed source files is read from the diff, so old and new reviews count the same way.
   try {
     const diff = readFileSync(join(rdir, "change.diff"), "utf8");
