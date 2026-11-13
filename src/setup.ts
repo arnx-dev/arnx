@@ -1031,27 +1031,38 @@ const sameOrNested = (a: string, b: string) => a === "." || b === "." || a === b
 /** `yaml` with each project in `blocks` that it leaves out put back, with its services, and its `/<root>/` entry
  * under uncovered taken out. A project is not put back (the new file wins; `replaced` names it) when its folder
  * overlaps one of another project in the file, "." being the ancestor of every folder; nor when the file defines a
- * service of that name differently. */
-export function restoreProven(yaml: string, blocks: Map<string, ProvenBlock>):
+ * service of that name differently. A project named in `revert` that the file has too gets its block replaced by the
+ * proven one, on the same terms (its own old services give way; another project's do not). */
+export function restoreProven(yaml: string, blocks: Map<string, ProvenBlock>, o: { revert?: ReadonlySet<string> } = {}):
   { yaml: string; restored: string[]; replaced: string[] } {
   const doc = parseDocument(yaml);
   if (doc.errors.length || !blocks.size) return { yaml, restored: [], replaced: [] };
   const js = doc.toJS() as { projects?: Record<string, { root?: unknown }>; services?: Record<string, unknown>;
     uncovered?: { path?: unknown }[]; allow_env_names?: string[] } | null;
   if (!js || !js.projects || typeof js.projects !== "object") return { yaml, restored: [], replaced: [] };
-  const roots = (): string[] => Object.values(js.projects!).map((p) => folder(p?.root));
   const restored: string[] = [];
   const replaced: string[] = [];
+  const othersUse = (self: string, k: string) => Object.entries(js.projects!).some(([n, p]) => n !== self &&
+    Array.isArray((p as { services?: unknown })?.services) && ((p as { services: unknown[] }).services).includes(k));
   for (const [name, b] of blocks) {
-    if (name in js.projects) continue;
+    const reverting = name in js.projects && !!o.revert?.has(name);
+    if (name in js.projects && !reverting) continue;
     const root = folder((b.spec as { root?: unknown } | null)?.root);
-    if (roots().some((r) => sameOrNested(r, root))) {
+    const others = Object.entries(js.projects).filter(([n]) => n !== name).map(([, p]) => folder(p?.root));
+    if (others.some((r) => sameOrNested(r, root))) {
       replaced.push(name);
       continue;
     }
     const clash = Object.entries(b.services).some(([k, v]) => js.services?.[k] !== undefined &&
-      JSON.stringify(js.services[k]) !== JSON.stringify(v));
+      JSON.stringify(js.services[k]) !== JSON.stringify(v) && (!reverting || othersUse(name, k)));
     if (clash) continue;
+    if (reverting) {
+      for (const k of Object.keys(b.services)) {
+        if (js.services?.[k] === undefined) continue;
+        doc.deleteIn(["services", k]);
+        delete js.services[k];
+      }
+    }
     doc.setIn(["projects", name], doc.createNode(b.spec));
     js.projects[name] = b.spec as { root?: unknown };
     for (const [k, v] of Object.entries(b.services)) {
@@ -1848,9 +1859,9 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       ...browser.map((b) => ({ path: b.path, reason: `${BROWSER_TESTS} (${b.tool})` })),
       ...drop.flatMap((name) => webUiPaths(f, name, mapFiles).map((path) => ({ path, reason: WEB_UI })))];
     // A project proven in this setup that the agent's file leaves out is put back (restoreProven), and the agent told.
-    const putBack = (text: string): string => {
+    const putBack = (text: string, revert?: ReadonlySet<string>): string => {
       const blocks = new Map([...state.provenBlocks].filter(([n]) => !keep.has(n) && !state.webUi.has(n)));
-      const r = restoreProven(text, blocks);
+      const r = restoreProven(text, blocks, { revert });
       if (r.replaced.length) {
         state.notice += `(${r.replaced.join(", ")} ran in this setup, but its folder overlaps a project in this file: ` +
           "the file's project stays.)\n";
@@ -1877,6 +1888,19 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       try {
         last = putBack(last);
         f = parseReviewFile(withOurs(last));
+        // A later try may have changed a project that passed: its proof is for the block that ran, so that goes back.
+        const revert = new Set(f.legacy ? [] : f.projects.map((p) => p.name).filter((n) => !keep.has(n) &&
+          state.provenBlocks.has(n) && state.proven.get(n) !== projectDigest(f, n)));
+        if (revert.size) {
+          const back = putBack(last, revert);
+          try {
+            f = parseReviewFile(withOurs(back));
+            last = back;
+          } catch (e) {
+            if (!(e instanceof ArnxError)) throw e;
+            f = parseReviewFile(withOurs(last));
+          }
+        }
       } catch (e) {
         if (!(e instanceof ArnxError)) throw e;
         return null;

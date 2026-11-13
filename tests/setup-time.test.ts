@@ -238,6 +238,35 @@ test("at the limit with no file accepted, the projects proven so far are kept, t
     data: { ok: true, stop: "time", projects: ["api"], uncovered_projects: ["web"] } });
 });
 
+test("at the limit, a project proven earlier keeps its proven block when a later try changed it", async () => {
+  const clock = { ms: 0 };
+  const repo = twoProjects();
+  const changed = TWO.replace("    root: api\n", "    root: api\n    uses: [web/web.py]\n");
+  expect(changed).not.toBe(TWO);
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("try_project", { yaml: changed, project: "web" })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"),
+    sessionFactory: apiThenSlowWeb(clock), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+  expect([r.ok, r.stop, r.setAside]).toEqual([true, "time", ["web"]]);
+  const f = parseReviewFile(r.yamlText!);
+  expect(f.projects.map((p) => [p.name, p.uses])).toEqual([["api", []]]);
+  expect(f.uncovered).toEqual([{ path: "/web/", reason: TIME_LEFT_OUT }]);
+});
+
+test("at the limit, a proven block that overlaps a project in the last file gives way", async () => {
+  const clock = { ms: 0 };
+  const repo = twoProjects();
+  // The last file gives api's folder to another project; api's proven block would overlap it.
+  const taken = TWO.replace("  api:\n    root: api\n", "  core:\n    root: api\n");
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("try_project", { yaml: taken, project: "web" })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"),
+    sessionFactory: apiThenSlowWeb(clock), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+  expect(r.stop).toBe("time");
+  const names = r.yamlText ? parseReviewFile(r.yamlText).projects.map((p) => p.name) : [];
+  expect(names).not.toContain("api");
+});
+
 test("at the limit, a held try and a project proven after it are both kept: the file that keeps the most is taken",
   async () => {
   // web alone is tried first: it runs, but test_command leaves most of its tests out, so it goes back to the agent.
