@@ -975,8 +975,8 @@ class Commands {
         reviewYaml: null, record: null, seconds: seconds(), failure: null, next: ["arnx setup"] }));
       return finish(0, false);
     }
-    if (!result.ok && result.stop === WEB_UI_STOP) {
-      // Nothing to fix and nothing to run next: setup has nothing here to set up.
+    if (!result.ok && (result.stop === WEB_UI_STOP || result.stop === DISK_FULL_STOP)) {
+      // Nothing to fix and nothing to run next: nothing here to set up, or Docker has no disk left.
       const failure = setupFailure(result, s.setupBudgetUsd, cap, !!quick);
       this.d.out(failure.text);
       this.d.out(`${cost} · logs: .arnx/setup/`);

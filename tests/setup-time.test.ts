@@ -526,3 +526,46 @@ test("a full Docker disk ends setup at once: no further tries, no more model cal
   expect(r.problem).toBe(diskFullMessage());
   expect(setupFailure(r, 3, 40).text).toBe(diskFullMessage());
 });
+
+test("a full disk in the middle of a suite run ends setup the same way", async () => {
+  const repo = twoProjects();
+  const factory = async <T>(_cfg: { name: string }, snap: string, _log: string, body: (r: Runner) => Promise<T>) =>
+    body(new FakeSession(snap, (command) => {
+      if (!command.includes("test_arnx_probe")) throw new DiskFull();
+      return [null, "", false];
+    }));
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("try_project", { yaml: TWO, project: "web" })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"), sessionFactory: factory });
+  expect([r.ok, r.stop, model.calls.length]).toEqual([false, "disk-full", 1]);
+  expect(r.problem).toBe(diskFullMessage());
+});
+
+test("a full disk met by the agent's exec tool ends setup: no further model call", async () => {
+  const repo = twoProjects();
+  const pass = fakeFactory(() => [junitXml([["api/tests/test_api.py", "test_f", "passed", ""]]), "1 passed", false]);
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("exec", { project: "api", command: "ls" })], [tool("exec", { project: "api", command: "ls" })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"), sessionFactory: pass,
+    execFactory: async () => {
+      throw new DiskFull();
+    } });
+  expect([r.ok, r.stop, model.calls.length]).toEqual([false, "disk-full", 2]);
+});
+
+test("arnx setup --json after a full disk: environment failure naming the disk, nothing to run next", async () => {
+  const repo = twoProjects();
+  const env = { ANTHROPIC_API_KEY: "a" };
+  expect(await new Cli({ cwd: repo, env }).run("init")).toBe(0);
+  const cli = new Cli({ cwd: repo, env,
+    setupModel: new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })], [text("done")]]),
+    setupSessions: async () => {
+      throw new DiskFull();
+    } });
+  expect(await cli.run("setup", "--yes", "--json")).toBe(2);
+  const out = JSON.parse(cli.stdout);
+  expect(out.failure).toMatchObject({ kind: "environment" });
+  expect(out.failure.reason).toContain("Docker is out of disk space");
+  expect(out.next).toEqual([]);
+  expect(out.stop).toBe("disk-full");
+});

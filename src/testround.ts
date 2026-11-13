@@ -6,7 +6,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
   from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
-import { type AgentResult, Workspace } from "./agent";
+import { type AgentResult, StopRound, Workspace } from "./agent";
 import { adapterFor, getAdapter } from "./adapters";
 import { DEFAULT_ACCEPTED_DIR } from "./adapters/types";
 import { absentFromSnapshot, bakedError, bakedIn, imageFiles, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
@@ -25,7 +25,7 @@ import { markUnproven } from "./diagnose";
 import { type KeyReruns, keyReruns, type RealOutcomes, rerunCandidates, rerunWithRealKeys } from "./realkey";
 import { clip, emit, testMessage } from "./events";
 import { baseName, type Classified, classify, describeRun, funcOf, ownerFile, runBounded, runTests, serialFlag, type TestResult } from "./outcomes";
-import { buildContextOf, DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
+import { buildContextOf, DEFAULT_LIMITS, DiskFull, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
   type SessionFactory } from "./sandbox";
 import type { Say } from "./progress";
 import { describeTypecheck, recordTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
@@ -475,10 +475,19 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const expand = (targets: string[]) =>
           targets.flatMap((t) => (posix.normalize(t) === posix.normalize(o.writeDir) ? generated() : [t]))
             .map((t) => posix.relative(cfg.workdir, t) || ".");
+        // A full Docker disk ends the round (no more model calls) and then the review, with its one line.
+        let diskFull: DiskFull | null = null;
         const run = async (targets: string[]) => {
           const rel = expand(targets);
           if (!rel.length) return `no test files under ${o.writeDir}/ yet`;
-          const [result, results] = await runTests(session, snap, cfg, rel, `agent-${++counter}.xml`, TOOL_TIMEOUT, { serial });
+          let result, results;
+          try {
+            [result, results] = await runTests(session, snap, cfg, rel, `agent-${++counter}.xml`, TOOL_TIMEOUT, { serial });
+          } catch (e) {
+            if (!(e instanceof DiskFull)) throw e;
+            diskFull = e;
+            throw new StopRound(e.message);
+          }
           const own = generated();
           if (results?.some((t) => ownerFile(t.fileAttr, own) !== null)) saw = true;
           return describeRun(result, results, own);
@@ -499,6 +508,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const done = await (ask.kind === "review"
           ? o.brain.agentRound("review", { ...ask.input, ...base }, Promise.resolve(tools))
           : o.brain.agentRound("answer", { ...ask.input, ...base }, Promise.resolve(tools)));
+        if (diskFull) throw diskFull;
         hunt = done.hunt;
         const a = done.agent;
         const f = generatedNow();
@@ -762,7 +772,8 @@ async function typecheckHere(session: Runner, snap: string, cfg: ReviewConfig, w
     clearArnxFiles(snap, cfg, writeDir);
     run = await runTypecheck(session, cfg);
   } catch (e) {
-    // Whatever goes wrong here is the type check's, never the round's.
+    // Whatever goes wrong here is the type check's, never the round's; a full disk is nobody's but Docker's.
+    if (e instanceof DiskFull) throw e;
     run = { status: "failed", errors: [], output: e instanceof Error ? e.message : String(e), exitCode: null,
       timedOut: false, seconds: 0 };
   }

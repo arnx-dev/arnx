@@ -6,7 +6,7 @@ import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import { SetupRequired } from "../src/errors";
 import { exitCode, load, render, summary } from "../src/report";
 import { projectConcurrency, runReview } from "../src/reviewer";
-import type { SessionFactory } from "../src/sandbox";
+import { DiskFull, diskFullMessage, type SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { FakeJson, FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
@@ -215,4 +215,19 @@ test("projects are tested as many at a time as the Docker VM holds", () => {
   expect(projectConcurrency({ cpus: 2, memoryBytes: 4 * gb })).toBe(1);
   expect(projectConcurrency({ cpus: 4, memoryBytes: 16 * gb })).toBe(2);
   expect(projectConcurrency(null)).toBe(1);
+});
+
+test("a full Docker disk during run_tests ends the review at once: no further model call, the disk message", async () => {
+  writeFileSync(join(repo, "services/pay/pay.py"), "X = 2\n");
+  const full: SessionFactory = async (_cfg, snap, _log, body) => body(new FakeSession(snap, () => {
+    throw new DiskFull();
+  }));
+  const agent = new ScriptedAgent([
+    [tool("write_file", { path: `services/pay/${GEN}`, content: "def test_ok(): pass\n" })],
+    [tool("run_tests")], [tool("run_tests")], [text(JSON.stringify({ tests: [] }))]]);
+  const err = await runReview(repo, { projectConcurrency: 1, settings: SETTINGS, agentModel: agent,
+    challenger: new FakeJson([]), sessionFactory: full }).catch((e) => e);
+  expect(err).toBeInstanceOf(DiskFull);
+  expect(err.message).toBe(diskFullMessage());
+  expect(agent.calls).toHaveLength(2); // the write, then the run that hit the disk
 });
