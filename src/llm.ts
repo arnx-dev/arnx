@@ -40,6 +40,19 @@ export const PRICES: Prices = {
 };
 export const RETRY_STATUS = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
 
+/** A provider's error body as one short line: its `error.message` when the body is JSON that has one, else the text;
+ * account, project and key ids become "…". */
+export function providerReason(body: string): string {
+  let text = body;
+  const start = body.indexOf("{");
+  if (start >= 0) {
+    try {
+      const err = (JSON.parse(body.slice(start)) as { error?: { message?: unknown } } | null)?.error;
+      if (typeof err?.message === "string") text = err.message;
+    } catch { /* not JSON: the text as it is */ }
+  }
+  return text.replace(/\b(?:org|proj|ak|sk|acct)-[A-Za-z0-9_-]{6,}\b/g, "…").slice(0, 200);
+}
 /** A failed call's message for a progress line: the HTTP status without the body the provider sent. */
 export function brief(message: string): string {
   const status = /^HTTP (\d+)/.exec(message)?.[1];
@@ -431,7 +444,7 @@ export class AnthropicAgent implements AgentModel {
           : timeout === "first-byte" ? `no reply: first-byte timeout after ${this.firstEvent}s`
           : timeout === "idle" ? `no reply: idle timeout after ${this.idle}s without bytes`
           : timeout === "attempt" ? `no reply: attempt timeout after ${this.attemptLimit}s`
-          : e instanceof Anthropic.APIError && e.status ? `HTTP ${e.status}: ${e.message.slice(0, 200)}` : errorName(e);
+          : e instanceof Anthropic.APIError && e.status ? `HTTP ${e.status}: ${providerReason(e.message)}` : errorName(e);
         record(timeout === "total" ? "late" : timeout ? "stalled" : "error", reason);
         const broke = !timeout && e instanceof Anthropic.APIError ? noCredits(this.provider, `${e.type ?? ""} ${e.message}`)
           : null;
@@ -787,7 +800,7 @@ export class ResponsesJson implements JsonModel {
       arm();
       if (r.status !== 200) {
         const body = await r.text().catch(() => "");
-        const message = `HTTP ${r.status}: ${body.slice(0, 200)}`;
+        const message = `HTTP ${r.status}: ${providerReason(body)}`;
         const broke = noCredits(providerOf(this.ref), body);
         if (broke) throw broke;
         if (RETRY_STATUS.has(r.status)) {
@@ -857,7 +870,7 @@ export class ResponsesJson implements JsonModel {
         diagnostics.headersSecs = Math.round((performance.now() - started) / 100) / 10;
         if (r.status !== 200) {
           const body = await r.text().catch(() => "");
-          const message = `HTTP ${r.status}: ${body.slice(0, 200)}`;
+          const message = `HTTP ${r.status}: ${providerReason(body)}`;
           const broke = noCredits(providerOf(this.ref), body);
           if (broke) throw broke;
           if (RETRY_STATUS.has(r.status)) {
@@ -930,7 +943,7 @@ export class ResponsesJson implements JsonModel {
       const r = await this.fetch(`${this.baseUrl}/responses/${id}`, { signal: abort.signal,
         headers: { authorization: `Bearer ${this.apiKey}` } });
       if (r.status !== 200) {
-        const message = `HTTP ${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}`;
+        const message = `HTTP ${r.status}: ${providerReason(await r.text().catch(() => ""))}`;
         if (RETRY_STATUS.has(r.status) || (r.status === 404 && young)) return message;
         throw refused(this.ref, `poll: ${message}`, r.status);
       }
@@ -1108,7 +1121,7 @@ function parseEvent(ref: string, line: string): Record<string, unknown> | null {
   if (["response.completed", "response.incomplete", "response.failed"].includes(String(event.type))) {
     return isObject(event.response) ? event.response : {};
   }
-  if (event.type === "error") throw noCredits(providerOf(ref), data) ?? new ModelError(`${ref}: ${String(event.message ?? JSON.stringify(event)).slice(0, 200)}`);
+  if (event.type === "error") throw noCredits(providerOf(ref), data) ?? new ModelError(`${ref}: ${providerReason(String(event.message ?? JSON.stringify(event)))}`);
   return null;
 }
 

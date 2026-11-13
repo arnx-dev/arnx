@@ -3,7 +3,7 @@ import { ModelError } from "../src/errors";
 import {
   AnthropicAgent, AnthropicJson, CANCEL_SECONDS, cancelInFlight, costUsd, FallbackJson, makeAgentModel, makeJsonModel,
   makeChallenger, makeSecondHunter, VERDICT_ATTEMPT_TIMEOUT, VERDICT_IDLE_TIMEOUT, OUTAGE_DELAYS, OUTAGE_WAIT_MAX_SECONDS, parseJsonObject, PRICES, resetOutageWaits, ResponsesAgent,
-  responsesInput, ResponsesJson, unpricedModels, unpricedNote,
+  providerReason, responsesInput, ResponsesJson, unpricedModels, unpricedNote,
 } from "../src/llm";
 import { exitCodeAfter, finalExitCode, onInterrupt, startInterrupt } from "../src/interrupt";
 import { type ProviderTable } from "../src/providers";
@@ -1592,3 +1592,14 @@ for (const path of PATHS) {
     });
   }, 10_000);
 }
+
+test("a rate-limit body loses its account ids", () => {
+  const org = ["org", "abcdef123"].join("-"), proj = ["proj", "abcdef123"].join("-"), ak = ["ak", "abcdef123"].join("-");
+  const body = JSON.stringify({ type: "error", error: { code: "rate_limit_exceeded",
+    message: `Your account ${org} / ${proj} <${ak}> reached its limit` } });
+  const reason = providerReason(body);
+  expect(reason).toContain("reached its limit");
+  for (const id of [org, proj, ak]) expect(reason).not.toContain(id);
+  expect(reason).not.toContain('{"type"');
+  expect(providerReason("plain " + "x".repeat(300)).length).toBeLessThanOrEqual(200);
+});
