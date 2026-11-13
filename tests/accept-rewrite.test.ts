@@ -13,6 +13,9 @@ import { Cli } from "./helpers/cli";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { finding, sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
+import { pinDockerCapacity } from "./helpers/dockercap";
+
+pinDockerCapacity();
 
 const tmp = useTmp();
 const RID = "20261011-a1b2c3";

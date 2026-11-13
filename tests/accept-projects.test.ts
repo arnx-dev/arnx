@@ -10,6 +10,9 @@ import { gitRepo } from "./helpers/gitutil";
 import { finding, sampleReview, blankMarks } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
 import { PROJECTS } from "./helpers/yaml";
+import { pinDockerCapacity } from "./helpers/dockercap";
+
+pinDockerCapacity();
 
 const tmp = useTmp();
 const SETTINGS = { ...defaultSettings(), consentAt: "2026-10-12T00:00:00Z" };

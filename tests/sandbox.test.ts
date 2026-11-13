@@ -1273,6 +1273,26 @@ test("a build that ran out of disk is named", async () => {
   expect(readFileSync(count, "utf8").trim().split("\n")).toHaveLength(1); // no second try
 });
 
+test("a disk that fills during the network retry is named too", async () => {
+  const fake = join(tmp(), "fake-docker-disk-retry");
+  const count = join(tmp(), "disk-retry-builds");
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in\n  image) exit 1;;\n  build) echo x >> ${count}; ` +
+    `if [ "$(wc -l < ${count})" -eq 1 ]; then echo "ERROR: No matching distribution found; Read timed out"; ` +
+    `else echo "ERROR: failed to copy: no space left on device"; fi; exit 1;;\nesac\nexit 0\n`);
+  chmodSync(fake, 0o755);
+  const saved = networkRetry.waitSeconds;
+  networkRetry.waitSeconds = 0;
+  try {
+    const err = await withDockerAsync(fake, () => ensureEnv(parseReviewConfig(CFG), tmp(), join(tmp(), "build.log")))
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(DiskFull);
+    expect(err.message).toBe(diskFullMessage());
+  } finally {
+    networkRetry.waitSeconds = saved;
+  }
+  expect(readFileSync(count, "utf8").trim().split("\n")).toHaveLength(2);
+});
+
 test("the disk message names the way out", () => {
   expect(diskFullMessage()).toContain("Docker is out of disk space");
   expect(diskFullMessage()).toContain("arnx env prune");

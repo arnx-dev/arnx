@@ -273,8 +273,8 @@ export function requireDocker(): void {
   throw new SetupRequired(`Docker is not answering: ${said.trim().split("\n")[0]!.slice(0, 200)}`);
 }
 
-/** The Docker VM's CPUs and memory (`docker info`), or null when it cannot be read. For tests, ARNX_DOCKER_CAPACITY
- * ("<cpus> <bytes>") is read first. */
+/** The Docker VM's CPUs and memory (`docker info`), or null when it cannot be read. For tests, an override is read
+ * first. */
 export function dockerCapacity(): { cpus: number; memoryBytes: number } | null {
   const parse = (text: string) => {
     const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(text);
@@ -576,6 +576,7 @@ async function ensureBuilt(cfg: ReviewConfig, snapshot: string, logPath: string,
     writeFileSync(logPath, r.stdout + r.stderr);
   }
   if (r.status !== 0) {
+    failIfDiskFull(r.stdout + r.stderr);
     if (NETWORK_TROUBLE.test(r.stdout + r.stderr)) {
       throw new EnvFailed("building the test environment failed because it could not reach the package index or " +
         "registry (timeouts or a broken connection, twice): a network problem, not the install steps. Keep the " +

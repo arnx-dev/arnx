@@ -803,14 +803,14 @@ export function sourceGroups(unexplained: string[], claimed: string[], all: stri
 }
 
 
-/** Where the web UI app `name`, whose runs failed, goes under uncovered: the folders and files of its source (of
- * any file when it has none) that no other project in `f` owns or uses, each folder the shallowest that holds none of
- * theirs. An app at the repository root next to other projects lists its own paths, never `**`. */
 /** What the user reads for a web UI app whose counted runs all stopped at listing. */
 function listingStopLine(name: string, runs: number, error: string): string {
   return `${name}: its tests did not list in ${runs} tries: ${error}`;
 }
 
+/** Where the web UI app `name`, whose runs failed, goes under uncovered: the folders and files of its source (of
+ * any file when it has none) that no other project in `f` owns or uses, each folder the shallowest that holds none of
+ * theirs. An app at the repository root next to other projects lists its own paths, never `**`. */
 export function webUiPaths(f: ReviewFile, name: string, files: string[]): string[] {
   const app = f.projects.find((p) => p.name === name);
   if (!app) return [];

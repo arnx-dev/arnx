@@ -12,6 +12,9 @@ import { gitRepo } from "./helpers/gitutil";
 import { finding, sampleReview, blankMarks } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
 import { golden } from "./helpers/golden";
+import { pinDockerCapacity } from "./helpers/dockercap";
+
+pinDockerCapacity();
 
 const WD = "tests/arnx_generated";
 const SRC = golden("add-skip-src.py");
