@@ -142,7 +142,7 @@ A test file that does not finish (its tests have no result) is one error, never 
 
 When a commit's own environment does not build or runs no test (an older commit whose install no longer works), that project is reported not tested, the other projects finish, and the review makes no model call for it and exits 2. If the image built for another commit of the project exists and holds no differing copy of the code, the tests run on it instead; the report says so, the review is never complete, and findings from it do not fail the run. A failure to reach the package index is not this: it keeps its own advice.
 Every command takes `--json`: one JSON object on stdout, the text on stderr, nothing asked (fields in
-[skills/arnx/references/json.md](../skills/arnx/references/json.md)).
+[plugin/skills/arnx/references/json.md](../plugin/skills/arnx/references/json.md)).
 
 ## The report
 
@@ -282,4 +282,4 @@ network), and after your yes writes them so `arnx setup --add`, which you run, c
 `arnx init` names the command (an `Optional:` line) until the repository has the skill. An existing different copy (an
 older version, or edited) is replaced only with `--force`. In Claude Code the skill also installs as a plugin:
 `/plugin marketplace add arnx-dev/arnx`, then `/plugin install arnx@arnx`. The skill is in
-[skills/arnx/](../skills/arnx/), with the JSON it reads documented in its `references/`.
+[plugin/skills/arnx/](../plugin/skills/arnx/), with the JSON it reads documented in its `references/`.

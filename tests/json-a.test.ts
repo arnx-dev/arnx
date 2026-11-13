@@ -1,5 +1,5 @@
 // --json for init, doctor, next, consent, cloud, login, logout and credits: one object on stdout with each command's
-// fields (skills/arnx/references/json.md), the human text on stderr, nothing asked, no real network.
+// fields (plugin/skills/arnx/references/json.md), the human text on stderr, nothing asked, no real network.
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

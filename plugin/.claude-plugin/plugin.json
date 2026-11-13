@@ -9,7 +9,7 @@
   },
   "homepage": "https://github.com/arnx-dev/arnx",
   "repository": "https://github.com/arnx-dev/arnx",
-  "icon": ".claude-plugin/icon.svg",
+  "icon": "./icon.png",
   "documentationUrl": "https://github.com/arnx-dev/arnx/blob/main/docs/WORKFLOW.md",
   "supportUrl": "https://github.com/arnx-dev/arnx/issues",
   "privacyPolicyUrl": "https://arnx.dev/privacy",

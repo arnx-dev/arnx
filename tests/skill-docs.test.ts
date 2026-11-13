@@ -1,4 +1,4 @@
-// The JSON a coding agent reads is pinned by its documentation: skills/arnx/references/review-json.md and
+// The JSON a coding agent reads is pinned by its documentation: plugin/skills/arnx/references/review-json.md and
 // check-json.md. A documented field that review.json or `check --json` stops writing fails here, and so does a field
 // they write that the page does not name.
 import { expect, test } from "bun:test";
@@ -13,7 +13,7 @@ import { finding, sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
-const REFS = join(import.meta.dir, "..", "skills", "arnx", "references");
+const REFS = join(import.meta.dir, "..", "plugin", "skills", "arnx", "references");
 const GOLDEN = join(import.meta.dir, "fixtures", "golden");
 
 interface Field { name: string; optional: boolean }
@@ -226,7 +226,7 @@ test("check --review --json results match exit codes as check-json.md says", () 
 
 // The skill's exit table and the status words must say what exitCode does.
 test("the skill's exit table and status words match exitCode", () => {
-  const skill = readFileSync(join(import.meta.dir, "..", "skills", "arnx", "SKILL.md"), "utf8");
+  const skill = readFileSync(join(import.meta.dir, "..", "plugin", "skills", "arnx", "SKILL.md"), "utf8");
   const refs = readFileSync(join(REFS, "review-json.md"), "utf8");
   const table = skill.slice(skill.indexOf("## Exit codes"));
   const row = (code: string) => table.split("\n").find((l) => l.startsWith(`| ${code} |`))!;

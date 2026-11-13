@@ -11,7 +11,7 @@ import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
 const ROOT = join(import.meta.dir, "..");
-const SOURCE = join(ROOT, "skills", "arnx");
+const SOURCE = join(ROOT, "plugin", "skills", "arnx");
 
 function walk(dir: string): string[] {
   return readdirSync(dir).flatMap((n) => statSync(join(dir, n)).isDirectory() ? walk(join(dir, n)).map((f) => `${n}/${f}`)
@@ -24,7 +24,7 @@ const read = (dir: string) => Object.fromEntries(walk(dir).sort().map((f) => [f,
 const expectSkills = (root: string) => { for (const d of SKILL_DIRS) expect(read(join(root, d))).toEqual(read(SOURCE)); };
 const CLAUDE_DIR = ".claude/skills/arnx";
 
-test("the embedded skill is exactly skills/arnx/ in this repository", () => {
+test("the embedded skill is exactly plugin/skills/arnx/ in this repository", () => {
   expect(Object.keys(SKILL_FILES).sort()).toEqual(walk(SOURCE).sort());
   for (const [f, text] of Object.entries(SKILL_FILES)) expect(text).toBe(readFileSync(join(SOURCE, f), "utf8"));
 });
@@ -125,7 +125,7 @@ test("the single binary carries the skill: dist/arnx skill install writes it int
   const build = spawnSync("sh", [join(ROOT, "scripts", "build.sh"), "bin", "", bin], { cwd: ROOT, encoding: "utf8" });
   expect(build.status).toBe(0);
   const repo = initRepo(join(tmp(), "repo"));
-  // Run from elsewhere than the source tree, so nothing can be read from skills/ on disk.
+  // Run from elsewhere than the source tree, so nothing can be read from plugin/skills/ on disk.
   const r = spawnSync(bin, ["skill", "install"], { cwd: repo, encoding: "utf8", env: { PATH: process.env.PATH } });
   expect(r.status).toBe(0);
   expect(r.stdout).toContain("Wrote the arnx skill");

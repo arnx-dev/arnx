@@ -2183,7 +2183,7 @@ const tryParse = (text: string | null): ReviewFile | null => {
   }
 };
 
-/** `arnx setup --json` (skills/arnx/references/json.md): each project as setup proved it and approval ran it. */
+/** `arnx setup --json` (plugin/skills/arnx/references/json.md): each project as setup proved it and approval ran it. */
 function setupJson(o: { file: ReviewFile | null; result: SetupResult; approved: boolean; auto: boolean;
   files: FilesSummary | null; warnings: string[]; reviewYaml: string | null; record: string | null; seconds: number;
   failure: Record<string, unknown> | null; next: string[]; approval?: ApprovedProject[] }): Record<string, unknown> {
@@ -2205,7 +2205,7 @@ function setupJson(o: { file: ReviewFile | null; result: SetupResult; approved: 
     seconds: o.seconds, stop: r.stop, uncovered_projects: r.setAside ?? [], failure: o.failure, next: o.next };
 }
 
-/** One project's suite in `approve --json` (skills/arnx/references/json.md). */
+/** One project's suite in `approve --json` (plugin/skills/arnx/references/json.md). */
 export interface ApprovedProject { name: string; ok: boolean; summary: string; accepted_failing: number;
   unexpected: string[]; baseline_failing?: number; left_baseline?: string[]; flaky?: string[] }
 

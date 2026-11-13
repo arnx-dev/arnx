@@ -1277,7 +1277,7 @@ const camel = (k: string) => k.replace(/_([a-z])/g, (_m, c: string) => c.toUpper
 const rekey = (o: object, f: (k: string) => string) =>
   Object.fromEntries(Object.entries(o).map(([k, v]) => [f(k), v]));
 
-/** review.json's shape; documented in skills/arnx/references/review-json.md, which coding agents read. A field
+/** review.json's shape; documented in plugin/skills/arnx/references/review-json.md, which coding agents read. A field
  * removed or renamed there is a new version. */
 export const REVIEW_SCHEMA_VERSION = 1;
 

@@ -70,13 +70,13 @@ throwaway copy.
 | `login`, `logout`, `credits` | arnx cloud: a device login (RFC 8628), its deletion, the balance (no answer: "arnx cloud unavailable", exit 2; "not open yet" only on arnx cloud's `not_open`) | the config directory, `/v1/account` | `~/.config/arnx/credentials.json` (0600) | no | no |
 | `cloud on`, `cloud off` | arnx cloud's models for this repository, or the user's keys again: asks the cloud consent once, changes only `[cloud] models` | `.arnx/config.toml` | `.arnx/config.toml` | no | no |
 | `prompts` | List the prompt keys, marking those `.arnx/prompts.toml` overrides; `copy KEY` writes arnx's default of KEY there with `KEY_base` (its hash), keeping the file's other content; a key already there is printed instead, nothing written | `.arnx/prompts.toml` | `.arnx/prompts.toml` (copy) | no | no |
-| `skill install` | Write the arnx skill for coding agents (`skills/arnx/`, embedded in the build) to `.agents/skills/arnx/` and `.claude/skills/arnx/`, or under `~/` with `--user`; a different copy only with `--force`. `init` names the command until the repository has it | nothing | `.agents/skills/arnx/`, `.claude/skills/arnx/` | no | no |
+| `skill install` | Write the arnx skill for coding agents (`plugin/skills/arnx/`, embedded in the build) to `.agents/skills/arnx/` and `.claude/skills/arnx/`, or under `~/` with `--user`; a different copy only with `--force`. `init` names the command until the repository has it | nothing | `.agents/skills/arnx/`, `.claude/skills/arnx/` | no | no |
 
 Exit codes: 0 no confirmed findings, 1 confirmed findings, 2 the run could not finish, 3 setup needed, 4 (`check`
 only) an accepted test changed since accept, 130 interrupted.
 
 Every command takes `--json` (`JsonOut` in `cli.ts`): one object on stdout, the text on stderr, nothing asked. The
-fields are in `skills/arnx/references/json.md` and `check-json.md`; `tests/json-*.test.ts` hold them.
+fields are in `plugin/skills/arnx/references/json.md` and `check-json.md`; `tests/json-*.test.ts` hold them.
 
 ## How a review flows
 
@@ -566,18 +566,19 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `report.ts` | `review.md` / `review.json`: render, parse marks, exit code |
 | `accept.ts` | Marks and answers to kept tests and the precision log |
 | `telemetry.ts` | Telemetry: on or off (config, environment), the allow-listed payload of each event (`SCHEMA`), a send that never blocks |
-| `skill.ts` | The arnx skill for coding agents: `skills/arnx/` imported as text, `arnx skill install` |
+| `skill.ts` | The arnx skill for coding agents: `plugin/skills/arnx/` imported as text, `arnx skill install` |
 | `recheck.ts` | `check --review`: a review's confirmed tests again on the working tree; fixed only when they pass in every run, still failing after one failing run |
 | `util.ts` | Python-compatible formatting (json.dumps, repr, shlex.quote, splitlines) for byte-level parity |
 
 ## The skill for coding agents
 
-`skills/arnx/` holds the skill (SKILL.md and `references/`), versioned with the CLI. `skill.ts` imports each file with
+`plugin/skills/arnx/` holds the skill (SKILL.md and `references/`), versioned with the CLI. `skill.ts` imports each file with
 `with { type: "text" }` (typed by `src/text.d.ts`), so `bun build` inlines it into both the binary and the Node bundle;
-a new reference file is a new import there (`tests/skill.test.ts` fails when `skills/arnx/` and the embedded files
+a new reference file is a new import there (`tests/skill.test.ts` fails when `plugin/skills/arnx/` and the embedded files
 differ, and builds the binary to install from it; `bun run smoke` does the same for both builds). The repository root
-is also a Claude Code plugin and its marketplace: `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`
-(source `./`), so the plugin's default `skills/` folder is this one. `claude plugin validate .` checks both.
+is a Claude Code marketplace (`.claude-plugin/marketplace.json`, source `./plugin`) and `plugin/` is the one plugin in it
+(`plugin/.claude-plugin/plugin.json`), so a plugin directory reviews only that folder and its default `skills/` is this one.
+`claude plugin validate ./plugin` and `claude plugin validate .` check both.
 
 What the skill reads is a contract: `references/review-json.md` (review.json, `schema_version` 1) and
 `references/check-json.md` (`arnx check --json`). `tests/skill-docs.test.ts` fails when a documented field is no
@@ -641,7 +642,7 @@ Every pull request and push to `main` runs `.github/workflows/ci.yml`: install, 
 smoke`, read-only and with no secrets. A `v*` tag runs `.github/workflows/release.yml`: tests, the Node bundle and the four binaries, then the package
 staged on npmjs.com (with provenance; installable once a maintainer approves it with 2FA, in Staged Packages or with
 `npm stage approve <id>`) and a GitHub release with the binaries and `SHA256SUMS`. The tag must match `version` in
-package.json, which must match `VERSION` in `src/version.ts` and `.claude-plugin/plugin.json`. A version with a
+package.json, which must match `VERSION` in `src/version.ts` and `plugin/.claude-plugin/plugin.json`. A version with a
 pre-release part is published under the npm dist-tag `next` and as a pre-release, so `npm install -g @arnx-dev/arnx`
 and `releases/latest/download/` keep the last plain version. `npm publish` outside GitHub Actions is refused
 (`prepublishOnly`).

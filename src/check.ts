@@ -823,7 +823,7 @@ export function changedSummary(changed: ChangedTest[], repo: string): string {
   return lines.join("\n");
 }
 
-/** `arnx check --json`: the result for programs and coding agents (skills/arnx/references/check-json.md). */
+/** `arnx check --json`: the result for programs and coding agents (plugin/skills/arnx/references/check-json.md). */
 export const CHECK_SCHEMA_VERSION = 1;
 const RESULTS = ["pass", "fail", "no-report", "nothing-accepted", "tests-changed"] as const;
 

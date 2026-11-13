@@ -21,10 +21,10 @@ test "$code" = 3
 grep -q "config" "$repo/out"
 # Both builds carry the skill for coding agents (imported as text at build time).
 (cd "$repo" && node "$root/dist/cli.js" skill install) >/dev/null
-cmp "$repo/.claude/skills/arnx/SKILL.md" "$root/skills/arnx/SKILL.md"
+cmp "$repo/.claude/skills/arnx/SKILL.md" "$root/plugin/skills/arnx/SKILL.md"
 rm -rf "$repo/.claude"
 (cd "$repo" && "$root/dist/arnx" skill install) >/dev/null
-cmp "$repo/.claude/skills/arnx/references/review-json.md" "$root/skills/arnx/references/review-json.md"
+cmp "$repo/.claude/skills/arnx/references/review-json.md" "$root/plugin/skills/arnx/references/review-json.md"
 # Both builds carry the default prompts (src/prompts.toml, imported as text at build time).
 (cd "$repo" && node "$root/dist/cli.js" prompts) | grep -qx "hunt.task"
 (cd "$repo" && "$root/dist/arnx" prompts) | grep -qx "setup.task"

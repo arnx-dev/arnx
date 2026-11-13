@@ -1,15 +1,15 @@
-// The arnx skill for coding agents (skills/arnx/ in this repository): SKILL.md and its references, imported as text
+// The arnx skill for coding agents (plugin/skills/arnx/ in this repository): SKILL.md and its references, imported as text
 // so every build carries them. `arnx skill install` writes them to .agents/skills/arnx/ (Codex and the other agents
 // of the open Agent Skills standard) and .claude/skills/arnx/ (Claude Code) in the repository, or under ~ with --user;
 // `arnx init` offers the first at a terminal.
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
-import SKILL from "../skills/arnx/SKILL.md" with { type: "text" };
-import CHECK_JSON from "../skills/arnx/references/check-json.md" with { type: "text" };
-import INSTALL from "../skills/arnx/references/install.md" with { type: "text" };
-import JSON_REF from "../skills/arnx/references/json.md" with { type: "text" };
-import REVIEW_JSON from "../skills/arnx/references/review-json.md" with { type: "text" };
-import UNCOVERED from "../skills/arnx/references/uncovered.md" with { type: "text" };
+import SKILL from "../plugin/skills/arnx/SKILL.md" with { type: "text" };
+import CHECK_JSON from "../plugin/skills/arnx/references/check-json.md" with { type: "text" };
+import INSTALL from "../plugin/skills/arnx/references/install.md" with { type: "text" };
+import JSON_REF from "../plugin/skills/arnx/references/json.md" with { type: "text" };
+import REVIEW_JSON from "../plugin/skills/arnx/references/review-json.md" with { type: "text" };
+import UNCOVERED from "../plugin/skills/arnx/references/uncovered.md" with { type: "text" };
 import { ArnxError } from "./errors";
 import type { Env } from "./settings";
 
