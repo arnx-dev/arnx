@@ -1,9 +1,10 @@
 // accept: read the user's marks and answers from review.md. Tests behind findings marked real are copied into
 // .arnx/tests/ (DOME), each at the path it runs from (accepted_tests_dir under its project's root: tests/arnx/r<review
 // id>/ by default, __tests__/arnx/ for TypeScript at that default; each file named after what it protects), with every
-// other test in the same file that did not pass in every run removed. The project's own test run never sees them:
-// only `arnx check` puts them in place, in a throwaway copy. Answered questions become tests through one agent round on the current working
-// tree, and so does each issue marked rewrite (the bug is real, its test wrong), from the owner's reason. A finding's
+// other test in the same file that did not pass in every run removed. Each file, support files too, is stored with
+// .arnx appended to its name (storedName), which no test runner, type checker or linter of the project picks up: only
+// `arnx check` puts them in place under the names they run by, in a throwaway copy. Answered questions become tests
+// through one agent round on the current working tree, and so does each issue marked rewrite (the bug is real, its test wrong), from the owner's reason. A finding's
 // test is set aside when the owner's answer to the question it assumed has a test of its own, or when it is rewritten.
 // Every mark is appended to .arnx/precision.jsonl.
 import { Boundary, maskedCopy, STAND_INS_NOTE } from "./boundary";
@@ -24,11 +25,12 @@ import { promptsFor } from "./userprompts";
 import { defaultMarks, firstLine, groupsOf, load, type Marks, parseMarks, parseReports, type Review, wrapMarkdown }
   from "./report";
 import { keyReruns } from "./realkey";
-import { sayingDocker, type SessionFactory } from "./sandbox";
+import { dockerCapacity, type Limits, sandboxesFit, sayingDocker, type SessionFactory } from "./sandbox";
 import { refString, type Settings } from "./settings";
 import { agentUse, logUsage } from "./usage";
-import { acceptedDirFor, collect, DOME, dockerSession, readCopies, testRound, writeDirOf } from "./testround";
-import { acceptedTestIds, recordAccepted, testsByFile } from "./check";
+import { runName, storedName } from "./kept";
+import { acceptedDirFor, collect, DOME, dockerSession, readCopies, runPath, testRound, writeDirOf } from "./testround";
+import { acceptedTestIds, irregularKept, keptAdvice, recordAccepted, storeOlderKept, type StoredOlder, testsByFile } from "./check";
 import { isoSeconds } from "./util";
 import { inPool } from "./challenge";
 import { sliceDiff, treeValues, workingTreeFiles } from "./change";
@@ -36,6 +38,12 @@ import { route } from "./route";
 
 /** Answer rounds at once (each a model round and three sandbox runs). */
 export const ANSWER_CONCURRENCY = 3;
+
+/** Answer rounds a Docker VM of this size runs at once: up to ANSWER_CONCURRENCY, as many as each sandbox's CPUs and
+ * memory allow; one when the size is unknown. */
+export function answerConcurrency(cap: { cpus: number; memoryBytes: number } | null, limits?: Limits): number {
+  return sandboxesFit(cap, ANSWER_CONCURRENCY, limits);
+}
 import type { Say } from "./progress";
 
 export interface AnswerOutcome {
@@ -79,6 +87,17 @@ export function rewritesOf(review: Review, marks: Marks): Rewrite[] {
   return out;
 }
 
+/** Whether accept has a model round to run: an answered question (the rule accept uses), or a rewrite of a test the
+ * owner marked wrong. Without one, accept needs no model and no key. */
+export function hasAnswers(rdir: string): boolean {
+  const review = load(rdir);
+  const marks = parseMarks(readFileSync(join(rdir, "review.md"), "utf8"), review.findings.map((f) => f.id),
+    { reasons: true });
+  const answered = Object.keys(marks.answers).some((qid) => Number(qid.slice(1)) - 1 >= 0 &&
+    Number(qid.slice(1)) - 1 < review.questions.length);
+  return answered || rewritesOf(review, marks).length > 0;
+}
+
 export interface AcceptResult {
   review: Review;
   marks: Marks;
@@ -100,6 +119,8 @@ export interface AcceptResult {
   precision: Precision;
   /** The fix prompt's keys .arnx/prompts.toml overrode (fix-prompt.md names them too). */
   fixOverrides: string[];
+  /** Kept files an older arnx stored by the names they run by, now under their stored names (storeOlderKept). */
+  storedOlder: StoredOlder;
 }
 
 export type MarkSource = "default" | "chosen";
@@ -332,11 +353,11 @@ function exportTests(adapter: Adapter, files: Record<string, string>, base: stri
       taken.add(posix.basename(target));
     }
     text = adapter.relocate(text, posix.dirname(posix.relative(d.rootRel, path)), posix.dirname(target));
-    const out = join(d.root, target);
+    const out = join(d.root, storedName(target));
     mkdirSync(dirname(out), { recursive: true });
     writeFileSync(out, text);
     written.push(out);
-    if (moved) moved[path] = posix.join(DOME, d.rootRel, target);
+    if (moved) moved[path] = posix.join(DOME, d.rootRel, storedName(target));
   }
   return written;
 }
@@ -425,17 +446,27 @@ export async function accept(repo: string, rdir: string, settings: Settings,
     throw new ArnxError(`review ${review.id} was already accepted; pass --again to apply edited marks`);
   }
   const say = (m: string) => o.progress?.(m);
+  // accept writes under .arnx/tests/ and never through a link: a link (or a folder at a pinned file) stops it before
+  // anything is written or deleted.
+  const odd = irregularKept(repo);
+  if (odd.length) {
+    throw new ArnxError(keptAdvice(repo, odd));
+  }
+  // Kept files an older arnx stored by the names they run by go out of the project's runs first; this review's own
+  // are then written again under the same stored names.
+  const storedOlder = storeOlderKept(repo, o.pins ?? null);
   const marks = parseMarks(readFileSync(join(rdir, "review.md"), "utf8"), review.findings.map((f) => f.id),
     { reasons: true });
   const projects = projectsOf(repo, rdir, review, settings);
   const tag = review.id.replaceAll("-", "_");
-  // This review's own kept files: in its r<tag>/ folder, or (Rust) named arnx_<tag>_* or arnx_<tag>.rs.
-  const own = (p: string) => p.split("/").includes(`r${tag}`) || posix.basename(p).startsWith(`arnx_${tag}_`) ||
-    posix.basename(p) === `arnx_${tag}.rs`;
-  // File names already used in the repository: pytest imports test files by name, so a kept file must not share
-  // one with the owner's tests or an earlier review's (this review's own are replaced, so they keep their names).
+  // This review's own kept files: in its r<tag>/ folder, or (Rust) named arnx_<tag>_* or arnx_<tag>.rs, by run name.
+  const own = (p: string) => p.split("/").includes(`r${tag}`) || posix.basename(runName(p)).startsWith(`arnx_${tag}_`) ||
+    posix.basename(runName(p)) === `arnx_${tag}.rs`;
+  // File names already used in the repository, kept files by the names they run by: pytest imports test files by
+  // name, so a kept file must not share one with the owner's tests or an earlier review's (this review's own are
+  // replaced, so they keep their names).
   const taken = new Set(workingTreeFiles(repo).files.filter((p) => (!p.startsWith(".arnx/") ||
-    p.startsWith(`${DOME}/`)) && !own(p)).map((p) => posix.basename(p)));
+    p.startsWith(`${DOME}/`)) && !own(p)).map((p) => posix.basename(runPath(p))));
   const before = existsSync(done)
     ? JSON.parse(readFileSync(done, "utf8")) as { moved?: Record<string, string>; kept?: string[] } : {};
   const earlier = before.moved ?? {};
@@ -470,8 +501,10 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   const answers: AnswerOutcome[] = [];
   const outcomes: (AnswerOutcome | undefined)[] = [];
   if (o.answerRunner) {
-    // Answer rounds run ANSWER_CONCURRENCY at a time, each in its own sandbox copy; tests are copied in round order.
-    await sayingDocker(o.progress, () => inPool(rounds.map((_x, k) => k), ANSWER_CONCURRENCY, async (k) => {
+    // Answer rounds run as many at a time as the Docker VM holds (at most ANSWER_CONCURRENCY), each in its own sandbox
+    // copy; tests are copied in round order.
+    const width = answerConcurrency(dockerCapacity());
+    await sayingDocker(o.progress, () => inPool(rounds.map((_x, k) => k), width, async (k) => {
       const { id, question, answer, project, key, rewrite } = rounds[k]!;
       // An answer already turned into tests (an earlier accept, same answer) is reused, not paid for again.
       const cache = join(rdir, "answers", id, "outcome.json");
@@ -545,10 +578,15 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   const rel = (p: string) => relative(repo, p).split(sep).join("/");
   const now = new Set(kept.map(rel));
   for (const was of new Set([...(before.kept ?? []), ...Object.values(earlier)])) {
-    const full = join(repo, was);
-    if (!own(was) || now.has(was) || !existsSync(full)) continue;
-    rmSync(full, { force: true });
-    removeEmpty(dirname(was));
+    // An older arnx's file was just stored under its stored name (storeOlderKept): look for that one too.
+    const names = was.startsWith(`${DOME}/`) && runName(was) === was ? [was, storedName(was)] : [was];
+    if (!own(was) || names.some((n) => now.has(n))) continue;
+    for (const n of names) {
+      const full = join(repo, n);
+      if (!existsSync(full)) continue;
+      rmSync(full, { force: true });
+      removeEmpty(dirname(n));
+    }
   }
   // Where the kept files went: the deepest directory they share (the repository when nothing was kept).
   const dest = kept.length ? kept.map(dirname).reduce((a, b) => {
@@ -594,7 +632,7 @@ export async function accept(repo: string, rdir: string, settings: Settings,
   const red = review.findings.filter((f) => keeps.findings[f.id] === "real")
     .map((f) => ({ id: f.id, testId: f.testId, project: f.project, explanation: f.explanation }));
   const result = { review, marks, kept, answers, rewrites, setAside, dest, red, moved, sources,
-    precision: precisionOf(log), fixOverrides: prompts.overridden.filter((k) => !isModelKey(k)) };
+    precision: precisionOf(log), fixOverrides: prompts.overridden.filter((k) => !isModelKey(k)), storedOlder };
   // A coding agent reads this. The review is masked already; answers and reasons are the user's own, and any may quote a
   // value of today's tree.
   const fix = maskedCopy(new Boundary(treeValues(repo)), fixPrompt(result, settings, prompts));

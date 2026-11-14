@@ -269,7 +269,7 @@ test("the 10-minute limit is the review's: arnx check proves a changed file as b
   expect(cli.stderr).toContain("Next: fix the ✗ above, then arnx check");
 });
 
-test("a change that cannot be reviewed is said before the proof runs", async () => {
+test("a change with nothing to review is said before the proof runs", async () => {
   const repo = await twoProjects();
   await proven(repo, file([block("api"), block("web")]));
   writeFileSync(reviewConfigPath(repo), readFileSync(reviewConfigPath(repo), "utf8")
@@ -278,7 +278,7 @@ test("a change that cannot be reviewed is said before the proof runs", async () 
   const [proofRuns, reached]: [Ran[], string[]] = [[], []];
   const cli = new Cli({ cwd: repo, env: ENV, setupModel: new ScriptedAgent([]), setupSessions: suites([]),
     approveSessions: suites(proofRuns), runReview: reviewStub(reached) });
-  expect(await cli.run("review", "--range", "HEAD..HEAD")).not.toBe(0);
+  expect(await cli.run("review", "--range", "HEAD..HEAD")).toBe(0);
   expect(cli.stderr).toContain("nothing to review");
   expect([proofRuns.length, reached.length]).toEqual([0, 0]);
 });

@@ -26,7 +26,7 @@ const sessions = (cases: [string, string, string, string][]): SessionFactory => 
 
 /** A repository with an approved environment and a review of four findings in two issues, all pre-filled real. */
 async function reviewed(o: { cases?: [string, string, string, string][]; questions?: string[];
-  real?: boolean } = {}): Promise<{ repo: string; rdir: string; cli: Cli }> {
+  real?: boolean; command?: string } = {}): Promise<{ repo: string; rdir: string; cli: Cli }> {
   const repo = gitRepo(tmp());
   const cli = new Cli({ cwd: repo, check: true, checkSessions: sessions(o.cases ?? []),
     env: { ANTHROPIC_API_KEY: "a" } });
@@ -36,7 +36,7 @@ projects:
   shop:
     root: .
     image: python:3.12-slim
-    test_command: python -m pytest {targets}
+    test_command: ${o.command ?? "python -m pytest {targets}"}
 `), "Dev", "2026-10-12"));
   commit(repo, "layout");
   const rdir = join(repo, ".arnx", "reviews", RID);
@@ -66,7 +66,7 @@ test("accept: the owner's example (one file, all marks pre-filled, no questions)
   expect(cli.stdout.slice(cli.stdout.indexOf("✓ Accepted"))).toBe([
     "✓ Accepted 4 tests from 2 issues (4 findings)",
     "  4 marks were pre-filled (not reviewed in triage)",
-    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py`,
+    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py.arnx`,
     "",
     "4 fail, as expected until the bugs are fixed; 5 pass:",
     "  ✗ test_s1_discount_over_100_rejected  Failed: DID NOT RAISE ValueError",
@@ -126,7 +126,7 @@ test("accept: all accepted tests pass: nothing to fix, commit them", async () =>
     [`${DIR}/test_r20261011_a1b2c3.py`, "test_s2", "passed", ""]] });
   expect(await cli.run("accept", "--no-answers")).toBe(0);
   expect(cli.stdout.slice(cli.stdout.indexOf(`  kept: `))).toBe([
-    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py`,
+    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py.arnx`,
     "",
     "All 2 accepted tests pass: the bugs they prove look fixed already.",
     "",
@@ -145,7 +145,7 @@ test("accept --no-check: the accepted tests fail until the fix, not run", async 
   const { cli } = await reviewed({ cases: OWNER });
   expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
   expect(cli.stdout.slice(cli.stdout.indexOf(`  kept: `))).toBe([
-    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py`,
+    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py.arnx`,
     "",
     "4 accepted tests fail until the fix (not run: --no-check).",
     "",
@@ -154,4 +154,20 @@ test("accept --no-check: the accepted tests fail until the fix, not run", async 
     "Then: arnx check",
     "Commit the fix and the accepted tests together.",
   ].join("\n"));
+});
+
+test("accept with nothing to answer needs no model key", async () => {
+  const { repo } = await reviewed({ cases: OWNER });
+  const bare = new Cli({ cwd: repo, check: true, checkSessions: sessions(OWNER), env: {} });
+  expect(await bare.run("accept")).toBe(0);
+  expect(bare.stderr).not.toMatch(/key/i);
+  expect(bare.stdout).toContain("✓ Accepted 4 tests");
+});
+
+test("accept asks for no exclude, even when arnx's own command leaves .arnx out", async () => {
+  // Kept files are stored under names no runner picks up: the project's own run needs nothing changed.
+  const { cli } = await reviewed({ cases: OWNER, command: "python -m pytest --ignore=.arnx {targets}" });
+  expect(await cli.run("accept", "--no-answers")).toBe(0);
+  expect(cli.stdout).not.toContain("collects .arnx/");
+  expect(cli.stdout).not.toMatch(/exclude/i);
 });

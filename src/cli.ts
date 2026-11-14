@@ -11,8 +11,9 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { accept, findAccepted, findReview, makeAnswerRunner, recordChosen } from "./accept";
+import { accept, findAccepted, findReview, hasAnswers, makeAnswerRunner, recordChosen } from "./accept";
 import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, contradictionLines,
+  linkAdvice, linkedDome, storedOlderText, storeOlderKept,
   failingList, keepEdits, mayContradict, recordAnswerWatch,
   legacyAccepted, moveOut,
   localPinsPath, TESTS_CHANGED } from "./check";
@@ -34,7 +35,7 @@ import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewF
   projectDigest, restDigest, reviewConfigPath, secretPinsOf, stampedBaseline, stampedQuick, withoutSecretPins,
   withSecretPins } from "./config";
 import { getAdapter } from "./adapters";
-import { ArnxError, EnvFailed, internalError, OnlyDocs, SetupRequired } from "./errors";
+import { ArnxError, EnvFailed, internalError, NoChange, OnlyDocs, SetupRequired } from "./errors";
 import { type Baseline, baselinePath, parseBaseline, readBaseline, writeBaseline } from "./baseline";
 import { FILE as IGNORE_FILE, initialIgnore } from "./ignore";
 import { type AgentModel, makeAgentModel, makeChallenger, makeJsonModel, makeSecondHunter, unpricedModels,
@@ -59,7 +60,7 @@ import { providerHost, resolveProvider } from "./providers";
 import { filePin, isSecretPath, secretHits, secretPins } from "./secrets";
 import { approveFile, coverageFiles, coverageMap, describeCoverage, entryHoldsTests, type NeededFile, type ProjectProof,
   NOTHING_TO_TEST, proofBefore, type ProofBefore, rerecordBaseline, runSetup, type SetupResult, type SetupRun, stillRed,
-  WEB_UI_STOP } from "./setup";
+  DISK_FULL_STOP, WEB_UI_STOP } from "./setup";
 import { withRepoHolds } from "./standins";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, notTestedRecord, PROVEN_BASELINE,
   PROVEN_COPY, proofState, quickCoverageLine, repoTypecheckGaps, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
@@ -301,9 +302,9 @@ class Commands {
   }
 
   /** With --json, the error that stopped the command: result "error", its message and exit code. */
-  fail(message: string, exitCode: number): void {
-    // Documentation alone is nothing to test, not an error.
-    if (exitCode === 0) this.emit("clean", 0, { status: "docs-only", message });
+  fail(message: string, exitCode: number, status = "nothing-to-review"): void {
+    // Nothing to review (documentation alone, an empty change) is not an error.
+    if (exitCode === 0) this.emit("clean", 0, { status, message });
     else this.emit("error", exitCode, { error: message });
   }
 
@@ -785,7 +786,7 @@ class Commands {
     try {
       const acct = await this.cloudClient(url, token, s, mode).call<Account>("GET", "/v1/account");
       out.push([acct.balance_micro_usd > 0, "Credits", `${usd(acct.balance_micro_usd)} available` +
-        (acct.balance_micro_usd > 0 ? "" : `; top up at ${acct.topup_url}`)]);
+        (acct.balance_micro_usd > 0 ? "" : "; own keys: arnx cloud off")]);
     } catch (e) {
       if (!(e instanceof ArnxError)) throw e;
       out.push([false, "Credits", oneLine(e.message)]);
@@ -965,12 +966,17 @@ class Commands {
       // Inside a review, a try that failed like any other: the review says the one next step at its end.
       if (quick && add) return finish(2, false);
       this.d.out("Next: arnx setup (sets up the whole repository)");
+      // A first-run review answers in its own shape: nothing to review, exit 0.
+      if (quick) {
+        this.emit("clean", 0, { status: "nothing-to-review", message: "nothing here arnx can test", next: ["arnx setup"] });
+        return finish(0, false);
+      }
       report("ok", 0, setupJson({ file: null, result, approved: false, auto: false, files: null, warnings: [],
         reviewYaml: null, record: null, seconds: seconds(), failure: null, next: ["arnx setup"] }));
       return finish(0, false);
     }
-    if (!result.ok && result.stop === WEB_UI_STOP) {
-      // Nothing to fix and nothing to run next: setup has nothing here to set up.
+    if (!result.ok && (result.stop === WEB_UI_STOP || result.stop === DISK_FULL_STOP)) {
+      // Nothing to fix and nothing to run next: nothing here to set up, or Docker has no disk left.
       const failure = setupFailure(result, s.setupBudgetUsd, cap, !!quick);
       this.d.out(failure.text);
       this.d.out(`${cost} · logs: .arnx/setup/`);
@@ -1310,17 +1316,20 @@ class Commands {
     const repo = this.repo();
     if (a.values.remove) return this.disallowSecret(repo, a.positionals);
     if (!a.positionals.length) throw new ArnxError("name the files to allow: arnx allow-secret PATH...");
-    const pins = a.positionals.map((p) => {
-      if (!existsSync(resolve(this.d.cwd, p))) throw new ArnxError(`${p}: no such file`);
+    // Each path is judged alone: those that qualify are allowed, each that does not is named, and only none at all fails.
+    const skipped: string[] = [];
+    const pins = a.positionals.flatMap((p) => {
+      const skip = (why: string) => { skipped.push(`${p}: ${why}`); return []; };
+      if (!existsSync(resolve(this.d.cwd, p))) return skip("no such file");
       const full = realpathSync(resolve(this.d.cwd, p));
-      if (!full.startsWith(repo + sep)) throw new ArnxError(`${p} is outside the repository`);
+      if (!full.startsWith(repo + sep)) return skip("outside the repository");
       const rel = relative(repo, full).split(sep).join("/");
       // A file left out whatever it holds, by its name or its size, is pinned as it stands.
       const tooBig = statSync(full).size > changeLimits.maxScanBytes;
       const whole = isSecretPath(rel) || tooBig || readFileSync(full).subarray(0, 8000).includes(0);
       const text = tooBig ? "" : readFileSync(full, "utf8");
       const hits = secretHits(text);
-      if (!hits.length && !whole) throw new ArnxError(`${rel} holds nothing that looks like a key; nothing to allow`);
+      if (!hits.length && !whole) return skip("holds nothing that looks like a key; nothing to allow");
       const shown = hits.slice(0, 5).map((h) => `${h.label} line ${h.line}`).join(", ") + (hits.length > 5 ? ", …" : "");
       if (hits.length) this.d.out(`! ${rel}: ${hits.length} key-like string${hits.length === 1 ? "" : "s"} (${shown})`);
       // Each side of a change must be allowed: the file as it stands, as committed, before the last commit, where its branch
@@ -1329,8 +1338,10 @@ class Commands {
         ? [git(repo, ["show", `${rev}:${rel}`], [0, 128])] : []) : [];
       const before = (existsSync(reviewConfigPath(repo)) ? readSecretPins(repo) : []).find((x) => x.path === rel)?.matches ?? [];
       const wholePins = whole ? [pinOfFile(full)!, ...earlier.filter(Boolean).map(filePin)] : [];
-      return { path: rel, matches: [...new Set([...secretPins(text), ...earlier.flatMap(secretPins), ...wholePins, ...before])].sort(), hits, whole };
+      return [{ path: rel, matches: [...new Set([...secretPins(text), ...earlier.flatMap(secretPins), ...wholePins, ...before])].sort(), hits, whole }];
     });
+    if (!pins.length) throw new ArnxError(skipped.join("\n"));
+    for (const line of skipped) this.d.out(`! ${line}`);
     const path = reviewConfigPath(repo);
     const seed = !existsSync(path) || isSeedFile(repo);
     mkdirSync(join(repo, ".arnx"), { recursive: true });
@@ -1344,7 +1355,8 @@ class Commands {
     this.d.out(`Next: ${seed ? "arnx setup" : "arnx review"}`);
     // Never the matched text, nor its pins: where each key-like string is, and what kind it looks like.
     this.emit("ok", 0, { files: pins.map((p) => ({ path: p.path, matches: p.hits.length,
-      labels: p.hits.map((h) => ({ label: h.label, line: h.line })) })), review_yaml: REVIEW_FILE,
+      labels: p.hits.map((h) => ({ label: h.label, line: h.line })) })), ...skipped.length ? { not_allowed: skipped } : {},
+      review_yaml: REVIEW_FILE,
       next: [seed ? "arnx setup" : "arnx review"] });
     return 0;
   }
@@ -1663,19 +1675,24 @@ class Commands {
     if (a.values["keep-edits"]) return this.keepEdits(a);
     if (a.values.move) return this.moveOut(a);
     const repo = this.repo();
+    // accept writes under .arnx/: never through a link there.
+    const linked = linkedDome(repo);
+    if (linked) throw new ArnxError(linkAdvice([linked]));
     const { s: file, mode } = this.settings(repo, a);
     let s = file;
     const rdir = findReview(repo, a.positionals[0] ?? null);
     // Answers and the closing check run in the sandbox: a changed review.yaml is proven again first (after the
     // consent the answers need).
     const again = `arnx accept${a.positionals[0] ? ` ${a.positionals[0]}` : ""}`;
-    if (a.values["no-answers"] && !a.values["no-check"] && this.d.check !== false) await this.reprove(repo, a, again);
+    // With nothing to answer no model runs: no consent, no key, no proof for the answers.
+    const answering = !a.values["no-answers"] && hasAnswers(rdir);
+    if (!answering && !a.values["no-check"] && this.d.check !== false) await this.reprove(repo, a, again);
     const progress = new Progress(this.progressLine, { quiet: a.values.quiet as boolean | undefined,
       live: this.d.live ?? null, cost: costSince() });
     let runner = null;
     let billed = false; // arnx cloud turns the answers into tests: their cost is what it billed
     let unpriced = false; // the answer model has no price: its cost is unknown
-    if (!a.values["no-answers"]) {
+    if (answering) {
       s = await this.agreed(repo, s, mode); // answers are turned into tests by a model
       await this.reprove(repo, a, again);
       const cloud = await this.cloudBrain(repo, s, mode);
@@ -1732,6 +1749,8 @@ class Commands {
     }
     for (const [qid, ids] of byAnswer) this.d.out(`${ids.join(", ")} set aside: your answer to ${qid} has its own test`);
     for (const p of tests) this.d.out(`  kept: ${relative(repo, p)}`);
+    const older = storedOlderText(result.storedOlder);
+    if (older) this.d.out(older);
     if (result.fixOverrides.length) {
       this.d.out(`Fix prompt: yours for ${result.fixOverrides.join(", ")} (${PROMPTS_FILE})`);
     }
@@ -1919,7 +1938,7 @@ class Commands {
       const acct = await this.cloudClient(url, token, s, mode).call<Account>("GET", "/v1/account");
       if (acct.balance_micro_usd > 0) return n;
       return { phase: n.phase, where: `${n.where}; the arnx cloud balance is ${usd(acct.balance_micro_usd)}`,
-        command: "arnx credits", why: `top up at ${acct.topup_url}`, then: n.command };
+        command: "arnx cloud off", why: "or arnx login to another account", then: n.command };
     } catch (e) {
       if (!(e instanceof ArnxError)) throw e;
       return { ...n, why: `${n.why} (arnx cloud could not be asked for the balance: ${oneLine(e.message)})` };
@@ -1980,9 +1999,17 @@ class Commands {
     if (a.positionals.length && !a.values.review) throw new ArnxError("a review id goes with --review: " +
       `arnx check --review ${a.positionals[0]}`);
     const repo = this.repo();
+    const json = !!a.values.json;
+    // A link at .arnx or .arnx/tests: nothing is read, moved or written through it, review copies included.
+    const linked = linkedDome(repo);
+    if (linked) {
+      const changed = [{ path: linked, review: "", change: "modified" as const }];
+      if (json) this.emitRaw(checkJson([], TESTS_CHANGED, changed));
+      else this.d.out(colorLines(changedSummary(changed, repo), paint(!!this.d.color)));
+      return TESTS_CHANGED;
+    }
     suffixReviewCopies(repo);
     const s = loadSettings(repo);
-    const json = !!a.values.json;
     if (a.values.review) return this.recheck(a, repo, s, json);
     // Accepted tests edited or deleted since accept are not run: passing them would prove nothing. Nor are they when
     // their pins were changed or removed by anything but arnx.
@@ -1992,6 +2019,9 @@ class Commands {
       else this.d.out(colorLines(changedSummary(changed, repo), paint(!!this.d.color)));
       return TESTS_CHANGED;
     }
+    // Kept files an older arnx stored by the names they run by: out of the project's runs, before anything runs.
+    const stored = storeOlderKept(repo, localPinsPath(this.d.env, repo));
+    if (!json && storedOlderText(stored)) this.d.out(storedOlderText(stored));
     // Accepted tests an older arnx kept in the projects' own test folders: their runs collect them.
     const legacy = [...legacyAccepted(repo, s).keys()];
     if (legacy.length) {
@@ -2018,7 +2048,7 @@ class Commands {
     const lines = text.split("\n");
     const at = lines.at(-1)!.startsWith("Next:") ? lines.length - 1 : lines.length;
     lines.splice(at, 0, ...contradictionLines(pairs));
-    if (json) this.emitRaw(checkJson(results, code, [], pairs));
+    if (json) this.emitRaw(checkJson(results, code, [], pairs, stored.stored.length));
     else this.d.out(colorLines(lines.join("\n"), paint(!!this.d.color)));
     await this.sendTelemetry("check", () => checkData(results, code, (performance.now() - started) / 1000));
     return code;
@@ -2120,6 +2150,7 @@ export function setupFailure(r: SetupResult, budgetUsd: number, minutes: number,
       json: { kind: "time", reason: `reached the ${minutes}-minute limit (last: ${r.problem || r.summary})`,
         failing: [] } };
   }
+  if (r.stop === DISK_FULL_STOP) return { text: r.problem, json: { kind: "environment", reason: r.problem, failing: [] } };
   if (r.failing.length) {
     const n = r.failing.length;
     const more = n - SHOWN_FAILING;
@@ -2158,7 +2189,7 @@ const tryParse = (text: string | null): ReviewFile | null => {
   }
 };
 
-/** `arnx setup --json` (skills/arnx/references/json.md): each project as setup proved it and approval ran it. */
+/** `arnx setup --json` (plugin/skills/arnx/references/json.md): each project as setup proved it and approval ran it. */
 function setupJson(o: { file: ReviewFile | null; result: SetupResult; approved: boolean; auto: boolean;
   files: FilesSummary | null; warnings: string[]; reviewYaml: string | null; record: string | null; seconds: number;
   failure: Record<string, unknown> | null; next: string[]; approval?: ApprovedProject[] }): Record<string, unknown> {
@@ -2180,7 +2211,7 @@ function setupJson(o: { file: ReviewFile | null; result: SetupResult; approved: 
     seconds: o.seconds, stop: r.stop, uncovered_projects: r.setAside ?? [], failure: o.failure, next: o.next };
 }
 
-/** One project's suite in `approve --json` (skills/arnx/references/json.md). */
+/** One project's suite in `approve --json` (plugin/skills/arnx/references/json.md). */
 export interface ApprovedProject { name: string; ok: boolean; summary: string; accepted_failing: number;
   unexpected: string[]; baseline_failing?: number; left_baseline?: string[]; flaky?: string[] }
 
@@ -2374,7 +2405,8 @@ async function run(command: string, args: Args, commands: Commands, d: CliDeps):
     const lines = e instanceof ArnxError ? [`arnx: ${e.message}`] : internalError(e, d.env);
     for (const line of lines) d.err(line);
     const code = e instanceof ArnxError ? e.exitCode : 2;
-    commands.fail(e instanceof ArnxError ? e.message : lines[0]!.replace(/^arnx: /, ""), code);
+    commands.fail(e instanceof ArnxError ? e.message : lines[0]!.replace(/^arnx: /, ""), code,
+      e instanceof OnlyDocs ? "docs-only" : e instanceof NoChange ? "nothing-to-review" : undefined);
     return code;
   }
 }

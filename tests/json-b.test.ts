@@ -1,5 +1,5 @@
 // --json for approve, review, triage, allow-secret, env prune and skill install: one object on stdout, its fields as
-// skills/arnx/references/json.md lists them, the people's text on stderr.
+// plugin/skills/arnx/references/json.md lists them, the people's text on stderr.
 import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

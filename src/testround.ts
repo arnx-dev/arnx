@@ -2,12 +2,14 @@
 // run what it wrote `runs` times in the sandbox and classify; for a review, tests that failed in every run (and, for
 // the fix proof, some that passed in every run) then run on the code before the change. Used by review and by
 // answered questions.
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync }
-  from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync,
+  writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
-import { type AgentResult, Workspace } from "./agent";
+import { type AgentResult, StopRound, Workspace } from "./agent";
 import { adapterFor, getAdapter } from "./adapters";
+import { isKeptJunk, runName, storedName } from "./kept";
+import { entriesUnder, regularBytes } from "./safefs";
 import { DEFAULT_ACCEPTED_DIR } from "./adapters/types";
 import { absentFromSnapshot, bakedError, bakedIn, imageFiles, bakedKey, type BakedCopy, copyOnly, type CopyOnly, CopyDiffers, copyStopText, rebuildText }
   from "./baked";
@@ -20,12 +22,12 @@ import { holdsIn, staleLine, staleRewrites, standInsLine, writeStandIns } from "
 import { fallbackImage } from "./envprune";
 import { filesAt, snapshot, takeSnapshot, type Withheld, withSandboxFiles } from "./change";
 import { type ReviewConfig, sandboxOnlyOf, secretPinsOf } from "./config";
-import { EnvFailed } from "./errors";
+import { ArnxError, EnvFailed } from "./errors";
 import { markUnproven } from "./diagnose";
 import { type KeyReruns, keyReruns, type RealOutcomes, rerunCandidates, rerunWithRealKeys } from "./realkey";
 import { clip, emit, testMessage } from "./events";
 import { baseName, type Classified, classify, describeRun, funcOf, ownerFile, runBounded, runTests, serialFlag, type TestResult } from "./outcomes";
-import { buildContextOf, DEFAULT_LIMITS, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
+import { buildContextOf, DEFAULT_LIMITS, DiskFull, dockerSteps, ensureEnv, envKey, REPORT_DIR, requireDocker, type Runner, type RunResult, Session,
   type SessionFactory } from "./sandbox";
 import type { Say } from "./progress";
 import { describeTypecheck, recordTypecheck, runTypecheck, type TscError, type TypeCheck, type TypeCheckBefore, type TypeCheckRun,
@@ -191,22 +193,60 @@ export function isKeptPath(cfg: ReviewConfig, path: string, acceptedTestsDir?: s
   const under = (d: string) => d === "." || path.startsWith(`${d}/`);
   if (acceptedRoots(cfg, acceptedTestsDir).some(under)) return true;
   const kept = adapterFor(cfg).kept;
-  return !!kept && kept.name.test(posix.basename(path)) &&
+  return !!kept && kept.name.test(posix.basename(runName(path))) &&
     kept.dirs.some((d) => posix.dirname(path) === posix.normalize(posix.join(cfg.workdir, d)).replace(/\/$/, ""));
 }
 
 /** Where `arnx accept` keeps tests: each at the path it runs from (`api/tests/arnx/r…/test_x.py`) under this
- * folder, which test runners leave out (setup proves it), so the project's own test run never imports, collects or runs
- * one. Only `arnx check` puts them in place, in its throwaway copy of the repository. */
+ * folder, stored under a name no test runner, type checker or linter picks up (kept.ts), so the project's own
+ * tools never import, collect, check or run one. Only `arnx check` puts them in place, under the names they run by, in
+ * its throwaway copy of the repository. */
 export const DOME = ".arnx/tests";
 
-/** The path a kept file runs from (repository-relative): its path under DOME. */
-export const runPath = (p: string): string => p.startsWith(`${DOME}/`) ? p.slice(DOME.length + 1) : p;
+/** The path a kept file runs from (repository-relative): its path under DOME, under its run name. */
+export const runPath = (p: string): string => p.startsWith(`${DOME}/`) ? runName(p.slice(DOME.length + 1)) : p;
 
-/** The test files `arnx accept` kept for this project that exist, relative to the repository (under DOME). */
+/** The test files `arnx accept` kept for this project that exist, relative to the repository (under DOME, as stored).
+ * A file stored both ways (an older arnx's beside a newer one) counts once, as the newer one. */
 export function keptTestFiles(repo: string, cfg: ReviewConfig, acceptedTestsDir?: string,
                               projects: readonly ReviewConfig[] = [cfg]): string[] {
-  return keptIn(join(repo, DOME), cfg, acceptedTestsDir, false, projects).map((p) => `${DOME}/${p}`);
+  const stored = keptIn(join(repo, DOME), cfg, acceptedTestsDir, false, projects);
+  const suffixed = new Set(stored.filter((p) => p !== runName(p)).map(runName));
+  return stored.filter((p) => p !== runName(p) || !suffixed.has(p)).map((p) => `${DOME}/${p}`);
+}
+
+/** Puts the kept files `pinned` names (repository-relative paths under DOME, as the record holds them) into `snap` (a
+ * throwaway copy of the repository) at the path each runs from, under its run name; the run paths placed. Nothing else
+ * under DOME is placed, nothing is placed over what the copy already holds, and every file is read as changedAccepted
+ * hashed it: never through a link, so what runs is what was checked. Two pinned files of one run name that differ are
+ * refused, never chosen between. */
+export function placeKept(repo: string, snap: string, pinned: ReadonlySet<string>): string[] {
+  const dome = join(repo, DOME);
+  if (!existsSync(dome)) return [];
+  const mine = [...pinned].filter((p) => p.startsWith(`${DOME}/`)).map((p) => p.slice(DOME.length + 1)).sort();
+  const bytes = new Map(mine.map((rel) => [rel, regularBytes(dome, rel)] as const));
+  const same = (a?: Buffer | string, b?: Buffer | string) => typeof a !== "string" && typeof b !== "string" && !!a && !!b &&
+    a.equals(b);
+  const differ = mine.filter((p) => runName(p) === p && bytes.has(storedName(p)) && !same(bytes.get(p), bytes.get(storedName(p))));
+  if (differ.length) {
+    throw new ArnxError(`a kept test is stored under two names that differ (${differ.map((p) => `${DOME}/${storedName(p)}`)
+      .join(", ")} and the same without .arnx): delete the copy you do not want, then run this again`);
+  }
+  const placed = new Set<string>();
+  for (const rel of mine) {
+    const b = bytes.get(rel)!;
+    // Gone meanwhile, or no longer a regular file: nothing of it runs (changedAccepted names it).
+    if (typeof b === "string" || placed.has(runName(rel))) continue;
+    const to = join(snap, runName(rel));
+    if (lstatSync(to, { throwIfNoEntry: false })) {
+      throw new ArnxError(`${DOME}/${rel} runs from ${runName(rel)}, which your project already has: arnx never puts a ` +
+        "kept test over a file of the project");
+    }
+    mkdirSync(dirname(to), { recursive: true });
+    writeFileSync(to, b, { mode: (lstatSync(join(dome, rel), { throwIfNoEntry: false })?.mode ?? 0o644) & 0o777 });
+    placed.add(runName(rel));
+  }
+  return [...placed].sort();
 }
 
 /** The project among `projects` whose folder holds `path` (repository-relative), the deepest one. */
@@ -230,8 +270,9 @@ function keptIn(root: string, cfg: ReviewConfig, acceptedTestsDir?: string, all 
                 projects: readonly ReviewConfig[] = [cfg]): string[] {
   const adapter = adapterFor(cfg);
   const base = getAdapter(cfg.language);
-  const writable = (n: string) => adapter.writable.test(n) || base.writable.test(n);
-  const isTest = (n: string) => adapter.isTestFile(n) || base.isTestFile(n);
+  // Names as they run: a kept file stored with its suffix (kept.ts) is told by the name it runs by.
+  const writable = (n: string) => adapter.writable.test(runName(n)) || base.writable.test(runName(n));
+  const isTest = (n: string) => adapter.isTestFile(runName(n)) || base.isTestFile(runName(n));
   const inRoots = acceptedRoots(cfg, acceptedTestsDir).filter((d) => existsSync(join(root, d)))
     .flatMap((d) => collect(root, d, /./).filter((p) => all || writable(posix.basename(p))))
     .filter((p) => all || isTest(posix.basename(p)));
@@ -240,9 +281,11 @@ function keptIn(root: string, cfg: ReviewConfig, acceptedTestsDir?: string, all 
       (all || writable(posix.basename(p))) && (all || isTest(posix.basename(p)))) : [];
   const own = (adapter.kept?.dirs ?? []).map((d) => posix.normalize(posix.join(cfg.workdir, d)).replace(/\/$/, ""))
     .filter((d) => existsSync(join(root, d)))
-    .flatMap((d) => readdirSync(join(root, d)).filter((n) => adapter.kept!.name.test(n) &&
+    .flatMap((d) => readdirSync(join(root, d)).filter((n) => adapter.kept!.name.test(runName(n)) &&
       lstatSync(join(root, d, n)).isFile()).map((n) => posix.join(d, n)));
-  return [...new Set([...inRoots, ...sat, ...own])].sort();
+  // OS and editor leftovers, and the byte-code cache a project's own pytest leaves in an older accepted folder, are
+  // nobody's kept files.
+  return [...new Set([...inRoots, ...sat, ...own])].filter((p) => !isKeptJunk(p)).sort();
 }
 
 /** A kept file's folder: `<anywhere>/arnx/r<review id>/`, as accept lays them out. */
@@ -475,10 +518,19 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const expand = (targets: string[]) =>
           targets.flatMap((t) => (posix.normalize(t) === posix.normalize(o.writeDir) ? generated() : [t]))
             .map((t) => posix.relative(cfg.workdir, t) || ".");
+        // A full Docker disk ends the round (no more model calls) and then the review, with its one line.
+        let diskFull: DiskFull | null = null;
         const run = async (targets: string[]) => {
           const rel = expand(targets);
           if (!rel.length) return `no test files under ${o.writeDir}/ yet`;
-          const [result, results] = await runTests(session, snap, cfg, rel, `agent-${++counter}.xml`, TOOL_TIMEOUT, { serial });
+          let result, results;
+          try {
+            [result, results] = await runTests(session, snap, cfg, rel, `agent-${++counter}.xml`, TOOL_TIMEOUT, { serial });
+          } catch (e) {
+            if (!(e instanceof DiskFull)) throw e;
+            diskFull = e;
+            throw new StopRound(e.message);
+          }
           const own = generated();
           if (results?.some((t) => ownerFile(t.fileAttr, own) !== null)) saw = true;
           return describeRun(result, results, own);
@@ -499,6 +551,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const done = await (ask.kind === "review"
           ? o.brain.agentRound("review", { ...ask.input, ...base }, Promise.resolve(tools))
           : o.brain.agentRound("answer", { ...ask.input, ...base }, Promise.resolve(tools)));
+        if (diskFull) throw diskFull;
         hunt = done.hunt;
         const a = done.agent;
         const f = generatedNow();
@@ -762,7 +815,8 @@ async function typecheckHere(session: Runner, snap: string, cfg: ReviewConfig, w
     clearArnxFiles(snap, cfg, writeDir);
     run = await runTypecheck(session, cfg);
   } catch (e) {
-    // Whatever goes wrong here is the type check's, never the round's.
+    // Whatever goes wrong here is the type check's, never the round's; a full disk is nobody's but Docker's.
+    if (e instanceof DiskFull) throw e;
     run = { status: "failed", errors: [], output: e instanceof Error ? e.message : String(e), exitCode: null,
       timedOut: false, seconds: 0 };
   }

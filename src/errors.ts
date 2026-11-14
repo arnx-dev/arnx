@@ -33,15 +33,16 @@ export function fatal(e: unknown, env: Record<string, string | undefined>): { li
   return e instanceof ArnxError ? { lines: [`arnx: ${e.message}`], code: e.exitCode } : { lines: internalError(e, env), code: 2 };
 }
 
-/** There is no change to review: the diff is empty. `arnx next` tells this apart from a change it cannot review. */
+/** There is nothing to review (an empty diff, lockfiles or generated files alone): not a failure, exit code 0. `arnx next`
+ * tells this apart from a change it cannot review. */
 export class NoChange extends ArnxError {
   override name = "NoChange";
+  override exitCode = 0;
 }
 
-/** The change holds documentation only: nothing to test unless `--docs` asks. Not a failure: exit code 0. */
+/** The change holds documentation only: nothing to test unless `--docs` asks. */
 export class OnlyDocs extends NoChange {
   override name = "OnlyDocs";
-  override exitCode = 0;
   constructor(files: readonly string[]) {
     const shown = files.slice(0, 3).join(", ") + (files.length > 3 ? `, +${files.length - 3} more` : "");
     super(`nothing to test: only documentation changed (${shown}). \`arnx review --docs\` reviews it anyway.`);

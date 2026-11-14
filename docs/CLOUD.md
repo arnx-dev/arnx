@@ -15,8 +15,8 @@ judges the findings, at effort `low`, `medium` or `high`. No model key needed.
 - **Sent to arnx cloud:** what a model provider gets with your own keys: the diff, the files the agent reads, the
   tests it writes and their output. arnx cloud passes them on to its model providers. Your own prompts
   (`.arnx/prompts.toml`) are not sent: arnx cloud runs its own, and arnx says so in one line.
-- **Price:** prepaid credit in US dollars; each review shows what it was billed, per role. New accounts start with
-  $5 free. Credits and top-ups: https://arnx.dev/credits. Terms: https://arnx.dev/terms; privacy:
+- **Price:** prepaid credit in US dollars; each review shows what it was billed, per role. The first 100
+  accounts get $5 of credit. Terms: https://arnx.dev/terms; privacy:
   https://arnx.dev/privacy.
 
 The commands:
@@ -25,7 +25,7 @@ The commands:
     arnx cloud off          # back to your own keys: models = false
     arnx init --cloud       # or set a new repository up for arnx cloud from the start
     arnx login              # open the link it shows, enter the code; token in ~/.config/arnx/credentials.json
-    arnx credits            # the balance, what reviews in progress reserve, and the top-up link
+    arnx credits            # the balance and what reviews in progress reserve
     arnx logout             # deletes the token
 
 Every `.arnx/config.toml` has the table, so switching is one word, which `arnx cloud on|off` changes (a plain
@@ -51,8 +51,8 @@ Money:
   cost, and is always closed, also when it fails or you interrupt it.
 - The cost shows per role under the tier, such as `arnx:medium/reviewer`, in review.md, review.json and
   `.arnx/usage.jsonl`; arnx cloud does not name the models it used.
-- A balance too low to start stops with exit 3, the balance and the top-up link; `arnx review --resume` continues
-  after a top-up.
+- A balance too low to start stops with exit 3 and the balance; your own model keys
+  (`arnx cloud off`) still work.
 
 When arnx cloud cannot be reached, arnx exits 2 and says so, and, when your own keys are all set, that `arnx cloud
 off` (or `--local`) uses them. With arnx cloud on, `doctor` and `next` check your login and balance instead of

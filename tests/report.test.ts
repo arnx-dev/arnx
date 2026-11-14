@@ -44,7 +44,7 @@ test("test_missing_mark_line_refused", () => {
 });
 
 test("test_save_load", () => {
-  const r = sampleReview();
+  const r = sampleReview({ sourceFiles: 4 }); // a current review always records its count
   save(r, tmp(), "diff text");
   expect(load(tmp())).toEqual(r);
   expect(readFileSync(join(tmp(), "change.diff"), "utf8")).toBe("diff text");
@@ -204,7 +204,7 @@ test("review.json carries schema_version, each finding's status and the exit cod
   const f = sampleReview().findings;
   const r = sampleReview({ findings: [f[0]!, f[1]!, { ...f[0]!, id: "F3", dependsOn: "Q1" },
     { ...f[0]!, id: "F4", verdict: null },
-    { ...f[0]!, id: "F5", before: { status: "pre-existing", detail: "fails the same way", runs: [] } }] });
+    { ...f[0]!, id: "F5", before: { status: "pre-existing", detail: "fails the same way", runs: [] } }], sourceFiles: 4 });
   save(r, tmp(), "");
   const json = JSON.parse(readFileSync(join(tmp(), "review.json"), "utf8"));
   expect(json.schema_version).toBe(1);

@@ -233,6 +233,9 @@ export interface Review {
   untested?: Untested[];
   /** Unique changed source files across the whole change, tested or not (absent in older reviews). */
   sourceFiles?: number;
+  /** A saved review written before `source_files` existed: nothing records which files its tests reached, so it never
+   * reads Complete (set when it is loaded; absent otherwise). */
+  noEvidence?: boolean;
   /** What the hunt suspected and what each suspect's test showed (absent when no hunt ran). */
   suspects?: SuspectOutcome[];
   /** Time spent in stages worth measuring, in seconds: the before/after check, summed over projects (absent when it
@@ -418,7 +421,7 @@ function why(stop: string, r?: Review): string {
   if (stop.startsWith("api_error: ")) return `the reviewer's model call failed (${stop.slice("api_error: ".length)})`;
   if (stop === "budget") {
     return "the review budget ran out before the reviewer finished (raise `review_usd` under [budget] in " +
-      `.arnx/config.toml${r && billedByCloud(r) ? ", or top up: arnx credits" : ""}, then run arnx review again)`;
+      `.arnx/config.toml${r && billedByCloud(r) ? ", or use your own keys: arnx cloud off" : ""}, then run arnx review again)`;
   }
   if (stop === "max_turns") return "the reviewer ran out of turns";
   if (stop === "refusal") return "the model refused the request";
@@ -512,16 +515,17 @@ function statusLines(r: Review): string[] {
   const again = (r.providerFailures ?? []).some(resumes) || hasEnv ? ""
     : r.couldNotRun?.length ? " If it is a test fixture, allow it with `arnx allow-secret PATH`, then `arnx review` again."
     : " Run `arnx review` again to cover it.";
+  const unjudged = notChecked(r);
   const out = [problems.length ? `Incomplete: ${problems.join("; ")}.${again}`
     : suspectedNothing(r) ? NOTHING_SUSPECTED
     : cov.none ? `Not tested: arnx saw no test reach any of the ${cov.n} changed source file${cov.n === 1 ? "" : "s"}, so finding nothing says ` +
       "nothing about this change."
     : cov.m ? `Partly covered: arnx saw no test reach ${cov.m} of the ${cov.n} changed source file${cov.n === 1 ? "" : "s"} below, so finding ` +
       "nothing there says nothing about them. Check them yourself, or review them on their own with `arnx review --range`."
-    : `Complete: ${r.projects.length > 1 ? `${r.projects.length} projects tested${names}` : "the change was tested"}; ` +
+    : r.noEvidence ? "Older review: this arnx did not record which files its tests reached."
+    : `${unjudged.length ? "Tested; not all checked" : "Complete"}: ${r.projects.length > 1 ? `${r.projects.length} projects tested${names}` : "the change was tested"}; ` +
       "every run reported its tests."];
   out.push(...(r.providerFailures ?? []).map(failureLine));
-  const unjudged = notChecked(r);
   if (unjudged.length) {
     out.push(`Not checked by the second opinion: ${unjudged.map((f) => f.id).join(", ")}. Their tests fail, but no second ` +
       "model looked at them: read them before you mark them.");
@@ -1273,7 +1277,7 @@ const camel = (k: string) => k.replace(/_([a-z])/g, (_m, c: string) => c.toUpper
 const rekey = (o: object, f: (k: string) => string) =>
   Object.fromEntries(Object.entries(o).map(([k, v]) => [f(k), v]));
 
-/** review.json's shape; documented in skills/arnx/references/review-json.md, which coding agents read. A field
+/** review.json's shape; documented in plugin/skills/arnx/references/review-json.md, which coding agents read. A field
  * removed or renamed there is a new version. */
 export const REVIEW_SCHEMA_VERSION = 1;
 
@@ -1331,6 +1335,7 @@ export function load(rdir: string): Review {
   if (data.unclaimed) r.unclaimed = (data.unclaimed as object[]).map((u) => rekey(u, camel) as { project: string; testId: string; message: string });
   r.groups = (data.groups ?? []) as Group[];
   r.checked = (data.checked ?? []) as Checked[];
+  if (data.source_files === undefined) r.noEvidence = true;
   // The count of changed source files is read from the diff, so old and new reviews count the same way.
   try {
     const diff = readFileSync(join(rdir, "change.diff"), "utf8");

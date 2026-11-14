@@ -40,7 +40,7 @@ import { look, type Placement } from "./precheck";
 import { LocalBrain } from "./localbrain";
 import { promptsFor } from "./userprompts";
 import type { Say } from "./progress";
-import { copyManifests, dockerExec, dockerSteps, envKey, envTag, type ExecFactory, OutOfTime, requireTime,
+import { copyManifests, dockerExec, DiskFull, dockerSteps, envKey, envTag, type ExecFactory, OutOfTime, requireTime,
   type Runner, type RunResult, type SessionFactory, type TimeLimit, timeIsUp, withTimeLimit } from "./sandbox";
 import type { ScipIndex } from "./scip";
 import { EXEC, SetupExec, type TriedEnv } from "./setupexec";
@@ -54,6 +54,7 @@ import { agentUse, logUsage } from "./usage";
 import { randomHex } from "./util";
 import { VERSION } from "./version";
 import { acceptedPins, type AcceptedPins } from "./check";
+import { storedName } from "./kept";
 import { collect, DOME, dockerSession, isKeptPath, ownTestsInWriteDir, ownTestsProblem, probeRun, swapIn, writeDirOf }
   from "./testround";
 import { type TestsDirChoice, testsDirFor } from "./testsdir";
@@ -268,6 +269,9 @@ export function hasOwnTests(cfg: ReviewConfig, snap: string): boolean {
 /** The summary of a project with no tests of its own whose environment arnx's one-line test proved. */
 export const NO_OWN_TESTS = "no tests of its own; arnx's one-line test runs";
 
+/** Said after a suite's counts when its runner also ran a file under .arnx/ (left out of them). */
+export const ARNX_COLLECTED = "; note: the runner also ran a file under .arnx/, left out of these counts";
+
 /** Most failing files run apart from the rest of the suite to look for order dependence (one extra run). */
 const APART_MAX = 20;
 
@@ -333,10 +337,10 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
           : `${plural(seen.tests, "test")} listed`}, ${plural(sample.files.length, "small file")} ran: `;
       }
     }
-    // A whole-suite run carries a canary: one-line tests where arnx keeps accepted tests (.arnx/tests/), which the
-    // project's own run must never collect.
+    // A whole-suite run carries a canary: one-line tests where arnx keeps accepted tests (.arnx/tests/), stored as
+    // accept stores them, which proves the project's own run never collects a kept file.
     const canary = targets.length || sample ? [] : adapterFor(cfg).probes(cfg.runner)
-      .map((p) => ({ path: join(snap, DOME, writeDirOf(cfg), p.file), source: p.source }));
+      .map((p) => ({ path: join(snap, DOME, writeDirOf(cfg), storedName(p.file)), source: p.source }));
     for (const c of canary) {
       mkdirSync(dirname(c.path), { recursive: true });
       writeFileSync(c.path, c.source);
@@ -355,14 +359,13 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
       source: { repo: leftOut.repo, head: null }, fakedKeys: leftOut.fakedKeys, tests: rerunCandidates([reported]), all: [reported],
       target: (t) => t.fileAttr || null, budget: leftOut.reruns ?? keyReruns(), timeout: SUITE_TIMEOUT, ...(boundary ? { id: (x: string) => boundary.mask(x) } : {}) })
       : undefined;
-    const all = reported && leftOut ? markUnproven(reported, { leftOut: leftOut.secret, fakedKeys: leftOut.fakedKeys, all: leftOut.all,
+    let all = reported && leftOut ? markUnproven(reported, { leftOut: leftOut.secret, fakedKeys: leftOut.fakedKeys, all: leftOut.all,
       ...(real ? { real } : {}) }) : reported;
-    if ((all ?? []).some((t) => [t.fileAttr, t.testId].some((x) => x && /(?:^|\/)\.arnx\//.test(x)))) {
-      return [false, "the project's test run collects files under .arnx/ (a test arnx placed in .arnx/tests/ ran). " +
-        "arnx keeps its accepted tests there so your own run never runs them: make the runner leave .arnx/ out " +
-        "(pytest: norecursedirs or testpaths; vitest, jest: exclude), then run setup again", tailOf(result.output), [],
-        [], "", { ...none, stoppedAt: "config" }] as Out;
-    }
+    // A runner that still picks up a file under .arnx/ (the canary, under its stored name) is noted, never the
+    // developer's to change: what it ran there does not count, and arnx keeps working (check runs kept files by name).
+    const inArnx = (t: TestResult) => [t.fileAttr, t.testId].some((x) => x && /(?:^|\/)\.arnx\//.test(x));
+    const collectsArnx = (all ?? []).some(inArnx);
+    if (collectsArnx) all = all!.filter((t) => !inArnx(t));
     // A project with no tests of its own has no suite to run: arnx's one-line test, which reviews depend on anyway,
     // proves the environment instead.
     if (!targets.length && !all?.length && cfg.language !== "rust" && !hasOwnTests(cfg, snap)) {
@@ -395,7 +398,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     }
     const fetched = all === null ? npxDownload(result.output) : null;
     const summary = fetched ? `the suite produced no report: ${npxText(fetched)}`
-      : all === null ? noReport(result, cfg) : listed + verdict;
+      : all === null ? noReport(result, cfg) : listed + verdict + (collectsArnx ? ARNX_COLLECTED : "");
     // Accepted tests that fail as pinned are not the environment's to fix: diagnosis and retries leave them out.
     const results = withoutAccepted(all, cfg, accepted, acceptedTestsDir);
     let said = "";
@@ -586,6 +589,8 @@ export const TIME_LEFT_OUT = "setup reached its time limit";
 /** Why setup stops when its only projects are web UI apps whose runs failed (SetupResult stop WEB_UI_STOP). */
 export const ONLY_WEB_UI = "only web UI here, which arnx does not set up";
 export const WEB_UI_STOP = "web-ui";
+/** Setup stopped because Docker's disk is full: no try or model call can help. */
+export const DISK_FULL_STOP = "disk-full";
 /** A quick setup's stop when no project arnx can set up owns a changed file. */
 export const NOTHING_TO_TEST = "nothing-to-test";
 
@@ -800,6 +805,11 @@ export function sourceGroups(unexplained: string[], claimed: string[], all: stri
   return [...groups.values()];
 }
 
+
+/** What the user reads for a web UI app whose counted runs all stopped at listing. */
+function listingStopLine(name: string, runs: number, error: string): string {
+  return `${name}: its tests did not list in ${runs} tries: ${error}`;
+}
 
 /** Where the web UI app `name`, whose runs failed, goes under uncovered: the folders and files of its source (of
  * any file when it has none) that no other project in `f` owns or uses, each folder the shallowest that holds none of
@@ -1031,27 +1041,38 @@ const sameOrNested = (a: string, b: string) => a === "." || b === "." || a === b
 /** `yaml` with each project in `blocks` that it leaves out put back, with its services, and its `/<root>/` entry
  * under uncovered taken out. A project is not put back (the new file wins; `replaced` names it) when its folder
  * overlaps one of another project in the file, "." being the ancestor of every folder; nor when the file defines a
- * service of that name differently. */
-export function restoreProven(yaml: string, blocks: Map<string, ProvenBlock>):
+ * service of that name differently. A project named in `revert` that the file has too gets its block replaced by the
+ * proven one, on the same terms (its own old services give way; another project's do not). */
+export function restoreProven(yaml: string, blocks: Map<string, ProvenBlock>, o: { revert?: ReadonlySet<string> } = {}):
   { yaml: string; restored: string[]; replaced: string[] } {
   const doc = parseDocument(yaml);
   if (doc.errors.length || !blocks.size) return { yaml, restored: [], replaced: [] };
   const js = doc.toJS() as { projects?: Record<string, { root?: unknown }>; services?: Record<string, unknown>;
     uncovered?: { path?: unknown }[]; allow_env_names?: string[] } | null;
   if (!js || !js.projects || typeof js.projects !== "object") return { yaml, restored: [], replaced: [] };
-  const roots = (): string[] => Object.values(js.projects!).map((p) => folder(p?.root));
   const restored: string[] = [];
   const replaced: string[] = [];
+  const othersUse = (self: string, k: string) => Object.entries(js.projects!).some(([n, p]) => n !== self &&
+    Array.isArray((p as { services?: unknown })?.services) && ((p as { services: unknown[] }).services).includes(k));
   for (const [name, b] of blocks) {
-    if (name in js.projects) continue;
+    const reverting = name in js.projects && !!o.revert?.has(name);
+    if (name in js.projects && !reverting) continue;
     const root = folder((b.spec as { root?: unknown } | null)?.root);
-    if (roots().some((r) => sameOrNested(r, root))) {
+    const others = Object.entries(js.projects).filter(([n]) => n !== name).map(([, p]) => folder(p?.root));
+    if (others.some((r) => sameOrNested(r, root))) {
       replaced.push(name);
       continue;
     }
     const clash = Object.entries(b.services).some(([k, v]) => js.services?.[k] !== undefined &&
-      JSON.stringify(js.services[k]) !== JSON.stringify(v));
+      JSON.stringify(js.services[k]) !== JSON.stringify(v) && (!reverting || othersUse(name, k)));
     if (clash) continue;
+    if (reverting) {
+      for (const k of Object.keys(b.services)) {
+        if (js.services?.[k] === undefined) continue;
+        doc.deleteIn(["services", k]);
+        delete js.services[k];
+      }
+    }
     doc.setIn(["projects", name], doc.createNode(b.spec));
     js.projects[name] = b.spec as { root?: unknown };
     for (const [k, v] of Object.entries(b.services)) {
@@ -1299,7 +1320,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     usesChecked: false, pathsChecked: false, pathHints: [] as UsesHint[],
     lastFile: null as string | null,
     // The project the last try was on, and whether a tool found too little time left to go on (OutOfTime).
-    current: null as string | null, outOfTime: false,
+    current: null as string | null, outOfTime: false, diskFull: false,
     // What went back to the agent once (failures that look like the environment, tests left out), per project, with the
     // run it came from: the same environment tried again goes on from that run without running the suite again.
     held: new Map<string, { env: string; files: string; shown: Set<string>; run: { digest: string; summary: string;
@@ -1325,11 +1346,22 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     placesAsked: false,
     // The runs of each web UI app that counted (countsAsUiRun), and the apps listed as web UI (webUiPaths).
     uiRuns: new Map<string, number>(), webUi: new Set<string>(),
+    // Per web UI app: how many counted runs stopped at listing and the last such error; what the user reads when all did.
+    uiListingStops: new Map<string, { n: number; error: string }>(),
     // Projects try_project refused for the services they need (MANY_SERVICES).
     tooMany: new Map<string, string[]>(),
     waiting: [] as string[],
     // The environment of each project's last try, which exec runs in.
     lastTry: new Map<string, TriedEnv>() };
+  // The stop's problem line when every project is a web UI app: the listing error when each one's counted runs all
+  // stopped at listing, else the general line.
+  const onlyWebUi = (names: string[]): string => {
+    const lines = names.map((n) => {
+      const s = state.uiListingStops.get(n);
+      return s && s.n === state.uiRuns.get(n) ? listingStopLine(n, s.n, s.error) : null;
+    });
+    return lines.length && lines.every((l) => l) ? lines.join("; ") : ONLY_WEB_UI;
+  };
   const tmp = tempDir("arnx-setup-");
   let exec: SetupExec | null = null;
   // Docker steps of this setup, with their durations.
@@ -1544,13 +1576,21 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       const uiApp = !keep.has(name) && cfg.language === "typescript"
         ? uiFramework(readSnap(join(cfg.workdir, "package.json"))) : null;
       // The answer when this failed try is a counted run: null until the app has had UI_RUNS of them.
-      const webUi = (why: string, c: SuiteCounts): string | null => {
+      const webUi = (why: string, c: SuiteCounts, listingError: string): string | null => {
         if (!countsAsUiRun(c, false)) return null;
         const runs = (state.uiRuns.get(name) ?? 0) + 1;
         state.uiRuns.set(name, runs);
+        const stops = (state.uiListingStops.get(name)?.n ?? 0) + (c.stoppedAt === "listing" ? 1 : 0);
+        if (c.stoppedAt === "listing") state.uiListingStops.set(name, { n: stops, error: listingError });
         if (runs < UI_RUNS) return null;
         state.webUi.add(name);
-        say(`${name}: a web UI app (${uiApp}); its tests failed ${runs} times, so it is listed as ${WEB_UI}`);
+        // Routing is the same; the user reads that the tests never listed when every counted run stopped there.
+        if (stops === runs) {
+          say(listingStopLine(name, stops, listingError));
+          state.problem = listingStopLine(name, stops, listingError);
+        } else {
+          say(`${name}: a web UI app (${uiApp}); its tests failed ${runs} times, so it is listed as ${WEB_UI}`);
+        }
         return `the suite of ${name} does not run: ${why}\n${name} is a web UI app (${uiApp} among its dependencies), ` +
           `which gets two runs of its tests: arnx lists it under uncovered as ${WEB_UI} and propose leaves it out of the ` +
           "file. Do not try it again; go on with the other projects.";
@@ -1637,7 +1677,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       } catch (e) {
         if (!(e instanceof ArnxError)) throw e;
         announce = null;
-        if (e instanceof OutOfTime) {
+        if (e instanceof OutOfTime || e instanceof DiskFull) {
           attempt({ ok: false, reused: false, summary: "", failing: 0, skips: 0, hints: "", error: e.message });
           throw e;
         }
@@ -1820,7 +1860,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       if (!ok) {
         say(`${name}: ✗ does not run yet: ${gist(summary)}`);
         // A UI app's runs are for a suite that will not run in a sandbox: one whose tests pass goes on like any other.
-        const ui = uiApp && !onlySubset ? webUi(gist(summary), counts) : null; // web UI rule
+        const ui = uiApp && !onlySubset ? webUi(gist(summary), counts, (tail || summary).replace(/\s+/g, " ").trim().slice(-200)) : null; // web UI rule
         if (ui) return ui;
         return `the suite of ${name} does not run yet: ${summary}${skipped}${hints ? `\n${hints}` : ""}\n${tail}`;
       }
@@ -1848,12 +1888,20 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       ...browser.map((b) => ({ path: b.path, reason: `${BROWSER_TESTS} (${b.tool})` })),
       ...drop.flatMap((name) => webUiPaths(f, name, mapFiles).map((path) => ({ path, reason: WEB_UI })))];
     // A project proven in this setup that the agent's file leaves out is put back (restoreProven), and the agent told.
-    const putBack = (text: string): string => {
+    const putBack = (text: string, revert?: ReadonlySet<string>): string => {
       const blocks = new Map([...state.provenBlocks].filter(([n]) => !keep.has(n) && !state.webUi.has(n)));
-      const r = restoreProven(text, blocks);
-      if (r.replaced.length) {
-        state.notice += `(${r.replaced.join(", ")} ran in this setup, but its folder overlaps a project in this file: ` +
-          "the file's project stays.)\n";
+      const r = restoreProven(text, blocks, { revert });
+      // A line already told (keepProven puts back twice) is not told again.
+      const tell = (line: string) => { if (!state.notice.includes(line)) state.notice += line; };
+      const kept = r.replaced.filter((n) => revert?.has(n));
+      const absent = r.replaced.filter((n) => !revert?.has(n));
+      if (absent.length) {
+        tell(`(${absent.join(", ")} ran in this setup, but its folder overlaps a project in this file: ` +
+          "the file's project stays.)\n");
+      }
+      if (kept.length) {
+        tell(`(${kept.join(", ")} ran in this setup, but its folder overlaps a project in this file: ` +
+          "the file's changed block stays.)\n");
       }
       if (!r.restored.length) return text;
       try {
@@ -1862,8 +1910,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         if (!(e instanceof ArnxError)) throw e;
         return text;
       }
-      state.notice += `(${r.restored.join(", ")} already ran in this setup and stays in the file as it ran: ` +
-        "arnx put it back.)\n";
+      tell(`(${r.restored.join(", ")} already ran in this setup and stays in the file as it ran: ` +
+        "arnx put it back.)\n");
       return r.yaml;
     };
     // At the time limit with no file accepted: the projects of the last whole file (or `file`) proven as they stand
@@ -1877,6 +1925,19 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       try {
         last = putBack(last);
         f = parseReviewFile(withOurs(last));
+        // A later try may have changed a project that passed: its proof is for the block that ran, so that goes back.
+        const revert = new Set(f.legacy ? [] : f.projects.map((p) => p.name).filter((n) => !keep.has(n) &&
+          state.provenBlocks.has(n) && state.proven.get(n) !== projectDigest(f, n)));
+        if (revert.size) {
+          const back = putBack(last, revert);
+          try {
+            f = parseReviewFile(withOurs(back));
+            last = back;
+          } catch (e) {
+            if (!(e instanceof ArnxError)) throw e;
+            f = parseReviewFile(withOurs(last));
+          }
+        }
       } catch (e) {
         if (!(e instanceof ArnxError)) throw e;
         return null;
@@ -1925,7 +1986,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       // of in the file. Done on the agent's file; arnx's own keys (withOurs) are added again to check it.
       const drop = [...state.webUi].filter((name) => parsed.f.projects.some((p) => p.name === name));
       if (drop.length && drop.length === parsed.f.projects.length) {
-        state.problem = ONLY_WEB_UI;
+        state.problem = onlyWebUi(drop);
         throw new StopRound(`stopped: ${ONLY_WEB_UI}: ${drop.join(", ")} did not run in ${UI_RUNS} tries, and there ` +
           "is no other project. Setup ends here.");
       }
@@ -2044,6 +2105,12 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
         if (runs) requireTime();
         r = await run(i);
       } catch (e) {
+        if (e instanceof DiskFull) {
+          if (!state.diskFull) say(`✗ ${e.message}`);
+          state.diskFull = true;
+          state.problem = e.message;
+          throw new StopRound(`stopped: ${e.message} Setup ends here.`);
+        }
         if (!(e instanceof OutOfTime)) throw e;
         if (!state.outOfTime) say(`✗ ${e.message}`);
         state.outOfTime = true;
@@ -2104,7 +2171,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
       }
       emit("setup.quick", { projects: q.names, files: o.quick.files.length });
       const said = await proposeDraft(q.yaml);
-      if (said.startsWith("accepted") || state.outOfTime || state.needed || said.startsWith("stopped")) {
+      if (said.startsWith("accepted") || state.outOfTime || state.diskFull || state.needed || said.startsWith("stopped")) {
         drafted = { finalText: "", costUsd: 0, turns: 0, stop: "end_turn", calls: 0,
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
       } else {
@@ -2124,13 +2191,13 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     logUsage(repo, "setup", [agentUse(brain.label ? `${brain.label}/setup` : refString(setupRef(settings)), result)],
       new Date());
     // A run cut short at the limit, then the agent's last word: out of time all the same.
-    const late = state.outOfTime || result.stop === "time" || (state.accepted === null && timeIsUp(limit));
+    const late = !state.diskFull && state.outOfTime || result.stop === "time" || (state.accepted === null && timeIsUp(limit));
     const capped = result.stop === "budget" || result.stop === "max_turns";
     let aside: string[] | null = null;
     // Out of time (or, after a note went back to the agent, out of budget or turns) with no file accepted. A working
     // run whose note went back to the agent stands as if tried again unchanged (a later failed try never replaces
     // it): of the last whole file and the files those runs ran with, the one that keeps the most projects is taken.
-    if (state.accepted === null && !state.needed && (late || (capped && state.standing.size))) {
+    if (state.accepted === null && !state.needed && !state.diskFull && (late || (capped && state.standing.size))) {
       const proven = new Map(state.proven);
       const stood = [...state.standing.values()];
       stood.forEach((x) => x.prove());
@@ -2165,8 +2232,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     }
     const webOnly = state.accepted === null && !state.needed && !late && last.length > 0 &&
       last.every((n) => state.webUi.has(n));
-    if (webOnly) state.problem = ONLY_WEB_UI;
-    const stop = state.needed ? "stopped" : late ? "time" : webOnly ? WEB_UI_STOP : result.stop;
+    if (webOnly) state.problem = onlyWebUi(last);
+    const stop = state.diskFull ? DISK_FULL_STOP : state.needed ? "stopped" : late ? "time" : webOnly ? WEB_UI_STOP : result.stop;
     const running = stop === "time" && !state.accepted && state.current && !state.proven.has(state.current)
       ? state.current : null;
     emit("setup.completed", { ok: state.accepted !== null, stop, cost_usd: result.costUsd,

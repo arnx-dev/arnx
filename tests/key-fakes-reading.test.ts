@@ -26,6 +26,7 @@ import { fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { RecordingAgent, RecordingJson } from "./helpers/recording";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -124,6 +125,7 @@ test("a finding beside a fake says fix the code, and how to run it with the real
   expect(summary(r, "review.md")).toContain(FIX);
   expect(render(r).replace(/\s+/g, " ")).toContain(FIX);
   put(repo, ".arnx/tests/tests/arnx/r1/test_kept.py", SOURCE);
+  pinKept(repo);
   const [said, code] = checkSummary(await check(repo, SETTINGS, { sessionFactory: fakeFactory(() =>
     [junitXml([["tests/arnx/r1/test_kept.py", "test_add", "failed", "E   assert 1 == 2"]]), "1 failed\n", false]) }));
   expect(code).toBe(1);
@@ -143,6 +145,7 @@ test("a skipped test in a run with a fake counts in the line about faked keys", 
   const { review: r } = await review(repo, "", "skipped");
   expect(summary(r, "review.md")).toContain("1 test skipped");
   put(repo, ".arnx/tests/tests/arnx/r1/test_kept.py", SOURCE);
+  pinKept(repo);
   const [said] = checkSummary(await check(repo, SETTINGS, { sessionFactory: fakeFactory(() =>
     [junitXml([["tests/arnx/r1/test_kept.py", "test_add", "skipped", ""]]), "1 skipped\n", false]) }));
   expect(said).toContain("tests/data/server.pem");
@@ -282,9 +285,9 @@ test("no END: a name with no key-like token after it still ends the run", () => 
   expect(maskPrivateKeys(after)).toBe(`${SHOWN}\nclientEmail,\nprojectId,\n`);
 });
 
-test("a name-like line between an intact header and END keeps its text in the sandbox, as ruled", () => {
+test("a name-like line that follows a key-shaped line is replaced in the sandbox too", () => {
   const text = `${HDR}\n${KEY_LINES[0]}\n${NAME_LINE}\n${KEY_LINES[1]}\n${END}\n`;
-  expect(fakeKeys(text).text).toContain(NAME_LINE);
+  expect(fakeKeys(text).text).not.toContain(NAME_LINE);
   expect(fakeKeys(text, { view: true }).text).not.toContain(NAME_LINE);
   expect(maskPrivateKeys(text)).toBe(`${SHOWN}\n`);
 });
@@ -470,15 +473,15 @@ test("arnx cloud is given a line of 1 or more for a file left out by its name", 
 });
 
 
-test("a key's short last line with no digit, + or / is kept in the sandbox and faked in the view", () => {
+test("a key's short last line with no digit, + or / is replaced in the sandbox and in the view", () => {
   const text = withLastLine(lastLine);
-  expect(fakeKeys(text).text).toContain(lastLine);
+  expect(fakeKeys(text).text).not.toContain(lastLine);
   expect(fakeKeys(text, { view: true }).text).not.toContain(lastLine);
   const digit = withLastLine("AbCdEfGhIjKlMnOpQrStUv7x");
   expect(fakeKeys(digit).text).not.toContain("AbCdEfGhIjKlMnOpQrStUv7x");
 });
 
-test("the diff shows a faked last line the sandbox keeps, when the line reads as a name (the flaky case, built)", () => {
+test("the diff and the sandbox agree on a key's last line: both show the stand-in", () => {
   const key = withLastLine(lastLine);
   const repo = project({ "k.txt": `${key}# one\n` }, { "k.txt": `${key}# two\n` });
   const dest = join(mkdtempSync(join(tmp(), "s-")), "s");
@@ -488,7 +491,7 @@ test("the diff shows a faked last line the sandbox keeps, when the line reads as
   const context = diff.slice(diff.indexOf("k.txt")).split("\n").filter((l) => l.startsWith(" ") && l.length > 8 && !l.includes("-----"))
     .map((l) => l.slice(1));
   expect(context.length).toBeGreaterThan(0);
-  expect(sandbox).toContain(lastLine);
+  expect(sandbox).not.toContain(lastLine);
   expect(context).not.toContain(lastLine);
-  expect(context.filter((l) => !sandbox.includes(l))).toHaveLength(1);
+  expect(context.filter((l) => !sandbox.includes(l))).toHaveLength(0);
 });

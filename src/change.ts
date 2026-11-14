@@ -19,7 +19,7 @@ import { isGenerated, isLockfile, loadIgnore, looksGenerated } from "./ignore";
 import { BIG_KEYS_MOST, excludePathspecs, fakeKeys, filePin, holdsOnlyPublicPem, holdsPrivateKey, isCertainRule, isCodePath, isKeyFileName, isSecretPath,
   type KeyScan, keyTokens, MAY_HOLD_KEY, mayShowPrivateKey, privateKeyIn, scanKeys, type SecretPin, standInsFor, suspects, usedAsName,
   secretFileValues, WORD_RULE } from "./secrets";
-import { realFolders, writeNew } from "./safefs";
+import { entriesUnder, realFolders, writeNew } from "./safefs";
 import { buildContextDir, manifestRule, REPORT_DIR, type Runner } from "./sandbox";
 import { standInsSetting } from "./settings";
 import { DIFF_SECTION, splitLines } from "./util";
@@ -807,8 +807,8 @@ export function takeSnapshot(repo: string, head: string | null, dest: string, al
   if (head === null) {
     const paths = workingTreeFiles(repo, !!o.untracked).files.filter((p) => !ignored(p) || sandbox.has(p));
     if (paths.length > limit) {
-      throw new ArnxError(`the working tree has ${paths.length} files; arnx copies up to ${limit}. ` +
-        "Add large generated directories to .gitignore");
+      throw new ArnxError(`the working tree has ${paths.length} files outside .arnxignore; arnx copies up to ${limit}. ` +
+        "Add large vendored or generated folders to .arnxignore (.gitignore cannot help a tracked file)");
     }
     for (const rel of paths) {
       const src = join(repo, rel);
@@ -825,8 +825,12 @@ export function takeSnapshot(repo: string, head: string | null, dest: string, al
       else copyFileSync(src, out);
     }
   } else {
-    const count = names(git(repo, ["ls-tree", "-r", "-z", "--name-only", head])).length;
-    if (count > limit) throw new ArnxError(`the commit has more than ${limit} files`);
+    const count = names(git(repo, ["ls-tree", "-r", "-z", "--name-only", head]))
+      .filter((p) => !ignored(p) || sandbox.has(p)).length;
+    if (count > limit) {
+      throw new ArnxError(`the commit has ${count} files outside .arnxignore; arnx copies up to ${limit}. ` +
+        "Add large vendored or generated folders to .arnxignore");
+    }
     const archive = spawnSync("git", ["-C", repo, "archive", "--format=tar", head], { maxBuffer: MAX_BUFFER });
     if (archive.status !== 0) throw new ArnxError(`git archive failed: ${String(archive.stderr).trim().slice(0, 300)}`);
     // -m: files get the extraction time, not the commit time. An environment image can carry a build made after the
@@ -1069,9 +1073,10 @@ export function withSandboxFiles(runner: Runner, snap: string): Runner {
       }
     }
     if (existsSync(reports)) {
-      for (const name of readdirSync(reports, { recursive: true }).map(String)) {
+      for (const name of entriesUnder(reports)) {
         const p = join(reports, name);
-        const text = statSync(p).isFile() ? textOf(p) : null;
+        // A link a run left there is skipped: rewriting through it could change a file outside the tree.
+        const text = lstatSync(p, { throwIfNoEntry: false })?.isFile() ? textOf(p) : null;
         if (text === null) continue;
         const clean = stripSandbox(text, xmlPrints);
         if (clean !== text) writeFileSync(p, clean);

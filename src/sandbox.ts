@@ -15,7 +15,8 @@ import type { CopyOnly } from "./baked";
 import type { Swap } from "./boundary";
 import { digest, loadReviewFile, type ReviewConfig } from "./config";
 import { ArnxError, EnvFailed, SetupRequired } from "./errors";
-import { removeTree } from "./safefs";
+import { entriesUnder, isFileOrLinkToFile, removeTree } from "./safefs";
+import { runName } from "./kept";
 import { envValue, globRegex } from "./secrets";
 import { pyJson, randomHex, shQuote, sleep } from "./util";
 
@@ -111,20 +112,26 @@ export const networkNotice = { said: false };
 export const OUTPUT_LIMIT = 200_000;
 export const REPORT_DIR = ".arnx-run";
 
-/** Where `arnx accept` keeps tests (testround.ts DOME); `arnx check` puts each in place from there. */
+/** Where `arnx accept` keeps tests (testround.ts DOME); `arnx check` puts each in place from there, under its run
+ * name. */
 const KEPT = ".arnx/tests";
+/** The file Docker reads at the root of a build context for what to leave out of it. */
+const DOCKERIGNORE = ".dockerignore";
 
 export const projectOf = (cfg: ReviewConfig) => posix.normalize(cfg.workdir).replace(/^\.$/, "").replace(/\/$/, "");
 
 /** What in a scope is not the code under test (relative to the scope): the generated tests' folder (it changes during
  * a round), and in the repository's scope arnx's own folder, the runners' reports and the accepted tests a check put
- * in place. Neither the image key nor the image holds these: runs read tests from the mounted copy. */
+ * in place. Neither the image key nor the image holds these: runs read tests from the mounted copy. The repository's
+ * .dockerignore is left out too: Docker would apply it to arnx's build (`*` there, for a project that ships its own
+ * image, leaves the image empty); what arnx keeps out is already out of the snapshot. */
 export function notCode(cfg: ReviewConfig, snap: string, scope: string): string[] {
   const tests = posix.normalize(posix.join(projectOf(cfg), cfg.testsDir));
   const rel = (p: string) => (scope ? posix.relative(scope, p) : p);
-  const kept = existsSync(join(snap, KEPT)) ? (readdirSync(join(snap, KEPT), { recursive: true }) as string[])
-    .map((p) => p.split("\\").join("/")).filter((p) => statSync(join(snap, KEPT, p)).isFile()) : [];
-  return [tests, ".arnx", REPORT_DIR, ...kept].filter((p) => !scope || p.startsWith(`${scope}/`)).map(rel);
+  const kept = existsSync(join(snap, KEPT)) ? entriesUnder(join(snap, KEPT)).filter((p) => isFileOrLinkToFile(join(snap, KEPT, p)))
+    .map(runName) : [];
+  return [tests, ".arnx", REPORT_DIR, ...kept].filter((p) => !scope || p.startsWith(`${scope}/`)).map(rel)
+    .concat(scope ? [] : [DOCKERIGNORE]);
 }
 
 /** A copy of `context` without the paths in `skip`, made of hard links where it can (a folder of its own, removed by
@@ -238,6 +245,24 @@ const secsSince = (t0: number) => Math.round((performance.now() - t0) / 100) / 1
 export const DOCKER_DENIED = /permission denied|operation not permitted|access is denied/i;
 const DOCKER_DOWN = /cannot connect|is the docker daemon running|error during connect|connection refused|no such file or directory/i;
 
+/** What Docker says when its disk is full. */
+export const DISK_FULL = /no space left on device|not enough space on the disk|disk quota exceeded/i;
+export const diskFullMessage = (): string =>
+  "Docker is out of disk space. arnx env prune removes arnx's old images; docker system df shows what else is there.";
+
+/** Docker's disk is full: no retry or other try helps, so setup and reviews stop on it with this one line. */
+export class DiskFull extends ArnxError {
+  override name = "DiskFull";
+  constructor() {
+    super(diskFullMessage());
+  }
+}
+
+/** Throws DiskFull when `output`, from a failed Docker build or start, says the disk is full. */
+export function failIfDiskFull(output: string): void {
+  if (DISK_FULL.test(output)) throw new DiskFull();
+}
+
 export function requireDocker(): void {
   const r = docker(["info", "--format", "{{.ServerVersion}}"], { timeout: 30 });
   if (r.status === 0) return;
@@ -249,6 +274,34 @@ export function requireDocker(): void {
   }
   if (DOCKER_DOWN.test(said) || !said.trim()) throw new SetupRequired("Docker is not running; start it and try again");
   throw new SetupRequired(`Docker is not answering: ${said.trim().split("\n")[0]!.slice(0, 200)}`);
+}
+
+/** The Docker VM's CPUs and memory (`docker info`), or null when it cannot be read. For tests, an override is read
+ * first. */
+export function dockerCapacity(): { cpus: number; memoryBytes: number } | null {
+  const parse = (text: string) => {
+    const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(text);
+    const cpus = m ? Number(m[1]) : 0, memoryBytes = m ? Number(m[2]) : 0;
+    return cpus > 0 && memoryBytes > 0 ? { cpus, memoryBytes } : null;
+  };
+  const given = process.env.ARNX_DOCKER_CAPACITY;
+  if (given) return parse(given);
+  try {
+    const r = docker(["info", "--format", "{{.NCPU}} {{.MemTotal}}"], { timeout: 30 });
+    return r.status === 0 ? parse(r.stdout) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Sandboxes of `limits` the Docker VM holds at once, at most `max` and at least 1: each takes its CPUs and memory,
+ * plus half a GB for Docker itself. An unreadable VM holds one (slower, never out of memory). */
+export function sandboxesFit(cap: { cpus: number; memoryBytes: number } | null, max: number, limits: Limits = DEFAULT_LIMITS)
+  : number {
+  if (!cap) return 1;
+  const unit = { k: 2 ** 10, m: 2 ** 20, g: 2 ** 30 }[/[kmg]$/i.exec(limits.memory)?.[0].toLowerCase() as "k" | "m" | "g"] ?? 1;
+  const memory = parseFloat(limits.memory) * unit;
+  return Math.max(1, Math.min(max, Math.floor(cap.cpus / Number(limits.cpus)), Math.floor(cap.memoryBytes / (memory + 2 ** 29))));
 }
 
 const workdirIn = (root: string, workdir: string) => posix.normalize(posix.join(root, workdir));
@@ -350,9 +403,9 @@ function newerThanImage(cfg: ReviewConfig, snapshot: string): void {
 /** Copies every file that can key an image (any language's manifests, at any depth) from `snapshot` to `dest`:
  * keys computed there stay as the snapshot was before runs wrote into it (cargo writes a missing Cargo.lock). */
 export function copyManifests(snapshot: string, dest: string): void {
-  for (const rel of readdirSync(snapshot, { recursive: true }) as string[]) {
-    if (!isManifest(rel.split("\\").join("/"))) continue;
-    if (!statSync(join(snapshot, rel), { throwIfNoEntry: false })?.isFile()) continue;
+  for (const rel of entriesUnder(snapshot)) {
+    if (!isManifest(rel)) continue;
+    if (!isFileOrLinkToFile(join(snapshot, rel))) continue;
     mkdirSync(dirname(join(dest, rel)), { recursive: true });
     copyFileSync(join(snapshot, rel), join(dest, rel));
   }
@@ -514,6 +567,7 @@ async function ensureBuilt(cfg: ReviewConfig, snapshot: string, logPath: string,
   stepLog({ step: "image", project: cfg.name, tag, built: true, ok: r.status === 0, secs: secsSince(t0) });
   mkdirSync(dirname(logPath), { recursive: true });
   writeFileSync(logPath, r.stdout + r.stderr);
+  if (r.status !== 0) failIfDiskFull(r.stdout + r.stderr);
   // A build that failed because the package index could not be reached is tried once more: a dropped connection is
   // not a wrong install step.
   if (r.status !== 0 && NETWORK_TROUBLE.test(r.stdout + r.stderr)) {
@@ -525,6 +579,7 @@ async function ensureBuilt(cfg: ReviewConfig, snapshot: string, logPath: string,
     writeFileSync(logPath, r.stdout + r.stderr);
   }
   if (r.status !== 0) {
+    failIfDiskFull(r.stdout + r.stderr);
     if (NETWORK_TROUBLE.test(r.stdout + r.stderr)) {
       throw new EnvFailed("building the test environment failed because it could not reach the package index or " +
         "registry (timeouts or a broken connection, twice): a network problem, not the install steps. Keep the " +
@@ -717,6 +772,7 @@ export class Session implements Runner {
           const env = this.realEnv(svc.env);
           for (const k of Object.keys(env).sort()) args.push("-e", `${k}=${envValue(env[k]!)}`);
           r = docker([...args, svc.image], { timeout: stepTimeout(900) });
+          if (r.status !== 0) failIfDiskFull(r.stderr);
           if (r.status !== 0) throw new ArnxError(`service ${svc.name} did not start: ${r.stderr.trim().slice(0, 300)}`);
           this.started.push(name);
           if (svc.ready) await this.waitReady(name, svc.name, svc.ready);
@@ -908,6 +964,7 @@ export class Session implements Runner {
       stepLog({ step: "container", project: this.cfg.name, ok: r.status === 0, secs: secsSince(t0) });
       if (r.status !== 0) {
         this.dropBox();
+        failIfDiskFull(r.stderr);
         return { exitCode: r.status, ...kept(r.stdout + r.stderr), timedOut: false, seconds: seconds() };
       }
     }
@@ -971,6 +1028,8 @@ export class Session implements Runner {
         return { exitCode: null, output: cut.output + "\n[timed out]", timedOut: true, seconds,
           ...(cut.truncated ? { truncated: true } : {}) };
       }
+      // 125: Docker itself failed to start the container; a test's own exit code is not its to judge.
+      if (r.status === 125) failIfDiskFull(r.stderr);
       return { exitCode: r.status, ...kept(r.stdout + r.stderr, r.trimmed), timedOut: false, seconds };
     } finally {
       this.running.delete(entry!);

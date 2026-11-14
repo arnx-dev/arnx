@@ -4,7 +4,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { rust } from "../src/adapters/rust";
-import { check } from "../src/check";
+import { check, reviewGroup } from "../src/check";
 import { parseReviewFile, reviewConfigPath, stampFile } from "../src/config";
 import type { SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
@@ -12,6 +12,7 @@ import { isKeptPath } from "../src/testround";
 import { FakeSession } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -38,13 +39,14 @@ test("check finds the tests accept kept in a Rust crate and runs only them", asy
   mkdirSync(join(repo, "calc/tests/common"), { recursive: true });
   writeFileSync(join(repo, "calc/Cargo.toml"), "[package]\nname = \"calc\"\nversion = \"0.1.0\"\n");
   writeFileSync(join(repo, "calc/src/lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }\n");
-  // Kept in .arnx/tests/ at the path each runs from: cargo never builds them there.
+  // Kept in .arnx/tests/ at the path each runs from, stored with .arnx appended: cargo never builds them there.
   mkdirSync(join(repo, ".arnx/tests/calc/tests"), { recursive: true });
-  for (const f of [KEPT, KEPT_REVIEW]) writeFileSync(join(repo, ".arnx/tests", f), "#[test]\nfn t() {}\n");
+  for (const f of [KEPT, KEPT_REVIEW]) writeFileSync(join(repo, ".arnx/tests", `${f}.arnx`), "#[test]\nfn t() {}\n");
   writeFileSync(join(repo, "calc/tests/integration.rs"), "#[test]\nfn own() {}\n"); // the crate's own
   writeFileSync(join(repo, "calc/tests/arnx_generated_left.rs"), "#[test]\nfn g() {}\n"); // a round's leftover
   writeFileSync(join(repo, "calc/tests/common/arnx_helper.rs"), "pub fn h() {}\n"); // not built by cargo
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(CONFIG), "Dev", "2026-10-12"));
+  pinKept(repo);
   commit(repo, "layout");
   const seen: string[] = [];
   const session: SessionFactory = async (_c, snap, _l, body) => {
@@ -55,7 +57,11 @@ test("check finds the tests accept kept in a Rust crate and runs only them", asy
     return r;
   };
   const results = await check(repo, SETTINGS, { sessionFactory: session });
-  expect(results.map((r) => [r.project, r.files])).toEqual([["calc", [`.arnx/tests/${KEPT_REVIEW}`, `.arnx/tests/${KEPT}`]]]);
+  expect(results.map((r) => [r.project, r.files])).toEqual([["calc", [`.arnx/tests/${KEPT_REVIEW}.arnx`,
+    `.arnx/tests/${KEPT}.arnx`]]]);
+  // Run by their run names, each told to its review by that name.
+  expect(seen.join(" ")).not.toContain(".rs.arnx");
+  expect(results[0]!.files.map(reviewGroup)).toEqual(["r20261022_30b1fe", "r20261022_30b1fe"]);
   expect(seen.join(" ")).not.toContain("integration");
   expect(seen.join(" ")).not.toContain("arnx_generated_left");
 });
@@ -64,6 +70,7 @@ test("setup counts a Rust crate's kept tests as accepted, not its own tests or g
   const cfg = parseReviewFile(CONFIG).projects[0]!;
   expect(isKeptPath(cfg, KEPT)).toBe(true);
   expect(isKeptPath(cfg, KEPT_REVIEW)).toBe(true);
+  expect(isKeptPath(cfg, `${KEPT}.arnx`)).toBe(true); // stored under its name with .arnx appended
   expect(isKeptPath(cfg, "calc/tests/integration.rs")).toBe(false);
   expect(isKeptPath(cfg, "calc/tests/arnx_generated_add.rs")).toBe(false);
   expect(isKeptPath(cfg, "calc/tests/common/arnx_20261022_30b1fe_add.rs")).toBe(false);

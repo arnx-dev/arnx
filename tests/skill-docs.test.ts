@@ -1,4 +1,4 @@
-// The JSON a coding agent reads is pinned by its documentation: skills/arnx/references/review-json.md and
+// The JSON a coding agent reads is pinned by its documentation: plugin/skills/arnx/references/review-json.md and
 // check-json.md. A documented field that review.json or `check --json` stops writing fails here, and so does a field
 // they write that the page does not name.
 import { expect, test } from "bun:test";
@@ -13,7 +13,7 @@ import { finding, sampleReview } from "./helpers/review";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
-const REFS = join(import.meta.dir, "..", "skills", "arnx", "references");
+const REFS = join(import.meta.dir, "..", "plugin", "skills", "arnx", "references");
 const GOLDEN = join(import.meta.dir, "fixtures", "golden");
 
 interface Field { name: string; optional: boolean }
@@ -137,6 +137,7 @@ test("review-json.md names each fix-proof status review.json can write", () => {
 // --- check --json -----------------------------------------------------------------------------------------------------
 
 const project: ProjectCheck = { project: "svc", files: ["svc/tests/arnx/r1/test_x.py"], passed: ["a"], skipped: 1, notRun: [".arnx/tests/svc/tests/arnx/r1/test_y.py"],
+  skippedAccepted: ["t::c"], missingAccepted: ["t::d"],
   noReport: false, failed: [{ testId: "t::b", fileAttr: "", name: "b", outcome: "failed", message: "assert 0" }] };
 const changed: ChangedTest[] = [{ path: "tests/arnx/r1/test_x.py", review: "r1", change: "modified" }];
 const contradiction: MayContradict = { answer: "Q1", accepted: "F3", review: "r1", accepted_review: "r1",
@@ -185,9 +186,12 @@ test("check --json results match exit codes as check-json.md says", () => {
     expect(JSON.parse(checkJson([], code as number, code === 4 ? changed : [])).result).toBe(result);
   }
   expect(checkSummary([])[1]).toBe(3);
-  expect(checkSummary([{ ...project, failed: [], notRun: [] }])[1]).toBe(0);
+  expect(checkSummary([{ ...project, failed: [], notRun: [], skippedAccepted: [], missingAccepted: [] }])[1]).toBe(0);
+  // An accepted test that ended skipped, or that did not report, does not pass: exit 1.
+  expect(checkSummary([{ ...project, failed: [], notRun: [], missingAccepted: [] }])[1]).toBe(1);
+  expect(checkSummary([{ ...project, failed: [], notRun: [], skippedAccepted: [] }])[1]).toBe(1);
   // A kept file the runner left out is exit 2, never a pass.
-  expect(checkSummary([{ ...project, failed: [] }])[1]).toBe(2);
+  expect(checkSummary([{ ...project, failed: [], skippedAccepted: [], missingAccepted: [] }])[1]).toBe(2);
   expect(checkSummary([{ ...project, noReport: true }])[1]).toBe(2);
 });
 
@@ -226,7 +230,7 @@ test("check --review --json results match exit codes as check-json.md says", () 
 
 // The skill's exit table and the status words must say what exitCode does.
 test("the skill's exit table and status words match exitCode", () => {
-  const skill = readFileSync(join(import.meta.dir, "..", "skills", "arnx", "SKILL.md"), "utf8");
+  const skill = readFileSync(join(import.meta.dir, "..", "plugin", "skills", "arnx", "SKILL.md"), "utf8");
   const refs = readFileSync(join(REFS, "review-json.md"), "utf8");
   const table = skill.slice(skill.indexOf("## Exit codes"));
   const row = (code: string) => table.split("\n").find((l) => l.startsWith(`| ${code} |`))!;

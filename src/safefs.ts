@@ -1,8 +1,38 @@
 // File writes and reads in a tree a test may have changed: a run can leave a link, a FIFO or a folder it took the write bit
 // from, so nothing here follows a link out of the tree or trusts what it finds there.
 import { chmodSync, closeSync, constants, copyFileSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readlinkSync,
-  readSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeSync } from "node:fs";
+  readSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
+
+/** Every entry under `root` (relative, "/"-separated, folders too), like a recursive readdir that never goes into a link:
+ * a link to a folder is listed, not entered, so a loop (`a/b -> ..`, `x -> x`) ends. A missing root has no entries. */
+export function entriesUnder(root: string): string[] {
+  const out: string[] = [];
+  const visit = (rel: string) => {
+    let names: string[];
+    try {
+      names = readdirSync(rel ? join(root, rel) : root);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const r = rel ? `${rel}/${name}` : name;
+      out.push(r);
+      if (lstatSync(join(root, r), { throwIfNoEntry: false })?.isDirectory()) visit(r);
+    }
+  };
+  visit("");
+  return out;
+}
+
+/** Whether `p` is a file, or a link that ends at one; a broken or looping link is not. */
+export function isFileOrLinkToFile(p: string): boolean {
+  try {
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
 
 const inside = (root: string, p: string) => p === root || p.startsWith(root + sep);
 
@@ -59,6 +89,40 @@ export function readRegular(path: string, max: number): string | null {
       got += n;
     }
     return buf.subarray(0, got).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The bytes of the file `rel` under `root`, read without following a link: "gone" when nothing is there (or it went
+ * while being read), "other" when it is not a regular file, or a folder on the way to it is not a real one. */
+export function regularBytes(root: string, rel: string): Buffer | "gone" | "other" {
+  const path = join(root, rel);
+  let st;
+  try {
+    st = lstatSync(path, { throwIfNoEntry: false });
+  } catch {
+    return "gone"; // a file where a folder on the way should be: nothing at `rel`
+  }
+  if (!st) return "gone";
+  if (!st.isFile() || !realFolders(root, rel)) return "other";
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ENOENT" ? "gone" : "other";
+  }
+  try {
+    const at = fstatSync(fd);
+    if (!at.isFile()) return "other";
+    const buf = Buffer.alloc(at.size);
+    let got = 0;
+    while (got < at.size) {
+      const n = readSync(fd, buf, got, at.size - got, got);
+      if (!n) break;
+      got += n;
+    }
+    return buf.subarray(0, got);
   } finally {
     closeSync(fd);
   }

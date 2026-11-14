@@ -63,5 +63,6 @@ test("golden: review.md and the summary (layout changed on purpose in batch 2; P
 });
 
 test("golden: a review.json written by Python loads", () => {
-  expect(load(join(GOLDEN, "review"))).toEqual(sampleReview());
+  // It predates source_files, so the load marks it as an older review.
+  expect(load(join(GOLDEN, "review"))).toEqual({ ...sampleReview(), noEvidence: true });
 });

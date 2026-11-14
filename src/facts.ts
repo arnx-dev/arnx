@@ -589,7 +589,7 @@ function githubJobs(paths: string[], yaml: (rel: string) => unknown, read: (rel:
       const jobDir = isMap(job.defaults) && isMap(job.defaults.run) ? str(job.defaults.run["working-directory"]) : wfDir;
       const j: CiJob = { id: `${file}:${id}`, dirs: [], versions: {}, services: [], env, install: [], test: [],
         apt: [], languages: [], text: "" };
-      const dirs = new Set<string>();
+      const dirs = new Set<string>(), ran = new Set<string>();
       const norm = (d: string | null) => (d ? posix.normalize(d.replace(/^\.\//, "")).replace(/\/$/, "") || "." : ".");
       for (const step of Array.isArray(job.steps) ? job.steps : []) {
         if (!isMap(step)) continue;
@@ -608,22 +608,27 @@ function githubJobs(paths: string[], yaml: (rel: string) => unknown, read: (rel:
         Object.assign(j.env, strEnv(step.env));
         const run = str(step.run);
         if (!run) continue;
-        const stepDir = resolve(str(step["working-directory"])) ?? jobDir;
-        dirs.add(norm(stepDir));
+        // A job is the project's in each folder where it installs or runs tests (a `cd` holds for the step's later
+        // lines): a step that checks out code or sets up a tool does not make it the root's, nor give the root its services.
+        let here = norm(resolve(str(step["working-directory"])) ?? jobDir);
+        ran.add(here);
         for (const line of commands(run)) {
           const cd = /^cd\s+([^\s&;]+)/.exec(line)?.[1];
           if (cd && !cd.startsWith("$") && !cd.startsWith("/") && !cd.startsWith("~")) {
-            dirs.add(norm(posix.join(norm(stepDir), cd)));
+            here = norm(posix.join(here, cd));
+            ran.add(here);
           }
           const cmd = resolve(line) ?? line;
           j.text += cmd + "\n";
+          if (TEST.test(cmd) || INSTALL.test(cmd)) dirs.add(here);
           if (TEST.test(cmd)) j.test.push(cmd);
           else if (INSTALL.test(cmd)) j.install.push(cmd);
           const apt = /apt(-get)?\s+install\s+(.*)/.exec(cmd);
           if (apt) j.apt.push(...apt[2]!.split(/\s+/).filter((p) => /^[a-z0-9][a-z0-9.+-]+$/.test(p)));
         }
       }
-      j.dirs = [...dirs].length ? [...dirs] : ["."];
+      // One that neither installs nor tests anywhere is the project's where it runs.
+      j.dirs = dirs.size ? [...dirs] : ran.size ? [...ran] : ["."];
       if (isMap(job.services)) {
         for (const [name, spec] of Object.entries(job.services)) {
           const image = resolve(isMap(spec) ? str(spec.image) : str(spec));

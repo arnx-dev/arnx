@@ -93,9 +93,10 @@ test("the rebuilt image's key follows the code it holds, not the tests or report
   const snap = write(tmp(), { "app/a.py": "1", "app/b.py": "b", "app/requirements.txt": "x" });
   const first = bakedKey("abc", cfg, snap);
   expect(first).toMatch(/^abc-src-[0-9a-f]{12}$/);
-  // generated tests, an accepted test put in place from .arnx/tests, the runners' reports: same code, same image
+  // generated tests, an accepted test put in place (under its run name) from .arnx/tests, the runners' reports: same
+  // code, same image
   write(snap, { [`app/${cfg.testsDir}/test_gen.py`]: "g", "app/tests/arnx/r1/test_k.py": "k",
-    ".arnx/tests/app/tests/arnx/r1/test_k.py": "k", ".arnx-run/final-1.xml": "<x/>" });
+    ".arnx/tests/app/tests/arnx/r1/test_k.py.arnx": "k", ".arnx-run/final-1.xml": "<x/>" });
   expect(bakedKey("abc", cfg, snap)).toBe(first);
   writeFileSync(join(snap, "app/a.py"), "2");
   expect(bakedKey("abc", cfg, snap)).not.toBe(first);

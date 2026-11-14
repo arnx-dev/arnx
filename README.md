@@ -26,7 +26,7 @@ A review costs from a few cents to a few dollars (our own: $0.17 to $3.19) and s
 at your cap, `review_usd` (default $3.00).
 
 No model keys? `arnx init --cloud`, then `arnx login`: [arnx cloud](docs/CLOUD.md) runs the models,
-and new accounts start with $5 of credit. Tests still run in your Docker. No Node? Use a
+and the first 100 accounts get $5 of credit. Tests still run in your Docker. No Node? Use a
 [standalone binary](docs/WORKFLOW.md#install).
 
 Want to see it on something small first? [checkout-demo](https://github.com/arnx-dev/checkout-demo) is a tiny
@@ -83,7 +83,7 @@ We marked it real, a coding agent fixed it, and the test still guards that behav
 ## Then you decide
 
     arnx triage     # mark each issue real / intended / noise / rewrite, answer questions
-    arnx accept     # keeps the tests of real issues in .arnx/tests/, never in your own suite
+    arnx accept     # keeps the tests of real issues in .arnx/tests/, under names your own tools never pick up
     arnx prompt     # prints the fix prompt for your coding agent
     arnx check      # runs the accepted tests, no model involved: green means they pass now
 

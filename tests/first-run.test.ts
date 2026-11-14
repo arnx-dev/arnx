@@ -10,7 +10,7 @@ import { filesAt } from "../src/change";
 import { parseReviewFile, reviewConfigPath, stampedQuick } from "../src/config";
 import { detect } from "../src/detect";
 import { NOT_SET_UP, quickDraft } from "../src/draft";
-import type { RunResult, Runner, SessionFactory } from "../src/sandbox";
+import { DiskFull, diskFullMessage, type RunResult, type Runner, type SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { approveFile, NOTHING_TO_TEST, runSetup } from "../src/setup";
 import { quickCoverageLine } from "../src/setupview";
@@ -506,4 +506,15 @@ test("a quick setup whose small files fail, tried again unchanged, ends: the who
   const whole = sessions.flatMap((s) => s.commands).filter((c) => !c.includes("--collect-only") &&
     !c.includes("test_arnx_probe") && !TESTS.some((f) => c.includes(f)));
   expect(whole).toEqual([]);
+});
+
+test("a quick setup whose first run finds Docker's disk full stops with that message", async () => {
+  const repo = twoProjects();
+  const model = new ScriptedAgent([[text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(() => {
+      throw new DiskFull();
+    }, []), quick: { files: ["svc/app.py"] } });
+  expect([r.ok, r.stop, r.problem]).toEqual([false, "disk-full", diskFullMessage()]);
+  expect(model.calls).toHaveLength(0);
 });

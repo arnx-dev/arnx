@@ -59,24 +59,24 @@ throwaway copy.
 | `setup` | doctor's checks, then where code goes (own keys: said once; arnx cloud: its consent, asked once, `--yes` gives it); an agent reads the repo and proposes a test environment, proving each proposal by running the existing suite (arnx's probe test for a project with no tests of its own); then runs approve's proof without asking (`--yes` gives only the consent): a project whose part of review.yaml, environment and code (`snapshotDigest`) are what setup's last whole-suite run of it had takes that run as its proof (`SetupRun`), the others run again; it ends with "Worth a look" (`worthALook` in `setupview.ts`: only what applies, baseline tests failing on the environment first, by cause, with what to fix: `environmentLines`) and doctor's line on unused images, when there are any. `--project NAME` redoes one project, `--add` covers more; a proven file is set up again only with `--force` | the repo (snapshot) | `.arnx/review.yaml`, `.arnx/setup/` logs and `approval.md` | setup model (default: Claude Sonnet with a Claude reviewer, else the reviewer) | yes |
 | `approve` | The proof, asked nothing: run every suite once more (accepted tests still red, matching their pins, do not block it: "N accepted tests still fail"), stamp the file with a hash (the `approved:` key, its old name; `by` is the git user: arnx does not tell a coding agent from its user), record the proof and its warnings. `review`, `check` and `accept` run it themselves first when review.yaml changed since its proof (`reprove` in `cli.ts`; a failing proof stops them, exit 3). Both say first what changed since the last proof (`describeChanges` in `setupview.ts`, against the copy each proof keeps in `.arnx/setup/proven-review.yaml`, stamp or not; `proofState`: a stamp that holds over content other than the copy's is no proof; no copy: said, and the proof goes on), record it, and put it in the command's JSON (`reproved`); after a passing proof, "Worth a look" and the unused images line | `.arnx/review.yaml`, `.arnx/accepted-tests.json` | the stamp in `.arnx/review.yaml`, `.arnx/setup/approval.md`, `.arnx/setup/proven-review.yaml` | no | yes |
 | `review` | Write tests for the current change, run them 3 times, turn stable failures into findings, have a second model challenge each one | the change, the code, the approved environment | `.arnx/reviews/<id>/` | reviewer + challenger | yes |
-| `next` | Say where the repository is in the flow and the one command to run now (`next.ts`); with arnx cloud, the login or a top-up first | `.arnx/`, the change | nothing | no | no |
+| `next` | Say where the repository is in the flow and the one command to run now (`next.ts`); with arnx cloud, the login, or a balance above $0, first | `.arnx/`, the change | nothing | no | no |
 | `triage` | Step through the findings in the terminal: marks, severity, answers | `.arnx/reviews/<id>/` | `review.md`, `triage.json` | no | no |
 | `accept` | Read the user's marks and answers from `review.md`; keep real findings as tests; turn answers into tests; pin each kept file's sha256 and its accepted tests; run the accepted tests (`--no-check` skips it); write the fix prompt. `--keep-edits`: record edited accepted tests as they are | `.arnx/reviews/<id>/` | `.arnx/tests/<project root>/tests/arnx/r<id>/`, `.arnx/precision.jsonl`, `.arnx/accepted-tests.json`, `.arnx/answer-watch.json`, `fix-prompt.md`, the local pins | reviewer (answers only) | yes |
 | `prompt` | Print the fix prompt of the review accepted last (or the id given) | `.arnx/reviews/<id>/fix-prompt.md` | nothing | no | no |
-| `check` | Run the accepted tests in the approved sandbox, accepted tests told from the other tests in their files; refuse (exit 4) when a pinned file or its entry changed. `--review [id]`: run a review's confirmed tests on the working tree instead (`recheck.ts`), before anything is accepted | `.arnx/tests/`, `.arnx/accepted-tests.json`, `.arnx/answer-watch.json`; with `--review`, `.arnx/reviews/<id>/` | `.arnx/run/` logs | no | yes |
+| `check` | Run the accepted tests in the approved sandbox, accepted tests told from the other tests in their files; refuse (exit 4) when a pinned file or its entry changed, a file under `.arnx/tests/` is `added` (accept did not write it), `duplicate` (one test under two names) or `collides` (with a file of the project), or `.arnx` is a link. `--review [id]`: run a review's confirmed tests on the working tree instead (`recheck.ts`), before anything is accepted | `.arnx/tests/`, `.arnx/accepted-tests.json`, `.arnx/answer-watch.json`; with `--review`, `.arnx/reviews/<id>/` | `.arnx/run/` logs | no | yes |
 | `consent` | `--cloud`: record the consent to send code to arnx cloud without sending anything; own keys need none | `.arnx/config.toml` | `cloud_consent_at` | no | no |
 | `allow-secret` | Pin test-fixture files: their key-like strings, and the whole text of a file holding a private key or left out by its name or size. The sandbox then keeps the real key, and models read the same as without a pin; never shows the strings. `--remove PATH...` takes the paths' pins out (the files need not exist; a seed left with none is deleted) | the files named | `.arnx/review.yaml` (proven again before the next review) | no | no |
 | `env prune` | Remove this repository's environment images no approved project uses, older than `--keep-days` (7); `--all-repos`, `--dry-run`. An image made from the code (`<key>-src-<hash>`, baked.ts) also takes the build cache records its build left, each by id, found from the step marked with its tag; one an arnx before 0.1.3 built has no such step (`docker image history` shows it), and its records cannot be told apart from others, so prune names `docker builder prune` instead | Docker's image labels, `docker buildx du` | nothing | no | yes |
 | `login`, `logout`, `credits` | arnx cloud: a device login (RFC 8628), its deletion, the balance (no answer: "arnx cloud unavailable", exit 2; "not open yet" only on arnx cloud's `not_open`) | the config directory, `/v1/account` | `~/.config/arnx/credentials.json` (0600) | no | no |
 | `cloud on`, `cloud off` | arnx cloud's models for this repository, or the user's keys again: asks the cloud consent once, changes only `[cloud] models` | `.arnx/config.toml` | `.arnx/config.toml` | no | no |
 | `prompts` | List the prompt keys, marking those `.arnx/prompts.toml` overrides; `copy KEY` writes arnx's default of KEY there with `KEY_base` (its hash), keeping the file's other content; a key already there is printed instead, nothing written | `.arnx/prompts.toml` | `.arnx/prompts.toml` (copy) | no | no |
-| `skill install` | Write the arnx skill for coding agents (`skills/arnx/`, embedded in the build) to `.agents/skills/arnx/` and `.claude/skills/arnx/`, or under `~/` with `--user`; a different copy only with `--force`. `init` names the command until the repository has it | nothing | `.agents/skills/arnx/`, `.claude/skills/arnx/` | no | no |
+| `skill install` | Write the arnx skill for coding agents (`plugin/skills/arnx/`, embedded in the build) to `.agents/skills/arnx/` and `.claude/skills/arnx/`, or under `~/` with `--user`; a different copy only with `--force`. `init` names the command until the repository has it | nothing | `.agents/skills/arnx/`, `.claude/skills/arnx/` | no | no |
 
 Exit codes: 0 no confirmed findings, 1 confirmed findings, 2 the run could not finish, 3 setup needed, 4 (`check`
 only) an accepted test changed since accept, 130 interrupted.
 
 Every command takes `--json` (`JsonOut` in `cli.ts`): one object on stdout, the text on stderr, nothing asked. The
-fields are in `skills/arnx/references/json.md` and `check-json.md`; `tests/json-*.test.ts` hold them.
+fields are in `plugin/skills/arnx/references/json.md` and `check-json.md`; `tests/json-*.test.ts` hold them.
 
 ## How a review flows
 
@@ -565,19 +565,21 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `challenge.ts` | The second-model check |
 | `report.ts` | `review.md` / `review.json`: render, parse marks, exit code |
 | `accept.ts` | Marks and answers to kept tests and the precision log |
+| `kept.ts` | The names kept tests are stored under in `.arnx/tests/` (`storedName` appends `.arnx`, `runName` strips it) and the leftovers arnx ignores there (`isKeptJunk`) |
 | `telemetry.ts` | Telemetry: on or off (config, environment), the allow-listed payload of each event (`SCHEMA`), a send that never blocks |
-| `skill.ts` | The arnx skill for coding agents: `skills/arnx/` imported as text, `arnx skill install` |
+| `skill.ts` | The arnx skill for coding agents: `plugin/skills/arnx/` imported as text, `arnx skill install` |
 | `recheck.ts` | `check --review`: a review's confirmed tests again on the working tree; fixed only when they pass in every run, still failing after one failing run |
 | `util.ts` | Python-compatible formatting (json.dumps, repr, shlex.quote, splitlines) for byte-level parity |
 
 ## The skill for coding agents
 
-`skills/arnx/` holds the skill (SKILL.md and `references/`), versioned with the CLI. `skill.ts` imports each file with
+`plugin/skills/arnx/` holds the skill (SKILL.md and `references/`), versioned with the CLI. `skill.ts` imports each file with
 `with { type: "text" }` (typed by `src/text.d.ts`), so `bun build` inlines it into both the binary and the Node bundle;
-a new reference file is a new import there (`tests/skill.test.ts` fails when `skills/arnx/` and the embedded files
+a new reference file is a new import there (`tests/skill.test.ts` fails when `plugin/skills/arnx/` and the embedded files
 differ, and builds the binary to install from it; `bun run smoke` does the same for both builds). The repository root
-is also a Claude Code plugin and its marketplace: `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`
-(source `./`), so the plugin's default `skills/` folder is this one. `claude plugin validate .` checks both.
+is a Claude Code marketplace (`.claude-plugin/marketplace.json`, source `./plugin`) and `plugin/` is the one plugin in it
+(`plugin/.claude-plugin/plugin.json`), so a plugin directory reviews only that folder and its default `skills/` is this one.
+`claude plugin validate ./plugin` and `claude plugin validate .` check both.
 
 What the skill reads is a contract: `references/review-json.md` (review.json, `schema_version` 1) and
 `references/check-json.md` (`arnx check --json`). `tests/skill-docs.test.ts` fails when a documented field is no
@@ -586,7 +588,7 @@ longer written, or a written field is not documented. Removing or renaming a fie
 Accepted tests are pinned: `accept` records each kept file's sha256 in `.arnx/accepted-tests.json` (`recordAccepted`
 in `check.ts`; a review's entries are replaced when it is accepted again), and `check` verifies them before it runs
 anything (`changedAccepted`): an edited or deleted file exits 4 and runs nothing. `accept --keep-edits` records the
-files as they are now. Files no accept recorded are run unchecked. The record is in the working tree, so its pins are
+files as they are now. A file under `.arnx/tests/` that no accept recorded is `added`: exit 4, not run. The record is in the working tree, so its pins are
 checked too: one counts only when it is HEAD's or one arnx wrote on this machine (`accept` and `--keep-edits` also
 keep every pin they write in `$XDG_CONFIG_HOME/arnx/pins/<repo>.json`, outside the repository and so outside a coding
 agent's usual sandbox; `localPinsPath`). Anything else is `repinned`, and an entry gone (with its file still there,
@@ -641,7 +643,7 @@ Every pull request and push to `main` runs `.github/workflows/ci.yml`: install, 
 smoke`, read-only and with no secrets. A `v*` tag runs `.github/workflows/release.yml`: tests, the Node bundle and the four binaries, then the package
 staged on npmjs.com (with provenance; installable once a maintainer approves it with 2FA, in Staged Packages or with
 `npm stage approve <id>`) and a GitHub release with the binaries and `SHA256SUMS`. The tag must match `version` in
-package.json, which must match `VERSION` in `src/version.ts` and `.claude-plugin/plugin.json`. A version with a
+package.json, which must match `VERSION` in `src/version.ts` and `plugin/.claude-plugin/plugin.json`. A version with a
 pre-release part is published under the npm dist-tag `next` and as a pre-release, so `npm install -g @arnx-dev/arnx`
 and `releases/latest/download/` keep the last plain version. `npm publish` outside GitHub Actions is refused
 (`prepublishOnly`).

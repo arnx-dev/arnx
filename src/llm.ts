@@ -40,6 +40,19 @@ export const PRICES: Prices = {
 };
 export const RETRY_STATUS = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
 
+/** A provider's error body as one short line: its `error.message` when the body is JSON that has one, else the text;
+ * account, project and key ids become "…". */
+export function providerReason(body: string): string {
+  let text = body;
+  const start = body.indexOf("{");
+  if (start >= 0) {
+    try {
+      const err = (JSON.parse(body.slice(start)) as { error?: { message?: unknown } } | null)?.error;
+      if (typeof err?.message === "string") text = err.message;
+    } catch { /* not JSON: the text as it is */ }
+  }
+  return text.replace(/\b(?:org|proj|ak|sk|acct)-[A-Za-z0-9_-]{6,}\b/g, "…").slice(0, 200);
+}
 /** A failed call's message for a progress line: the HTTP status without the body the provider sent. */
 export function brief(message: string): string {
   const status = /^HTTP (\d+)/.exec(message)?.[1];
@@ -317,7 +330,7 @@ export class AnthropicAgent implements AgentModel {
   /** How many attempts may end in a timeout before the call fails (default: the usual retries). */
   private timeoutAttempts: number;
   private fetch: typeof fetch;
-  private sleep: (seconds: number) => Promise<void>;
+  private sleep: (seconds: number, signal?: AbortSignal) => Promise<void>;
   /** The waits while every attempt finds the provider down (OUTAGE_DELAYS unless the role gives fewer). */
   readonly downDelays: number[];
   private random: () => number;
@@ -325,7 +338,7 @@ export class AnthropicAgent implements AgentModel {
 
   constructor(readonly model: string, readonly effort: string, private apiKey: string, private client?: MessagesClient,
               opts: { idleSeconds?: number; firstEventSeconds?: number; totalSeconds?: number; attemptSeconds?: number;
-                timeoutAttempts?: number; fetch?: typeof fetch; sleep?: (seconds: number) => Promise<void>;
+                timeoutAttempts?: number; fetch?: typeof fetch; sleep?: (seconds: number, signal?: AbortSignal) => Promise<void>;
                 provider?: string; baseURL?: string; downDelays?: number[]; random?: () => number; clock?: () => number } = {}) {
     this.provider = opts.provider ?? "anthropic";
     this.downDelays = opts.downDelays ?? OUTAGE_DELAYS;
@@ -334,7 +347,7 @@ export class AnthropicAgent implements AgentModel {
     this.baseURL = opts.baseURL;
     this.timeoutAttempts = opts.timeoutAttempts ?? Infinity;
     this.fetch = opts.fetch ?? fetch;
-    this.sleep = opts.sleep ?? ((s) => sleep(s * 1000));
+    this.sleep = opts.sleep ?? ((s, signal) => sleep(s * 1000, signal));
     this.idle = opts.idleSeconds ?? ANTHROPIC_IDLE;
     this.firstEvent = Math.min(opts.firstEventSeconds ?? ANTHROPIC_FIRST_EVENT, this.idle);
     this.total = opts.totalSeconds ?? ANTHROPIC_TOTAL;
@@ -431,7 +444,7 @@ export class AnthropicAgent implements AgentModel {
           : timeout === "first-byte" ? `no reply: first-byte timeout after ${this.firstEvent}s`
           : timeout === "idle" ? `no reply: idle timeout after ${this.idle}s without bytes`
           : timeout === "attempt" ? `no reply: attempt timeout after ${this.attemptLimit}s`
-          : e instanceof Anthropic.APIError && e.status ? `HTTP ${e.status}: ${e.message.slice(0, 200)}` : errorName(e);
+          : e instanceof Anthropic.APIError && e.status ? `HTTP ${e.status}: ${providerReason(e.message)}` : errorName(e);
         record(timeout === "total" ? "late" : timeout ? "stalled" : "error", reason);
         const broke = !timeout && e instanceof Anthropic.APIError ? noCredits(this.provider, `${e.type ?? ""} ${e.message}`)
           : null;
@@ -476,7 +489,7 @@ export class AnthropicAgent implements AgentModel {
         clearTimeout(cutoff);
         stream?.abort();
       }
-      await this.sleep(delay);
+      await this.sleep(delay, signal);
     }
   }
 
@@ -497,7 +510,8 @@ export class AnthropicAgent implements AgentModel {
     const attempts: Attempt[] = [], billed = { unknown: 0 };
     try {
       // One pool per model: a busy Sonnet reviewer does not hold back Haiku part hunters.
-      resp = await withProviderSlot(`${this.provider}:${this.model}`, () => this.send(params, attempts, billed, signal));
+      resp = await withProviderSlot(`${this.provider}:${this.model}`, () => this.send(params, attempts, billed, signal),
+        { signal, cancelled: () => this.cancelled(billed) });
     } catch (e) {
       if (e instanceof ModelError) e.attempts = attempts;
       throw e;
@@ -588,7 +602,7 @@ export class ResponsesJson implements JsonModel {
   readonly ref: string;
   readonly model: string;
   private fetch: typeof fetch;
-  private sleep: (seconds: number) => Promise<void>;
+  private sleep: (seconds: number, signal?: AbortSignal) => Promise<void>;
   /** The waits while every attempt finds the provider down (OUTAGE_DELAYS unless the role gives fewer). */
   readonly downDelays: number[];
   private random: () => number;
@@ -612,7 +626,7 @@ export class ResponsesJson implements JsonModel {
   trace?: Trace;
 
   constructor(ref: ModelRef, baseUrl: string, private apiKey: string, readonly effort: string, private prices: Prices,
-              opts: { fetch?: typeof fetch; sleep?: (seconds: number) => Promise<void>; idleSeconds?: number;
+              opts: { fetch?: typeof fetch; sleep?: (seconds: number, signal?: AbortSignal) => Promise<void>; idleSeconds?: number;
                       connectSeconds?: number; totalSeconds?: number; attemptSeconds?: number;
                       timeoutAttempts?: number; tier?: string | null; store?: boolean; background?: boolean; pollSeconds?: number;
                       graceSeconds?: number; downDelays?: number[]; random?: () => number; clock?: () => number } = {}) {
@@ -623,7 +637,7 @@ export class ResponsesJson implements JsonModel {
     this.model = ref.model;
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.fetch = opts.fetch ?? fetch;
-    this.sleep = opts.sleep ?? ((s) => sleep(s * 1000));
+    this.sleep = opts.sleep ?? ((s, signal) => sleep(s * 1000, signal));
     this.idle = opts.idleSeconds ?? IDLE_TIMEOUT;
     this.connect = opts.connectSeconds ?? CONNECT_TIMEOUT;
     this.total = opts.totalSeconds ?? TOTAL_TIMEOUT;
@@ -680,7 +694,8 @@ export class ResponsesJson implements JsonModel {
   async post(payload: Record<string, unknown>, signal?: AbortSignal): Promise<[Record<string, unknown>, number, number]> {
     const { stream: _stream, ...rest } = payload;
     const body = this.background ? { ...rest, background: true } : payload;
-    return withProviderSlot(this.baseUrl, () => this.postWithinSlot(body, signal));
+    return withProviderSlot(this.baseUrl, () => this.postWithinSlot(body, signal),
+      { signal, cancelled: () => billedError(`${this.ref}: request cancelled`, 0, null, 0) });
   }
 
   private async postWithinSlot(payload: Record<string, unknown>, signal?: AbortSignal)
@@ -750,7 +765,7 @@ export class ResponsesJson implements JsonModel {
           this.notice?.(`${this.ref}: ${brief(e.message)}; retrying (attempt ${attempt + 1}) in ${delay}s`);
         }
       }
-      await this.sleep(delay);
+      await this.sleep(delay, signal);
     }
   }
 
@@ -785,7 +800,7 @@ export class ResponsesJson implements JsonModel {
       arm();
       if (r.status !== 200) {
         const body = await r.text().catch(() => "");
-        const message = `HTTP ${r.status}: ${body.slice(0, 200)}`;
+        const message = `HTTP ${r.status}: ${providerReason(body)}`;
         const broke = noCredits(providerOf(this.ref), body);
         if (broke) throw broke;
         if (RETRY_STATUS.has(r.status)) {
@@ -855,7 +870,7 @@ export class ResponsesJson implements JsonModel {
         diagnostics.headersSecs = Math.round((performance.now() - started) / 100) / 10;
         if (r.status !== 200) {
           const body = await r.text().catch(() => "");
-          const message = `HTTP ${r.status}: ${body.slice(0, 200)}`;
+          const message = `HTTP ${r.status}: ${providerReason(body)}`;
           const broke = noCredits(providerOf(this.ref), body);
           if (broke) throw broke;
           if (RETRY_STATUS.has(r.status)) {
@@ -928,7 +943,7 @@ export class ResponsesJson implements JsonModel {
       const r = await this.fetch(`${this.baseUrl}/responses/${id}`, { signal: abort.signal,
         headers: { authorization: `Bearer ${this.apiKey}` } });
       if (r.status !== 200) {
-        const message = `HTTP ${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}`;
+        const message = `HTTP ${r.status}: ${providerReason(await r.text().catch(() => ""))}`;
         if (RETRY_STATUS.has(r.status) || (r.status === 404 && young)) return message;
         throw refused(this.ref, `poll: ${message}`, r.status);
       }
@@ -1106,7 +1121,7 @@ function parseEvent(ref: string, line: string): Record<string, unknown> | null {
   if (["response.completed", "response.incomplete", "response.failed"].includes(String(event.type))) {
     return isObject(event.response) ? event.response : {};
   }
-  if (event.type === "error") throw noCredits(providerOf(ref), data) ?? new ModelError(`${ref}: ${String(event.message ?? JSON.stringify(event)).slice(0, 200)}`);
+  if (event.type === "error") throw noCredits(providerOf(ref), data) ?? new ModelError(`${ref}: ${providerReason(String(event.message ?? JSON.stringify(event)))}`);
   return null;
 }
 

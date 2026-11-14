@@ -171,7 +171,7 @@ test("arnx login, credits and logout", async () => {
     "✓ Logged in as dev@example.com");
   cli.out = [];
   expect(await cli.run("credits")).toBe(0);
-  expect(cli.stdout).toBe("arnx cloud · dev@example.com\n  Available: $4.25\nTop up: https://arnx.dev/credits");
+  expect(cli.stdout).toBe("arnx cloud · dev@example.com\n  Available: $4.25");
   expect(c.seen.at(-1)!.headers.authorization).toBe(`Bearer ${TOKEN}`);
   cli.out = [];
   expect(await cli.run("logout")).toBe(0);
@@ -189,15 +189,15 @@ test("credits: what reviews in progress reserve, apart; a debt pauses new review
   writeCredentials({ HOME: home }, { url: c.url, token: TOKEN });
   let cli = new Cli({ cwd: home, env: { HOME: home, ARNX_CLOUD_URL: c.url } });
   expect(await cli.run("credits")).toBe(0);
-  expect(cli.stdout).toBe("arnx cloud · dev@example.com\n  Available: $4.25\n  Reserved:  $0.40 (reviews in progress)\n" +
-    "Top up: https://arnx.dev/credits");
+  expect(cli.stdout).toBe("arnx cloud · dev@example.com\n  Available: $4.25\n  Reserved:  $0.40 (reviews in progress)");
   c.stop();
   c = start({ balance: -250_000 });
   writeCredentials({ HOME: home }, { url: c.url, token: TOKEN });
   cli = new Cli({ cwd: home, env: { HOME: home, ARNX_CLOUD_URL: c.url } });
   expect(await cli.run("credits")).toBe(0);
   expect(cli.stdout).toBe("✗ Outstanding balance: $0.25 (a review's overage)\n" +
-    "New arnx cloud reviews are paused until you top up.\nTop up: https://arnx.dev/credits");
+    "New arnx cloud reviews are paused. arnx works with your own model keys: `arnx cloud off`, then export " +
+    "ANTHROPIC_API_KEY (or another provider's key).");
 });
 
 test("init --cloud: config gets [cloud]; next is login, then review", async () => {
@@ -228,7 +228,7 @@ test("doctor with arnx models: login and credits instead of keys", async () => {
   cli.out = [];
   await cli.run("doctor");
   expect(cli.stdout).toContain(`✓ Login: logged in to ${c.url}`);
-  expect(cli.stdout).toContain("✗ Credits: $0.00 available; top up at https://arnx.dev/credits");
+  expect(cli.stdout).toContain("✗ Credits: $0.00 available; own keys: arnx cloud off");
 });
 
 test("doctor names the unreachable part and whether the user's own keys would do", async () => {
@@ -246,7 +246,7 @@ test("doctor names the unreachable part and whether the user's own keys would do
     "maintenance). Try again later. To use your own keys: arnx cloud off\n");
 });
 
-test("next with arnx models: log in first, then top up", async () => {
+test("next with arnx models: log in first, then credits", async () => {
   const c = start({ balance: -1 });
   const repo = gitRepo(tmp());
   const home = tmp();
@@ -260,11 +260,12 @@ test("next with arnx models: log in first, then top up", async () => {
   writeCredentials({ HOME: home }, { url: c.url, token: TOKEN });
   cli.out = [];
   await cli.run("next");
-  expect(cli.stdout).toContain("arnx credits");
+  expect(cli.stdout).toContain("arnx cloud off");
+  expect(cli.stdout).toContain("arnx login to another account");
   expect(cli.stdout).toContain("-$0.00");
 });
 
-test("the client: 402 is a top-up (exit 3); 503 and a dead address name the part (exit 2); 503 is retried", async () => {
+test("the client: 402 points to own keys (exit 3); 503 and a dead address name the part (exit 2); 503 is retried", async () => {
   const c = start({ fail: {
     "GET /v1/account": [{ status: 402, body: { code: "insufficient_credits", message: "Your balance is too low.",
       balance_micro_usd: 120_000, needed_micro_usd: 380_000, topup_url: "https://arnx.dev/credits" } },
@@ -273,7 +274,9 @@ test("the client: 402 is a top-up (exit 3); 503 and a dead address name the part
   const client = new CloudClient(c.url, { token: TOKEN, delays: [0], hint: () => "To use your own keys: arnx cloud off" });
   const e402 = await client.call("GET", "/v1/account").catch((e: unknown) => e);
   expect(e402).toBeInstanceOf(SetupRequired);
-  expect((e402 as Error).message).toContain("Balance $0.12; $0.38 more lets this start. Top up at https://arnx.dev/credits");
+  expect((e402 as Error).message).toContain("Balance $0.12; $0.38 more lets this start. arnx works with your own model keys: " +
+    "`arnx cloud off`, then export ANTHROPIC_API_KEY (or another provider's key).");
+  expect((e402 as Error).message).not.toContain("Top up");
   // One 503, then the account: the retry got through.
   expect(await client.call<{ balance_micro_usd: number }>("GET", "/v1/account")).toMatchObject({ balance_micro_usd: 5_000_000 });
   const dead = new CloudClient("http://127.0.0.1:9", { token: TOKEN, delays: [0],
@@ -394,7 +397,7 @@ test("the default address once arnx cloud answers there: login and credits as us
     expect(readCredentials({ HOME: home })).toEqual({ url: CLOUD_URL, token: TOKEN });
     cli.out = [];
     expect(await cli.run("credits")).toBe(0);
-    expect(cli.stdout).toBe("arnx cloud · dev@example.com\n  Available: $4.25\nTop up: https://arnx.dev/credits");
+    expect(cli.stdout).toBe("arnx cloud · dev@example.com\n  Available: $4.25");
     let calls = 0;
     const client = new CloudClient(CLOUD_URL, { token: TOKEN, delays: [0], sleep: noWait,
       fetch: (u, init) => (calls++ ? dnsFails(u, init) : viaFake(c)(u, init)) });

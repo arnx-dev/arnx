@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveChange, snapshot } from "../src/change";
 import { ArnxError } from "../src/errors";
-import { DEFAULT_IGNORE, loadIgnore, matcher, proposeIgnore } from "../src/ignore";
+import { DEFAULT_IGNORE, initialIgnore, loadIgnore, matcher, proposeIgnore } from "../src/ignore";
 import { isSecretPath } from "../src/secrets";
 import { Cli } from "./helpers/cli";
 import { commit, gitRepo } from "./helpers/gitutil";
@@ -118,4 +118,27 @@ test("a ! line keeps what it matches again; the last matching line decides", () 
   const m = matcher("*.csv\n!tests/\ntests/secret.csv\n");
   expect([m("a.csv"), m("tests/a.csv"), m("tests/secret.csv"), m("x/tests/b.csv"), m("a.py")])
     .toEqual([true, false, true, false, false]);
+});
+
+test("init keeps the data files code embeds or imports: listed nowhere, and kept again over a default pattern", () => {
+  mkdirSync(join(tmp(), "embed"));
+  const repo = gitRepo(join(tmp(), "embed"));
+  const big = "x".repeat(150_000);
+  const files: Record<string, string> = {
+    "crypto/setup.go": "package crypto\n\nimport _ \"embed\"\n\n//go:embed trusted.json\nvar setup []byte\n",
+    "crypto/trusted.json": big,
+    "web/assets.go": "package web\n\nimport \"embed\"\n\n//go:embed static/*.png \"logo dir\"\nvar fs embed.FS\n",
+    "web/static/a.png": "", "web/static/b.png": "", "web/logo dir/c.png": "", "web/other.png": "",
+    "app/abi.ts": "import abi from \"./abi.json\";\nconst more = require('../shared/more.json');\n",
+    "app/abi.json": big, "shared/more.json": big, "loose.json": big };
+  for (const [p, body] of Object.entries(files)) {
+    mkdirSync(join(repo, p, ".."), { recursive: true });
+    writeFileSync(join(repo, p), body);
+  }
+  commit(repo, "embed");
+  expect(proposeIgnore(repo).files).toEqual(["loose.json"]);
+  const ignored = matcher(initialIgnore(repo));
+  for (const f of ["crypto/trusted.json", "web/static/a.png", "web/static/b.png", "web/logo dir/c.png", "app/abi.json",
+    "shared/more.json"]) expect([f, ignored(f)]).toEqual([f, false]);
+  expect(["web/other.png", "loose.json"].map(ignored)).toEqual([true, true]);
 });

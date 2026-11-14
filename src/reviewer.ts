@@ -33,7 +33,7 @@ import { pythonTypeGap } from "./setupview";
 import { type AgentReport, type Checked, type Finding, type FixProof, hasReport, parseReports, reportedTests, type ProjectStat, type Review,
   save, type SuspectOutcome, type Untested, adjudicate, CONFIRMED_FAILS, type DisputeKind, exitCode, firstLine, type Origin,
   sameCause, summaryRows, plural } from "./report";
-import { dockerSteps, type SessionFactory } from "./sandbox";
+import { dockerCapacity, dockerSteps, sandboxesFit, type SessionFactory } from "./sandbox";
 import { skippedTypecheck, type TypeCheck } from "./typecheck";
 import type { Say } from "./progress";
 import { keyReruns, sweepRealKeyCopies } from "./realkey";
@@ -52,6 +52,11 @@ export const AGENT_SHARE = 0.85;
 /** Projects tested at once: each runs its own sandbox, and a test run does not hold the process (Session.spawnRun), so
  * two side by side roughly halve a two-project review. */
 export const PROJECT_CONCURRENCY = 2;
+
+/** Projects tested at once: PROJECT_CONCURRENCY, or fewer when the Docker VM cannot hold that many sandboxes. */
+export function projectConcurrency(cap: { cpus: number; memoryBytes: number } | null): number {
+  return sandboxesFit(cap, PROJECT_CONCURRENCY);
+}
 
 interface SavedVerdict { verdict: string; reason: string; dependsOn: string | null; judge: string | null;
   model: string; cost: number; sameAs?: string; kind?: DisputeKind; origin?: Origin }
@@ -655,7 +660,7 @@ export async function runReview(repo: string, o: { settings: Settings;
     // A range ending anywhere but the checked-out commit tests an older tree: setup (which proves this one) cannot mend it.
     const atCheckedOut = change.kind !== "range" || change.head === commitOf(repo, "HEAD");
     const done: Done[] = [];
-    await inPool(routing.routed.map((_r, i) => i), o.projectConcurrency ?? PROJECT_CONCURRENCY, async (i) => {
+    await inPool(routing.routed.map((_r, i) => i), o.projectConcurrency ?? (o.sessionFactory ? PROJECT_CONCURRENCY : projectConcurrency(dockerCapacity())), async (i) => {
       done[i] = await runProject(i);
     });
     let beforeSecs = 0, fixProofSecs = 0;

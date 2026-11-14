@@ -8,7 +8,7 @@ import { runAgent, Workspace } from "../src/agent";
 import { setupFailure } from "../src/cli";
 import { parseReviewConfig, parseReviewFile } from "../src/config";
 import { PRICES } from "../src/llm";
-import { ensureEnv, OutOfTime, sandboxOptions, Session, stepTimeout, timeLimit, withTimeLimit } from "../src/sandbox";
+import { DiskFull, diskFullMessage, ensureEnv, OutOfTime, sandboxOptions, Session, stepTimeout, timeLimit, withTimeLimit } from "../src/sandbox";
 import { defaultSettings, loadSettings } from "../src/settings";
 import { runSetup, TIME_LEFT_OUT } from "../src/setup";
 import { setupPreview } from "../src/setupview";
@@ -238,6 +238,70 @@ test("at the limit with no file accepted, the projects proven so far are kept, t
     data: { ok: true, stop: "time", projects: ["api"], uncovered_projects: ["web"] } });
 });
 
+test("at the limit, a project proven earlier keeps its proven block when a later try changed it", async () => {
+  const clock = { ms: 0 };
+  const repo = twoProjects();
+  const changed = TWO.replace("    root: api\n", "    root: api\n    uses: [web/web.py]\n");
+  expect(changed).not.toBe(TWO);
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("try_project", { yaml: changed, project: "web" })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"),
+    sessionFactory: apiThenSlowWeb(clock), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+  expect([r.ok, r.stop, r.setAside]).toEqual([true, "time", ["web"]]);
+  const f = parseReviewFile(r.yamlText!);
+  expect(f.projects.map((p) => [p.name, p.uses])).toEqual([["api", []]]);
+  expect(f.uncovered).toEqual([{ path: "/web/", reason: TIME_LEFT_OUT }]);
+});
+
+/** api and lib pass at once; web's suite runs eleven minutes and fails. */
+const apiLibThenSlowWeb = (clock: { ms: number }) =>
+  async <T>(cfg: { name: string }, snap: string, _log: string, body: (r: Runner) => Promise<T>) =>
+    body(new FakeSession(snap, () => {
+      if (cfg.name === "web") {
+        clock.ms += 11 * MIN;
+        return [junitXml([["web/tests/test_web.py", "test_f", "failed", "boom"]]), "1 failed", false];
+      }
+      const dir = cfg.name === "lib" ? "lib" : "api";
+      return [junitXml([[`${dir}/tests/test_${dir}.py`, "test_f", "passed", ""]]), "1 passed", false];
+    }));
+
+/** The last file changes api's block so that it overlaps another project; lib passed too. */
+async function overlapAtLimit(last: (three: string) => string) {
+  const clock = { ms: 0 };
+  const repo = initRepo(join(tmp(), "three"));
+  for (const name of ["api", "lib", "web"]) {
+    mkdirSync(join(repo, name, "tests"), { recursive: true });
+    writeFileSync(join(repo, name, `${name}.py`), "def f():\n    return 1\n");
+    writeFileSync(join(repo, name, "tests", `test_${name}.py`), "def test_f():\n    assert True\n");
+  }
+  commit(repo, "three");
+  const three = TWO + TWO.slice(TWO.indexOf("  api:"), TWO.indexOf("  web:")).replace("api", "lib").replace("root: api", "root: lib");
+  const model = new ScriptedAgent([[tool("try_project", { yaml: three, project: "api" })],
+    [tool("try_project", { yaml: three, project: "lib" })], [tool("try_project", { yaml: last(three), project: "web" })],
+    [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"),
+    sessionFactory: apiLibThenSlowWeb(clock), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
+  return { r, f: parseReviewFile(r.yamlText!) };
+}
+
+test("at the limit, a proven block that overlaps a project in the last file gives way", async () => {
+  // The last file gives api's folder to another project: api is not in it, and its proven block would overlap.
+  const { r, f } = await overlapAtLimit((t) => t.replace("  api:\n    root: api\n", "  core:\n    root: api\n"));
+  expect([r.ok, r.stop]).toEqual([true, "time"]);
+  expect(f.projects.map((p) => p.name)).toEqual(["lib"]);
+  expect([...r.setAside!].sort()).toEqual(["core", "web"]);
+});
+
+test("at the limit, a proven project whose changed block overlaps another gives way to the file", async () => {
+  // api is in the last file with a changed block, and web's root moved onto api's folder: putting api's proven block
+  // back would overlap web, so the file's api stays.
+  const { r, f } = await overlapAtLimit((t) => t.replace("    root: api\n", "    root: api\n    uses: [lib/lib.py]\n")
+    .replace("    root: web\n", "    root: api\n"));
+  expect([r.ok, r.stop]).toEqual([true, "time"]);
+  expect(f.projects.map((p) => p.name)).toEqual(["lib"]);
+  expect([...r.setAside!].sort()).toEqual(["api", "web"]);
+});
+
 test("at the limit, a held try and a project proven after it are both kept: the file that keeps the most is taken",
   async () => {
   // web alone is tried first: it runs, but test_command leaves most of its tests out, so it goes back to the agent.
@@ -446,4 +510,62 @@ projects:
     sessionFactory: fastExceptWeb(clock), timeLimit: { at: 10 * MIN, now: () => clock.ms, minutes: 10 } });
   expect([r.ok, r.stop]).toEqual([true, "time"]);
   expect(parseReviewFile(r.yamlText!).projects.map((p) => p.name)).toEqual(["lib"]);
+});
+
+test("a full Docker disk ends setup at once: no further tries, no more model calls", async () => {
+  const repo = twoProjects();
+  let builds = 0;
+  const factory = async <T>(_cfg: { name: string }, _snap: string, _log: string, _body: (r: Runner) => Promise<T>) => {
+    builds++;
+    throw new DiskFull();
+  };
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("try_project", { yaml: TWO, project: "web" })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"), sessionFactory: factory });
+  expect([r.ok, r.stop, builds, model.calls.length]).toEqual([false, "disk-full", 1, 1]);
+  expect(r.problem).toBe(diskFullMessage());
+  expect(setupFailure(r, 3, 40).text).toBe(diskFullMessage());
+});
+
+test("a full disk in the middle of a suite run ends setup the same way", async () => {
+  const repo = twoProjects();
+  const factory = async <T>(_cfg: { name: string }, snap: string, _log: string, body: (r: Runner) => Promise<T>) =>
+    body(new FakeSession(snap, (command) => {
+      if (!command.includes("test_arnx_probe")) throw new DiskFull();
+      return [null, "", false];
+    }));
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("try_project", { yaml: TWO, project: "web" })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"), sessionFactory: factory });
+  expect([r.ok, r.stop, model.calls.length]).toEqual([false, "disk-full", 1]);
+  expect(r.problem).toBe(diskFullMessage());
+});
+
+test("a full disk met by the agent's exec tool ends setup: no further model call", async () => {
+  const repo = twoProjects();
+  const pass = fakeFactory(() => [junitXml([["api/tests/test_api.py", "test_f", "passed", ""]]), "1 passed", false]);
+  const model = new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })],
+    [tool("exec", { project: "api", command: "ls" })], [tool("exec", { project: "api", command: "ls" })], [text("done")]]);
+  const r = await runSetup(repo, defaultSettings(), model, { outDir: join(repo, ".arnx", "setup"), sessionFactory: pass,
+    execFactory: async () => {
+      throw new DiskFull();
+    } });
+  expect([r.ok, r.stop, model.calls.length]).toEqual([false, "disk-full", 2]);
+});
+
+test("arnx setup --json after a full disk: environment failure naming the disk, nothing to run next", async () => {
+  const repo = twoProjects();
+  const env = { ANTHROPIC_API_KEY: "a" };
+  expect(await new Cli({ cwd: repo, env }).run("init")).toBe(0);
+  const cli = new Cli({ cwd: repo, env,
+    setupModel: new ScriptedAgent([[tool("try_project", { yaml: TWO, project: "api" })], [text("done")]]),
+    setupSessions: async () => {
+      throw new DiskFull();
+    } });
+  expect(await cli.run("setup", "--yes", "--json")).toBe(2);
+  const out = JSON.parse(cli.stdout);
+  expect(out.failure).toMatchObject({ kind: "environment" });
+  expect(out.failure.reason).toContain("Docker is out of disk space");
+  expect(out.next).toEqual([]);
+  expect(out.stop).toBe("disk-full");
 });

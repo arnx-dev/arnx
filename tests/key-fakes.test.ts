@@ -21,6 +21,7 @@ import { fakeFactory, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { RecordingAgent, RecordingJson, treeText } from "./helpers/recording";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
 
 const { fakeKeys, looksLikeName, maskPrivateKeys, secretPins } = secrets;
@@ -385,6 +386,7 @@ const FIXTURE_TEST = "from keyparse import parse\n\ndef test_add():\n    parse(o
 const reportFor = (t: string) => JSON.stringify({ tests: [{ test: `${t}::test_add`, expects: "x" }], suspected_defects: [{ test: `${t}::test_add`, explanation: "It broke." }], questions: [] });
 const keptTest = (repo: string, content: string) => {
   put(repo, ".arnx/tests/tests/arnx/r1/test_kept.py", content);
+  pinKept(repo);
 };
 
 test("real pytest, a test that parses a fixture key: a fake reads as unproven, and a pin makes it run", async () => {
@@ -537,4 +539,46 @@ test("a file over the cap is left out and named the same way, and can be allowed
   } finally {
     changeLimits.maxScanBytes = was;
   }
+});
+
+test("allow-secret with several paths allows each that qualifies and names each that does not", async () => {
+  const { readSecretPins } = await import("../src/config");
+  const repo = project({ "a.txt": pem, "b.txt": pem, "plain.txt": "nothing here\n" });
+  const all = new Cli({ cwd: repo });
+  expect(await all.run("allow-secret", "a.txt", "b.txt")).toBe(0);
+  expect(readSecretPins(repo).map((p) => p.path).sort()).toEqual(["a.txt", "b.txt"]);
+  expect(all.stdout).not.toContain("nothing to allow");
+
+  const repo2 = project({ "a.txt": pem, "plain.txt": "nothing here\n", "b.txt": pem });
+  const mixed = new Cli({ cwd: repo2 });
+  expect(await mixed.run("allow-secret", "a.txt", "plain.txt", "gone.txt", "b.txt")).toBe(0);
+  expect(readSecretPins(repo2).map((p) => p.path).sort()).toEqual(["a.txt", "b.txt"]);
+  expect(mixed.stdout).toContain("! plain.txt: holds nothing that looks like a key");
+  expect(mixed.stdout).toContain("! gone.txt: no such file");
+  expect(mixed.stdout).toContain("Allowed in");
+});
+
+test("allow-secret with no path that qualifies names each one and exits 2", async () => {
+  const { readSecretPins } = await import("../src/config");
+  const repo = project({ "p.txt": "one\n", "q.txt": "two\n" });
+  const none = new Cli({ cwd: repo });
+  expect(await none.run("allow-secret", "p.txt", "q.txt")).toBe(2);
+  expect(none.stderr + none.stdout).toContain("p.txt: holds nothing that looks like a key; nothing to allow");
+  expect(none.stderr + none.stdout).toContain("q.txt: holds nothing that looks like a key; nothing to allow");
+  expect(readSecretPins(repo)).toEqual([]);
+});
+
+const LAST_LINE_LINES = [0, 1, 2].map((i) => String(i + 1).repeat(64));
+const LAST_LINE = "abcdefghijklmnopqrstuvwxyzabcdef";
+test("a key's last line of letters alone is replaced", () => {
+  const doc = [HDR, ...LAST_LINE_LINES, LAST_LINE, END, ""].join("\n");
+  expect(secrets.keyTokens(doc)).toContain(LAST_LINE);
+  expect(fakeKeys(doc).text).not.toContain(LAST_LINE);
+});
+test("the same with CRLF line ends", () => {
+  expect(fakeKeys([HDR, ...LAST_LINE_LINES, LAST_LINE, END, ""].join("\r\n")).text).not.toContain(LAST_LINE);
+});
+test("a placeholder between header and END keeps its words", () => {
+  const doc = [HDR, "yourprivatekeygoeshere", END, ""].join("\n");
+  expect(fakeKeys(doc)).toEqual({ text: doc, count: 0 });
 });

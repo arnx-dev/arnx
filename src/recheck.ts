@@ -199,7 +199,7 @@ export function recheckSummary(r: ReviewRecheck): [string, number] {
   return [lines.join("\n"), code];
 }
 
-/** `arnx check --review <id> --json` (skills/arnx/references/check-json.md). */
+/** `arnx check --review <id> --json` (plugin/skills/arnx/references/check-json.md). */
 export function recheckJson(r: ReviewRecheck): string {
   const code = recheckCode(r);
   return JSON.stringify({ schema_version: 1, command: "check", review: r.review,

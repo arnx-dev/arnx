@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { added, changeLimits, describe as describeChange, filesAt, removed, repoRoot, resolveChange, snapshot,
   untrackedLine } from "../src/change";
 import { ArnxError, ChangeTooLarge, NoChange, SetupRequired } from "../src/errors";
@@ -484,4 +484,61 @@ test("a first commit over the limit names its largest files and says --range can
   expect((err as ChangeTooLarge).root).toBe(true);
   expect((err as Error).message).toContain("(largest: big.py 350 KB, app.py 1 KB)");
   expect((err as Error).message).toContain("first commit, so it holds every file");
+});
+
+function commitFiles(repo: string, files: Record<string, string>): string {
+  for (const [p, body] of Object.entries(files)) {
+    mkdirSync(dirname(join(repo, p)), { recursive: true });
+    writeFileSync(join(repo, p), body);
+  }
+  runGit(repo, "add", ...Object.keys(files));
+  runGit(repo, "commit", "-m", "more");
+  return runGit(repo, "rev-parse", "HEAD").trim();
+}
+
+function withLimit<T>(n: number, f: () => T): T {
+  const saved = changeLimits.maxSnapshotFiles;
+  changeLimits.maxSnapshotFiles = n;
+  try {
+    return f();
+  } finally {
+    changeLimits.maxSnapshotFiles = saved;
+  }
+}
+
+test("a commit over the file limit only by ignored files is copied", () => {
+  const repo = gitRepo(tmp());
+  const files: Record<string, string> = { "src/a.py": "x = 1\n", ".arnxignore": "vendored/\n" };
+  for (let i = 0; i < 5; i++) files[`vendored/v${i}.txt`] = "x";
+  const head = commitFiles(repo, files);
+  const dest = join(tmp(), "snap");
+  const total = runGit(repo, "ls-tree", "-r", "--name-only", head).trim().split("\n").length;
+  withLimit(total - 5, () => { // the ignored folder alone puts the commit over the limit
+    expect(() => snapshot(repo, head, dest)).not.toThrow();
+  });
+  expect(existsSync(join(dest, "src", "a.py"))).toBe(true);
+  expect(existsSync(join(dest, "vendored"))).toBe(false);
+});
+
+test("a sandbox-only file counts toward the limit", () => {
+  const repo = gitRepo(tmp());
+  const head = commitFiles(repo, { ".arnxignore": "vendored/\n", "vendored/a.txt": "x", "vendored/b.txt": "x" });
+  const total = runGit(repo, "ls-tree", "-r", "--name-only", head).trim().split("\n").length;
+  const visible = total - 2;
+  withLimit(visible, () => {
+    expect(() => snapshot(repo, head, join(tmp(), "ok"))).not.toThrow();
+    expect(() => snapshot(repo, head, join(tmp(), "sb"), [], { sandbox: ["vendored/a.txt"] })).toThrow(ArnxError);
+  });
+});
+
+test("over the limit, the message names .arnxignore", () => {
+  const repo = gitRepo(tmp());
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 5; i++) files[`f${i}.txt`] = "x";
+  const head = commitFiles(repo, files);
+  withLimit(3, () => {
+    expect(() => snapshot(repo, head, join(tmp(), "c"))).toThrow(/\.arnxignore/);
+    for (let i = 0; i < 5; i++) writeFileSync(join(repo, `u${i}.txt`), "x");
+    expect(() => snapshot(repo, null, join(tmp(), "w"), [], { untracked: true })).toThrow(/\.arnxignore/);
+  });
 });

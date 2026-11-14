@@ -16,7 +16,11 @@ import { FakeSession } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { blankMarks, finding, sampleReview } from "./helpers/review";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
+import { pinDockerCapacity } from "./helpers/dockercap";
+
+pinDockerCapacity();
 
 const tmp = useTmp();
 const RID = "20261011-a1b2c3";
@@ -85,6 +89,7 @@ test("check prints the pair before its Next line and in --json; the exit code is
     mkdirSync(join(path, ".."), { recursive: true });
     writeFileSync(path, "def test():\n    pass\n");
   }
+  pinKept(repo);
   writeFileSync(join(repo, ANSWER_WATCH), JSON.stringify({ schema_version: 1, answers: [
     { review: RID, answer: "Q1", test: Q1, passing: [{ id: "F1", review: RID, test: F1 }] }] }));
   commit(repo, "accepted");

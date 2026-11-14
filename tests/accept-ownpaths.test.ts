@@ -57,7 +57,7 @@ test("a kept test reading package.json through import.meta.dir still finds it af
   writeFileSync(join(rdir, "review.md"), blankMarks(readFileSync(join(rdir, "review.md"), "utf8"))
     .replace("Mark: [ ] real", "Mark: [x] real"));
   const result = await accept(repo, rdir, SETTINGS);
-  const kept = join(repo, ".arnx", "tests", "__tests__", "arnx", "r20261022_0a1b2c", "pkg_wrong.test.ts");
+  const kept = join(repo, ".arnx", "tests", "__tests__", "arnx", "r20261022_0a1b2c", "pkg_wrong.test.ts.arnx");
   expect(result.kept).toEqual([kept]);
   expect(readFileSync(kept, "utf8")).toContain('join(import.meta.dir, "../../../package.json")');
   // Run from the path it runs from (where check puts it): the helper test passes, and the bug's test fails until it is

@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "arnx",
-      "source": "./",
+      "source": "./plugin",
       "description": "The arnx skill: review a finished change with arnx, fix confirmed findings, run arnx check until it passes."
     }
   ]

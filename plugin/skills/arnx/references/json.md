@@ -26,7 +26,7 @@ to the baseline) is the user's to judge: pass `changes` on to them.
 | `schema_version` | number | 1. |
 | `command` | string | The command, as typed: `init`, `doctor`, `review`, … |
 | `result` | string | One word: `ok`, `fail`, or the command's own (below). |
-| `exit_code` | number | The process exit code: 0 fine (a confirmed finding does not fail a `review`; a change of documentation only is not reviewed: `result` `clean`, `status` `docs-only`, `--docs` reviews it); 1 a finding not checked (`review`) or failing tests (`check`); 2 could not finish or a usage error; 3 setup needed; 4 accepted tests edited (`check`). |
+| `exit_code` | number | The process exit code: 0 fine (a confirmed finding does not fail a `review`; nothing to review is not reviewed: `result` `clean`, `status` `docs-only` for documentation alone (`--docs` reviews it), `nothing-to-review` for an empty change, lockfiles or generated files alone, or a first run with nothing arnx can set up); 1 a finding not checked (`review`) or failing tests (`check`); 2 could not finish or a usage error; 3 setup needed; 4 accepted tests edited (`check`). |
 
 Every other field is the command's own, in snake_case. Paths are relative to the repository root, times are ISO
 8601, money is a number of US dollars in a field ending `_usd`.
@@ -139,12 +139,12 @@ The code to enter and the page to open are on stderr while it waits.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `balance_usd` | number | The available balance (the text's "Available"); negative is a debt (nothing new starts until a top-up). |
+| `balance_usd` | number | The available balance (the text's "Available"); negative is a debt (nothing new starts until it is cleared). |
 | `held_usd` | number | Reserved by reviews in progress (not spendable; `balance_usd` already leaves it out). |
 | `reserved_usd` | number | The same as `held_usd`, under the text's name ("Reserved"). |
 | `email` | string or null | The account's email. |
 | `account_id` | string | The account. |
-| `topup_url` | string | Where to top up. |
+| `topup_url` | string | The account link. |
 
 | `result` | Exit | When |
 |---|---|---|
@@ -168,9 +168,9 @@ recorded (else `error`, exit 3, nothing sent). What is worth a look is in `warni
 | `approval_record` | string or null | `.arnx/setup/approval.md` once proven (who ran the proof: the git user; when, the file's sha256 and the warnings); else `null`. |
 | `cost_usd` | number | What setup's model calls cost. |
 | `seconds` | number | How long setup took, the proof included. |
-| `stop` | string | Why setup's agent stopped: `end_turn`, `budget`, `max_turns`, `time` (it reached `setup_minutes`, the proof included), or another. |
+| `stop` | string | Why setup's agent stopped: `end_turn`, `budget`, `max_turns`, `time` (it reached `setup_minutes`, the proof included), `disk-full` (Docker is out of disk space; setup stops at once), or another. |
 | `uncovered_projects` | array of strings | At `setup_minutes` with some projects proven (`result` `ok`, `stop` `time`): the projects of its last attempt it had not proven, now listed under `uncovered` (reason `setup reached its time limit`), for `arnx setup --add`; `next` is then `["arnx setup --add"]`. Empty otherwise. |
-| `failure` | object or null | Why setup failed: `{ kind, reason, failing }`. `kind` is `environment` (it never got a suite running: a build that fails, a runner that does not start, the budget or the turns used up, no proposal, a run that needs a file arnx left out, after which setup stops, or only web UI apps whose two counted runs failed: `reason` is `only web UI here, which arnx does not set up` and `next` is empty), `tests` (the suite runs and the current code fails tests outside the baseline; `failing` holds their ids) or `time` (setup reached `setup_minutes`; `next` is `arnx setup --project NAME` for the project it was on, `arnx setup` again, or `arnx approve` when the proof ran out of time). `null` unless `fail`. |
+| `failure` | object or null | Why setup failed: `{ kind, reason, failing }`. `kind` is `environment` (it never got a suite running: a build that fails, a runner that does not start, the budget or the turns used up, no proposal, a run that needs a file arnx left out, after which setup stops, only web UI apps whose two counted runs failed: `reason` is `only web UI here, which arnx does not set up`, or `<name>: its tests did not list in N tries: <error>` when no counted run got past listing, and `next` is empty, or Docker out of disk space: `reason` says so, `next` is empty and `arnx env prune` frees arnx's old images), `tests` (the suite runs and the current code fails tests outside the baseline; `failing` holds their ids) or `time` (setup reached `setup_minutes`; `next` is `arnx setup --project NAME` for the project it was on, `arnx setup` again, or `arnx approve` when the proof ran out of time). `null` unless `fail`. |
 | `next` | array of strings | The commands to run next: `arnx review` once proven; `arnx approve` (after fixing `review_yaml`: it proves it again); `arnx setup --force` when there was no attempt. When setup stopped for a file it left out: `arnx allow-secret PATH` (secret-looking) or `add !PATH to .arnxignore`, then `arnx setup`. |
 
 | `result` | Exit | When |
@@ -394,7 +394,7 @@ the owner answered that question and the answer's round kept a test.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `changed` | array | The accepted test files recorded as they are now, each `{ path, change }`; `change` is `modified`, `deleted`, `repinned` or `unpinned`, as in [check-json.md](check-json.md). Empty when nothing changed. |
+| `changed` | array | The accepted test files recorded as they are now, each `{ path, change }`; `change` is `modified`, `deleted`, `repinned` or `unpinned`, as in [check-json.md](check-json.md) (`--keep-edits` refuses `duplicate`, `added` and `collides`). Empty when nothing changed. |
 | `restored_tests` | array of strings | The files whose accepted-test list (`tests` in `.arnx/accepted-tests.json`) was edited: an edit there is not kept (it could relabel a failing accepted test as another one), so the list arnx wrote (HEAD's, else this machine's) is recorded again. The files themselves are recorded as they are now. Usually empty. |
 | `recorded` | string | The record, `.arnx/accepted-tests.json` (unchanged when `changed` is empty): commit it with the tests. |
 

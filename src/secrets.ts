@@ -362,12 +362,26 @@ function keyFake(token: string): string {
   return out;
 }
 
+/** Start offsets, in a closed span's body, of the tokens that stay as names: a name-shaped token whose token before it (only
+ * separators between) is not key-shaped. A key's short last line of letters follows its key-shaped lines, so it never stays. */
+function keptNames(body: string): Set<number> {
+  const out = new Set<number>();
+  let before: string | undefined;
+  for (const m of body.matchAll(KEY_TOKEN)) {
+    if (m[1] !== undefined) { before = undefined; continue; }
+    if (looksLikeName(m[0]) && (before === undefined || looksLikeName(before))) out.add(m.index);
+    before = m[0];
+  }
+  return out;
+}
+
 /** The different tokens of `text`'s private keys. */
 export const keyTokens = (text: string) => tokensIn(text, privateKeySpans(text));
 function tokensIn(text: string, spans: readonly KeySpan[]): Set<string> {
   const out = new Set<string>();
   for (const s of spans) {
-    for (const m of text.slice(s.body, s.bodyEnd).matchAll(KEY_TOKEN)) if (m[1] === undefined && !(s.closed && looksLikeName(m[0]))) out.add(m[0]);
+    const body = text.slice(s.body, s.bodyEnd), kept = s.closed ? keptNames(body) : new Set<number>();
+    for (const m of body.matchAll(KEY_TOKEN)) if (m[1] === undefined && !kept.has(m.index)) out.add(m[0]);
   }
   return out;
 }
@@ -389,8 +403,10 @@ export function fakeKeys(text: string, o: { view?: boolean } = {}): { text: stri
   const parts: string[] = [];
   let from = 0, count = 0;
   for (const s of spans) {
-    parts.push(text.slice(from, s.body), text.slice(s.body, s.bodyEnd).replace(all(s) ? VIEW_TOKEN : KEY_TOKEN, (m: string, skip: string | undefined) => {
-      if (skip !== undefined || (s.closed && !all(s) && looksLikeName(m))) return m;
+    const body = text.slice(s.body, s.bodyEnd), kept = s.closed && !all(s) ? keptNames(body) : new Set<number>();
+    parts.push(text.slice(from, s.body), body.replace(all(s) ? VIEW_TOKEN : KEY_TOKEN, (m: string, skip: string | undefined, ...rest: unknown[]) => {
+      // The offset follows the last group, and KEY_HEADER holds groups of its own.
+      if (skip !== undefined || kept.has(rest.find((a) => typeof a === "number") as number)) return m;
       const out = many ? m.replace(/[A-Za-z0-9]/g, "x") : keyFake(m);
       if (out !== m) count++;
       return out;

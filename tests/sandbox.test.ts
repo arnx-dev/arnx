@@ -4,12 +4,13 @@ import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, statSync, uti
 import { join } from "node:path";
 import { python } from "../src/adapters/python";
 import { parseReviewConfig, parseReviewFile } from "../src/config";
-import { ArnxError, SetupRequired } from "../src/errors";
+import { ArnxError, EnvFailed, SetupRequired } from "../src/errors";
 import {
   buildContextOf, cleanupLiveSessions, DEFAULT_LIMITS, dockerfile, ensureEnv, envKey, requireDocker, runArgv,
   sandboxOptions, Session,
   dockerSteps, keptBox, NETWORK_OPEN, networkNotice, networkRetry,
 } from "../src/sandbox";
+import { dockerCapacity, DISK_FULL, DiskFull, diskFullMessage, sandboxesFit } from "../src/sandbox";
 import { withSandboxFiles } from "../src/change";
 import { probeRun } from "../src/testround";
 import { runTypecheck } from "../src/typecheck";
@@ -104,6 +105,29 @@ test("the image is built from the build context", async () => {
   } finally {
     sandboxOptions.buildkit = saved;
   }
+});
+
+test("the project's own .dockerignore does not empty the image: the build gets the code without it", async () => {
+  const fake = join(tmp(), "docker");
+  const files = join(tmp(), "files");
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in image) exit 1;; build) for a; do ctx="$a"; done; ` +
+    `(cd "$ctx" && find . -type f | sort) > '${files}'; cat > /dev/null;; esac\nexit 0\n`);
+  chmodSync(fake, 0o755);
+  const snap = join(tmp(), "snap");
+  mkdirSync(join(snap, "pkg"), { recursive: true });
+  writeFileSync(join(snap, ".dockerignore"), "*\n");
+  writeFileSync(join(snap, "pkg", ".dockerignore"), "*\n"); // not the context's: Docker reads only the root one
+  writeFileSync(join(snap, "go.mod"), "module example.com/m\n");
+  writeFileSync(join(snap, "main.go"), "package main\n");
+  const saved = sandboxOptions.buildkit;
+  sandboxOptions.buildkit = false;
+  try {
+    await withDockerAsync(fake, () => ensureEnv(parseReviewConfig(CFG), snap, join(tmp(), "build.log")));
+  } finally {
+    sandboxOptions.buildkit = saved;
+  }
+  expect(readFileSync(files, "utf8").trim().split("\n")).toEqual(["./go.mod", "./main.go", "./pkg/.dockerignore"]);
+  expect(readFileSync(join(snap, ".dockerignore"), "utf8")).toBe("*\n"); // the snapshot keeps it
 });
 
 test("a build that keeps its output: the code that differs from what was built is newer than the build", async () => {
@@ -1192,4 +1216,104 @@ test("a network Docker will not describe counts as open: no answer, a failed one
 
 test("a network Docker cannot make at all stops the session, naming why", async () => {
   await expect(openingSession(`echo no addresses left >&2; exit 1`, prints(ISOLATED_CONFIG))).rejects.toThrow("no addresses left");
+});
+
+test("dockerCapacity reads NCPU and MemTotal", () => {
+  const fake = join(tmp(), "docker");
+  const say = (out: string, code: number) => {
+    writeFileSync(fake, `#!/bin/sh\ncase "$1" in info) printf '%s' '${out}'; exit ${code};; esac\nexit 0\n`);
+    chmodSync(fake, 0o755);
+  };
+  say("8 16777216000\n", 0);
+  expect(withDocker(fake, dockerCapacity)).toEqual({ cpus: 8, memoryBytes: 16777216000 });
+  say("8 16777216000\n", 1);
+  expect(withDocker(fake, dockerCapacity)).toBeNull();
+  say("Cannot connect", 0);
+  expect(withDocker(fake, dockerCapacity)).toBeNull();
+  say("0 0", 0);
+  expect(withDocker(fake, dockerCapacity)).toBeNull();
+});
+
+test("ARNX_DOCKER_CAPACITY is read before docker", () => {
+  const saved = process.env.ARNX_DOCKER_CAPACITY;
+  process.env.ARNX_DOCKER_CAPACITY = "2 4294967296";
+  try {
+    expect(withDocker(join(tmp(), "no-such-docker"), dockerCapacity)).toEqual({ cpus: 2, memoryBytes: 4294967296 });
+  } finally {
+    if (saved === undefined) delete process.env.ARNX_DOCKER_CAPACITY;
+    else process.env.ARNX_DOCKER_CAPACITY = saved;
+  }
+});
+
+test("sandboxesFit counts CPUs and memory, never below one", () => {
+  const gb = 2 ** 30;
+  expect(sandboxesFit(null, 5)).toBe(1);
+  expect(sandboxesFit({ cpus: 1, memoryBytes: gb }, 5)).toBe(1);
+  expect(sandboxesFit({ cpus: 64, memoryBytes: 512 * gb }, 5)).toBe(5);
+  expect(sandboxesFit({ cpus: 8, memoryBytes: 64 * gb }, 5, { cpus: "2", memory: "1024m", pids: 1, tmp: "1g" })).toBe(4);
+});
+
+// ---- A full Docker disk is named, not shown as a failed build. ----
+
+const fullDisk = (output: string) => {
+  const fake = join(tmp(), "fake-docker-disk");
+  const count = join(tmp(), "disk-builds");
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in\n  image) exit 1;;\n  build) echo x >> ${count}; echo '${output}'; exit 1;;\nesac\nexit 0\n`);
+  chmodSync(fake, 0o755);
+  return { fake, count };
+};
+
+test("a build that ran out of disk is named", async () => {
+  const { fake, count } = fullDisk("#9 ERROR: failed to copy: write /var/lib/docker/overlay2/x/diff/a.so: no space left on device");
+  const err = await withDockerAsync(fake, () => ensureEnv(parseReviewConfig(CFG), tmp(), join(tmp(), "build.log")))
+    .catch((e) => e);
+  expect(err).toBeInstanceOf(DiskFull);
+  expect(err.message).toBe(diskFullMessage());
+  expect(err).not.toBeInstanceOf(EnvFailed);
+  expect(readFileSync(count, "utf8").trim().split("\n")).toHaveLength(1); // no second try
+});
+
+test("a disk that fills during the network retry is named too", async () => {
+  const fake = join(tmp(), "fake-docker-disk-retry");
+  const count = join(tmp(), "disk-retry-builds");
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in\n  image) exit 1;;\n  build) echo x >> ${count}; ` +
+    `if [ "$(wc -l < ${count})" -eq 1 ]; then echo "ERROR: No matching distribution found; Read timed out"; ` +
+    `else echo "ERROR: failed to copy: no space left on device"; fi; exit 1;;\nesac\nexit 0\n`);
+  chmodSync(fake, 0o755);
+  const saved = networkRetry.waitSeconds;
+  networkRetry.waitSeconds = 0;
+  try {
+    const err = await withDockerAsync(fake, () => ensureEnv(parseReviewConfig(CFG), tmp(), join(tmp(), "build.log")))
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(DiskFull);
+    expect(err.message).toBe(diskFullMessage());
+  } finally {
+    networkRetry.waitSeconds = saved;
+  }
+  expect(readFileSync(count, "utf8").trim().split("\n")).toHaveLength(2);
+});
+
+test("the disk message names the way out", () => {
+  expect(diskFullMessage()).toContain("Docker is out of disk space");
+  expect(diskFullMessage()).toContain("arnx env prune");
+  for (const s of ["no space left on device", "There is not enough space on the disk", "Disk quota exceeded"]) {
+    expect(DISK_FULL.test(s)).toBe(true);
+  }
+});
+
+test("an ordinary build failure is not called a full disk", async () => {
+  const { fake } = fullDisk("npm ERR! 404 Not Found - GET https://registry.npmjs.org/nope");
+  const err = await withDockerAsync(fake, () => ensureEnv(parseReviewConfig(CFG), tmp(), join(tmp(), "build.log")))
+    .catch((e) => e);
+  expect(err).toBeInstanceOf(EnvFailed);
+  expect(err.message).toContain("building the test environment failed");
+});
+
+test("a container that cannot start for want of disk is named", async () => {
+  const fake = join(tmp(), "fake-docker-run");
+  writeFileSync(fake, `#!/bin/sh\ncase "$1" in run) echo 'docker: Error response from daemon: no space left on device.' >&2; exit 125;; esac\nexit 0\n`);
+  chmodSync(fake, 0o755);
+  const err = await withDockerAsync(fake, () => new Session("img", parseReviewConfig(CFG), tmp()).run("pytest -q", 60))
+    .catch((e) => e);
+  expect(err).toBeInstanceOf(DiskFull);
 });
