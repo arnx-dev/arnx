@@ -247,6 +247,35 @@ A summary of the review, as the terminal shows it. The whole review is `review_j
 
 `not-ready` (doctor's checks failed) and `error` (no consent, no environment set up, …) are as above.
 
+### scan
+
+The hunt of a review alone. Every suspect is unproven: nothing was run, and only `arnx review` turns one into a failing
+test. The same object is kept in `.arnx/scans/<scan_id>/scan.json`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `scan_id` | string | The scan's id; its folder is `.arnx/scans/<scan_id>/`. |
+| `file` | string | `scan.json`, relative to the repository. |
+| `unproven` | boolean | Always `true`. |
+| `change` | string | What was scanned, as review names it. |
+| `projects_from` | string | `review.yaml` (its projects) or `detected` (no setup yet: projects read from the files). |
+| `projects` | array | `{ name, language, root, files }`, plus `stopped` (why it gave no list: the budget, a model that failed) or `partial: true` (a hunter did not answer in time). |
+| `suspects` | array | Ranked, most harmful first within each project: `{ id, project, file, line, claim, why, input, expected, actual, by, test_names_file }`. `claim`: what could break; `why`: the reason in the code; `input`, `expected`, `actual`: a case to try; `by`: the model that listed it. `test_names_file`: `false` when no test file of the project names the file (by module or file name; certain); `true` when one does (which does not mean it tests this); `null` when not a changed source file, or the test files were too many to read. |
+| `not_scanned` | array | `{ path, reason }`: changed files no project holds, or past `max_projects`. |
+| `cost_usd` | number | What the scan cost; `cost_unknown: true` when a model had no price (then it is a floor). |
+| `budget_usd` | number | The cap: `[budget] scan_usd`, default 0.50. `capped: true` when it stopped a project. |
+| `seconds` | number | How long it took. |
+| `models` | object | `{ reviewer, hunter, ranker, second_hunter }`. |
+| `next` | array of strings | `arnx review`. |
+
+| `result` | Exit | When |
+|---|---|---|
+| `ok` | 0 | The scan ran, with suspects or none. |
+
+Nothing to scan (an empty change, or documentation alone) is exit 0 as for review. `error` with exit 2: the scan could
+not run (no project gave a list: a model failed, or the budget ran out first). Exit 3: what must be set first (keys,
+arnx cloud on, a repository only in languages arnx does not review).
+
 ### triage
 
 With `--json` there is no terminal: nothing is drawn and no mark changes. The object is the review's marks and

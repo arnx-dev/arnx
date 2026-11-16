@@ -283,6 +283,30 @@ export function envTests(snap: string, cfg: ReviewConfig, max = 6): string[] {
   return out;
 }
 
+/** What a change sends beyond its tracked files, and what it leaves out, said before anything is sent (review and scan). */
+export function sayChange(change: Change, progress?: Say): void {
+  const sent = untrackedLine(change);
+  if (sent) progress?.(sent);
+  if (change.ignored) {
+    progress?.(`left out (.arnxignore): ${change.ignored.slice(0, 5).join(", ")}` +
+      `${change.ignored.length > 5 ? ", …" : ""}`);
+  }
+  if (change.lockfiles) {
+    progress?.(`lockfile changes not sent (the sandbox keeps them): ${someNames(change.lockfiles, 5)}`);
+  }
+  if (change.generated) {
+    progress?.(`generated files not sent (the sandbox keeps them): ${someNames(change.generated, 5)}`);
+  }
+  if (change.leftOut) {
+    progress?.(`left out ${change.leftOut.length} accepted test file(s) not committed yet`);
+  }
+  if (change.blanked) progress?.(`comment lines blanked as secret-looking: ${describeBlanked(change.blanked)}`);
+  if (change.withheld) {
+    progress?.(`left out as secret-looking: ${describeWithheld(change.withheld)}; if one is a test fixture, allow it ` +
+      "with `arnx allow-secret PATH`");
+  }
+}
+
 export async function runReview(repo: string, o: { settings: Settings;
   /** The reviewer and the second opinion of the local brain (not needed when `brain` is given). */
   agentModel?: AgentModel; challenger?: JsonModel;
@@ -323,26 +347,7 @@ export async function runReview(repo: string, o: { settings: Settings;
   const change = resolveChange(repo, o.range ?? null, secretPinsOf(file.raw),
     { untracked: o.untracked ?? s.untracked });
   // What is sent beyond tracked changes, or left out of them, comes first: the owner can stop before anything is sent.
-  const sent = untrackedLine(change);
-  if (sent) o.progress?.(sent);
-  if (change.ignored) {
-    o.progress?.(`left out (.arnxignore): ${change.ignored.slice(0, 5).join(", ")}` +
-      `${change.ignored.length > 5 ? ", …" : ""}`);
-  }
-  if (change.lockfiles) {
-    o.progress?.(`lockfile changes not sent (the sandbox keeps them): ${someNames(change.lockfiles, 5)}`);
-  }
-  if (change.generated) {
-    o.progress?.(`generated files not sent (the sandbox keeps them): ${someNames(change.generated, 5)}`);
-  }
-  if (change.leftOut) {
-    o.progress?.(`left out ${change.leftOut.length} accepted test file(s) not committed yet`);
-  }
-  if (change.blanked) o.progress?.(`comment lines blanked as secret-looking: ${describeBlanked(change.blanked)}`);
-  if (change.withheld) {
-    o.progress?.(`left out as secret-looking: ${describeWithheld(change.withheld)}; if one is a test fixture, allow it ` +
-      "with `arnx allow-secret PATH`");
-  }
+  sayChange(change, o.progress);
   // The local brain reads .arnx/prompts.toml from the working tree: a change that edits it is reviewed with its own.
   const promptsEdited = !o.brain && changeEditsPrompts(repo, change);
   if (promptsEdited) o.progress?.(PROMPTS_EDITED);

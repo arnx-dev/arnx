@@ -139,13 +139,15 @@ export class LocalBrain implements Brain {
     const hunt = x.prior ? this.prior(x, x.prior) : x.hunt ? this.hunt(x, x.hunt) : null;
     const t = await tools;
     let hunting = hunt !== null && !x.prior;
-    say(hunting ? "looking for defects" : "writing tests");
+    say(hunting ? (x.huntOnly ? "reading the change" : "looking for defects") : "writing tests");
     let asked = false;
     const decide = async (reply: string, turn: number): Promise<string | null> => {
       if (hunting && hunt) {
         hunting = false;
         const next = await hunt.afterHunt(reply);
         opts.budgetUsd = Math.max(0, opts.budgetUsd - next.spent);
+        // A scan stops at the hunt's reply: nothing is written or run.
+        if (x.huntOnly) return null;
         // No suspect: nothing to prove, so the round ends here and spends nothing more.
         if (next.message === null) {
           say("nothing suspected; no tests written");
@@ -388,7 +390,7 @@ export class LocalBrain implements Brain {
       // that failed somewhere goes on to the tests as before.
       const clean = Array.isArray(data?.suspects) && early !== TIMED_OUT && !theirs?.failed && !split?.failed;
       if (!hunted.length && clean) state.ended = true;
-      if (hunted.length || !clean) {
+      if ((hunted.length || !clean) && !x.huntOnly) {
         x.progress?.(`${cfg.name}: checking ${hunted.length} thing${hunted.length === 1 ? "" : "s"} in this change`);
       }
       return { message: hunted.length || !clean ? prompts.proveTask(cfg, hunted, x.maxQuestions) : null,

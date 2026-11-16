@@ -47,6 +47,7 @@ import { acceptData, checkData, reportTelemetry, reviewData, type Sender, setupD
   from "./telemetry";
 import { Progress, type Live } from "./progress";
 import { runReview } from "./reviewer";
+import { runScan, type ScanModels, scanJson, scanSummary } from "./scan";
 import { envOwner, OutOfTime, requireDocker, type TimeLimit, timeIsUp, withTimeLimit } from "./sandbox";
 import { ageDays, type CacheRecord, type EnvImage, KEEP_DAYS, oldImages, pruneEnv, totalSize } from "./envprune";
 import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSettings, missingKeys, modelRefs, type ModelsMode,
@@ -135,6 +136,8 @@ Prepare, once per repository (the first review sets up what it needs)
   remove [--yes] [--tests]              what arnx put in this repository: listed, deleted with --yes
 
 Review, after each change
+  scan [--range A..B] [--untracked] [--docs]
+                                        suspects in the change, unproven: no Docker, no tests run
   review [--range A..B] [--untracked] [--no-hunt] [--docs] [--resume]
                                         test the change: branch commits, uncommitted work, or the last commit
 
@@ -169,6 +172,8 @@ export interface CliDeps {
   setupSessions?: SessionFactory;
   /** The review itself (default: reviewer's runReview); tests replace it to see what runs before it. */
   runReview?: typeof runReview;
+  /** `arnx scan`'s models (default: made from the settings and keys); tests give scripted ones. */
+  scanModels?: (s: Settings) => ScanModels;
   /** Interactive marking: keys from the terminal and a full-screen draw (absent when not a terminal). */
   keys?: () => AsyncIterator<Key> & { close?(): void };
   draw?: (lines: string[]) => void;
@@ -212,6 +217,8 @@ const COMMANDS: Record<string, { options: Options; positionals: number }> = Obje
     "no-untracked": { type: "boolean" }, ...MODELS }, positionals: 0 },
   approve: { options: { yes: { type: "boolean" }, project: { type: "string" }, quiet: { type: "boolean" } },
     positionals: 0 },
+  scan: { options: { range: { type: "string" }, quiet: { type: "boolean" }, docs: { type: "boolean" },
+    untracked: { type: "boolean" }, "no-untracked": { type: "boolean" }, ...MODELS }, positionals: 0 },
   review: { options: { range: { type: "string" }, quiet: { type: "boolean" }, "no-hunt": { type: "boolean" },
     docs: { type: "boolean" },
     resume: { type: "boolean" }, untracked: { type: "boolean" }, "no-untracked": { type: "boolean" }, ...MODELS },
@@ -1527,6 +1534,66 @@ class Commands {
     return r.code;
   }
 
+  /** The hunt of a review alone: suspects, unproven, from your own keys, without Docker or setup. It writes only its own
+   * folder (.arnx/scans/), never the config, the consent or anything review, accept or check read. Exit 0 with or
+   * without suspects; 2 when it could not run, 3 for what has to be set first (keys, models, language). */
+  async scan(a: Args): Promise<number> {
+    const untracked = untrackedFlag(a);
+    const repo = this.repo();
+    // Before `arnx init`: arnx's default models for the keys present; nothing is written to make it so.
+    const initialized = existsSync(settingsPath(repo));
+    const file = initialized ? loadSettings(repo) : defaultSettings(this.d.env);
+    const mode = this.mode(file, a);
+    if (mode.cloud) {
+      throw new SetupRequired("arnx scan runs on your own model keys; arnx cloud does not scan yet. " +
+        "Run `arnx scan --local` with your keys, or `arnx review`");
+    }
+    const s = withModels(file, mode);
+    const scanModels = this.d.scanModels;
+    if (!scanModels) {
+      const refs = [s.reviewer, s.hunter ?? s.reviewer, ...s.secondHunter ? [s.secondHunter] : [s.challenger]];
+      const missing = missingKeys(s, this.d.env, refs);
+      if (missing.length) throw new SetupRequired(keysHint(missing, false));
+    }
+    if (!initialized) {
+      this.d.out(`No .arnx/config.toml: arnx's default models. ${existsSync(join(repo, IGNORE_FILE)) ? ""
+        : "No .arnxignore: every file git tracks may be read (secret-looking values go as fakes). "}` +
+        "`arnx init` writes both.");
+    }
+    // Own keys: said, not asked, and not recorded (a scan writes no config).
+    if (!s.consentAt) {
+      const providers = [...new Set([s.reviewer, s.hunter ?? s.reviewer, ...s.secondHunter ? [s.secondHunter] : []]
+        .map((r) => providerName(s, r.provider)))];
+      this.d.out(`Sends your change and the files arnx reads to ${providers.join(", ")}, with your keys.`);
+    }
+    const progress = new Progress(this.progressLine, { quiet: a.values.quiet as boolean | undefined,
+      live: this.d.live ?? null, cost: costSince() });
+    let models: ScanModels;
+    if (scanModels) models = scanModels(s);
+    else {
+      this.unpriced(s, [s.reviewer, s.hunter, s.secondHunter]);
+      const secondHunter = makeSecondHunter(s, this.d.env, this.boundary);
+      models = { agentModel: makeAgentModel(s, this.d.env, this.boundary),
+        hunter: makeJsonModel(s.hunter ?? s.reviewer, s, this.d.env, this.boundary),
+        ranker: makeJsonModel(s.reviewer, s, this.d.env, this.boundary),
+        ...secondHunter ? { secondHunter } : { challenger: makeChallenger(s, this.d.env, this.boundary) } };
+    }
+    for (const m of [models.agentModel, models.hunter, models.ranker, models.secondHunter, models.challenger]) {
+      if (m) m.notice = progress.say;
+    }
+    progress.start();
+    let result;
+    try {
+      result = await runScan(repo, { settings: s, models, boundary: this.boundary,
+        range: (a.values.range as string | undefined) ?? null, untracked, docs: !!a.values.docs, progress: progress.say });
+    } finally {
+      progress.stop();
+    }
+    for (const line of scanSummary(result)) this.d.out(line);
+    this.emit("ok", 0, { ...scanJson(result), file: `${result.dir}/scan.json` });
+    return 0;
+  }
+
   async review(a: Args): Promise<number> {
     const untracked = untrackedFlag(a);
     const repo = this.repo();
@@ -2404,6 +2471,7 @@ async function run(command: string, args: Args, commands: Commands, d: CliDeps):
       case "setup": return await commands.setup(args);
       case "approve": return await commands.approve(args);
       case "review": return await commands.review(args);
+      case "scan": return await commands.scan(args);
       case "check": return await commands.check(args);
       case "prompt": return await commands.prompt(args);
       case "triage": return await commands.mark(args);

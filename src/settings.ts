@@ -89,6 +89,8 @@ export interface Settings {
   secondHunterEffort?: string;
   effort: string;
   reviewBudgetUsd: number;
+  /** The most one `arnx scan` may spend (`[budget] scan_usd`; init does not write it). */
+  scanBudgetUsd: number;
   setupBudgetUsd: number;
   /** Setup stops here, its proof included (`[budget] setup_minutes`, default 40). */
   setupMinutes: number;
@@ -131,8 +133,11 @@ export function settingsPath(repo: string): string {
   return join(repo, ".arnx", "config.toml");
 }
 
+/** `arnx scan`'s default cap, in USD: a scan of a few hundred changed lines costs well under it. */
+export const SCAN_BUDGET_USD = 0.5;
+
 function withDefaults(consentAt: string | null, reviewer: ModelRef, challenger: ModelRef): Settings {
-  return { consentAt, telemetry: false, reviewer, challenger, effort: "medium", reviewBudgetUsd: 3.0,
+  return { consentAt, telemetry: false, reviewer, challenger, effort: "medium", reviewBudgetUsd: 3.0, scanBudgetUsd: SCAN_BUDGET_USD,
     setupBudgetUsd: 3.0, setupMinutes: 40, answerBudgetUsd: 0.5, runs: 3, maxQuestions: 5, maxProjects: 4,
     beforeCheck: true, untracked: false, standIns: true, fixProofMax: 20, acceptedTestsDir: "tests/arnx", context: "names", jev: false, prices: {} };
 }
@@ -287,6 +292,7 @@ export function loadSettings(repo: string): Settings {
     ...(models.answer_model !== undefined ? { answerModel: parseRef(String(models.answer_model)) } : {}),
     effort: str(models.effort, "medium"),
     reviewBudgetUsd: float(budget.review_usd ?? 3.0),
+    scanBudgetUsd: float(budget.scan_usd ?? SCAN_BUDGET_USD),
     setupBudgetUsd: float(budget.setup_usd ?? 3.0),
     setupMinutes,
     answerBudgetUsd: float(budget.answer_usd ?? 0.5),
