@@ -6,6 +6,7 @@ import type { Runner } from "../src/sandbox";
 import { join } from "node:path";
 import { runAgent, Workspace } from "../src/agent";
 import { setupFailure } from "../src/cli";
+import { compiledLanguages } from "../src/detect";
 import { parseReviewConfig, parseReviewFile } from "../src/config";
 import { PRICES } from "../src/llm";
 import { DiskFull, diskFullMessage, ensureEnv, OutOfTime, sandboxOptions, Session, stepTimeout, timeLimit, withTimeLimit } from "../src/sandbox";
@@ -416,6 +417,81 @@ test("a first review's quick setup stops at 10 minutes, whatever setup_minutes s
   expect(await cli.run("review")).toBe(2);
   expect(cli.stdout).toContain("stops at 10 min).");
   expect(cli.stdout).toContain("Could not set this up within 10 min while on api; `arnx setup` takes longer");
+  expect(cli.stdout.trimEnd()).toEndWith("Next: arnx setup");
+});
+
+/** A Go module at the root, with a test, committed. */
+function goModule(): string {
+  const repo = initRepo(join(tmp(), "gomod"));
+  writeFileSync(join(repo, "go.mod"), "module example.com/m\n\ngo 1.24\n");
+  writeFileSync(join(repo, "m.go"), "package m\n\nfunc F() int { return 1 }\n");
+  writeFileSync(join(repo, "m_test.go"), "package m\n\nimport \"testing\"\n\nfunc TestF(t *testing.T) {}\n");
+  commit(repo, "go");
+  return repo;
+}
+
+test("compiled languages: the deepest project holding a file, and the file's own language", () => {
+  const c = (root: string, language: string) => ({ root, language, manifest: "", runner: null, packageManager: null,
+    evidence: [] }) as never;
+  const found = [c(".", "go"), c("web", "typescript"), c("crates/a", "rust")];
+  expect(compiledLanguages(found, ["web/app.ts"])).toEqual([]);
+  expect(compiledLanguages(found, ["cmd/main.go"])).toEqual(["go"]);
+  expect(compiledLanguages(found, ["crates/a/src/lib.rs", "web/app.ts"])).toEqual(["rust"]);
+  expect(compiledLanguages(found, ["crates/a/src/lib.rs", "x.go"])).toEqual(["go", "rust"]);
+  // No project holds it: its own language counts.
+  expect(compiledLanguages([c("api", "python")], ["tool/main.go"])).toEqual(["go"]);
+  expect(compiledLanguages([], ["a.py"])).toEqual([]);
+});
+
+test("init names Go's longer first setup, in text and JSON; Python says nothing and keeps 10", async () => {
+  const go = new Cli({ cwd: goModule(), env: { ANTHROPIC_API_KEY: "a" } });
+  expect(await go.run("init", "--json")).toBe(0);
+  expect(go.stderr).toContain("Go compiles before any test runs: the first review may take up to 20 min to set up.");
+  expect(JSON.parse(go.stdout).first_setup_minutes).toBe(20);
+  const py = new Cli({ cwd: twoProjects(), env: { ANTHROPIC_API_KEY: "a" } });
+  expect(await py.run("init", "--json")).toBe(0);
+  expect(py.stderr).not.toContain("compile");
+  expect(JSON.parse(py.stdout).first_setup_minutes).toBe(10);
+});
+
+test("init: Go and Rust together, and setup_minutes below 20 caps what init promises", async () => {
+  const repo = goModule();
+  mkdirSync(join(repo, "crate", "src"), { recursive: true });
+  writeFileSync(join(repo, "crate", "Cargo.toml"), "[package]\nname = \"c\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+  writeFileSync(join(repo, "crate", "src", "lib.rs"), "pub fn f() -> i32 { 1 }\n");
+  commit(repo, "crate");
+  const cli = new Cli({ cwd: repo, env: { ANTHROPIC_API_KEY: "a" } });
+  expect(await cli.run("init")).toBe(0);
+  expect(cli.stdout).toContain("Go and Rust compile before any test runs: the first review may take up to 20 min");
+  writeFileSync(join(repo, ".arnx", "config.toml"), readFileSync(join(repo, ".arnx", "config.toml"), "utf8")
+    .replace("setup_minutes = 40", "setup_minutes = 15"));
+  const again = new Cli({ cwd: repo, env: { ANTHROPIC_API_KEY: "a" } });
+  expect(await again.run("init")).toBe(0);
+  expect(again.stdout).toContain("up to 15 min to set up.");
+});
+
+test("a first review of a Go change waits 20 minutes for its quick setup, then points to arnx setup", async () => {
+  const clock = { ms: 0 };
+  const repo = goModule();
+  const env = { ANTHROPIC_API_KEY: "a" };
+  expect(await new Cli({ cwd: repo, env }).run("init")).toBe(0);
+  commit(repo, "init");
+  writeFileSync(join(repo, "m.go"), "package m\n\nfunc F() int { return 2 }\n");
+  commit(repo, "go change");
+  const ran: number[] = [];
+  const slow = async <T>(_cfg: { name: string }, snap: string, _log: string, body: (r: Runner) => Promise<T>) =>
+    body(new FakeSession(snap, () => {
+      clock.ms += 11 * MIN;
+      ran.push(clock.ms / MIN);
+      return [null, "", true];
+    }));
+  const cli = new Cli({ cwd: repo, env, now: () => clock.ms, setupModel: new ScriptedAgent([[text("done")]]),
+    setupSessions: slow });
+  expect(await cli.run("consent", "--yes")).toBe(0);
+  expect(await cli.run("review")).toBe(2);
+  expect(cli.stdout).toContain("(Go compiles first: up to 20 min).");
+  expect(ran.length).toBeGreaterThan(1); // still running past 10 minutes
+  expect(cli.stdout).toContain("Could not set this up within 20 min");
   expect(cli.stdout.trimEnd()).toEndWith("Next: arnx setup");
 });
 

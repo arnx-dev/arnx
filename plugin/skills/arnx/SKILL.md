@@ -10,7 +10,7 @@ failure. A **confirmed** finding is a test that failed in all 3 runs and was not
 
     review → triage → accept → check → prompt → fix → check → full suites → commit/push
 
-Yours: **review** (the first also sets up what the change touches, at most 10 min), **check**, **prompt**, **fix**,
+Yours: **review** (the first also sets up what the change touches, at most 10 min, 20 for Go and Rust), **check**, **prompt**, **fix**,
 **check**, **full suites**. The user's: **triage**, **accept**, `arnx setup` (the whole repository), **commit/push**.
 Never skip a step or change the order. Do not fix anything before the user has triaged and accepted, even obvious ones.
 

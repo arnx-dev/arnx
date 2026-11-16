@@ -305,6 +305,23 @@ export function describeDetection(d: Detection): string {
   return lines.join("\n");
 }
 
+/** Go and Rust compile before a test runs: one image build alone can take ten minutes. */
+export const isCompiled = (language: string) => language === "go" || language === "rust";
+
+/** The compiled languages (Go, Rust) of what tests `files`: each file's own language and that of the deepest project
+ * detection finds holding it. Sorted, no repeats. */
+export function compiledLanguages(candidates: Candidate[], files: string[]): string[] {
+  const out = new Set<string>();
+  for (const f of files) {
+    const holder = candidates.filter((c) => c.language !== "other" && (c.root === "." || f.startsWith(c.root + "/")))
+      .sort((a, b) => b.root.length - a.root.length)[0];
+    for (const lang of [holder?.language, EXT_LANG[posix.extname(f).slice(1)]]) {
+      if (lang && isCompiled(lang)) out.add(lang);
+    }
+  }
+  return [...out].sort();
+}
+
 /** The repository's languages, from the files a snapshot holds (minus .arnxignore), and whether arnx has nothing
  * here it can review: only languages it does not review yet. Null when the files cannot be listed. */
 export function repoLanguages(repo: string): { survey: LanguageSurvey; onlyOthers: boolean } | null {

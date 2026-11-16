@@ -51,6 +51,7 @@ Every other field is the command's own, in snake_case. Paths are relative to the
 | `next` | array of strings | The commands to run next, in order (`["arnx setup"]`, or `["arnx login", "arnx setup"]` with arnx cloud and no login); empty in a repository arnx cannot review. |
 | `skill_installed` | boolean | This arnx's skill is in every skill folder of the repository; `false`: `arnx skill install`. |
 | `unsupported` | string | Only in a repository written in languages arnx does not review: the note init prints, naming them. |
+| `first_setup_minutes` | number | Otherwise: the most minutes the first review waits for its setup, 10, or 20 when the repository has Go or Rust (never above `setup_minutes`). |
 
 | `result` | Exit | When |
 |---|---|---|

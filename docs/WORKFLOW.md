@@ -6,7 +6,7 @@ The flow, what each step writes, and what its results mean. Start with the [READ
     arnx init → arnx review → arnx triage → arnx accept → arnx prompt → arnx check
 
 arnx works best on single-package Python and TypeScript repositories. A repository with several packages is set up one part at a time: a
-review waits up to 10 minutes for the part its change touches, and `arnx setup` stops at 40 minutes overall (the default
+review waits up to 10 minutes (20 for Go and Rust, which compile first) for the part its change touches, and `arnx setup` stops at 40 minutes overall (the default
 `setup_minutes`). Tests that run only in a browser (Playwright, Cypress and the like) are not run; setup lists them
 under `uncovered`. Details are in [SAFETY.md](SAFETY.md#what-arnx-covers).
 
@@ -90,7 +90,7 @@ fresh clone, it says there is no copy to compare), stamp or not; a file whose st
 that copy's (a stamp recomputed by hand) counts as changed too. With `--json`, the command's object says so in
 `reproved`. Then the suites run and the file is stamped again, followed by what
 is worth a look; the changes go into `.arnx/setup/approval.md` too. When a suite fails there, the command stops and
-names the failing tests (exit 3). Before a review the proof gets 10 minutes: past that the review stops (exit 3) and
+names the failing tests (exit 3). Before a review the proof gets 10 minutes (20 with a Go or Rust project): past that the review stops (exit 3) and
 says what ran out (the image build or the suites). `arnx approve` runs the same proof on its own, without a limit,
 saying the same.
 
