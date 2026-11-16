@@ -188,13 +188,14 @@ export function parsePytestList(output: string, exitCode: number | null): Listin
 
 /** pytest-xdist's worker count in options: `-n 4`, `-nauto`, `-n=2`, `--numprocesses auto`, `--numprocesses=4`. */
 const WORKERS = /(?<![\w-])(?:-n\s*=?\s*\w+|--numprocesses(?:\s*=\s*|\s+)\w+)/;
-/** pytest's `addopts` in an ini or toml file: the value on the key's line and what continues it (indented lines, or
- * a toml list up to its `]`), quotes and commas read as spaces. */
-function addopts(text: string): string {
+/** A key's value in an ini or toml file: what is on the key's line and what continues it (indented lines, or a toml
+ * list up to its `]`), quotes and commas read as spaces. "" when the key is not there. */
+function iniValue(text: string, key: string): string {
   const lines = text.split("\n");
-  const at = lines.findIndex((l) => /^\s*addopts\s*[=:]/.test(l));
+  const start = new RegExp(`^\\s*${key}\\s*[=:]`);
+  const at = lines.findIndex((l) => start.test(l));
   if (at < 0) return "";
-  const out = [lines[at]!.replace(/^\s*addopts\s*[=:]/, "")];
+  const out = [lines[at]!.replace(start, "")];
   const list = out[0]!.includes("[") && !out[0]!.includes("]");
   for (let i = at + 1; i < lines.length; i++) {
     const l = lines[i]!;
@@ -205,6 +206,48 @@ function addopts(text: string): string {
     else break;
   }
   return out.join("\n").replace(/["',[\]]/g, " ");
+}
+/** pytest's `addopts` in an ini or toml file. */
+const addopts = (text: string): string => iniValue(text, "addopts");
+
+/** pytest's own part of a config file: the sections it reads ([pytest], [tool:pytest], [tool.pytest.ini_options],
+ * [tool.pytest]), or null when the file has none. Another tool's section (mypy has a cache_dir too) is not pytest's. */
+function pytestSection(text: string): string | null {
+  const out: string[] = [];
+  let ours = false, found = false;
+  for (const line of text.split("\n")) {
+    const head = /^\s*\[([^\]]+)\]\s*$/.exec(line);
+    if (head) {
+      ours = ["pytest", "tool:pytest", "tool.pytest.ini_options", "tool.pytest"].includes(head[1]!.trim());
+      found ||= ours;
+    } else if (ours) out.push(line);
+  }
+  return found ? out.join("\n") : null;
+}
+/** Where pytest's cache goes in such a project: out of the code, in the container. */
+const CACHE_ELSEWHERE = " -o cache_dir=/tmp/arnx-pytest-cache";
+const CACHE_OFF = " -p no:cacheprovider";
+/** The option that keeps pytest's cache out of the code: its cache plugin off. With the plugin off pytest does not
+ * know `cache_dir`, so a project that sets it and refuses unknown options (--strict-config, strict_config, or
+ * warnings as errors) would not start: there the plugin stays on and its folder moves. pytest reads the first of
+ * these files that has a section of its own. */
+function pytestCache(testCommand: string, read?: (rel: string) => string | null): string {
+  if (!read) return CACHE_OFF;
+  let section: string | null = null;
+  for (const file of ["pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"]) {
+    const text = read(file);
+    section = text === null ? null : pytestSection(text);
+    if (section !== null) break;
+  }
+  if (section === null || !/^\s*cache_dir\s*[=:]/m.test(section)) return CACHE_OFF;
+  // An addopts given on the command line replaces the file's.
+  const replaced = /(?:-o|--override-ini)[\s=]*["']?addopts\s*=/.test(testCommand);
+  const options = `${replaced ? "" : addopts(section)} ${testCommand}`;
+  const strict = /(?<![\w-])--strict-config(?![\w-])/.test(options) ||
+    /^\s*(?:strict_config|strict)\s*[=:]\s*["']?(?:true|1|yes|on)\b/im.test(section);
+  const errors = /(?<![\w-])-W\s*error(?![\w:])/.test(options) ||
+    iniValue(section, "filterwarnings").split("\n").some((l) => l.trim() === "error");
+  return strict || errors ? CACHE_ELSEWHERE : CACHE_OFF;
 }
 /** `-n0` when the project configures xdist workers, else null: with xdist off, nothing is added. */
 function pytestSerial(testCommand: string, read: (rel: string) => string | null): string | null {
@@ -332,14 +375,15 @@ export const python: Adapter = {
   reportSaid: (output) => [...output.matchAll(/generated xml file: (\S+)/g)].at(-1)?.[1] ?? null,
   serialFlag: pytestSerial,
   // The project's PYTHONPATH (review.yaml's env, or the image's) stays, after the hook's folder.
-  command: (testCommand, targets, reportPath) =>
+  command: (testCommand, targets, reportPath, _runner, read) =>
     `export PYTHONPATH=${shQuote(posix.join(posix.dirname(reportPath), HOOK_DIR))}\${PYTHONPATH:+:\$PYTHONPATH}; ` +
     testCommand.replaceAll("{targets}", targets.map(shQuote).join(" ")) +
-    " -p no:cacheprovider --continue-on-collection-errors -o junit_family=xunit1 -o faulthandler_timeout=60" +
+    `${pytestCache(testCommand, read)} --continue-on-collection-errors -o junit_family=xunit1 -o faulthandler_timeout=60` +
     ` --junitxml=${shQuote(reportPath)}`,
   parseReport: (text) => parseJunit(text, (f) => f.endsWith(".py") ? f.slice(0, -3).replaceAll("/", ".") : ""),
-  listCommand: (testCommand, targets) => testCommand.replaceAll("{targets}", targets.map(shQuote).join(" ")) +
-    " -p no:cacheprovider --continue-on-collection-errors --collect-only -qq",
+  listCommand: (testCommand, targets, _listPath, _runner, read) =>
+    testCommand.replaceAll("{targets}", targets.map(shQuote).join(" ")) +
+    `${pytestCache(testCommand, read)} --continue-on-collection-errors --collect-only -qq`,
   parseList: (output, _listed, exitCode) => parsePytestList(output, exitCode),
   reportSetup: (snapshot) => {
     const dir = join(snapshot, ".arnx-run", HOOK_DIR), path = join(dir, "sitecustomize.py");

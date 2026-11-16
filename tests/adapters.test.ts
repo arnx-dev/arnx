@@ -177,3 +177,55 @@ test("a continued addopts value is read to its end, whatever options come first"
   expect(serialOf(cmd, { "pytest.ini": "[pytest]\naddopts =\n    --cov=src\nxfail_strict = true\n" })).toBeNull();
   expect(serialOf(cmd, { "pytest.ini": "[pytest]\naddopts = -ra\n[other]\n  -n 4\n" })).toBeNull();
 });
+
+// pytest with its cache plugin off does not know `cache_dir`: a project that sets it and refuses unknown options (or
+// turns warnings into errors) would not start. For such a project the plugin stays on, its folder outside the code.
+const python = getAdapter("python");
+const pytestCommands = (command: string, files: Record<string, string> = {}) => [
+  python.command(command, ["tests/test_a.py"], "/src/.arnx-run/r.xml", "pytest", reads(files)),
+  python.listCommand!(command, [], "/src/.arnx-run/list.json", "pytest", reads(files))!];
+
+test("a project that sets cache_dir and refuses unknown options keeps pytest's cache plugin, outside the code", () => {
+  const cmd = "python -m pytest {targets}";
+  const strict: Record<string, string>[] = [
+    { "setup.cfg": "[tool:pytest]\ncache_dir = /tmp/pytest_cache\naddopts =\n    -ra\n    --strict-config\n" },
+    { "pytest.ini": "[pytest]\ncache_dir = .cache\nstrict_config = true\n" },
+    { "pyproject.toml": '[tool.pytest.ini_options]\ncache_dir = ".cache"\naddopts = ["-ra", "--strict-config"]\n' },
+    { "pyproject.toml": '[tool.pytest.ini_options]\ncache_dir = ".cache"\nfilterwarnings = [\n  "error",\n]\n' },
+    { "tox.ini": "[pytest]\ncache_dir = .cache\nfilterwarnings =\n    error\n    ignore::DeprecationWarning\n" },
+  ];
+  for (const files of strict) {
+    for (const c of pytestCommands(cmd, files)) {
+      expect(c).not.toContain("no:cacheprovider");
+      expect(c).toContain("-o cache_dir=/tmp/arnx-pytest-cache");
+    }
+  }
+  // cache_dir on the command line's own strictness counts too.
+  for (const c of pytestCommands("python -m pytest --strict-config {targets}", { "pytest.ini": "[pytest]\ncache_dir = .c\n" })) {
+    expect(c).not.toContain("no:cacheprovider");
+  }
+});
+
+test("every other project runs as before, with pytest's cache plugin off", () => {
+  const cmd = "python -m pytest {targets}";
+  const same: Record<string, string>[] = [
+    {},
+    { "setup.cfg": "[tool:pytest]\naddopts = -ra --strict-config\n" }, // strict, no cache_dir
+    { "setup.cfg": "[tool:pytest]\ncache_dir = /tmp/c\naddopts = -ra\n" }, // cache_dir, not strict: a warning only
+    { "pytest.ini": "[pytest]\ncache_dir = .c\nfilterwarnings =\n    error::DeprecationWarning\n" },
+    { "setup.cfg": "[mypy]\ncache_dir = .mypy_cache\n\n[tool:pytest]\naddopts = --strict-config\n" }, // mypy's, not pytest's
+  ];
+  for (const files of same) {
+    for (const c of pytestCommands(cmd, files)) {
+      expect(c).toContain(" -p no:cacheprovider ");
+      expect(c).not.toContain("cache_dir");
+    }
+  }
+  // A test_command that replaces the file's addopts drops its --strict-config with them.
+  const replaced = 'python -m pytest -o addopts="-ra" {targets}';
+  for (const c of pytestCommands(replaced, { "setup.cfg": "[tool:pytest]\ncache_dir = /tmp/c\naddopts = --strict-config\n" })) {
+    expect(c).toContain(" -p no:cacheprovider ");
+  }
+  // With no way to read the project's files, as before.
+  expect(python.command(cmd, ["a.py"], "/src/.arnx-run/r.xml", "pytest")).toContain(" -p no:cacheprovider ");
+});
