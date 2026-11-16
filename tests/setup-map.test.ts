@@ -9,7 +9,8 @@ import { parseReviewFile } from "../src/config";
 import { ArnxError } from "../src/errors";
 import type { SessionFactory } from "../src/sandbox";
 import { NOT_SET_UP } from "../src/draft";
-import { coverageMap, honestReasons, runSetup, sourceGroups, webUiPaths, withUncovered } from "../src/setup";
+import { detect } from "../src/detect";
+import { coverageMap, honestReasons, runSetup, setupHintsFor, sourceGroups, webUiPaths, withUncovered } from "../src/setup";
 import { filesLine, worthALook } from "../src/setupview";
 import { defaultSettings } from "../src/settings";
 import { FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -396,4 +397,17 @@ test("an agent's no-tests reason is corrected", () => {
   expect(f.uncovered).toEqual([{ path: "/svc/", reason: NOT_SET_UP }, { path: "/legacy/", reason: "no tests" },
     { path: "/gone/", reason: "vendored, no tests" }]);
   expect(honestReasons("version: 1\n", files)).toBe("version: 1\n");
+});
+
+test("a Go repository's setup advice names the image rule, gotest and the shared install", () => {
+  const goRepo = initRepo(join(tmp(), "gorepo"));
+  for (const [p, body] of Object.entries({ "go.mod": "module example.com/x\n\ngo 1.25.3\n", "a.go": "package x\n",
+    "a_test.go": "package x\n" })) writeFileSync(join(goRepo, p), body);
+  commit(goRepo, "go");
+  const hints = setupHintsFor(detect(goRepo));
+  expect(hints).toContain("Advice for Go projects:");
+  expect(hints).toContain("golang:<major.minor>-bookworm");
+  expect(hints).toContain("install_root: .");
+  expect(hints).toContain("runner: gotest and test_command: go test {targets}");
+  expect(hints).not.toContain("Advice for Rust");
 });

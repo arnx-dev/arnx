@@ -14,8 +14,8 @@ const CODE_EXT = String.raw`\.(?:[cm]?[jt]sx?|py|rs|go|java|kt|rb|php|cs|less|cs
 const CODE_FILE = new RegExp(String.raw`['"\`]([^'"\`\n]*${CODE_EXT})['"\`]`);
 const CODE_NAME = new RegExp(`${CODE_EXT}$`);
 /** A call that reads a file by its path: Node's readFile, Python's open (not Popen, urlopen or a method named open),
- * Rust's include_str!. */
-const READ_CALL = /\breadFile(?:Sync)?\s*\(|(?:(?<![\w.])|(?<=\b(?:io|codecs)\.))open\s*\(|\binclude_str!\s*\(/;
+ * Rust's include_str!, Go's os.ReadFile. */
+const READ_CALL = /\breadFile(?:Sync)?\s*\(|(?:(?<![\w.])|(?<=\b(?:io|codecs)\.))open\s*\(|\binclude_str!\s*\(|\b(?:os|ioutil)\.ReadFile\s*\(/;
 /** pathlib's read, after the path: `Path("app.py").read_text()`. */
 const READ_AFTER = /\.read_(?:text|bytes)\s*\(/;
 const GETSOURCE = /\binspect\.getsource\s*\(/;
@@ -29,12 +29,15 @@ const FIXTURE_DIR = new RegExp(String.raw`(?:^|[/'"\`])(?:__fixtures__|__testfix
  * with the property alone (with a value too, it checks the value); `assert hasattr(...)`, `assert callable(...)`. */
 const EXISTS_JS = /^expect\s*\(\s*typeof\b[^\n]*\)\s*\.toBe\s*\(\s*['"]function['"]\s*\)|^expect\s*\([^\n]*\)\s*\.(?:toBeDefined\s*\(|toHaveProperty\s*\(\s*(?:'[^']*'|"[^"]*"|`[^`]*`|\[[^\]]*\])\s*\))/;
 const EXISTS_PY = /^assert\s+(?:hasattr|callable)\s*\(/;
-/** A name given a value at the start of a line: `const src = …`, `SOURCE = …`. */
-const ASSIGNS = /^\s*(?:export\s+)?(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*(?::[^=\n]*)?=(?!=)/;
+/** A name given a value at the start of a line: `const src = …`, `SOURCE = …`, Go's `src, err := …`. */
+const ASSIGNS = /^\s*(?:export\s+)?(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)(?:\s*,\s*[A-Za-z_]\w*\s*:=(?!=)|\s*(?::[^=\n]*)?=(?!=))/;
 /** Python's `for p in …:`. */
 const FOR_IN = /^\s*for\s+([A-Za-z_]\w*)\s+in\b/;
 /** Python's `with open(...) as f:`: the file it names is read through `f.read()`. */
 const WITH_OPEN = /\bwith\b[^\n]*\bas\s+([A-Za-z_]\w*)\s*:/;
+
+/** A Go file: its package clause, after blank lines and comments, comes first. */
+const GO_FILE = /^(?:\s|\/\/[^\n]*(?:\n|$)|\/\*(?:[^*]|\*(?!\/))*\*\/)*package\s+[A-Za-z_]\w*/;
 
 /** Where the test is: from its name to the next test, or the end of the file. JS names come as "describe > it": the
  * name is looked for after its describe blocks', so two tests of the same name in different suites are told apart. */
@@ -55,13 +58,17 @@ function testSpan(source: string, func: string): { at: number; end: number } | n
     const at = quotes(suite).map((q) => source.indexOf(q, from)).filter((i) => i >= 0);
     if (at.length) from = Math.min(...at);
   }
-  const quoted = quotes(name).map((q) => source.indexOf(q, from)).filter((i) => i >= 0);
-  const defined = [new RegExp(String.raw`\bdef\s+${esc(name)}\s*\(`), new RegExp(String.raw`\bfn\s+${esc(name)}\s*\(`)]
+  // A Go test is a top-level func; a quoted name there is a table entry, and its body ends at the next top-level func.
+  const go = GO_FILE.test(source);
+  const quoted = go ? [] : quotes(name).map((q) => source.indexOf(q, from)).filter((i) => i >= 0);
+  const defined = (go ? [new RegExp(String.raw`^func\s+${esc(name)}\s*\(`, "m")]
+    : [new RegExp(String.raw`\bdef\s+${esc(name)}\s*\(`), new RegExp(String.raw`\bfn\s+${esc(name)}\s*\(`)])
     .map((rx) => rx.exec(source)?.index ?? -1).filter((i) => i >= 0);
   const at = Math.min(...quoted, ...defined);
   if (!Number.isFinite(at)) return null;
   const rest = source.slice(at + name.length);
-  const next = /\n\s*(?:it|test)(?:\.\w+)?\s*\(|\n\s*(?:async\s+)?def\s+test|\n\s*#\[test\]|\n\s*(?:class|describe)\b/.exec(rest);
+  const next = (go ? /\nfunc\s/
+    : /\n\s*(?:it|test)(?:\.\w+)?\s*\(|\n\s*(?:async\s+)?def\s+test|\n\s*#\[test\]|\n\s*(?:class|describe)\b/).exec(rest);
   return { at, end: at + name.length + (next ? withoutDecorators(rest, next.index) : rest.length) };
 }
 
@@ -204,6 +211,7 @@ function checked(line: string): string[] {
   calls(/\bre\s*\.\s*(?:search|match|fullmatch|findall)\s*\(/g, (a) => a[1]);
   calls(/\.assert(?:Not)?In\s*\(/g, (a) => a[1]);
   calls(/\.assert(?:Not)?Regex\s*\(/g, (a) => a[0]);
+  calls(/\b(?:strings|bytes)\s*\.\s*(?:Contains|HasPrefix|HasSuffix)\s*\(/g, (a) => a[0]?.replace(/^string\((.*)\)$/, "$1"));
   for (const m of line.matchAll(/\.\s*(?:includes|indexOf|match|search|find|count)\s*\(/g)) {
     if (!/\b(?:assert|re)\s*$/.test(line.slice(0, m.index))) out.push(receiver(line, m.index!));
   }

@@ -256,6 +256,24 @@ test("a proof before a review whose image build runs out of time says so", async
   expect(reached).toEqual([]);
 });
 
+test("a proof before a review gives a file with a Go project 20 minutes", async () => {
+  const { repo, clock } = await slowBuild();
+  writeFileSync(join(repo, "web", "go.mod"), "module example.com/web\n\ngo 1.24\n");
+  writeFileSync(reviewConfigPath(repo), file([block("api"), "  web:\n    root: web\n    language: go\n" +
+    "    image: golang:1.24-bookworm\n    runner: gotest\n    install: [go mod download]\n" +
+    "    test_command: go test {targets}\n"]));
+  commit(repo, "web is Go");
+  const builds: SessionFactory = async () => {
+    clock.ms += 21 * MIN;
+    throw new EnvFailed("docker build did not finish; see .arnx/run/approve-build-web.log", "build",
+      "approve-build-web.log");
+  };
+  const cli = new Cli({ cwd: repo, env: ENV, now: () => clock.ms, setupModel: new ScriptedAgent([]),
+    setupSessions: suites([]), approveSessions: builds, runReview: reviewStub([]) });
+  expect(await cli.run("review")).toBe(3);
+  expect(cli.stderr).toContain("the image build did not finish in 20 min.\nNext: arnx approve");
+});
+
 test("the 10-minute limit is the review's: arnx check proves a changed file as before", async () => {
   const repo = await twoProjects();
   await proven(repo, file([block("api"), block("web")]));
@@ -349,7 +367,7 @@ test("setupParts: which changed files a review sets up first, by the reason thei
   const hasTests = (path: string) => path === "/lib/";
   const changed = ["api/api.py", "web/web.py", "web/README.md", "later/a.ts", "e2e/login.spec.ts", "ui/app.tsx",
     "tools/release.py", "stack/svc.py", "gen/out.py", "lib/util.py", "legacy/old.py", "failed/x.py",
-    "plugins/one/main.py", "extra/new.py", "cmd/main.go"];
+    "plugins/one/main.py", "extra/new.py", "cmd/Main.java"];
   expect(setupParts(f, changed, new Set(["/failed/"]), hasTests)).toEqual({
     files: ["web/web.py", "later/a.ts", "lib/util.py", "legacy/old.py", "plugins/one/main.py", "extra/new.py"],
     parts: ["/web/", "/later/", "/lib/", "/legacy/", "/plugins/*/", "/extra/"],

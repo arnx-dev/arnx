@@ -262,3 +262,15 @@ ${tc}uncovered: []
   const checked = parseReviewFile(yaml("    typecheck: npx tsc --noEmit -p tsconfig.json\n"));
   expect(typecheckGaps(checked, read)).toEqual([]);
 });
+
+test("the install arnx drafts for Go is not an ignored error; a project's own || true still is", () => {
+  const warm = (cmd: string) => parseReviewFile(COVERED.replace("install: [pip install pytest]",
+    () => `install: [${JSON.stringify(cmd)}]`));
+  const own = "go mod download && { go test -vet=off -run '^$' ./a/... ./b/... || true; }";
+  expect(approvalChecks(warm(own)).filter((l) => l.includes("ignore their own errors"))).toEqual([]);
+  expect(approvalChecks(warm("go mod download && { go test -vet=off -run '^$' ./... || true; }"))
+    .filter((l) => l.includes("ignore"))).toEqual([]);
+  expect(approvalChecks(warm("go generate ./... || true")).filter((l) => l.includes("ignore"))).toHaveLength(1);
+  expect(approvalChecks(warm("go mod download && { go test -vet=off -run '^$' ./... || true; } && make || true"))
+    .filter((l) => l.includes("ignore"))).toHaveLength(1);
+});

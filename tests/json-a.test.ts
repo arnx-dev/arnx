@@ -27,7 +27,7 @@ test("init --json: created, then already-initialized; one object on stdout, the 
   expect(cli.out).toHaveLength(1);
   expect(json(cli)).toEqual({ schema_version: 1, command: "init", result: "ok", exit_code: 0, state: "created",
     files: [{ path: ".arnx/config.toml", action: "created" }, { path: ".arnxignore", action: "created" }],
-    cloud: false, next: ["arnx review"], skill_installed: false });
+    cloud: false, next: ["arnx review"], skill_installed: false, first_setup_minutes: 10 });
   expect(cli.stderr).toStartWith("✓ arnx initialized\n");
   expect(cli.stderr).toContain("Next: arnx review");
   const again = new Cli({ cwd: repo });

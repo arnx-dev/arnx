@@ -22,33 +22,33 @@ const put = (repo: string, files: Record<string, string>) => {
 };
 
 test("the survey counts languages by extension and manifest, leaving vendored code out", () => {
-  const goOnly = surveyLanguages(["go.mod", "id.go", "id_test.go", "b/id.go", "vendor/x/y.go", "README.md"]);
-  expect(goOnly.others).toEqual([{ name: "Go", files: 3, manifests: 1, roots: ["."] }]);
+  const goOnly = surveyLanguages(["pom.xml", "Id.java", "IdTest.java", "b/Id.java", "vendor/x/Y.java", "README.md"]);
+  expect(goOnly.others).toEqual([{ name: "Java", files: 3, manifests: 1, roots: ["."] }]);
   expect(onlyOtherLanguages(goOnly, 0)).toBe(true);
   // A supported project beside it, or a real amount of supported code, is something arnx can review.
-  const mixed = surveyLanguages(["backend/go.mod", "backend/main.go", "backend/api.go", "web/package.json",
+  const mixed = surveyLanguages(["backend/pom.xml", "backend/Main.java", "backend/Api.java", "web/package.json",
     "web/src/App.tsx", "web/src/main.ts"]);
   expect(onlyOtherLanguages(mixed, 1)).toBe(false);
-  expect(notableOthers(mixed).map((o) => [o.name, o.roots])).toEqual([["Go", ["backend"]]]);
+  expect(notableOthers(mixed).map((o) => [o.name, o.roots])).toEqual([["Java", ["backend"]]]);
   // One helper in another language is noise, not a language to name.
   const helper = surveyLanguages(["pyproject.toml", "app/main.py", "app/util.py", "tools/fast.c"]);
   expect(notableOthers(helper)).toEqual([]);
   expect(onlyOtherLanguages(helper, 1)).toBe(false);
   // A Go module with a lone JavaScript config file is still a Go repository.
-  expect(onlyOtherLanguages(surveyLanguages(["go.mod", ...Array.from({ length: 30 }, (_, i) => `p/f${i}.go`),
+  expect(onlyOtherLanguages(surveyLanguages(["pom.xml", ...Array.from({ length: 30 }, (_, i) => `p/F${i}.java`),
     "eslint.config.js"]), 0)).toBe(true);
   expect(surveyLanguages(["Main.hs", "app.cabal", "lib/Server.ex", "mix.exs", "src/x.cpp", "src/x.hpp"]).others
     .map((o) => o.name).sort()).toEqual(["C/C++", "Elixir", "Haskell"]);
   // A manifest alone names its language (arnx review 20261022-0fe7f1, F5).
-  const manifestOnly = surveyLanguages(["go.mod", "README.md"]);
-  expect(manifestOnly.others).toEqual([{ name: "Go", files: 0, manifests: 1, roots: ["."] }]);
+  const manifestOnly = surveyLanguages(["pom.xml", "README.md"]);
+  expect(manifestOnly.others).toEqual([{ name: "Java", files: 0, manifests: 1, roots: ["."] }]);
   expect(onlyOtherLanguages(manifestOnly, 0)).toBe(true);
-  expect(nameLanguages(manifestOnly.others)).toBe("Go (a manifest, no source files)");
+  expect(nameLanguages(manifestOnly.others)).toBe("Java (a manifest, no source files)");
 });
 
 test("projects in review.yaml are reviewable, whatever the files look like", () => {
   const repo = initRepo(join(tmp(), "repo"));
-  const go = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`go/f${i}.go`, "package x\n"]));
+  const go = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`java/F${i}.java`, "class X {}\n"]));
   put(repo, { ...go, "pkg/mod.py": "X = 1\n" });
   commit(repo, "x");
   expect(repoLanguages(repo)?.onlyOthers).toBe(true);
@@ -64,14 +64,14 @@ projects:
   expect(repoLanguages(repo)?.onlyOthers).toBe(false);
 });
 
-test("a repository written only in Go: init says so, doctor fails the Languages check, setup stops before sending", async () => {
+test("a repository written only in Java: init says so, doctor fails the Languages check, setup stops before sending", async () => {
   const repo = initRepo(join(tmp(), "repo"));
-  put(repo, { "go.mod": "module example.com/x\n", "id.go": "package x\n", "id_test.go": "package x\n" });
-  commit(repo, "go");
+  put(repo, { "pom.xml": "<project/>\n", "Id.java": "class Id {}\n", "IdTest.java": "class IdTest {}\n" });
+  commit(repo, "java");
   const env = { ANTHROPIC_API_KEY: "a" };
   const cli = new Cli({ cwd: repo, env });
   expect(await cli.run("init")).toBe(0);
-  const line = "this repository looks like Go (2 files); arnx reviews Python, JavaScript/TypeScript and Rust for " +
+  const line = "this repository looks like Java (2 files); arnx reviews Python, JavaScript/TypeScript, Rust and Go for " +
     "now. Tell us which language you need: https://github.com/arnx-dev/arnx/issues";
   expect(cli.stdout).toContain(`Note: ${line}`);
   expect(cli.stdout).not.toContain("Next: arnx setup");
@@ -98,9 +98,9 @@ test("a supported repository shows no Languages line", async () => {
   expect(cli.stdout).not.toContain("Note:");
 });
 
-test("in a mixed repository, Go files count as uncovered on their own instead of unexplained", () => {
+test("in a mixed repository, Java files count as uncovered on their own instead of unexplained", () => {
   const repo = initRepo(join(tmp(), "repo"));
-  put(repo, { "backend/go.mod": "module x\n", "backend/main.go": "package main\n", "backend/api.go": "package main\n",
+  put(repo, { "backend/pom.xml": "<project/>\n", "backend/Main.java": "class Main {}\n", "backend/Api.java": "class Api {}\n",
     "web/package.json": "{}\n", "web/src/App.tsx": "export {}\n" });
   commit(repo, "mixed");
   const file = parseReviewFile(`version: 1
@@ -114,7 +114,7 @@ projects:
 `);
   const map = coverageMap(repo, file);
   expect(map.unexplained).toEqual([]);
-  expect(map.uncovered).toEqual([{ path: "Go files", reason: "Go: arnx does not review it yet", files: 2 }]);
+  expect(map.uncovered).toEqual([{ path: "Java files", reason: "Java: arnx does not review it yet", files: 2 }]);
 });
 
 test("the coverage map agrees with routing: an uncovered folder of another language is not used, same-language code is", () => {
@@ -138,5 +138,5 @@ uncovered:
 });
 
 test("an unknown language names only the languages arnx reviews", () => {
-  expect(() => getAdapter("go")).toThrow('unknown language "go"; arnx reviews python, typescript, rust');
+  expect(() => getAdapter("java")).toThrow('unknown language "java"; arnx reviews python, typescript, rust, go');
 });

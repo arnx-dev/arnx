@@ -1,0 +1,6 @@
+{"ImportPath":"example.com/events/import-main/x_arnx [example.com/events/import-main/x_arnx.test]","Action":"build-output","Output":"# example.com/events/import-main/x_arnx\n"}
+{"ImportPath":"example.com/events/import-main/x_arnx [example.com/events/import-main/x_arnx.test]","Action":"build-output","Output":"import-main/x_arnx/x_arnx_test.go:6:2: import \"example.com/events/import-main\" is a program, not an importable package\n"}
+{"ImportPath":"example.com/events/import-main/x_arnx [example.com/events/import-main/x_arnx.test]","Action":"build-fail"}
+{"Time":"2026-11-09T17:46:17.973613233Z","Action":"start","Package":"example.com/events/import-main/x_arnx"}
+{"Time":"2026-11-09T17:46:17.973654571Z","Action":"output","Package":"example.com/events/import-main/x_arnx","Output":"FAIL\texample.com/events/import-main/x_arnx [setup failed]\n"}
+{"Time":"2026-11-09T17:46:17.973662439Z","Action":"fail","Package":"example.com/events/import-main/x_arnx","Elapsed":0,"FailedBuild":"example.com/events/import-main/x_arnx [example.com/events/import-main/x_arnx.test]"}

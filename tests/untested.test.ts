@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
+import { go } from "../src/adapters/go";
 import { python } from "../src/adapters/python";
 import { sliceDiff } from "../src/change";
 import { changedSources, codeOf, dbUntested, framesIn, moduleName, notReached, untestedFiles } from "../src/untested";
@@ -138,3 +139,101 @@ test("a frame that fits more than one changed file hides none", () => {
   expect(notReached(owned, { tests: {}, frames: ["utils.py", "main.py"] }, python)).toEqual(["a/utils.py", "b/utils.py"]);
   expect(notReached(owned, { tests: {}, frames: ["b/utils.py"] }, python)).toEqual(["a/utils.py", "c/main.py"]);
 });
+
+const GO_TEST = (...imports: string[]) => `package arnx\n\nimport (\n${imports.map((i) => `\t${i}`).join("\n")}\n)\n\nfunc TestA(t *testing.T) {\n}\n`;
+
+test("Go: a test refers to a file by importing its directory", () => {
+  const refers = go.refersTo!;
+  expect(refers("pkg/foo/bar.go", { t: 'import "example.com/m/pkg/foo"' })).toBe(true);
+  expect(refers("pkg/foo/bar.go", { t: 'import "example.com/m/pkg/other"' })).toBe(false);
+  expect(refers("pkg/foo/bar.go", { t: GO_TEST('"testing"', '"example.com/m/pkg/foo"') })).toBe(true);
+  expect(refers("pkg/foo/bar.go", { t: GO_TEST('"testing"', '"example.com/m/pkg/other"') })).toBe(false);
+  expect(refers("pkg/foo/bar.go", { t: GO_TEST('foo2 "example.com/m/pkg/foo"') })).toBe(true);
+  expect(refers("pkg/foo/bar.go", { t: GO_TEST('_ "example.com/m/pkg/foo"') })).toBe(true);
+  expect(refers("pkg/foo/bar.go", { t: GO_TEST("`example.com/m/pkg/foo`") })).toBe(true);
+  expect(refers("pkg/foo/bar.go", { t: 'package arnx\n\nimport `example.com/m/pkg/foo`\n' })).toBe(true);
+});
+
+test("Go: a standard-library import of the same name does not refer to a project directory", () => {
+  const refers = go.refersTo!;
+  for (const std of ["errors", "strings", "log", "time", "context"]) {
+    expect(refers(`internal/${std}/x.go`, { t: GO_TEST(`"${std}"`, '"testing"') })).toBe(false);
+    expect(refers(`internal/${std}/x.go`, { t: GO_TEST(`"example.com/m/internal/${std}"`) })).toBe(true);
+  }
+});
+
+test("Go: comments and text past the imports name nothing", () => {
+  const refers = go.refersTo!;
+  expect(refers("pkg/foo/bar.go", { t: 'package arnx\n\n// import "example.com/m/pkg/foo"\nimport "testing"\n' })).toBe(false);
+  expect(refers("pkg/foo/bar.go", { t: GO_TEST("// \"example.com/m/pkg/foo\"", '"testing"') })).toBe(false);
+  const later = 'package arnx\n\nimport "testing"\n\nvar s = `\nimport "example.com/m/pkg/foo"\n`\n';
+  expect(refers("pkg/foo/bar.go", { t: later })).toBe(false);
+});
+
+test("Go: a root-level file counts as referred to once a test exists; vendored code and own tests need none", () => {
+  const refers = go.refersTo!;
+  expect(refers("main.go", { t: GO_TEST('"testing"') })).toBe(true);
+  expect(refers("main.go", {})).toBe(false);
+  expect(refers("main.go", { t: "   \n" })).toBe(false);
+  expect(refers("vendor/x/y/z.go", {})).toBe(true);
+  expect(refers("internal/testdata/in.go", {})).toBe(true);
+  expect(refers("pkg/foo/foo_test.go", {})).toBe(true);
+});
+
+test("Go: notReached reads raw test text and uses only the import rule", () => {
+  const owned = ["pkg/foo/bar.go", "internal/thing/errors.go", "pkg/other/baz.go"];
+  const tests = { "gen/a_arnx/a_arnx_test.go": GO_TEST('"errors"', '"testing"', '"example.com/m/pkg/foo"') };
+  // The stripped text blanks import blocks: only the raw text shows pkg/foo. The strings "errors" and "baz" (a subtest
+  // name) match the stems errors.go and baz.go, but a Go test names a package, not a file.
+  const body = tests["gen/a_arnx/a_arnx_test.go"]!.replace("{\n}", '{\n\tt.Run("baz", func(t *testing.T) {})\n}');
+  expect(notReached(owned, { tests: { "gen/a_arnx/a_arnx_test.go": body }, frames: [] }, go)).toEqual(["internal/thing/errors.go", "pkg/other/baz.go"]);
+});
+
+test("Go: the hook also serves untestedFiles and dbUntested; a stack frame still reaches a file", () => {
+  const owned = ["pkg/foo/bar.go", "pkg/other/baz.go"];
+  const tests = { "a_arnx_test.go": GO_TEST('"example.com/m/pkg/foo"') };
+  expect(untestedFiles(owned, tests, go)).toEqual(["pkg/other/baz.go"]);
+  expect(dbUntested(owned, () => "SELECT a FROM t", { x: GO_TEST('"example.com/m/pkg/foo"') + "\nDATABASE_URL" }, go, ["DATABASE_URL"]))
+    .toEqual(["pkg/other/baz.go"]);
+  expect(notReached(["pkg/other/baz.go"], { tests, frames: ["/src/pkg/other/baz.go"] }, go)).toEqual([]);
+});
+
+test("the Python path is unchanged: the by-name reading and string names still count", () => {
+  expect(notReached(["a/snapshot.py"], { tests: { "t.py": "import snapshot\n" }, frames: [] }, python)).toEqual([]);
+  expect(notReached(["a/plain.py"], { tests: { "t.py": 'NAMES = ["plain"]\n' }, frames: [] }, python)).toEqual([]);
+  expect(notReached(["a/plain.py"], { tests: { "t.py": "x = 1\n" }, frames: [] }, python)).toEqual(["a/plain.py"]);
+});
+
+describe("Go: a module in a sub-directory", () => {
+  const importing = (path: string) => ({ "svc/arnx_generated/a_arnx/a_arnx_test.go": GO_TEST(`"${path}"`) });
+
+  test("a file in the module's root counts as referred to, given the project's root", () => {
+    const tests = importing("example.com/api");
+    expect(untestedFiles(["svc/lib.go"], tests, go, "svc")).toEqual([]);
+    expect(notReached(["svc/lib.go"], { tests, frames: [] }, go, "svc")).toEqual([]);
+    expect(dbUntested(["svc/lib.go"], () => "SELECT a FROM t", { x: `${GO_TEST('"testing"')}\nDATABASE_URL` }, go,
+      ["DATABASE_URL"], "svc")).toEqual([]);
+  });
+
+  test("the same file reads as outside a root the project does not have", () => {
+    expect(untestedFiles(["svc/lib.go"], importing("example.com/api"), go)).toEqual(["svc/lib.go"]);
+  });
+
+  test("a package below the module's root still needs its import", () => {
+    expect(untestedFiles(["svc/pkg/foo/bar.go", "svc/pkg/baz/q.go"], importing("example.com/api/pkg/foo"), go, "svc"))
+      .toEqual(["svc/pkg/baz/q.go"]);
+    expect(untestedFiles(["svc/vendor/x/y.go", "svc/lib_test.go"], importing("example.com/api"), go, "svc")).toEqual([]);
+  });
+
+  test("with no test, a file in the module's root is not referred to", () => {
+    expect(untestedFiles(["svc/lib.go"], {}, go, "svc")).toEqual(["svc/lib.go"]);
+  });
+
+  test("an adapter without the hook reads repository paths whatever the root", () => {
+    const owned = ["svc/snapshot.py", "svc/other.py"];
+    const tests = { "t.py": "import snapshot\n" };
+    expect(untestedFiles(owned, tests, python, "svc")).toEqual(untestedFiles(owned, tests, python));
+    expect(notReached(owned, { tests, frames: [] }, python, "svc")).toEqual(["svc/other.py"]);
+  });
+});
+

@@ -8,7 +8,8 @@ No failing test, no finding. Keep the tests you want, and they guard that behavi
 
 ![arnx init, then arnx review on a branch that adds discount codes: arnx proves a half-cent rounding bug with a failing test and asks two questions](assets/demo.gif)
 
-Open source (Apache 2.0). Python, JavaScript/TypeScript and Rust ([early](docs/WORKFLOW.md#rust-crates)).
+Open source (Apache 2.0). Python, JavaScript/TypeScript, Rust ([early](docs/WORKFLOW.md#rust-crates)) and Go
+([early](docs/WORKFLOW.md#go-modules)).
 
 ## Try it
 
@@ -125,6 +126,7 @@ Details: [docs/SAFETY.md](docs/SAFETY.md). Security reports: [SECURITY.md](SECUR
   a time, and browser-only tests (Playwright, Cypress) are not run:
   [what arnx covers](docs/SAFETY.md#what-arnx-covers).
 - Rust is the least tried: [where it stands](docs/WORKFLOW.md#rust-crates).
+- Go is the newest language: [where it stands](docs/WORKFLOW.md#go-modules).
 - Up to 200 KB of change per review. Split a long branch with `--range A..B`.
 
 ## More

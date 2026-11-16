@@ -1,11 +1,12 @@
-import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { afterAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseJunit } from "../src/adapters/junit";
 import { python } from "../src/adapters/python";
 import type { TestResult } from "../src/adapters/types";
 import { parseReviewConfig } from "../src/config";
-import { classify, describeRun, funcOf, ownerFile, runTests } from "../src/outcomes";
+import { classify, describeRun, funcOf, ownerFile, runTests, sourceLineReader } from "../src/outcomes";
 import type { RunResult, Runner } from "../src/sandbox";
 import { junitXml } from "./helpers/junit";
 import { useTmp } from "./helpers/tmp";
@@ -159,4 +160,29 @@ test("a failure reported for the whole file is an error (it crashed while loadin
   expect(classify([[rel]]).errors).toHaveLength(1);
   // a real test that fails stays a finding
   expect(classify([[tr(f, "sends mail", "failed", "1 == 2")]]).findings).toHaveLength(1);
+});
+
+describe("sourceLineReader", () => {
+  const dir = mkdtempSync(join(tmpdir(), "arnx-src-"));
+  const outside = mkdtempSync(join(tmpdir(), "arnx-out-"));
+  mkdirSync(join(dir, "p"));
+  writeFileSync(join(dir, "p", "x_test.go"), "one\ntwo\nthree");
+  writeFileSync(join(outside, "secret.go"), "secret");
+  symlinkSync(join(outside, "secret.go"), join(dir, "p", "link_test.go"));
+  symlinkSync(outside, join(dir, "linked"));
+  const read = sourceLineReader(dir);
+  afterAll(() => { rmSync(dir, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
+
+  test("reads a 1-based line of a file under the root", () => expect(read("p/x_test.go", 2)).toBe("two"));
+  test("a line past the end is null", () => { expect(read("p/x_test.go", 4)).toBeNull(); expect(read("p/x_test.go", 0)).toBeNull(); });
+  test("a missing file is null", () => expect(read("p/none_test.go", 1)).toBeNull());
+  test("a path above the root is null", () => expect(read("../x_test.go", 1)).toBeNull());
+  test("an absolute path is null", () => expect(read(join(outside, "secret.go"), 1)).toBeNull());
+  test("a name that merely starts with two dots is read", () => {
+    mkdirSync(join(dir, "..odd"));
+    writeFileSync(join(dir, "..odd", "x_test.go"), "dots");
+    expect(read("..odd/x_test.go", 1)).toBe("dots");
+  });
+  test("a symlinked file is not followed", () => expect(read("p/link_test.go", 1)).toBeNull());
+  test("a symlinked folder is not followed", () => expect(read("linked/secret.go", 1)).toBeNull());
 });

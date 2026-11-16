@@ -16,7 +16,7 @@ import { clip } from "./events";
 
 export type HintKind = "missing-package" | "import-path" | "missing-library" | "missing-program" |
   "missing-variable" | "env-value" | "unresolved-host" | "connection-refused" | "does-not-load" | "order-dependent" |
-  "genuine-failure";
+  "genuine-failure" | "wrong-image";
 
 /** source: who judged it when it is not a signature (the experimental JEV, with its confidence). */
 export interface Hint { kind: HintKind; detail: string; files: string[]; evidence: string; source?: string }
@@ -82,6 +82,27 @@ export function classify(message: string, cfg: ReviewConfig, snap: string): Omit
     const name = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!;
     if (name.startsWith("node:")) return null;
     return { kind: "missing-package", detail: name, evidence: lineOf(message, m.index) };
+  }
+  if (cfg.language === "go" && (m = /(?:lookup ([^\s:]+)[^\n]*)?no such host/.exec(message))) {
+    const host = m[1] ?? "";
+    if (host && (LOCAL.test(host) || cfg.services.some((s) => s.name === host))) return null;
+    return { kind: "unresolved-host", detail: host, evidence: lineOf(message, m.index) };
+  }
+  if (cfg.language === "go" && (m = /dial tcp ([\w.:[\]-]+): connect: (?:connection refused|network is unreachable)/.exec(message))) {
+    return { kind: "connection-refused", detail: m[1]!, evidence: lineOf(message, m.index) };
+  }
+  // Go: a module the build cannot get, a toolchain older than go.mod asks for.
+  if (cfg.language === "go" && (m = /missing go\.sum entry for module providing package (\S+)|go: downloading (\S+)|module lookup disabled by GOPROXY=off/.exec(message))) {
+    return { kind: "missing-package", detail: m[1] ?? m[2] ?? "a Go module", evidence: lineOf(message, m.index) };
+  }
+  if (cfg.language === "go" && (m = /go(?:\.mod)? requires go (>= ?[\d.]+)/.exec(message))) {
+    return { kind: "wrong-image", detail: `go ${m[1]!}`, evidence: lineOf(message, m.index) };
+  }
+  if (cfg.language === "go" && (m = /exec: "([^"]+)": executable file not found|C compiler "([^"]+)" not found/.exec(message))) {
+    return { kind: "missing-program", detail: (m[1] ?? m[2])!, evidence: lineOf(message, m.index) };
+  }
+  if (cfg.language === "go" && (m = /cannot find -l([\w+.-]+)/.exec(message))) {
+    return { kind: "missing-library", detail: `lib${m[1]}`, evidence: lineOf(message, m.index) };
   }
   if ((m = /(lib[\w+.-]*?\.so(?:\.[\w.]+)?): cannot open shared object file/.exec(message))) {
     return { kind: "missing-library", detail: m[1]!, evidence: lineOf(message, m.index) };
@@ -244,8 +265,13 @@ export function firstErrors(results: TestResult[] | null, cfg: ReviewConfig): st
 
 /** Hints for the failures outside known_failing, one per kind and detail, with the files they come from. A file that
  * does not load and matches no signature gets a hint of its own, named by its error: it hides every test in it. */
-export function diagnose(results: TestResult[] | null, cfg: ReviewConfig, snap: string): Hint[] {
+export function diagnose(results: TestResult[] | null, cfg: ReviewConfig, snap: string, log?: string): Hint[] {
   const hints = new Map<string, Hint>();
+  // No report (go prints a toolchain error on stderr only): the run's log is all there is to read, for Go.
+  if (results === null && cfg.language === "go" && log) {
+    const h = classify(log, cfg, snap);
+    return h ? [{ ...h, files: [] }] : [];
+  }
   for (const t of results ?? []) {
     if (!failed(t) || cfg.knownFailing.some((k) => t.fileAttr.startsWith(k))) continue;
     const h = classify(t.message, cfg, snap) ??
@@ -321,6 +347,8 @@ function sentence(h: Hint, cfg: ReviewConfig): string {
           "are reached by their name";
       }
       return `a connection was refused${h.detail ? ` (${h.detail})` : ""}: a service the test expects is not running`;
+    case "wrong-image":
+      return `the image's Go is older than the module needs (${h.detail}): use an image with a newer Go`;
     case "genuine-failure":
       return "the code runs and fails on its own result or data, not on the environment";
     case "order-dependent":

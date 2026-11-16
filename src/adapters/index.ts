@@ -1,12 +1,13 @@
 import { ArnxError } from "../errors";
+import { go } from "./go";
 import { python } from "./python";
 import { rust } from "./rust";
 import { typescript, withTestFiles } from "./typescript";
 import type { Adapter, AdapterId } from "./types";
 
 export type { Adapter, AdapterId, TestResult } from "./types";
-export const LANGUAGES: AdapterId[] = ["python", "typescript", "rust", "csharp"];
-const ADAPTERS: Partial<Record<AdapterId, Adapter>> = { python, typescript, rust };
+export const LANGUAGES: AdapterId[] = ["python", "typescript", "rust", "go", "csharp"];
+const ADAPTERS: Partial<Record<AdapterId, Adapter>> = { python, typescript, rust, go };
 
 export function getAdapter(id: string): Adapter {
   if (!(LANGUAGES as string[]).includes(id)) {

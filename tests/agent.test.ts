@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { backtracks, grepLimits, MAX_TOKENS, REPORT_MAX_TOKENS, REPORT_THINKING_TOKENS, runAgent, ToolError, Workspace }
   from "../src/agent";
+import { go } from "../src/adapters/go";
 import { ModelError } from "../src/errors";
 import { type Attempt, billedError, PRICES, type Reply } from "../src/llm";
 import { BusyAgent, ScriptedAgent, text, tool } from "./helpers/fakes";
@@ -51,6 +52,23 @@ test("test_confinement", async () => {
   expect((await ws.call("write_file", { path: "tests/gen/test_a.py", content: "def test_a(): pass\n" }))
     .startsWith("wrote")).toBe(true);
   expect(await ws.call("run_tests", {})).toBe('ran ["tests/gen"]');
+});
+
+test("a write to a path the adapter's pathProblem refuses is a tool error", async () => {
+  const ws = new Workspace(root, { writeDir: "tests/gen", adapter: go, runner: "gotest" });
+  await expect(ws.call("write_file", { path: "tests/gen/a_arnx_test.go", content: "package arnx\n" })).rejects.toThrow(ToolError);
+  await expect(ws.call("write_file", { path: "tests/gen/a_arnx/b_arnx_test.go", content: "package arnx\n" })).rejects.toThrow(ToolError);
+  expect(existsSync(join(root, "tests/gen/a_arnx_test.go"))).toBe(false);
+  expect(existsSync(join(root, "tests/gen/a_arnx/b_arnx_test.go"))).toBe(false);
+  expect((await ws.call("write_file", { path: "tests/gen/a_arnx/a_arnx_test.go", content: "package arnx\n" }))
+    .startsWith("wrote")).toBe(true);
+});
+
+test("an adapter without pathProblem writes as before, in a subfolder too", async () => {
+  const ws = new Workspace(root, { writeDir: "tests/gen" });
+  expect((await ws.call("write_file", { path: "tests/gen/test_a.py", content: "x\n" })).startsWith("wrote")).toBe(true);
+  expect((await ws.call("write_file", { path: "tests/gen/sub/test_b.py", content: "x\n" })).startsWith("wrote")).toBe(true);
+  expect(existsSync(join(root, "tests/gen/sub/test_b.py"))).toBe(true);
 });
 
 test("test_tools_offered", () => {

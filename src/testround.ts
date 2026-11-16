@@ -381,7 +381,7 @@ export async function probeRun(session: Runner, snap: string, cfg: ReviewConfig,
   const files = adapterFor(cfg).probes(cfg.runner).map((p) => ({ ...p, rel: posix.join(dir, p.file) }));
   try {
     for (const p of files) {
-      mkdirSync(join(snap, dir), { recursive: true });
+      mkdirSync(dirname(join(snap, p.rel)), { recursive: true });
       writeFileSync(join(snap, p.rel), p.source);
     }
     const [result, results] = await runTests(session, snap, cfg, files.map((p) => posix.relative(cfg.workdir, p.rel)),
@@ -544,8 +544,8 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const tools: RoundTools = { tools: () => ws.tools(), call: (name, args) => ws.call(name, args),
           facts: () => {
             const now = generatedNow();
-            return { untestedFiles: untestedFiles(coverage, now, adapter),
-              dbUntested: dbUntested(coverage, read, now, adapter, dbNames), generatedFiles: Object.keys(now) };
+            return { untestedFiles: untestedFiles(coverage, now, adapter, cfg.workdir),
+              dbUntested: dbUntested(coverage, read, now, adapter, dbNames, cfg.workdir), generatedFiles: Object.keys(now) };
           } };
         // The brain starts only now, the hunt too: a review the probe stops has made no model call.
         const done = await (ask.kind === "review"
@@ -556,7 +556,7 @@ export async function testRound(repo: string, head: string | null, cfg: ReviewCo
         const a = done.agent;
         const f = generatedNow();
         emit("test.files", { project: cfg.name, files: Object.keys(f).sort() });
-        if (o.coverage?.length && dbNames.length) dbLeft = dbUntested(o.coverage, read, f, adapter, dbNames);
+        if (o.coverage?.length && dbNames.length) dbLeft = dbUntested(o.coverage, read, f, adapter, dbNames, cfg.workdir);
         const target = expand([o.writeDir]);
         const hasTests = target.length > 0;
         // Only the generated tests count: a command that ignores {targets} can also run the project's own suite.

@@ -46,6 +46,9 @@ const MISSING = new RegExp([
   "Failed to (?:load|resolve) (?:url|import)", "cannot find (?:function|value|struct|type|macro|trait|module)",
   "unresolved import", "no (?:function|method|associated item|field) named", "object has no field", "error\\[E0(?:412|425|432|433|599|609)\\]",
   "ENOENT: no such file or directory, \\w+ '/src/", "No such file or directory: '/src/",
+  // Go: the compiler's lines, anchored on `file.go:L:C: ` so no other language's text matches
+  "\\.go:\\d+:\\d+: (?:undefined: |[^\\n]* undefined \\(type |(?:too many|not enough) arguments in call to |" +
+    "no required module provides package |[^\\n]* does not implement [^\\n]*\\(missing method )",
   // vitest clips an import failure to the module's alias and the name: `__vite_ssr_import_2__.assertNever`
   "__vite_ssr_import_\\d+__\\.", "__vi_import_\\d+__", "unexpected keyword argument",
 ].join("|"));
@@ -57,6 +60,7 @@ const UNDEFINED = new RegExp([
   "Cannot (?:read|set) propert(?:y|ies) of (?:undefined|null)", "Cannot destructure",
   "(?:undefined|null) is not an object", "Right side of assignment cannot be destructured",
   "'NoneType' object (?:has no attribute|is not (?:callable|subscriptable|iterable))", "non-iterable NoneType",
+  "panic: runtime error: invalid memory address or nil pointer dereference",
 ].join("|"));
 
 const head = (m: string) => (splitLines(m.trim())[0] ?? "").trim();
@@ -85,22 +89,28 @@ export function missingName(message: string): string | null {
     ?? /(?:has no attribute|unexpected keyword argument|does not provide an export named|no (?:function|method|field) named) ['"`]([^'"`]+)['"`]/.exec(message)
     ?? /name ['"`]([^'"`]+)['"`] is not defined/.exec(message)
     ?? /__(?:vite_ssr_import|vi_import)_\d+__\.([A-Za-z_$][\w$]*)/.exec(message)
+    ?? /\.go:\d+:\d+: undefined: (?:[\w$]+\.)*([A-Za-z_]\w*)/.exec(message)
+    ?? /\.go:\d+:\d+: [^\n]*?\.([A-Za-z_]\w*) undefined \(type /.exec(message)
     ?? /(?<![\w$.])([A-Za-z_$][\w$]*) is not (?:defined|a function|a constructor)/.exec(message);
   return m?.[1] ?? null;
 }
 
 /** A file that cannot load for a name its test does not use settles nothing about that test: every test of the file
  * fails there alike. Null when the failure is not a load error, names nothing, or the test (`body`) uses the name. */
-function foreignLoad(seen: { load?: true; message: string }[], body?: { source: string; func: string })
+function foreignLoad(seen: { load?: true; message: string }[], body?: { source: string; func: string }, path?: string)
   : { name: string } | null {
   const first = seen.find((s) => s.load);
   if (!body || !first || !seen.every((s) => s.load)) return null;
   const name = missingName(first.message);
   if (!name || !MISSING.test(first.message)) return null;
-  const used = usesNew(body.source, body.func, new Set([name]));
+  const used = usesNew(body.source, body.func, new Set([name]), path);
   // A test that cannot be found in its file may use it: nothing is claimed.
   return used === null && testBody(body.source, body.func) !== null ? { name } : null;
 }
+
+/** The test file's path for `foreignLoad`, for Go only: a Go body needs Go's rules, every other language keeps the
+ * default reading. */
+const goPath = (file: string | null) => (file?.endsWith(".go") ? file : undefined);
 
 const unloaded = (name: string) => `its file cannot load there because \`${name}\` is missing, which this test does not use`;
 
@@ -147,7 +157,7 @@ export function judgeBefore(t: TestResult, file: string | null, runs: BeforeRun[
   const silent = silentRuns(seen);
   if (silent) return { ...silent, runs: outcomes };
   if (all("error")) {
-    const foreign = foreignLoad(seen, body);
+    const foreign = foreignLoad(seen, body, goPath(file));
     if (foreign) return withMessage({ status: "unknown", detail: unloaded(foreign.name), runs: outcomes });
     return withMessage(MISSING.test(failure)
       ? { status: "new-code", detail: `cannot load on the code before the change: what it tests is new ` +
@@ -220,7 +230,7 @@ export function judgeFix(t: TestResult, file: string | null, runs: BeforeRun[], 
   const silent = silentRuns(seen);
   if (silent) return { ...silent, runs: outcomes };
   if (all("error")) {
-    const foreign = foreignLoad(seen, body);
+    const foreign = foreignLoad(seen, body, goPath(file));
     if (foreign) return withMessage({ status: "unknown", detail: unloaded(foreign.name), runs: outcomes });
     return withMessage(MISSING.test(failure)
       ? { status: "new-code", detail: `cannot load on the code before the change: what it tests is new ` +

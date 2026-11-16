@@ -1,10 +1,11 @@
 // Test results from the adapter's report, classified over repeated runs: a test that fails in every run is a
 // finding; errors, flaky tests and runs without a report never are.
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { adapterFor } from "./adapters";
 import type { TestResult } from "./adapters/types";
 import type { ReviewConfig } from "./config";
+import { readRegular, realFolders } from "./safefs";
 import { REPORT_DIR, type RunResult, type Runner } from "./sandbox";
 import { maskPrivateKeys } from "./secrets";
 
@@ -146,8 +147,24 @@ export async function runTests(session: Runner, snap: string, cfg: ReviewConfig,
   const text = file !== report && session.clean ? session.clean(raw) : raw;
   if (file !== report) rmSync(file, { force: true });
   const exists = (rel: string) => existsSync(join(snap, cfg.workdir, rel));
-  const parsed = adapter.parseReport(text, cfg.runner, cfg.workdir, exists);
+  const sourceLine = sourceLineReader(join(snap, cfg.workdir));
+  const parsed = adapter.parseReport(text, cfg.runner, cfg.workdir, exists, sourceLine);
   return [result, parsed && adapter.messagesFrom ? adapter.messagesFrom(parsed, result.output, cfg.runner) : parsed];
+}
+
+const MAX_SOURCE = 1_000_000;
+/** Reads one line (1-based) of a file under `root`, by a path relative to it; null for a path outside it, one through
+ * a link, a file that is not a regular file or too large, a missing one or a line past its end. */
+export function sourceLineReader(root: string): (file: string, line: number) => string | null {
+  const files = new Map<string, string[] | null>();
+  return (rel, line) => {
+    if (!rel || rel === ".." || rel.startsWith("../") || isAbsolute(rel)) return null;
+    if (!files.has(rel)) {
+      const text = realFolders(root, rel) ? readRegular(join(root, rel), MAX_SOURCE) : null;
+      files.set(rel, text === null ? null : text.split("\n"));
+    }
+    return files.get(rel)?.[line - 1] ?? null;
+  };
 }
 
 /** The report a runner says it wrote somewhere else in the code under test, as a path in the snapshot: vitest keeps

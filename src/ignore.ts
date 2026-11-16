@@ -65,7 +65,7 @@ const JSON_LIMIT = 100_000;
 /** Names with these words are data-like unless they are code or configuration. */
 const DATA_WORDS = /dump|export|backup/;
 /** Lockfiles are large JSON or YAML but are what installs need: never data. */
-const LOCKFILES = /^(package-lock\.json|npm-shrinkwrap\.json|composer\.lock|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|go\.sum|packages\.lock\.json|package\.resolved|[^/]*\.lock)$/;
+const LOCKFILES = /^(package-lock\.json|npm-shrinkwrap\.json|composer\.lock|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|go\.sum|go\.work\.sum|packages\.lock\.json|package\.resolved|[^/]*\.lock)$/;
 /** A lockfile (by its name, any folder): installs need it, so the snapshot keeps it; a review does not send its text. */
 export const isLockfile = (path: string) => LOCKFILES.test(posix.basename(path).toLowerCase());
 /** Machine-made by name: a bundle, a source map, a snapshot, protocol or schema output. Kept in the snapshot; a review

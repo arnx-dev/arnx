@@ -738,8 +738,8 @@ export async function runReview(repo: string, o: { settings: Settings;
         const frames = [...rnd.classified.findings, ...rnd.classified.flaky].filter((t) => !t.needs && !t.fakedKey)
           .flatMap((t) => framesIn(t.message));
         const loaded = loadedTests(rnd.files, rnd.classified, [...rnd.hungFiles ?? [], ...rnd.notRunFiles ?? []]);
-        const byText = new Set(untestedFiles(ownedNow, rnd.files, adapter));
-        const missed = notReached(ownedNow, { tests: loaded, frames, ...(rnd.reached ? { ran: rnd.reached } : {}) }, adapter);
+        const byText = new Set(untestedFiles(ownedNow, rnd.files, adapter, cfg.workdir));
+        const missed = notReached(ownedNow, { tests: loaded, frames, ...(rnd.reached ? { ran: rnd.reached } : {}) }, adapter, cfg.workdir);
         const reasons: Record<string, string> = {};
         for (const f of missed) if (!byText.has(f)) reasons[f] = "a test only mentions it as text";
         // A file the reviewer named stays listed, unless a failing test's frame goes through it.

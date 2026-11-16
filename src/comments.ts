@@ -1,8 +1,9 @@
 // Where a source file's comments are, for the languages arnx reviews: JavaScript and TypeScript (// and /* */), Rust
-// (the same, block comments nest) and Python (#). Strings, template literals, regex literals, raw strings and char
-// literals are skipped so a // or # inside one is not taken for a comment. Python docstrings are strings, not comments.
+// (the same, block comments nest), Python (#) and Go (// and /* */, no nesting). Strings, template literals, regex
+// literals, raw strings and char literals are skipped so a // or # inside one is not taken for a comment. Python
+// docstrings are strings, not comments.
 
-export type CommentStyle = "js" | "rust" | "python";
+export type CommentStyle = "js" | "rust" | "python" | "go";
 
 /** A comment: [start, end) in the text; `open` is the length of its opening delimiter. A line comment ends before
  * its newline; an unclosed block comment at the end of the text. */
@@ -13,11 +14,11 @@ const JS = new Set(["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"]);
 /** The comment syntax of a file by its extension, or null for files whose comments arnx does not read. */
 export function commentStyle(path: string): CommentStyle | null {
   const ext = /\.([a-z]+)$/.exec(path.toLowerCase())?.[1] ?? "";
-  return JS.has(ext) ? "js" : ext === "rs" ? "rust" : ext === "py" || ext === "pyi" ? "python" : null;
+  return JS.has(ext) ? "js" : ext === "rs" ? "rust" : ext === "py" || ext === "pyi" ? "python" : ext === "go" ? "go" : null;
 }
 
 export function comments(text: string, style: CommentStyle): Comment[] {
-  return style === "python" ? pythonComments(text) : cComments(text, style === "rust");
+  return style === "python" ? pythonComments(text) : style === "go" ? goComments(text) : cComments(text, style === "rust");
 }
 
 const ident = (c: string | undefined) => !!c && /[A-Za-z0-9_$]/.test(c);
@@ -134,6 +135,31 @@ function cComments(text: string, rust: boolean): Comment[] {
       prev = next > i + 1 ? "a" : c;
     }
     i = next;
+  }
+  return out;
+}
+
+/** Go: `"` strings and `'` runes stop at their line's end; a raw string (backticks) holds no escapes and spans lines. */
+function goComments(text: string): Comment[] {
+  const out: Comment[] = [];
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    const c = text[i]!, d = text[i + 1];
+    if (c === "/" && d === "/") {
+      const e = lineEnd(text, i);
+      out.push({ start: i, end: e, block: false, open: 2 });
+      i = e;
+    } else if (c === "/" && d === "*") {
+      const e = text.indexOf("*/", i + 2);
+      const end = e < 0 ? n : e + 2;
+      out.push({ start: i, end, block: true, open: 2 });
+      i = end;
+    } else if (c === "`") {
+      const e = text.indexOf("`", i + 1);
+      i = e < 0 ? n : e + 1;
+    } else if (c === '"' || c === "'") i = skipQuoted(text, i, c, false);
+    else i++;
   }
   return out;
 }

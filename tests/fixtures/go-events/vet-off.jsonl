@@ -1,0 +1,9 @@
+{"Time":"2026-11-09T17:44:50.692226544Z","Action":"start","Package":"example.com/events/vet-off"}
+{"Time":"2026-11-09T17:44:50.694266711Z","Action":"run","Package":"example.com/events/vet-off","Test":"TestVetBad"}
+{"Time":"2026-11-09T17:44:50.694287617Z","Action":"output","Package":"example.com/events/vet-off","Test":"TestVetBad","Output":"=== RUN   TestVetBad\n"}
+{"Time":"2026-11-09T17:44:50.694323617Z","Action":"output","Package":"example.com/events/vet-off","Test":"TestVetBad","Output":"    lib_test.go:5: %!d(string=not a number)\n"}
+{"Time":"2026-11-09T17:44:50.694334006Z","Action":"output","Package":"example.com/events/vet-off","Test":"TestVetBad","Output":"--- PASS: TestVetBad (0.00s)\n"}
+{"Time":"2026-11-09T17:44:50.694345698Z","Action":"pass","Package":"example.com/events/vet-off","Test":"TestVetBad","Elapsed":0}
+{"Time":"2026-11-09T17:44:50.69436415Z","Action":"output","Package":"example.com/events/vet-off","Output":"PASS\n"}
+{"Time":"2026-11-09T17:44:50.69450284Z","Action":"output","Package":"example.com/events/vet-off","Output":"ok  \texample.com/events/vet-off\t0.002s\n"}
+{"Time":"2026-11-09T17:44:50.694523845Z","Action":"pass","Package":"example.com/events/vet-off","Elapsed":0.002}

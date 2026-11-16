@@ -6,7 +6,7 @@ import { join, posix } from "node:path";
 import type { AdapterId } from "./adapters/types";
 import { workingTreeFiles } from "./change";
 import { loadReviewFile, reviewConfigPath } from "./config";
-import { type Facts, readFacts } from "./facts";
+import { type Facts, goWorkUses, readFacts } from "./facts";
 import { loadIgnore } from "./ignore";
 import { notableOthers, onlyOtherLanguages, type OtherLanguage, surveyLanguages, type LanguageSurvey } from "./languages";
 
@@ -32,7 +32,7 @@ export interface Detection {
   others?: OtherLanguage[];
   /** What the files settle about each candidate (versions, managers, CI, services), for the draft. */
   facts?: Facts;
-  /** Python, JavaScript/TypeScript and Rust source files, by language, for the draft. */
+  /** Python, JavaScript/TypeScript, Rust and Go source files, by language, for the draft. */
   sources?: Record<string, string[]>;
 }
 
@@ -49,8 +49,14 @@ const LOCKS: [string, string][] = [["pnpm-lock.yaml", "pnpm"], ["yarn.lock", "ya
   ["bun.lockb", "bun"], ["package-lock.json", "npm"], ["npm-shrinkwrap.json", "npm"]];
 /** Manifests under these directories are test data (fixtures, sample apps of a test suite), not projects. */
 const NOT_PROJECTS = new Set(["fixtures", "__fixtures__", "testdata", "test-data", "test", "tests", "__tests__", "e2e"]);
+/** Go: a go.mod under these is vendored code, not a module of the repository. */
+const GO_SKIP = new Set(["vendor", "third_party"]);
+/** Go: the go tool ignores directories whose name starts with a dot or an underscore. */
+const hiddenDir = (dir: string) => dir.split("/").some((s) => s.length > 1 && (s.startsWith(".") || s.startsWith("_")));
+const GO_TEST = /_test\.go$/;
 const MAX_LISTED = 40;
-const LANGUAGE_NAMES: Record<string, string> = { python: "Python", typescript: "JavaScript/TypeScript", rust: "Rust" };
+const LANGUAGE_NAMES: Record<string, string> = { python: "Python", typescript: "JavaScript/TypeScript", rust: "Rust",
+  go: "Go" };
 
 const dirOf = (p: string) => posix.dirname(p);
 const list = (xs: string[], max = 10) =>
@@ -154,7 +160,7 @@ export function detect(repo: string, files?: string[]): Detection {
   const paths = all.filter((p) => !p.split("/").includes("node_modules"));
   const set = new Set(paths);
   const languages: Record<string, number> = {};
-  const sources: Record<string, string[]> = { python: [], typescript: [], rust: [] };
+  const sources: Record<string, string[]> = { python: [], typescript: [], rust: [], go: [] };
   for (const p of paths) {
     const lang = EXT_LANG[posix.extname(p).slice(1)];
     if (lang) languages[lang] = (languages[lang] ?? 0) + 1;
@@ -173,6 +179,15 @@ export function detect(repo: string, files?: string[]): Detection {
   const candidates: Candidate[] = [];
   const ownFiles = new Map<Candidate, string[]>();
   const workspaces = new Set<string>();
+  // Go: the directories a go.work lists; each runs from inside itself, with install_root "."
+  const goMembers = new Set<string>();
+  const goWorkDirs = new Set<string>();
+  for (const p of paths) {
+    if (posix.basename(p) !== "go.work" || dirOf(p).split("/").some((s) => NOT_PROJECTS.has(s) || GO_SKIP.has(s)) || hiddenDir(dirOf(p))) continue;
+    workspaces.add(dirOf(p));
+    goWorkDirs.add(dirOf(p));
+    for (const u of goWorkUses(read(repo, p))) goMembers.add(posix.normalize(posix.join(dirOf(p), u)));
+  }
   for (const p of paths) {
     const name = posix.basename(p);
     const root = dirOf(p);
@@ -195,6 +210,15 @@ export function detect(repo: string, files?: string[]): Detection {
       if (/^\s*\[package\]/m.test(text)) {
         candidates.push({ root, language: "rust", manifest: p, runner: "nextest", packageManager: "cargo", evidence: [] });
       }
+    } else if (name === "go.mod") {
+      if (root.split("/").some((s) => GO_SKIP.has(s))) continue;
+      // A hidden directory is skipped by ./..., unless a go.work lists the module: the developer asked for it.
+      if (hiddenDir(root) && !goMembers.has(root)) continue;
+      // Under a go.work, only its `use` members are projects.
+      if (ancestors(root).some((d) => goWorkDirs.has(d)) && !goMembers.has(root)) continue;
+      // A stray go.mod beside no Go code is not a Go project.
+      if (!paths.some((q) => q.endsWith(".go") && (root === "." || q.startsWith(root + "/")))) continue;
+      candidates.push({ root, language: "go", manifest: p, runner: "gotest", packageManager: "go", evidence: [] });
     } else if (/^(pyproject\.toml|setup\.py|setup\.cfg|requirements[^/]*\.txt)$/.test(name)) {
       if (candidates.some((c) => c.root === root && c.language === "python")) continue;
       const pytest = [p, `${root}/pytest.ini`, `${root}/conftest.py`].some((f) => /pytest/.test(read(repo, f))) ||
@@ -204,10 +228,11 @@ export function detect(repo: string, files?: string[]): Detection {
     }
   }
   for (const c of candidates) {
-    const files = testFiles(c.root);
+    const files = c.language === "go"
+      ? paths.filter((p) => (c.root === "." || p.startsWith(c.root + "/")) && GO_TEST.test(p)) : testFiles(c.root);
     const deeper = candidates.filter((o) => o.language === c.language && o.root !== c.root &&
       (c.root === "." || o.root.startsWith(c.root + "/")));
-    const ext = c.language === "rust" ? /\.rs$/ : c.language === "python" ? /\.py$/ : /\.[cm]?[jt]sx?$/;
+    const ext = c.language === "rust" ? /\.rs$/ : c.language === "go" ? /\.go$/ : c.language === "python" ? /\.py$/ : /\.[cm]?[jt]sx?$/;
     const own = files.filter((p) => ext.test(p) && !deeper.some((o) => p.startsWith(o.root + "/")));
     c.ownTests = own.length;
     ownFiles.set(c, own);
@@ -215,6 +240,7 @@ export function detect(repo: string, files?: string[]): Detection {
     const n = files.length;
     c.evidence.push(`${n} test file${n === 1 ? "" : "s"}`);
     if (workspaces.has(c.root)) c.evidence.push("workspace root");
+    if (c.language === "go" && goMembers.has(c.root)) c.evidence.push("install_root: .");
     if (c.language === "typescript" && typeCheckable((rel) => (set.has(rel) ? read(repo, rel) : ""), c.root)) {
       c.evidence.push("tsconfig.json and typescript: give it a typecheck");
     }
@@ -277,6 +303,23 @@ export function describeDetection(d: Detection): string {
       `${o.name} ${o.files} files (${o.roots.join(", ")})`).join("; ")}`);
   }
   return lines.join("\n");
+}
+
+/** Go and Rust compile before a test runs: one image build alone can take ten minutes. */
+export const isCompiled = (language: string) => language === "go" || language === "rust";
+
+/** The compiled languages (Go, Rust) of what tests `files`: each file's own language and that of the deepest project
+ * detection finds holding it. Sorted, no repeats. */
+export function compiledLanguages(candidates: Candidate[], files: string[]): string[] {
+  const out = new Set<string>();
+  for (const f of files) {
+    const holder = candidates.filter((c) => c.language !== "other" && (c.root === "." || f.startsWith(c.root + "/")))
+      .sort((a, b) => b.root.length - a.root.length)[0];
+    for (const lang of [holder?.language, EXT_LANG[posix.extname(f).slice(1)]]) {
+      if (lang && isCompiled(lang)) out.add(lang);
+    }
+  }
+  return [...out].sort();
 }
 
 /** The repository's languages, from the files a snapshot holds (minus .arnxignore), and whether arnx has nothing

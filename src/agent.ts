@@ -362,6 +362,12 @@ export class Workspace {
     return full;
   }
 
+  /** Whether a name a listing or a search leaves out: the shared list, and for Go vendored code. testdata/ stays visible,
+   * since that is where a Go test finds its fixtures. */
+  private skipped(name: string): boolean {
+    return SKIP_DIRS.has(name) || (this.adapter.id === "go" && name === "vendor");
+  }
+
   private rel(full: string): string {
     return relative(this.root, full).split(sep).join("/");
   }
@@ -369,7 +375,7 @@ export class Workspace {
   private listDir(path: string): string {
     const full = this.resolvePath(path);
     if (!existsSync(full) || !statSync(full).isDirectory()) throw new ToolError(`not a directory: ${path}`);
-    const entries = readdirSync(full).filter((n) => !SKIP_DIRS.has(n) && !isSecretPath(n)).sort();
+    const entries = readdirSync(full).filter((n) => !this.skipped(n) && !isSecretPath(n)).sort();
     return entries.map((n) => {
       let dir = false;
       try {
@@ -472,7 +478,7 @@ export class Workspace {
       for (const name of readdirSync(dir)) {
         const p = join(dir, name);
         const st = lstatSync(p);
-        if (SKIP_DIRS.has(name)) continue;
+        if (this.skipped(name)) continue;
         if (st.isDirectory()) visit(p);
         else if (!isSecretPath(name) && (st.isFile() || (st.isSymbolicLink() && existsSync(p) && statSync(p).isFile()))) {
           out.push(p);
@@ -496,6 +502,9 @@ export class Workspace {
       throw new ToolError(`writes are allowed only for ${this.adapter.words(this.runner).writableFiles} under ` +
         `${this.writeDir}/`);
     }
+    const problem = this.adapter.pathProblem?.(
+      relative(resolveLoose(join(this.root, this.writeDir!)), full).split(sep).join("/"));
+    if (problem) throw new ToolError(problem);
     if (content.length > WRITE_LIMIT) throw new ToolError("file too large");
     if (content.includes(KEY_SHOWN)) throw new ToolError(KEY_SHOWN_MEANS);
     mkdirSync(dirname(full), { recursive: true });

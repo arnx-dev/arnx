@@ -1,0 +1,3 @@
+{"Time":"2026-11-09T17:44:49.872675458Z","Action":"start","Package":"example.com/events/testmain-exit0"}
+{"Time":"2026-11-09T17:44:49.875455165Z","Action":"output","Package":"example.com/events/testmain-exit0","Output":"ok  \texample.com/events/testmain-exit0\t0.003s\n"}
+{"Time":"2026-11-09T17:44:49.875474194Z","Action":"pass","Package":"example.com/events/testmain-exit0","Elapsed":0.003}

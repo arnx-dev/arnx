@@ -228,7 +228,7 @@ export async function probeListed(session: Runner, snap: string, cfg: ReviewConf
   const files = adapterFor(cfg).probes(cfg.runner).map((p) => ({ ...p, rel: posix.join(dir, p.file) }));
   try {
     for (const p of files) {
-      mkdirSync(join(snap, dir), { recursive: true });
+      mkdirSync(dirname(join(snap, p.rel)), { recursive: true });
       writeFileSync(join(snap, p.rel), p.source);
     }
     const listed = await listTests(session, snap, cfg, files.map((p) => posix.relative(cfg.workdir, p.rel)), "probe-list.json");

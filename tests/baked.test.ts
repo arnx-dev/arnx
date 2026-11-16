@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { bakedIn, bakedKey, commandPaths, differing, findCopies, onlyInCopies, packageName, reached, scopeFiles }
+import { bakedIn, bakedKey, commandPaths, differing, findCopies, imageFiles, onlyInCopies, packageName, reached, scopeFiles }
   from "../src/baked";
 import { takeSnapshot } from "../src/change";
 import { parseReviewConfig, parseReviewFile, type ReviewConfig } from "../src/config";
@@ -10,6 +10,7 @@ import { cacheRecords, sourceRecords } from "../src/envprune";
 import { EnvFailed } from "../src/errors";
 import { buildContextOf, dockerSteps, ensureEnv, envKey, sandboxOptions } from "../src/sandbox";
 import { dockerSession } from "../src/testround";
+import { randomHex } from "../src/util";
 import { commit, initRepo } from "./helpers/gitutil";
 import { useTmp } from "./helpers/tmp";
 
@@ -709,3 +710,23 @@ projects:
     Object.assign(sandboxOptions, saved);
   }
 });
+
+test("the listing of an image leaves out Go's toolchain and caches, and keeps what it already pruned", () => {
+  const saved = sandboxOptions.docker;
+  try {
+    const dir = tmp();
+    const argsFile = join(dir, "args");
+    writeFileSync(join(dir, "docker"), `#!/bin/sh\nprintf '%s\\n' "$@" > '${argsFile}'\nexit 0\n`);
+    chmodSync(join(dir, "docker"), 0o755);
+    sandboxOptions.docker = join(dir, "docker");
+    imageFiles(`gotest:${randomHex(4)}`);
+    const args = readFileSync(argsFile, "utf8");
+    for (const p of ["/usr/local/go", "/go/pkg/mod", "/opt/arnx-gocache", "/usr/local/cargo", "/usr/local/rustup", "/usr/lib"]) {
+      expect(args).toContain(`-path ${p}`);
+    }
+    expect(args).toContain("-name node_modules");
+  } finally {
+    sandboxOptions.docker = saved;
+  }
+});
+

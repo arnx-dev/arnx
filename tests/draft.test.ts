@@ -542,3 +542,146 @@ test("a .pyx file with no setup.py adds no build_ext: the project's own install 
   expect(p.install.join("\n")).not.toContain("build_ext");
   expect(p.test_command).toBe("python -m pytest {targets}");
 });
+
+describe("Go projects", () => {
+  const goRepo = (mod: string, extra: Record<string, string> = {}) => repoWith({
+    "go.mod": mod, "a.go": "package x\n", "a_test.go": "package x\n", ...extra });
+  const only = (d: ReturnType<typeof detect>) => Object.values(projects(d))[0]!;
+
+  test("the image is the go line, at least 1.24, major.minor only", () => {
+    expect(only(detect(goRepo("module example.com/x\n\ngo 1.22\n"))).image).toBe("golang:1.24-bookworm");
+    expect(only(detect(goRepo("module example.com/x\n\ngo 1.25.3\n"))).image).toBe("golang:1.25-bookworm");
+    expect(only(detect(goRepo("module example.com/x\n\ngo 1.24\n"))).image).toBe("golang:1.24-bookworm");
+  });
+
+  test("no go line drafts 1.26 and marks it", () => {
+    const d = detect(goRepo("module example.com/x\n"));
+    expect(only(d).image).toBe("golang:1.26-bookworm");
+    expect(unsure(d)).toContain("projects.main.image: no Go version found");
+  });
+
+  test("a Go project drafts gotest with go test, no nextest, no -rs name suffix", () => {
+    const d = detect(goRepo("module example.com/x\n\ngo 1.24\n", { "sub/go.mod": "module example.com/x/sub\n",
+      "sub/b.go": "package b\n", "sub/b_test.go": "package b\n", "lib/Cargo.toml": "[package]\nname=\"x\"\n",
+      "lib/src/lib.rs": "", "lib/tests/t.rs": "" }));
+    const ps = projects(d);
+    const go = Object.entries(ps).filter(([, p]) => p.language === "go");
+    expect(go.length).toBeGreaterThan(0);
+    for (const [name, p] of go) {
+      expect(p.runner).toBe("gotest");
+      expect(p.test_command).toBe("go test {targets}");
+      expect(JSON.stringify(p)).not.toContain("nextest");
+      expect(name.endsWith("-rs")).toBe(false);
+    }
+    expect(Object.values(ps).filter((p) => p.language === "rust").map((p) => p.runner)).toEqual(["nextest"]);
+  });
+
+  test("the install fetches modules while the network is there", () => {
+    expect(only(detect(goRepo("module example.com/x\n\ngo 1.24\n"))).install)
+      .toEqual(["go mod download && { go test -vet=off -run '^$' ./... || true; }"]);
+  });
+
+  test("the version comes from .go-version, setup-go or a golang image when go.mod has no go line", () => {
+    expect(only(detect(goRepo("module example.com/x\n", { ".go-version": "1.25.1\n" }))).image).toBe("golang:1.25-bookworm");
+    const ci = "on: push\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/setup-go@v5\n" +
+      "        with:\n          go-version: '1.25.2'\n      - run: go test ./...\n";
+    expect(only(detect(goRepo("module example.com/x\n", { ".github/workflows/ci.yml": ci }))).image)
+      .toBe("golang:1.25-bookworm");
+    expect(only(detect(goRepo("module example.com/x\n", { Dockerfile: "FROM golang:1.25.0-alpine AS b\n" }))).image)
+      .toBe("golang:1.25-bookworm");
+  });
+
+  test("go-version-file: go.mod reads the go line, not the first line", () => {
+    const ci = "on: push\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/setup-go@v5\n" +
+      "        with:\n          go-version-file: go.mod\n";
+    const d = detect(goRepo("// a comment\nmodule example.com/x\n\ngo 1.25.1\n\ntoolchain go1.25.4\n",
+      { ".github/workflows/ci.yml": ci }));
+    expect(d.facts!.projects.find((p) => p.language === "go")!.versions.go?.value).toBe("1.25");
+  });
+
+  test("a go.work member runs on the higher of its go line and the go.work line, all sharing one image", () => {
+    const d = detect(repoWith({
+      "go.work": "go 1.25\n\nuse (\n\t./a\n\t./b\n)\n",
+      "a/go.mod": "module example.com/a\n\ngo 1.22\n", "a/a.go": "package a\n", "a/a_test.go": "package a\n",
+      "b/go.mod": "module example.com/b\n\ngo 1.25\n", "b/b.go": "package b\n", "b/b_test.go": "package b\n" }));
+    const ps = projects(d);
+    expect(ps.a.image).toBe("golang:1.25-bookworm");
+    expect(ps.b.image).toBe("golang:1.25-bookworm");
+    expect(ps.a.install).toEqual(ps.b.install);
+  });
+
+  test("a go.work lower than 1.24 is still floored at 1.24", () => {
+    const d = detect(repoWith({ "go.work": "go 1.22\nuse ./a\n",
+      "a/go.mod": "module example.com/a\n\ngo 1.22\n", "a/a.go": "package a\n", "a/a_test.go": "package a\n" }));
+    expect(projects(d).a.image).toBe("golang:1.24-bookworm");
+  });
+
+  test("a CI job that builds Go changes nothing in a Python project's draft", () => {
+    const ci = "on: push\njobs:\n  t:\n    runs-on: ubuntu-latest\n    services:\n      db:\n        image: postgres:16\n" +
+      "        env:\n          POSTGRES_PASSWORD: ci\n    env:\n      DATABASE_URL: postgres://postgres:ci@localhost:5432/db\n" +
+      "    steps:\n      - run: sudo apt-get install -y libpq-dev\n      - run: go build ./tools\n      - run: make test\n";
+    const py = { "pyproject.toml": "[project]\nname='p'\nrequires-python='>=3.11'\ndependencies=['psycopg2']\n",
+      "tests/test_a.py": "def test_a():\n    pass\n" };
+    const withGo = projects(detect(repoWith({ ...py, ".github/workflows/ci.yml": ci }))).main;
+    const without = projects(detect(repoWith({ ...py, ".github/workflows/ci.yml": ci.replace("go build ./tools", "echo hi") })))
+      .main;
+    expect(withGo.services).toEqual(["db"]);
+    expect(withGo).toEqual(without);
+  });
+
+  test("a job that runs go test does not reorder which Python job's version wins", () => {
+    const job = (id: string, py: string, run: string) => `  ${id}:\n    runs-on: ubuntu-latest\n    steps:\n` +
+      `      - uses: actions/setup-python@v5\n        with:\n          python-version: '${py}'\n      - run: ${run}\n`;
+    const ci = (second: string) => "on: push\njobs:\n" + job("a", "3.13", "echo hi") + job("b", "3.11", second);
+    const py = { "pyproject.toml": "[project]\nname='p'\n", "tests/test_a.py": "def test_a():\n    pass\n" };
+    const image = (second: string) =>
+      projects(detect(repoWith({ ...py, ".github/workflows/ci.yml": ci(second) }))).main.image;
+    expect(image("go test ./tools/...")).toBe(image("echo hi"));
+  });
+
+  test("a go.work member gets install_root . and a shared module download", () => {
+    const d = detect(repoWith({
+      "go.work": "go 1.25\n\nuse (\n\t./a\n\t./b\n)\n",
+      "a/go.mod": "module example.com/a\n\ngo 1.25\n", "a/a.go": "package a\n", "a/a_test.go": "package a\n",
+      "b/go.mod": "module example.com/b\n\ngo 1.25\n", "b/b.go": "package b\n", "b/b_test.go": "package b\n" }));
+    const ps = projects(d);
+    for (const name of ["a", "b"]) {
+      expect(ps[name]).toEqual({ root: name, language: "go", runner: "gotest", image: "golang:1.25-bookworm",
+        install_root: ".", install: ["go mod download && { go test -vet=off -run '^$' ./a/... ./b/... || true; }"],
+        test_command: "go test {targets}" });
+    }
+  });
+});
+
+test("a go.work that uses . drafts the root with the same environment as the other members", () => {
+  const d = detect(repoWith({
+    "go.work": "go 1.25\n\nuse (\n\t.\n\t./a\n)\n",
+    "go.mod": "module example.com/r\n\ngo 1.22\n", "r.go": "package r\n", "r_test.go": "package r\n",
+    "a/go.mod": "module example.com/a\n\ngo 1.24\n", "a/a.go": "package a\n", "a/a_test.go": "package a\n" }));
+  const ps = projects(d);
+  const root = ps.main ?? Object.values(ps).find((p) => p.root === ".")!;
+  expect(root.image).toBe("golang:1.25-bookworm");
+  expect(root.install).toEqual(ps.a.install);
+  expect(root.install).toEqual(["go mod download && { go test -vet=off -run '^$' ./... ./a/... || true; }"]);
+  expect(root.image).toBe(ps.a.image);
+});
+
+test("a drafted Go workspace member passes the config check", () => {
+  const d = detect(repoWith({
+    "go.work": "go 1.25\n\nuse ./a\n",
+    "a/go.mod": "module example.com/a\n\ngo 1.25\n", "a/a.go": "package a\n", "a/a_test.go": "package a\n" }));
+  const cfg = parseReviewFile(draftYaml(d).replace(/^#.*\n/gm, ""));
+  expect(cfg.projects.map((p) => [p.name, p.runner, p.installRoot])).toEqual([["a", "gotest", "."]]);
+});
+
+test("a Go job that tests only in a sub-folder is not the root module's", () => {
+  const ci = "on: push\njobs:\n  integration:\n    runs-on: ubuntu-latest\n    services:\n" +
+    "      postgres:\n        image: postgres:16\n      mysql:\n        image: mysql:8\n      redis:\n        image: redis:7\n" +
+    "    steps:\n      - uses: actions/checkout@v4\n      - run: git checkout -\n" +
+    "      - run: |\n          cd sub\n          go mod download\n          go test ./...\n";
+  const d = detect(repoWith({ "go.mod": "module example.com/root\n\ngo 1.24\n", "a_test.go": "package root\n",
+    "sub/go.mod": "module example.com/sub\n\ngo 1.24\n", "sub/b_test.go": "package sub\n", ".github/workflows/ci.yml": ci }));
+  const of = (root: string) => d.facts!.projects.find((p) => p.root === root)!;
+  expect([of(".").jobs, of(".").services]).toEqual([[], []]);
+  expect(of("sub").jobs).toEqual([".github/workflows/ci.yml:integration"]);
+});

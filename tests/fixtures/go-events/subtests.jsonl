@@ -1,0 +1,37 @@
+{"Time":"2026-11-09T17:44:43.801429042Z","Action":"start","Package":"example.com/events/subtests"}
+{"Time":"2026-11-09T17:44:43.804189464Z","Action":"run","Package":"example.com/events/subtests","Test":"TestTop"}
+{"Time":"2026-11-09T17:44:43.804214022Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop","Output":"=== RUN   TestTop\n"}
+{"Time":"2026-11-09T17:44:43.804268951Z","Action":"run","Package":"example.com/events/subtests","Test":"TestTop/a/b"}
+{"Time":"2026-11-09T17:44:43.804275602Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/a/b","Output":"=== RUN   TestTop/a/b\n"}
+{"Time":"2026-11-09T17:44:43.804285462Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/a/b","Output":"--- PASS: TestTop/a/b (0.00s)\n"}
+{"Time":"2026-11-09T17:44:43.804296439Z","Action":"pass","Package":"example.com/events/subtests","Test":"TestTop/a/b","Elapsed":0}
+{"Time":"2026-11-09T17:44:43.804303824Z","Action":"run","Package":"example.com/events/subtests","Test":"TestTop/with_space"}
+{"Time":"2026-11-09T17:44:43.804308119Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/with_space","Output":"=== RUN   TestTop/with_space\n"}
+{"Time":"2026-11-09T17:44:43.804313647Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/with_space","Output":"--- PASS: TestTop/with_space (0.00s)\n"}
+{"Time":"2026-11-09T17:44:43.804322631Z","Action":"pass","Package":"example.com/events/subtests","Test":"TestTop/with_space","Elapsed":0}
+{"Time":"2026-11-09T17:44:43.804328535Z","Action":"run","Package":"example.com/events/subtests","Test":"TestTop/plain"}
+{"Time":"2026-11-09T17:44:43.804332969Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/plain","Output":"=== RUN   TestTop/plain\n"}
+{"Time":"2026-11-09T17:44:43.804338274Z","Action":"run","Package":"example.com/events/subtests","Test":"TestTop/plain/inner"}
+{"Time":"2026-11-09T17:44:43.804342813Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/plain/inner","Output":"=== RUN   TestTop/plain/inner\n"}
+{"Time":"2026-11-09T17:44:43.804368586Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/plain/inner","Output":"--- PASS: TestTop/plain/inner (0.00s)\n"}
+{"Time":"2026-11-09T17:44:43.804375666Z","Action":"pass","Package":"example.com/events/subtests","Test":"TestTop/plain/inner","Elapsed":0}
+{"Time":"2026-11-09T17:44:43.804381392Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/plain","Output":"--- PASS: TestTop/plain (0.00s)\n"}
+{"Time":"2026-11-09T17:44:43.804386305Z","Action":"pass","Package":"example.com/events/subtests","Test":"TestTop/plain","Elapsed":0}
+{"Time":"2026-11-09T17:44:43.804390791Z","Action":"run","Package":"example.com/events/subtests","Test":"TestTop/plain#01"}
+{"Time":"2026-11-09T17:44:43.804394998Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/plain#01","Output":"=== RUN   TestTop/plain#01\n"}
+{"Time":"2026-11-09T17:44:43.804400074Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/plain#01","Output":"--- PASS: TestTop/plain#01 (0.00s)\n"}
+{"Time":"2026-11-09T17:44:43.804409603Z","Action":"pass","Package":"example.com/events/subtests","Test":"TestTop/plain#01","Elapsed":0}
+{"Time":"2026-11-09T17:44:43.804414128Z","Action":"run","Package":"example.com/events/subtests","Test":"TestTop/bad_one"}
+{"Time":"2026-11-09T17:44:43.804418048Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/bad_one","Output":"=== RUN   TestTop/bad_one\n"}
+{"Time":"2026-11-09T17:44:43.804424749Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/bad_one","Output":"    lib_test.go:12: nope\n"}
+{"Time":"2026-11-09T17:44:43.804430144Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/bad_one","Output":"--- FAIL: TestTop/bad_one (0.00s)\n"}
+{"Time":"2026-11-09T17:44:43.804435356Z","Action":"fail","Package":"example.com/events/subtests","Test":"TestTop/bad_one","Elapsed":0}
+{"Time":"2026-11-09T17:44:43.804439957Z","Action":"run","Package":"example.com/events/subtests","Test":"TestTop/q\"uote_$^(x)"}
+{"Time":"2026-11-09T17:44:43.80444463Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/q\"uote_$^(x)","Output":"=== RUN   TestTop/q\"uote_$^(x)\n"}
+{"Time":"2026-11-09T17:44:43.804449795Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop/q\"uote_$^(x)","Output":"--- PASS: TestTop/q\"uote_$^(x) (0.00s)\n"}
+{"Time":"2026-11-09T17:44:43.804454689Z","Action":"pass","Package":"example.com/events/subtests","Test":"TestTop/q\"uote_$^(x)","Elapsed":0}
+{"Time":"2026-11-09T17:44:43.804460445Z","Action":"output","Package":"example.com/events/subtests","Test":"TestTop","Output":"--- FAIL: TestTop (0.00s)\n"}
+{"Time":"2026-11-09T17:44:43.804512723Z","Action":"fail","Package":"example.com/events/subtests","Test":"TestTop","Elapsed":0}
+{"Time":"2026-11-09T17:44:43.804731809Z","Action":"output","Package":"example.com/events/subtests","Output":"FAIL\n"}
+{"Time":"2026-11-09T17:44:43.805731105Z","Action":"output","Package":"example.com/events/subtests","Output":"FAIL\texample.com/events/subtests\t0.004s\n"}
+{"Time":"2026-11-09T17:44:43.805769215Z","Action":"fail","Package":"example.com/events/subtests","Elapsed":0.004}

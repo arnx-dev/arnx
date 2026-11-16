@@ -395,7 +395,7 @@ function uses(r: Reading, name: string, kinds: Set<Kind>, skip: (h: Hit) => bool
       const hit = { file, line: i + 1 };
       if (!kinds.has(r.lineKind(file, i + 1)!) || skip(hit)) continue;
       // A definition of the same name is no use of it.
-      if (defAt(lines, i)?.name === name || classAt(lines[i]!) === name) continue;
+      if (defAt(lines, i, file)?.name === name || classAt(lines[i]!) === name) continue;
       out.push(hit);
       if (out.length > most) return out;
     }
@@ -421,8 +421,8 @@ const classAt = (line: string) => (line.length <= LONG_LINE ? CLASS.exec(line)?.
 const indent = (s: string) => s.length - s.trimStart().length;
 
 /** A line that may define a function, for defAt to say: tested in linear time on any line. */
-const mayDefine = (l: string) => /\b(?:def|function|fn)\b|=>/.test(l) || /\(\s*$/.test(l) ||
-  (l.trimEnd().endsWith("{") && l.includes(")"));
+export const mayDefine = (l: string, path = "") => /\b(?:def|function|fn)\b|=>/.test(l) || /\(\s*$/.test(l) ||
+  (l.trimEnd().endsWith("{") && l.includes(")")) || (path.endsWith(".go") && /^func\b/.test(l));
 const NOT_A_NAME = new Set(["if", "for", "while", "switch", "catch", "return", "with", "elif", "await", "new", "typeof",
   "function", "super", "this"]);
 /** A signature that opens on its own line and closes on a later one at its indent: `  async save(` ... `  ): T {`. */
@@ -446,10 +446,10 @@ function signatureAt(lines: string[], i: number): Def | null {
 }
 
 /** The function line `i` (0-based) defines, on one line or as a signature over several. */
-function defAt(lines: string[], i: number): Def | null {
+function defAt(lines: string[], i: number, path: string): Def | null {
   const l = lines[i]!;
-  if (l.length > LONG_LINE || !mayDefine(l)) return null;
-  const one = enclosing([l], 1);
+  if (l.length > LONG_LINE || !mayDefine(l, path)) return null;
+  const one = enclosing([l], 1, path);
   if (one && one.kind === "function") return { ...one, line: i + 1 };
   return signatureAt(lines, i);
 }
@@ -457,7 +457,7 @@ function defAt(lines: string[], i: number): Def | null {
 /** The function that holds line `at`: the nearest definition above it that every code line between is indented
  * deeper than, so a nested function that ended above does not count; read on the code lines (`code`, strings
  * blanked), so a string's text at the margin ends nothing. Else what enclosing says when it is a constant. */
-function holder(lines: string[], code: string[], at: number): Def | null {
+function holder(lines: string[], code: string[], at: number, path: string): Def | null {
   const here = code[at - 1] ?? "";
   let deepest = here.trim() ? indent(here) : Infinity;
   for (let i = at - 2; i >= 0; i--) {
@@ -466,14 +466,14 @@ function holder(lines: string[], code: string[], at: number): Def | null {
     // code's depth.
     if (/^[\s'"`;,]*$/.test(c) || /^\s*[)\]}]/.test(c)) continue;
     if (indent(c) < deepest) {
-      const d = defAt(lines, i);
+      const d = defAt(lines, i, path);
       if (d) return d;
     }
     if (/^\s*@/.test(c)) continue;
     deepest = Math.min(deepest, indent(c));
     if (deepest === 0) break;
   }
-  const d = enclosing(lines, at);
+  const d = enclosing(lines, at, path);
   return d?.kind === "constant" ? d : null;
 }
 
@@ -529,7 +529,7 @@ function changedDefs(r: Reading, diff: string, ours: (path: string) => boolean):
     if (!lines) continue;
     const seen = new Set<string>();
     for (const n of at) {
-      let d: Def | Target | null = holder(lines, r.codeOf(file)!, n) ?? classOf(lines, n);
+      let d: Def | Target | null = holder(lines, r.codeOf(file)!, n, file) ?? classOf(lines, n);
       // A change inside `__init__` (or another dunder) is a change to its class.
       if (d && /^__\w+__$/.test(d.name)) d = classOf(lines, d.line);
       if (!d || seen.has(d.name) || d.name.length < 3 || /^__\w+__$/.test(d.name)) continue;
@@ -676,7 +676,7 @@ export function judgeEvidence(o: EvidenceInput): string {
       const upDone = new Set<string>();
       for (const h of ordered.slice(0, CALLERS_PER_NAME)) {
         const lines = r.linesOf(h.file)!;
-        const d = holder(lines, r.codeOf(h.file)!, h.line);
+        const d = holder(lines, r.codeOf(h.file)!, h.line, h.file);
         const entry = [`- ${h.file}:${h.line}${d ? ` in \`${d.name}\`` : ""}${sure(h) ? "" : " (same name, may be another)"}`,
           around(r, lines, h.line, 1)];
         // Second level: where the calling definition is used, by place only.

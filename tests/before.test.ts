@@ -665,3 +665,83 @@ describe("a pass and a failure say only what the runs show", () => {
     expect(missingName("assert 1 == 2")).toBeNull();
   });
 });
+
+describe("judgeBefore: Go compiler text at the base", () => {
+  const goT = t("TestAdd", "error", "x.go:3:5: undefined: lib.Add");
+  const base = (message: string) => judgeBefore(goT, GEN, three(run(t("TestAdd", "error", message))));
+  const missing = [
+    "undefined: lib.Nope", "lib.T{}.Nope undefined (type lib.T has no field or method Nope)",
+    "too many arguments in call to lib.Add", "not enough arguments in call to lib.Add",
+    "no required module provides package x/y; to add it:", "lib.T does not implement I (missing method Gone)",
+  ];
+  for (const m of missing) {
+    test(`new code: ${m}`, () => {
+      expect(base(`x.go:3:5: ${m}`).status).toBe("new-code");
+      expect(base(`dir/sub/x_arnx_test.go:3:5: ${m}`).status).toBe("new-code");
+    });
+  }
+  test("a Go nil dereference panic is an undefined value: a differing message is not compared away", () => {
+    const panic = "panic: runtime error: invalid memory address or nil pointer dereference\n[signal SIGSEGV]";
+    const change = t("TestAdd", "failed", "got 1, want 2");
+    const j = (runs: BeforeRun[]) => judgeBefore(change, GEN, runs);
+    // one test in the file: not enough to say the setup is missing, so nothing is claimed
+    expect(j(three(run(t("TestAdd", "failed", panic)))).status).toBe("unknown");
+    // the same text quoted by a failure that is no Go panic stays what it was
+    expect(j(three(run(t("TestAdd", "failed", "service said: invalid memory address or nil pointer dereference")))).status)
+      .toBe("changed");
+  });
+  test("a test log line (no column) that reads like the compiler is not new code", () => {
+    const change = t("TestAdd", "failed", "z_arnx_test.go:14: got 3, want 4");
+    const base = three(run(t("TestAdd", "failed", "z_arnx_test.go:12: undefined: y")));
+    expect(judgeBefore(change, GEN, base).status).toBe("changed");
+    expect(judgeFix(t("TestAdd", "passed", ""), GEN, base).status).not.toBe("new-code");
+  });
+  test("a test that can never build (a program imported as a package) is not new code", () => {
+    const m = 'x.go:6:2: import "example.com/m" is a program, not an importable package';
+    expect(base(m).status).toBe("unknown");
+  });
+  test("the same text without a .go:L: prefix is not Go: JavaScript failures are unchanged", () => {
+    const js = (m: string) => judgeBefore(t("TestAdd", "error", "boom"), GEN, three(run(t("TestAdd", "error", m))));
+    expect(js("expected undefined: 5").status).toBe("unknown");
+    expect(js("too many arguments in call to lib.Add").status).toBe("unknown");
+    expect(js("undefined: lib.Nope").status).toBe("unknown");
+  });
+});
+
+test("missingName reads the last segment of a Go undefined name", () => {
+  expect(missingName("x_arnx_test.go:3:5: undefined: lib.Brandnew")).toBe("Brandnew");
+  expect(missingName("x_arnx_test.go:3:5: undefined: Local")).toBe("Local");
+  expect(missingName("x_arnx_test.go:3:5: lib.T{}.Nope undefined (type lib.T has no field or method Nope)")).toBe("Nope");
+  expect(missingName("undefined: lib.Brandnew")).toBeNull();
+});
+
+describe("foreignLoad: reading a test's body", () => {
+  const GO_GEN = "arnx_generated/z_arnx/z_arnx_test.go";
+  const go = (name: string, outcome: string, message = ""): TestResult =>
+    ({ testId: `${GO_GEN}::${name}`, fileAttr: GO_GEN, name, outcome, message });
+  const SOURCE = ["package arnx", "", 'import "testing"', "", "func TestNew(t *testing.T) {", "\tlib.Brandnew()", "}", "",
+    "func TestOld(t *testing.T) {", "\tt.Fatal(\"real failure\")", "}", ""].join("\n");
+  const load = go(GO_GEN, "failed", "z_arnx_test.go:6:5: undefined: lib.Brandnew");
+  const runs = three(run(load));
+
+  test("Go: two tests in one file, only one uses what is missing: the other is unknown, not new code", () => {
+    const newOne = judgeBefore(go("TestNew", "failed", "got"), GO_GEN, runs, false, { source: SOURCE, func: "TestNew" });
+    expect(newOne.status).toBe("new-code");
+    const oldOne = judgeBefore(go("TestOld", "failed", "real failure"), GO_GEN, runs, false, { source: SOURCE, func: "TestOld" });
+    expect(oldOne.status).toBe("unknown");
+    expect(oldOne.detail).toContain("Brandnew");
+  });
+
+  test("TypeScript keeps the default reading of the test's body: a name in a comment counts as used", () => {
+    const TS_GEN = "tests/arnx_generated/a.test.ts";
+    const ts = (name: string, outcome: string, message = ""): TestResult =>
+      ({ testId: `${TS_GEN} > ${name}`, fileAttr: TS_GEN, name, outcome, message });
+    const source = 'test("t", () => {\n  // Gadget is what this is about\n  expect(1).toBe(2);\n});\n';
+    const message = "ReferenceError: Gadget is not defined";
+    const base = three(run({ testId: TS_GEN, fileAttr: TS_GEN, name: TS_GEN, outcome: "failed", message }));
+    const b = judgeBefore(ts("t", "failed", "expected 2"), TS_GEN, base, false, { source, func: "t" });
+    expect(b.status).toBe("new-code");
+    expect(usesNew(source, "t", new Set(["Gadget"]))).toBe("Gadget");
+  });
+});
+

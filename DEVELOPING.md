@@ -443,7 +443,7 @@ listed), and the proof takes setup's runs (`setAside` in the result, `uncovered_
 A round clears every file with the adapter's writable names from tests_dir, so a tests_dir holding the project's own
 such files (Python's test_*.py, conftest.py, __init__.py; not those under the folders `accept` keeps tests in) is
 refused by `try_project`, `propose`, `approve` and `review` (`ownTestsInWriteDir`). Rust's writable names are arnx's own
-(`arnx_generated_*.rs`), so a crate's tests in `tests/` never count.
+(`arnx_generated_*.rs`) and so are Go's (`<name>_arnx_test.go`), so a crate's or module's own tests never count.
 A project the agent gives no tests_dir gets one from its runner's own configuration when the default folder lies
 outside it (`testsdir.ts`: vitest include and projects, jest roots, testMatch and testRegex, pytest testpaths; set in
 the file by `withTestsDirs`, said once to the agent): a new `arnx_generated` folder beside most of the project's own
@@ -469,7 +469,8 @@ and the manifests that key the environment image. `review.yaml` names the langua
 Implemented: Python (`adapters/python.ts`: pytest, JUnit xunit1, a text-based skip marker), JavaScript/TypeScript
 (`adapters/typescript.ts`: vitest, jest via its JSON report, node:test, bun; kept tests get their relative imports
 rewritten) and Rust (`adapters/rust.ts`: cargo-nextest JUnit; generated tests are integration tests in the crate's
-`tests/`). More languages are planned. JUnit walking shared by adapters is in `adapters/junit.ts`.
+`tests/`) and Go (`adapters/go.ts`: `go test -json`; each generated test is a test-only package in its own folder,
+`<name>_arnx/<name>_arnx_test.go`, so a file that does not compile loses only itself). More languages are planned. JUnit walking shared by adapters is in `adapters/junit.ts`.
 
 Rust keeps its build within a session (`keepBuild`): the session's runs share one container, started at its first run
 with every limit a run has, so cargo starts each run from the target the last run left instead of compiling the
@@ -485,7 +486,7 @@ at `Session` in `sandbox.ts`.
 
 Kept test files are named after what they protect, inside a folder that keeps the review id, under `.arnx/tests/` at
 the path each runs from (`.arnx/tests/<project root>/tests/arnx/r<id>/`, i.e. `accepted_tests_dir` under the
-project's root; while that is the default, TypeScript uses `__tests__/arnx/r<id>/`; Rust has no folder, as cargo builds
+project's root; while that is the default, TypeScript uses `__tests__/arnx/r<id>/` and Go `r<id>/<name>_arnx/<name>_arnx_test.go` (one folder per file); Rust has no folder, as cargo builds
 only `tests/*.rs`, so the id is a prefix: `tests/arnx_<id>_<name>.rs`). The name comes from the file's first finding
 marked real (F1, F2, … order): the title of its problem (its group from `explain`), else its explanation's first
 line, else its test function's name, made into lowercase ASCII words joined by `_` (`slugify`: at most 50 characters,
@@ -495,7 +496,7 @@ the name in its own form (`test_<name>.py`, `<name>.test.ts`, `arnx_<id>_<name>.
 arnx-helpers) keep theirs. A name that another file in the repository already has (the owner's tests, an earlier
 review's in `.arnx/tests/`; not this review's own) gets `_2`, `_3`: pytest imports test files by name. `accepted.json`
 maps each generated file to where it went (`moved`), which the fix prompt uses; `arnx check` runs whatever is in the
-accepted folders under `.arnx/tests/` (and a Rust crate's `tests/arnx_<id>_*.rs`: the adapter's `kept`), so tests
+accepted folders under `.arnx/tests/` (and a Rust crate's `tests/arnx_<id>_*.rs`: the adapter's `kept`; Go's are in the folders), so tests
 kept under the older names (`test_<id>_<name>.py`, `<name>.r<id>.test.ts`) keep running. Accepting again under other
 marks can rename a file: the copy under its old name is removed.
 
@@ -528,7 +529,7 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 |---|---|
 | `route.ts` | Which projects review a change; what no project covers |
 | `detect.ts` | Layout found without a model: candidate projects, runners, workspaces, services |
-| `facts.ts` | What the files settle per candidate without a model: Node/Python/Rust/Bun versions, package manager and install root, CI jobs (GitHub Actions; GitLab best effort), compose and CI services, Dockerfile base images, example env names |
+| `facts.ts` | What the files settle per candidate without a model: Node/Python/Rust/Go/Bun versions, package manager and install root, CI jobs (GitHub Actions; GitLab best effort), compose and CI services, Dockerfile base images, example env names |
 | `draft.ts` | The review.yaml draft setup's agent starts from, written from the facts; unsettled values marked `# unsure:` |
 | `languages.ts` | Languages found without a model (extensions, manifests, vendored folders left out): a repository written only in languages arnx does not review fails doctor's `Languages` check, so setup and review stop before any model call; in a mixed one their files count as uncovered on their own |
 | `cli.ts` | Argument parsing, prompts, printing, exit codes; all I/O is injectable for tests |
@@ -537,7 +538,7 @@ Approval's stamp covers review.yaml only, so editing the file needs no approve. 
 | `settings.ts` | `.arnx/config.toml`: consent, models, budgets, prices, `[cloud]` |
 | `config.ts` | `.arnx/review.yaml`: validation (YAML scalars resolved as PyYAML does), secret-looking variable names refused, approval hash |
 | `secrets.ts` | What is never sent or copied: secret file names, key-like text, credential variable names; `scanKeys`: what a file's key-like text comes to, or its comment lines blanked when that text is only in comments; `fakeKeys` and `maskPrivateKeys`: a private key's fake in the sandbox and `[private key]` on the wire |
-| `comments.ts` | Where a JavaScript, TypeScript, Rust or Python file's comments are (strings and literals skipped) |
+| `comments.ts` | Where a JavaScript, TypeScript, Rust, Go or Python file's comments are (strings and literals skipped) |
 | `ignore.ts` | `.arnxignore` matching, and the proposal of data-like files for `init` |
 | `boundary.ts` | The one filter: `Boundary` holds each value with its JSON, URL, case, hex and base64 forms (an encoded form's stand-in is the value's stand-in, encoded the same way; only plain forms come back from `unmask`). `maskedCopy` masks what is written or printed. `swapFor` gives a model's text back as it means where real files are: a value real there comes back, a certain one's stand-in stays, and one those files hold stays. A value's slow hash is taken only when the text has a window of its shape. |
 | `change.ts` | Resolve the change (diff lines with key-like text in comments blanked); build the snapshot, and its build context beside it (`<snapshot>.build`: hard links, but for the files that hold a guess; none when no guess is left to replace). Certain values (`isCertainRule`: `key-shaped`, `address-password`) get stand-ins in both; guesses (`named-*`) only in the build context, in every file but the project's manifests (`manifestRule`: what keys its image; before review.yaml, manifests outside folders of examples and tests) and lockfiles. A `named-word` guess (`Summer2024`) that code uses as a name anywhere is dropped from the filter too. `.env*` files at the repository's top give values only. The build context's hard links mean a run writing in place into a file with no guess changes that file there too: it matters only for a build after runs on one snapshot (setup's later tries, a before-check whose image is gone), and copying instead would double each snapshot's disk |

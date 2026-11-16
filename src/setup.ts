@@ -422,7 +422,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
         tailOf(result.output);
         throw new LeftOutNeeded([...new Set([...needed, ...named, ...guessed])]);
       }
-      const hints = diagnose(results, cfg, snap);
+      const hints = diagnose(results, cfg, snap, result.output);
       // Failing files with no other explanation run once more, together and without the rest of the suite: those
       // that pass then depend on a file left out. Only after a whole-suite run, when other files did run.
       const apart = targets.length || sample ? [] : unexplainedFiles(results, cfg, hints);

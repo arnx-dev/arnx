@@ -6,7 +6,7 @@ The flow, what each step writes, and what its results mean. Start with the [READ
     arnx init → arnx review → arnx triage → arnx accept → arnx prompt → arnx check
 
 arnx works best on single-package Python and TypeScript repositories. A repository with several packages is set up one part at a time: a
-review waits up to 10 minutes for the part its change touches, and `arnx setup` stops at 40 minutes overall (the default
+review waits up to 10 minutes (20 for Go and Rust, which compile first) for the part its change touches, and `arnx setup` stops at 40 minutes overall (the default
 `setup_minutes`). Tests that run only in a browser (Playwright, Cypress and the like) are not run; setup lists them
 under `uncovered`. Details are in [SAFETY.md](SAFETY.md#what-arnx-covers).
 
@@ -90,7 +90,7 @@ fresh clone, it says there is no copy to compare), stamp or not; a file whose st
 that copy's (a stamp recomputed by hand) counts as changed too. With `--json`, the command's object says so in
 `reproved`. Then the suites run and the file is stamped again, followed by what
 is worth a look; the changes go into `.arnx/setup/approval.md` too. When a suite fails there, the command stops and
-names the failing tests (exit 3). Before a review the proof gets 10 minutes: past that the review stops (exit 3) and
+names the failing tests (exit 3). Before a review the proof gets 10 minutes (20 with a Go or Rust project): past that the review stops (exit 3) and
 says what ran out (the image build or the suites). `arnx approve` runs the same proof on its own, without a limit,
 saying the same.
 
@@ -107,6 +107,18 @@ to the setup agent once; what it cannot fix in the sandbox is recorded with its 
 hides every test in it, so it is recorded as one (`"load": true`) and listed apart under Worth a look. Its hash is part of the stamp, so a hand edit is proven again like one of `review.yaml`. A
 `review.yaml` from before 0.1.5 with `known_failing` keeps working; `arnx setup --baseline` replaces it with the
 failing tests in those files.
+
+### Go modules
+
+Go works, but it is arnx's newest language, so here is where it stands:
+
+- **Exported names only.** Each generated test is its own test-only package in a folder of its own
+  (`<name>_arnx/<name>_arnx_test.go`), so it sees your module's exported API; `package main` and unexported code are
+  out of reach, and a bug behind them is found through an exported function, or not at all.
+- **Nested packages.** A package such as `a/internal/b` is covered by a project at `a`, whose module root holds
+  `go.mod`; under a `go.work`, only its `use` members are projects.
+- **Image.** Setup picks a `golang:<major.minor>-bookworm` image from the `go` line of `go.mod` (1.24 at least).
+- **Newest.** Tried on public Go modules, small libraries to large repositories; tell us what broke.
 
 ### Rust crates
 
@@ -222,8 +234,8 @@ checked, and review.md and review.json (`types_unchecked`) record it. Run your o
    picked it in `arnx triage`) or left it as it came.
 2. `arnx accept <id>` (without an id: the review started last). Tests behind findings marked real are copied into
    `.arnx/tests/`, at the path each runs from: `.arnx/tests/<project root>/tests/arnx/r<id>/` (`accepted_tests_dir`
-   in `.arnx/config.toml`; at that default a TypeScript project uses `__tests__/arnx/r<id>/`, and a Rust crate
-   `tests/arnx_<id>_<name>.rs`). Each file, support files such as `conftest.py` too, is stored with `.arnx` appended
+   in `.arnx/config.toml`; at that default a TypeScript project uses `__tests__/arnx/r<id>/`, a Rust crate
+   `tests/arnx_<id>_<name>.rs`, and a Go module `r<id>/<name>_arnx/<name>_arnx_test.go`). Each file, support files such as `conftest.py` too, is stored with `.arnx` appended
    to its name (`test_x.py.arnx`), which no test runner, type checker or linter picks up: your own test run, `tsc` and
    eslint never see them, whatever their configuration. Only `arnx check` puts them in place, under the names they
    run by, in a throwaway copy. Each file is named after the problem it

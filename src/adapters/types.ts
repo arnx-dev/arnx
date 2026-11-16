@@ -1,7 +1,7 @@
 // Everything that depends on the reviewed repository's language goes behind one interface. Piece 1 implements
 // Python; TypeScript, Rust and C# add adapters, not redesigns.
 
-export type AdapterId = "python" | "typescript" | "rust" | "csharp";
+export type AdapterId = "python" | "typescript" | "rust" | "go" | "csharp";
 
 /** One test in one run, from the runner's report. */
 export interface TestResult {
@@ -53,6 +53,12 @@ export interface Adapter {
   defaultTestsDir: string;
   /** Files the agent may write under the tests directory; a round collects exactly these. */
   writable: RegExp;
+  /** Why a file `writable` allows cannot go at this path, relative to the tests directory; null when it can. Absent:
+   * any path there will do. */
+  pathProblem?(relToWriteDir: string): string | null;
+  /** Whether a generated test refers to this changed file (path relative to the project's root; tests: test file to
+   * its raw text). Absent: the test must name the file. */
+  refersTo?(path: string, tests: Record<string, string>): boolean;
   /** One-test files that prove the runner picks up files in the tests directory (any one reported passing is
    * enough; file names relative to that directory). */
   probes(runner: string): { file: string; source: string }[];
@@ -79,8 +85,10 @@ export interface Adapter {
   serialFlag?(testCommand: string, read: (rel: string) => string | null, runner: string): string | null;
   /** Parse the report file the command wrote; null when it is unreadable. projectRoot is the project's directory
    * relative to the repository root; `exists` tells whether a path relative to it is a file in the snapshot (Rust
-   * finds the source file of a test inside src/ by its module path). */
-  parseReport(text: string, runner: string, projectRoot: string, exists?: (rel: string) => boolean): TestResult[] | null;
+   * finds the source file of a test inside src/ by its module path); `sourceLine` reads one line (1-based) of a file
+   * relative to it, null when unreadable (Go tells the line that failed a test from the one that logged). */
+  parseReport(text: string, runner: string, projectRoot: string, exists?: (rel: string) => boolean,
+              sourceLine?: (file: string, line: number) => string | null): TestResult[] | null;
   /** The parsed results with the failure messages the report left empty filled from the run's output (bun's JUnit
    * report holds none); absent for runners whose report has them. */
   messagesFrom?(results: TestResult[], output: string, runner: string): TestResult[];

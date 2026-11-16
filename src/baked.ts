@@ -27,7 +27,7 @@ export interface Baked { copies: BakedCopy[]; differ: string[] }
 /** Paths no copy of the project is looked for under: the mounted code itself, the system and package stores. */
 const PRUNED_PATHS = ["/src", "/proc", "/sys", "/dev", "/etc", "/var", "/run", "/tmp", "/boot", "/bin", "/sbin", "/lib",
   "/lib32", "/lib64", "/libx32", "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/libexec", "/usr/share", "/usr/include",
-  "/usr/local/cargo", "/usr/local/rustup"];
+  "/usr/local/cargo", "/usr/local/rustup", "/usr/local/go", "/go/pkg/mod", "/opt/arnx-gocache"];
 const PRUNED_NAMES = ["node_modules", "site-packages", "dist-packages", ".git"];
 const FIND = `find / -xdev \\( ${[...PRUNED_PATHS.map((p) => `-path ${p}`), ...PRUNED_NAMES.map((n) => `-name ${n}`)]
   .join(" -o ")} \\) -prune -o -type f -print 2>/dev/null; true`;

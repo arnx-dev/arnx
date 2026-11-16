@@ -1,25 +1,25 @@
 // Which languages a repository is written in, found without a model: source files counted by extension and
-// manifests that name a language, vendored and build folders left out. arnx reviews Python, JavaScript/TypeScript
-// and Rust; a repository written only in other languages is told so before any model is called, and in a mixed one
+// manifests that name a language, vendored and build folders left out. arnx reviews Python, JavaScript/TypeScript,
+// Rust and Go; a repository written only in other languages is told so before any model is called, and in a mixed one
 // the other languages' files count as uncovered on their own, so the setup agent never has to explain them.
 import { posix } from "node:path";
 
 /** Display names of the languages arnx reviews. */
-export const SUPPORTED_NAMES = "Python, JavaScript/TypeScript and Rust";
+export const SUPPORTED_NAMES = "Python, JavaScript/TypeScript, Rust and Go";
 export const ISSUES_URL = "https://github.com/arnx-dev/arnx/issues";
 
 const SUPPORTED_EXT: Record<string, string> = { py: "python", pyi: "python", js: "typescript", jsx: "typescript",
   mjs: "typescript", cjs: "typescript", ts: "typescript", tsx: "typescript", mts: "typescript", cts: "typescript",
-  rs: "rust" };
+  rs: "rust", go: "go" };
 /** Languages arnx does not review, by extension, as their display names. */
-const OTHER_EXT: Record<string, string> = { go: "Go", c: "C/C++", h: "C/C++", cc: "C/C++", cpp: "C/C++",
+const OTHER_EXT: Record<string, string> = { c: "C/C++", h: "C/C++", cc: "C/C++", cpp: "C/C++",
   cxx: "C/C++", hpp: "C/C++", hh: "C/C++", hxx: "C/C++", cs: "C#", fs: "F#", fsx: "F#", java: "Java", kt: "Kotlin",
   kts: "Kotlin", scala: "Scala", swift: "Swift", rb: "Ruby", php: "PHP", hs: "Haskell", lhs: "Haskell",
   ex: "Elixir", exs: "Elixir", erl: "Erlang", hrl: "Erlang", clj: "Clojure", cljs: "Clojure", cljc: "Clojure",
   dart: "Dart", lua: "Lua", zig: "Zig", nim: "Nim", jl: "Julia", ml: "OCaml", mli: "OCaml", pl: "Perl", pm: "Perl",
   groovy: "Groovy" };
 /** Manifests that name a language arnx does not review (exact file names, then extensions). */
-const OTHER_MANIFEST: Record<string, string> = { "go.mod": "Go", "CMakeLists.txt": "C/C++", "meson.build": "C/C++",
+const OTHER_MANIFEST: Record<string, string> = { "CMakeLists.txt": "C/C++", "meson.build": "C/C++",
   "pom.xml": "Java", "build.gradle": "Java", "build.gradle.kts": "Kotlin", "build.sbt": "Scala",
   "Package.swift": "Swift", Gemfile: "Ruby", "composer.json": "PHP", "stack.yaml": "Haskell",
   "cabal.project": "Haskell", "mix.exs": "Elixir", "rebar.config": "Erlang", "deps.edn": "Clojure",
@@ -34,7 +34,7 @@ const MAX_ROOTS = 5;
 
 export interface OtherLanguage { name: string; files: number; manifests: number; roots: string[] }
 export interface LanguageSurvey {
-  /** Source files per supported language (python, typescript, rust). */
+  /** Source files per supported language (python, typescript, rust, go). */
   supported: Record<string, number>;
   /** Languages arnx does not review, most files first. */
   others: OtherLanguage[];
@@ -49,9 +49,9 @@ export function otherLanguageOf(path: string): string | null {
   return OTHER_EXT[extOf(path)] ?? null;
 }
 
-const SUPPORTED_NAME: Record<string, string> = { python: "Python", typescript: "JavaScript/TypeScript", rust: "Rust" };
+const SUPPORTED_NAME: Record<string, string> = { python: "Python", typescript: "JavaScript/TypeScript", rust: "Rust", go: "Go" };
 
-/** The language of a source file: `id` is arnx's adapter id for a language it reviews (python, typescript, rust) and the
+/** The language of a source file: `id` is arnx's adapter id for a language it reviews (python, typescript, rust, go) and the
  * display name for another; null for a file that is no source (or lies in a vendored or build folder). */
 export function sourceLanguageOf(path: string): { id: string; name: string } | null {
   if (skipped(path)) return null;

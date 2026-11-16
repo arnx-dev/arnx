@@ -25,7 +25,7 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
   Files you committed are left for the `git rm` it prints, so the removal shows in a commit. Accepted tests are your
   tests by then: kept unless `--tests`. Your arnx cloud login and the arnx program itself are not touched.
 - Your model keys stay in the arnx process. Files named like secrets are not sent to a model, a key file with a key in it aside
-  (below). A file left out is named at setup and in each review. When every key-shaped string in a JavaScript, TypeScript, Python or Rust file,
+  (below). A file left out is named at setup and in each review. When every key-shaped string in a JavaScript, TypeScript, Python, Rust or Go file,
   a private key aside, is inside a comment that has its lines to itself (a doc example), the file is sent with those comment
   lines blanked instead, and setup names the file and its lines. Everything else that may be a secret reaches a model as a
   stand-in, a fake of the same shape (its prefix such as `sk-`, `whsec_` or `AKIA` kept, then the same length and kinds
@@ -176,7 +176,7 @@ What runs where, what leaves your machine, and what arnx keeps. Security reports
 ## What arnx covers
 
 arnx works best on single-package Python and TypeScript repositories. A repository with several packages is set up one part at a time: a review
-waits up to 10 minutes for the part its change touches, and `arnx setup` stops at 40 minutes overall (`setup_minutes`
+waits up to 10 minutes (20 for Go and Rust, which compile first) for the part its change touches, and `arnx setup` stops at 40 minutes overall (`setup_minutes`
 under `[budget]`). Parts it did not reach are listed under `uncovered`, for `arnx setup --add`. Tests that run only in a
 browser (Playwright, Cypress, Storybook, vitest's browser mode) are not run, and a web UI app gets two counted runs at its unit
 tests.

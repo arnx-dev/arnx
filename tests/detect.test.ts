@@ -124,3 +124,109 @@ test("untracked files count as the snapshot holds them; git-ignored ones do not"
   expect(d.languages.typescript).toBe(2);
   expect(d.candidates[0]!.evidence).toContain("1 test file");
 });
+
+test("a go.mod gives one go project", () => {
+  const d = detect(repoWith({
+    "go.mod": "module example.com/x\n\ngo 1.24\n",
+    "go.sum": "",
+    "x.go": "package x\n",
+    "x_test.go": "package x\n",
+    "sub/y_test.go": "package sub\n",
+  }));
+  expect(short(d)).toEqual([[".", "go", "gotest", "go"]]);
+  expect(d.candidates[0]!.evidence[0]).toBe("2 test files");
+  expect(d.languages.go).toBe(3);
+});
+
+test("a go.work with two use members gives two go projects with install_root .", () => {
+  const d = detect(repoWith({
+    "go.work": "go 1.24\n\nuse (\n\t./a\n\t./b\n)\n",
+    "go.work.sum": "",
+    "a/go.mod": "module example.com/a\n",
+    "a/a.go": "package a\n",
+    "b/go.mod": "module example.com/b\n",
+    "b/b.go": "package b\n",
+  }));
+  expect(short(d)).toEqual([["a", "go", "gotest", "go"], ["b", "go", "gotest", "go"]]);
+  expect(d.candidates.every((c) => c.evidence.includes("install_root: ."))).toBe(true);
+  expect(d.workspaces).toEqual(["."]);
+});
+
+test("a single-line go.work use gives its member", () => {
+  const d = detect(repoWith({
+    "go.work": "go 1.24\nuse ./m\n",
+    "m/go.mod": "module example.com/m\n",
+    "m/m.go": "package m\n",
+  }));
+  expect(short(d)).toEqual([["m", "go", "gotest", "go"]]);
+  expect(d.candidates[0]!.evidence).toContain("install_root: .");
+});
+
+test("a go.work use with a trailing slash still names its member", () => {
+  for (const work of ["go 1.24\nuse ./a/\n", "go 1.24\n\nuse (\n\t./a/\n)\n", 'go 1.24\nuse "./a//"\n']) {
+    const d = detect(repoWith({
+      "go.work": work,
+      "a/go.mod": "module example.com/a\n",
+      "a/a.go": "package a\n",
+    }));
+    expect(short(d)).toEqual([["a", "go", "gotest", "go"]]);
+    expect(d.candidates[0]!.evidence).toContain("install_root: .");
+  }
+});
+
+test("a go.mod under vendor, third_party or testdata is no project", () => {
+  const d = detect(repoWith({
+    "vendor/x/go.mod": "module x\n", "vendor/x/x.go": "package x\n",
+    "third_party/y/go.mod": "module y\n", "third_party/y/y.go": "package y\n",
+    "testdata/z/go.mod": "module z\n", "testdata/z/z.go": "package z\n",
+  }));
+  expect(d.candidates).toEqual([]);
+});
+
+test("a Python project with a stray go.mod and no .go file stays one Python project", () => {
+  const d = detect(repoWith({
+    "pyproject.toml": "[project]\nname='x'\n",
+    "app.py": "",
+    "tools/go.mod": "module example.com/tools\n",
+  }));
+  expect(d.candidates.map((c) => c.language)).toEqual(["python"]);
+});
+
+test("under a go.work only its use members are projects", () => {
+  const d = detect(repoWith({
+    "go.work": "go 1.24\nuse ./a\n",
+    "a/go.mod": "module example.com/a\n", "a/a.go": "package a\n",
+    "b/go.mod": "module example.com/b\n", "b/x.go": "package b\n",
+  }));
+  expect(short(d)).toEqual([["a", "go", "gotest", "go"]]);
+});
+
+test("a go.work with use . gives the root module", () => {
+  const d = detect(repoWith({
+    "go.work": "go 1.24\nuse (\n\t.\n)\n",
+    "go.mod": "module example.com/r\n", "r.go": "package r\n",
+  }));
+  expect(short(d)).toEqual([[".", "go", "gotest", "go"]]);
+});
+
+test("a Go module under a hidden directory is not a project, unless a go.work uses it", () => {
+  const d = detect(repoWith({
+    "go.mod": "module example.com/r\n", "r.go": "package r\n",
+    ".github/scripts/tool/go.mod": "module example.com/tool\n", ".github/scripts/tool/t.go": "package t\n" }));
+  expect(short(d)).toEqual([[".", "go", "gotest", "go"]]);
+  const w = detect(repoWith({
+    "go.work": "go 1.24\nuse ./.tools/x\n",
+    ".tools/x/go.mod": "module example.com/x\n", ".tools/x/x.go": "package x\n" }));
+  expect(short(w)).toEqual([[".tools/x", "go", "gotest", "go"]]);
+});
+
+test("a Go module under a folder starting with _ is not a project, unless a go.work uses it", () => {
+  const d = detect(repoWith({
+    "go.mod": "module example.com/r\n", "r.go": "package r\n",
+    "_examples/demo/go.mod": "module example.com/demo\n", "_examples/demo/d.go": "package d\n" }));
+  expect(short(d)).toEqual([[".", "go", "gotest", "go"]]);
+  const w = detect(repoWith({
+    "go.work": "go 1.24\nuse ./_tools/x\n",
+    "_tools/x/go.mod": "module example.com/x\n", "_tools/x/x.go": "package x\n" }));
+  expect(short(w)).toEqual([["_tools/x", "go", "gotest", "go"]]);
+});

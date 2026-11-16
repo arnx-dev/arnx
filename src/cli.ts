@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { clip } from "./events";
-import { repoLanguages } from "./detect";
+import { compiledLanguages, detect, isCompiled, repoLanguages } from "./detect";
 import { unsupportedText } from "./languages";
 // arnx command line. Exit codes: 0 fine (confirmed findings are worth a look, not a failure), 1 a finding no second opinion saw, 2 incomplete or failed, 3 setup
 // required, 4 (check only) accepted tests changed since accept, 130 interrupted.
@@ -28,7 +28,7 @@ import { type Account, byokHint, CloudClient, credentialsPath, deleteCredentials
   type Fetch, tokenFor, usd } from "./cloud";
 import { dockerSession, suffixReviewCopies } from "./testround";
 import type { SessionFactory } from "./sandbox";
-import { branchBase, changeLimits, describe, describeBlanked, fakedKeysText, git, hasCommits, leftOutBrief, pinOfFile, repoRoot, resolveChange } from "./change";
+import { branchBase, changeLimits, describe, describeBlanked, fakedKeysText, filesAt, git, hasCommits, leftOutBrief, pinOfFile, repoRoot, resolveChange } from "./change";
 import { docsFilter, route, setupParts, uncoveredChange } from "./route";
 import { SOURCE } from "./untested";
 import { approvalStamp, isFileApproved, isSeedFile, loadReviewFile, parseReviewFile, readSecretPins, type ReviewFile,
@@ -81,6 +81,12 @@ export const sendQuestion = (to: string) => `Send your change and the files arnx
 export const DOCKER_LINE = "(Tests run in Docker on this machine.)";
 /** The most minutes a review waits for the quick setup of what its change touches; `arnx setup` takes longer. */
 export const QUICK_MINUTES = 10;
+/** The same for Go and Rust, which compile before a test runs (detect's isCompiled). */
+export const QUICK_MINUTES_COMPILED = 20;
+const quickMinutes = (compiled: string[]) => compiled.length ? QUICK_MINUTES_COMPILED : QUICK_MINUTES;
+/** "Go compiles", "Go and Rust compile". */
+const compileWords = (compiled: string[]) =>
+  `${compiled.map((l) => l === "go" ? "Go" : "Rust").join(" and ")} compile${compiled.length > 1 ? "" : "s"}`;
 /** Where a key for a built-in provider is made. */
 const KEY_PAGES: Record<string, string> = {
   ANTHROPIC_API_KEY: "https://console.anthropic.com/settings/keys",
@@ -404,6 +410,12 @@ class Commands {
     }
     const langs = repoLanguages(repo);
     if (langs?.onlyOthers) this.d.out(`Note: ${unsupportedText(langs.survey)}`);
+    // Said before the first review waits on it: Go and Rust compile, so their first setup gets longer.
+    const compiled = langs && !langs.onlyOthers
+      ? [...new Set(detect(repo).candidates.map((c) => c.language).filter(isCompiled))].sort() : [];
+    const firstSetup = Math.min(now?.setupMinutes ?? QUICK_MINUTES_COMPILED, quickMinutes(compiled));
+    if (compiled.length) this.d.out(`${compileWords(compiled)} before any test runs: the first review may take up to ` +
+      `${firstSetup} min to set up.`);
     this.d.out("");
     // The flow's next step; with arnx cloud and no login, the login first.
     const then = whatNext(repo).command;
@@ -417,7 +429,8 @@ class Commands {
     const action = !existed ? "created" : force ? "replaced" : "kept";
     this.emit("ok", 0, { state: !existed ? "created" : force ? "replaced" : "already-initialized",
       files: [{ path: config, action }, { path: IGNORE_FILE, action: ignore ? "created" : "kept" }], cloud, next,
-      skill_installed: skill, ...langs?.onlyOthers ? { unsupported: unsupportedText(langs.survey) } : {} });
+      skill_installed: skill, ...langs?.onlyOthers ? { unsupported: unsupportedText(langs.survey) }
+        : { first_setup_minutes: firstSetup } });
     return 0;
   }
 
@@ -916,10 +929,13 @@ class Commands {
     const report = (result: string, code: number, fields: Record<string, unknown> = {}) => {
       if (!(quick && add)) this.emit(result, code, fields);
     };
-    // A review waits on a quick setup: it stops at QUICK_MINUTES, and `arnx setup` takes the rest.
-    const cap = quick ? Math.min(s.setupMinutes, QUICK_MINUTES) : s.setupMinutes;
-    this.d.out(quick ? `${add ? "Setting up" : "First run: setting up"} just enough to test ${quick.why ?? quick.what} (about ` +
-      `2–6 min, stops at ${cap} min).` : setupPreview(repo, s, untracked));
+    // A review waits on a quick setup: it stops at QUICK_MINUTES (Go and Rust: QUICK_MINUTES_COMPILED), and
+    // `arnx setup` takes the rest.
+    const compiled = quick ? compiledLanguages(detect(repo, filesAt(repo, null, untracked)).candidates, quick.files) : [];
+    const cap = quick ? Math.min(s.setupMinutes, quickMinutes(compiled)) : s.setupMinutes;
+    this.d.out(quick ? `${add ? "Setting up" : "First run: setting up"} just enough to test ${quick.why ?? quick.what} (` +
+      `${compiled.length ? `${compileWords(compiled)} first: up to ${cap} min` : `about 2–6 min, stops at ${cap} min`}).`
+      : setupPreview(repo, s, untracked));
     const outDir = join(repo, ".arnx", "setup");
     // JEV is asked only when the config turns it on and its key is set (the key alone does nothing).
     const jev = jevKey(s, this.d.env);
@@ -1147,13 +1163,14 @@ class Commands {
     this.reproved = { changes: st.changes, no_copy: st.changes === null };
     const why = changes === null ? "is not proven yet" : "changed since its proof";
     const last = lastProof(repo);
-    // A review does not wait long for it (`limited`): past QUICK_MINUTES it stops, and `arnx approve` proves the file
+    // A review does not wait long for it (`limited`): past QUICK_MINUTES (a Go or Rust project in the file:
+    // QUICK_MINUTES_COMPILED) it stops, and `arnx approve` proves the file
     // without a limit.
     const now = () => this.clock();
-    const limit: TimeLimit | undefined = limited
-      ? { at: now() + QUICK_MINUTES * 60_000, now, minutes: QUICK_MINUTES } : undefined;
+    const minutes = quickMinutes(file.projects.map((p) => p.language).filter(isCompiled));
+    const limit: TimeLimit | undefined = limited ? { at: now() + minutes * 60_000, now, minutes } : undefined;
     const late = (what: string) => new SetupRequired(`${REVIEW_FILE} ${why}: ${what} did not finish in ` +
-      `${QUICK_MINUTES} min.\nNext: arnx approve (runs it without a limit)`);
+      `${minutes} min.\nNext: arnx approve (runs it without a limit)`);
     let r;
     try {
       r = await this.approveRun(repo, a, undefined, untracked, { warnings: warningsOf(repo, file, [], untracked),
