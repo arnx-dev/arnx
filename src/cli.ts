@@ -63,7 +63,7 @@ import { approveFile, coverageFiles, coverageMap, describeCoverage, entryHoldsTe
   DISK_FULL_STOP, WEB_UI_STOP } from "./setup";
 import { withRepoHolds } from "./standins";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, notTestedRecord, PROVEN_BASELINE,
-  PROVEN_COPY, proofState, quickCoverageLine, repoTypecheckGaps, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
+  PROVEN_COPY, proofState, quickCoverageLine, quickOutsideLine, repoTypecheckGaps, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
 import { isoSeconds } from "./util";
 import { spend } from "./spend";
 import { installSkills, SKILL_DIRS, skillDirsShown, skillStates, userSkillRoot } from "./skill";
@@ -1054,6 +1054,8 @@ class Commands {
         `${APPROVAL_RECORD}`);
       const left = quickCoverageLine(proposed, quick.files, !!result.waiting?.length);
       if (left) this.d.out(left);
+      const outside = quickOutsideLine(proposed, quick.files);
+      if (outside) this.d.out(outside);
       for (const line of repoTypecheckGaps(proposed, repo)) this.d.out(line);
       if (result.waiting?.length) {
         this.d.out(`Not set up yet, though ${result.waiting.length === 1 ? "it uses" : "they use"} what this change ` +

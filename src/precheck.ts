@@ -9,7 +9,7 @@ import type { Listing, TestResult } from "./adapters/types";
 import type { BaselineTest } from "./baseline";
 import type { ReviewConfig } from "./config";
 import { describeHints, diagnose, firstErrors } from "./diagnose";
-import { ownerFile, runTests } from "./outcomes";
+import { ownerFile, projectReader, runTests } from "./outcomes";
 import { REPORT_DIR, type Runner, type RunResult } from "./sandbox";
 import { namesFor } from "./testsdir";
 import { isKeptPath, writeDirOf } from "./testround";
@@ -36,7 +36,8 @@ const few = (xs: string[], max = 3) => xs.slice(0, max).join(", ") + (xs.length 
 export async function listTests(session: Runner, snap: string, cfg: ReviewConfig, targets: string[], name = "list.json")
   : Promise<{ listing: Listing; result: RunResult } | null> {
   const adapter = adapterFor(cfg);
-  const command = adapter.listCommand?.(cfg.testCommand, targets, `/src/${REPORT_DIR}/${name}`, cfg.runner);
+  const command = adapter.listCommand?.(cfg.testCommand, targets, `/src/${REPORT_DIR}/${name}`, cfg.runner,
+    projectReader(cfg, snap));
   if (!command || !adapter.parseList) return null;
   const path = join(snap, REPORT_DIR, name);
   rmSync(path, { force: true });
@@ -56,7 +57,7 @@ export function listingProblem(listing: Listing, exitCode: number | null, known:
   if (listing.failed) {
     if (exitCode === 127) return "listing the tests stopped: the runner is not installed (exit 127); install it in install";
     return `listing the tests stopped with an error (exit ${exitCode ?? "?"}) before any test ran: the runner does not ` +
-      "start, or its configuration does not load; the end of the output says why";
+      "start, or its configuration does not load; its error lines say why";
   }
   const broken = listing.broken.filter((f) => !known(f));
   const n = broken.length;
@@ -69,6 +70,20 @@ export function listingProblem(listing: Listing, exitCode: number | null, known:
     return "listing the tests found none: test_command collects no tests";
   }
   return "";
+}
+
+/** How many of the runner's error lines go to the agent, and how long each may be. */
+const ERROR_LINES = 8, ERROR_LINE_MAX = 300;
+/** The runner's own error lines in a list run that stopped, in order, for the setup agent: a runner says what stops
+ * it first and lists what it can after, and the agent reads only the end of the output. Of a traceback pytest prints
+ * as INTERNALERROR lines, only the last (the error itself). "" when no line looks like one. */
+export function runnerErrors(output: string): string {
+  const lines = output.split("\n").map((l) => l.trimEnd());
+  const internal = lines.filter((l) => l.startsWith("INTERNALERROR>")).at(-1);
+  const errors = lines.filter((l) => /^(?:ERROR|error|Error|FATAL|fatal)\b/.test(l));
+  const all = [...new Set([...errors, ...(internal ? [internal] : [])])].slice(0, ERROR_LINES);
+  if (!all.length) return "";
+  return "The runner's error lines:\n" + all.map((l) => `- ${l.slice(0, ERROR_LINE_MAX)}`).join("\n");
 }
 
 /** Up to SAMPLE_FILES of the listed files, the smallest first, as targets (relative to the project root); none when
@@ -173,7 +188,7 @@ export async function look(session: Runner, snap: string, cfg: ReviewConfig, acc
     const { listing, result } = listed;
     counts = { tests: listing.tests ?? listing.files.length, files: listing.files.length, listed: listing.files };
     const why = listingProblem(listing, result.exitCode, known);
-    if (why) return { ...none, ...counts, early: { summary: why + (!proof && files && listing.broken.length && !listing.failed ? loads : again), output: result.output, hints: "", kind: "listing" } };
+    if (why) return { ...none, ...counts, early: { summary: why + (!proof && files && listing.broken.length && !listing.failed ? loads : again), output: result.output, hints: listing.failed ? runnerErrors(result.output) : "", kind: "listing" } };
     if (!listing.files.length) return { ...none, ...counts };
     const probe = await probeListed(session, snap, cfg);
     if (probe && !probe.seen) {

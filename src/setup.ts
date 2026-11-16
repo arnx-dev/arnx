@@ -23,7 +23,7 @@ import { configSuspects,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
 import { draftYaml, NOT_SET_UP, quickDraft, sourceFirst } from "./draft";
-import { NO_TESTS, route, SCRIPTS, usesBlocked } from "./route";
+import { NO_TESTS, ownedFromOutside, route, SCRIPTS, usesBlocked } from "./route";
 import { MANY_SERVICES, manyServices, manyServicesReason } from "./facts";
 import { A_FAKED_FILE, classify, describeHints, diagnose, firstErrors, firstLine, type Hint, markUnproven, missingLeftOut, npxDownload, npxText,
   loadFailure, passingApart, unexplainedFiles } from "./diagnose";
@@ -63,6 +63,11 @@ export const SUITE_TIMEOUT = 1800;
 /** The one-line test's run after the suite (probe): a handful of seconds in a working environment. */
 export const PROBE_TIMEOUT = 300;
 export const OUTPUT_TAIL = 6000;
+/** How many of the change's files a quick setup names to its agent. */
+const CHANGED_SHOWN = 20;
+/** The first `max` of `xs`, and how many more there are. */
+const someOf = (xs: string[], max = 5): string =>
+  xs.slice(0, max).join(", ") + (xs.length > max ? ` (+${xs.length - max} more)` : "");
 
 /** What a suite's failures were: tests kept by `arnx accept` that fail as pinned, failures that block, failures the
  * baseline holds, the baseline's tests that no longer fail (`left`, ids), tests that failed and then passed when run
@@ -1344,6 +1349,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     notice: "",
     // Source files outside every project went back to the agent once (by folder); the rest arnx lists itself.
     placesAsked: false,
+    rootsAsked: false,
     // The runs of each web UI app that counted (countsAsUiRun), and the apps listed as web UI (webUiPaths).
     uiRuns: new Map<string, number>(), webUi: new Set<string>(),
     // Per web UI app: how many counted runs stopped at listing and the last such error; what the user reads when all did.
@@ -1537,6 +1543,20 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     };
     const untouched = (f: ReviewFile): ReviewConfig[] => o.quick && !f.legacy
       ? f.projects.filter((p) => !keep.has(p.name) && p.workdir !== "." && !touched(f).has(p.name)) : [];
+    // A quick setup is for the files the change touches: a project that owns some of them and holds none under its
+    // root goes back once, with the files; the same file tried or proposed again is taken as it is.
+    const rootAway = (f: ReviewFile, only?: string): string => {
+      if (!o.quick || f.legacy || state.rootsAsked) return "";
+      const away = ownedFromOutside(f, sourceFirst(o.quick.files))
+        .filter((x) => !keep.has(x.project.name) && (!only || x.project.name === only));
+      if (!away.length) return "";
+      state.rootsAsked = true;
+      return "refused once: " + away.map((x) => `${x.project.name}'s root is ${x.project.workdir}, but the files ` +
+        `this change touches that it owns are all outside it (${someOf(x.files)}): tests run in an environment built ` +
+        `for ${x.project.workdir} do not load that code as its own project does.`).join("\n") +
+        "\nGive those files a project rooted where they are, with its own install and test_command (owns `/*` takes " +
+        "every top-level folder whole), or try or propose the same file again to keep it as it is.";
+    };
     const tryProject = async (input: Record<string, unknown>): Promise<string> => {
       if (state.needed) throw stopped();
       const n = ++state.attempts;
@@ -1553,6 +1573,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           `it: set up only ${[...touched(f)].join(", ") || "the projects that own a changed file"}. propose takes ` +
           `${name} out of the file and lists /${cfg.workdir}/ under uncovered as "${NOT_SET_UP}".`;
       }
+      const away = rootAway(f, name);
+      if (away) return away;
       // Answers of nothing make tests pass or fail for no reason, and a before/after check then proves nothing.
       if (cfg.install.some((c) => /\bMagicMock\b/.test(c))) {
         return "refused: install replaces code with MagicMock, which answers everything with nothing, so tests pass or " +
@@ -2039,6 +2061,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           ownTests, failed: [] });
         return `refused:\n${problems.join("\n")}`;
       }
+      const away = rootAway(f);
+      if (away) return away;
       // The map's paths are checked once, before any project runs: uses entries wider than meant go back as hints,
       // and the same file proposed again is accepted. Approved projects must stay as they are, so none is named.
       if (!state.pathsChecked) {
@@ -2176,7 +2200,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
       } else {
         // The agent starts from the draft, with what stopped it (comment lines: the file stays the same YAML).
-        draft = `${clip(said, 3000).split("\n").map((l) => `# ${l}`).join("\n")}\n${q.yaml}`;
+        draft = `# The change this review is for touches: ${someOf(o.quick.files, CHANGED_SHOWN)}\n` +
+          `${clip(said, 3000).split("\n").map((l) => `# ${l}`).join("\n")}\n${q.yaml}`;
       }
     }
     const { agent: result } = drafted ? { agent: drafted } : await withRole("setup", () => brain.agentRound("setup", {

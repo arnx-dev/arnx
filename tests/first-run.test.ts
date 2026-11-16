@@ -13,7 +13,7 @@ import { NOT_SET_UP, quickDraft } from "../src/draft";
 import { DiskFull, diskFullMessage, type RunResult, type Runner, type SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { approveFile, NOTHING_TO_TEST, runSetup } from "../src/setup";
-import { quickCoverageLine } from "../src/setupview";
+import { quickCoverageLine, quickOutsideLine } from "../src/setupview";
 import { ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
@@ -517,4 +517,82 @@ test("a quick setup whose first run finds Docker's disk full stops with that mes
     }, []), quick: { files: ["svc/app.py"] } });
   expect([r.ok, r.stop, r.problem]).toEqual([false, "disk-full", diskFullMessage()]);
   expect(model.calls).toHaveLength(0);
+});
+
+// A quick setup is for the files a change touches. A project rooted in another folder can still own them by a wide
+// `owns` (`/*` takes every top-level folder whole): its tests would then run in an environment built for other code.
+/** twoProjects with a small Python project in tools/ besides. */
+function withTools(): string {
+  const repo = twoProjects();
+  TESTS.forEach((f) => {
+    mkdirSync(dirname(join(repo, "tools", f)), { recursive: true });
+    writeFileSync(join(repo, "tools", f), "def test_x():\n    pass\n");
+  });
+  commit(repo, "tools");
+  return repo;
+}
+const ELSEWHERE = "version: 1\nprojects:\n  main:\n    root: tools\n    language: python\n    image: python:3.12\n" +
+  "    install: [pip install pytest]\n    test_command: python -m pytest {targets}\n    owns:\n      - \"/*\"\n";
+/** The draft's listing fails, so the agent is asked; what it proposes then lists and runs. */
+function draftFails(root: string) {
+  let listings = 0;
+  const answer = runner(root);
+  return (command: string): Answer => command.includes("--collect-only") && !command.includes("arnx_probe") &&
+    listings++ === 0 ? { exit: 4, output: "ERROR: usage: unrecognized arguments: --cov" } : answer(command);
+}
+const answerTo = (m: ScriptedAgent, call: number) =>
+  String((m.calls[call]!.messages.at(-1)!.content as Record<string, unknown>[])[0]!.content);
+
+test("the agent is told which files the change touches", async () => {
+  const model = new ScriptedAgent([[text("done")]]);
+  await runSetup(withTools(), defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(draftFails("svc"), []), quick: { files: ["svc/app.py", "svc/tests/test_a.py"] } });
+  const prompt = JSON.stringify(model.calls[0]!.messages);
+  expect(prompt).toContain("# The change this review is for touches: svc/app.py, svc/tests/test_a.py");
+});
+
+test("a project rooted away from every changed file it owns goes back once, with the files; proposed again, it stands",
+  async () => {
+  const model = new ScriptedAgent([[tool("propose", { yaml: ELSEWHERE })], [tool("propose", { yaml: ELSEWHERE })],
+    [text("done")]]);
+  const r = await runSetup(withTools(), defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(draftFails("tools"), []), quick: { files: ["svc/app.py"] } });
+  const back = answerTo(model, 1);
+  expect(back).toStartWith("refused once:");
+  expect(back).toContain("main's root is tools");
+  expect(back).toContain("svc/app.py");
+  expect(back).toContain("propose the same file again to keep it");
+  expect(r.ok).toBe(true);
+  expect(parseReviewFile(r.yamlText!).projects[0]!.workdir).toBe("tools");
+});
+
+test("trying such a project goes back once too, before it is built", async () => {
+  const sessions: Session[] = [];
+  const model = new ScriptedAgent([[tool("try_project", { yaml: ELSEWHERE, project: "main" })], [text("done")]]);
+  await runSetup(withTools(), defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(draftFails("tools"), sessions), quick: { files: ["svc/app.py"] } });
+  expect(answerTo(model, 1)).toStartWith("refused once:");
+  // Only the draft's own try ran.
+  expect(sessions.length).toBe(1);
+});
+
+test("a project that holds a changed file it owns, or the root project, is not sent back", async () => {
+  const fixed = "version: 1\nprojects:\n  svc:\n    root: svc\n    language: python\n    image: python:3.12\n" +
+    "    install: [pip install pytest pytest-cov]\n    test_command: python -m pytest {targets}\n    owns:\n" +
+    "      - \"/*\"\n";
+  const model = new ScriptedAgent([[tool("propose", { yaml: fixed })], [text("done")]]);
+  const r = await runSetup(withTools(), defaultSettings(), model, { outDir: join(tmp(), "s"),
+    sessionFactory: factory(draftFails("svc"), []), quick: { files: ["svc/app.py", "tools/x.py"] } });
+  expect(answerTo(model, 1)).not.toContain("refused once");
+  expect(r.ok).toBe(true);
+});
+
+test("after a quick setup, the changed files tested from another folder's environment are said", () => {
+  const f = parseReviewFile(ELSEWHERE);
+  expect(quickOutsideLine(f, ["svc/app.py", "svc/b.py", "README.md"]))
+    .toBe("Tested from another folder's environment: 2 changed source files are outside main's root (tools).");
+  expect(quickOutsideLine(f, ["svc/app.py", "tools/x.py"])).toBeNull();
+  const root = parseReviewFile("version: 1\nimage: python:3.12\ninstall: [pip install pytest]\n" +
+    "test_command: python -m pytest {targets}\n");
+  expect(quickOutsideLine(root, ["svc/app.py"])).toBeNull();
 });
