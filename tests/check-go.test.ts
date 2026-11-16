@@ -10,6 +10,7 @@ import type { Runner, RunResult, SessionFactory } from "../src/sandbox";
 import { defaultSettings } from "../src/settings";
 import { isKeptPath } from "../src/testround";
 import { commit, gitRepo } from "./helpers/gitutil";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -41,11 +42,13 @@ test("check runs the package accept kept in a Go module, and only that", async (
   const repo = gitRepo(tmp());
   mkdirSync(join(repo, "calc/arnx_generated/left_arnx"), { recursive: true });
   mkdirSync(join(repo, ".arnx/tests", dirname(KEPT)), { recursive: true });
-  writeFileSync(join(repo, ".arnx/tests", KEPT), "package arnx\n");
+  // Stored with .arnx appended: go test never builds it there.
+  writeFileSync(join(repo, ".arnx/tests", `${KEPT}.arnx`), "package arnx\n");
   writeFileSync(join(repo, "calc/go.mod"), "module example.com/calc\n\ngo 1.24\n");
   writeFileSync(join(repo, "calc/calc_test.go"), "package calc\n"); // the module's own
   writeFileSync(join(repo, "calc/arnx_generated/left_arnx/left_arnx_test.go"), "package arnx\n"); // a round's leftover
   writeFileSync(reviewConfigPath(repo), stampFile(parseReviewFile(CONFIG), "Dev", "2026-11-09"));
+  pinKept(repo);
   commit(repo, "layout");
   const commands: string[] = [];
   const session: SessionFactory = async (_c, snap, _l, body) => body({
@@ -59,7 +62,7 @@ test("check runs the package accept kept in a Go module, and only that", async (
   } as Runner);
   const [calc, ...others] = await check(repo, SETTINGS, { sessionFactory: session });
   expect(others).toEqual([]);
-  expect(calc!.files).toEqual([`.arnx/tests/${KEPT}`]);
+  expect(calc!.files).toEqual([`.arnx/tests/${KEPT}.arnx`]);
   expect(calc!.passed).toEqual([`${RUN}::TestAdds`]);
   expect(commands).toHaveLength(1);
   expect(commands[0]).toContain(`-json -count=1 -vet=off ./tests/arnx/r${TAG}/adds_arnx `);
