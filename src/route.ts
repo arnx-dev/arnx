@@ -210,3 +210,13 @@ export function uncoveredChange(file: ReviewFile, changed: string[], maxProjects
   const paths = routing.uncovered.map((u) => `${u.path} (${u.reason})`).join(", ");
   return `no project covers this change: ${paths}. Run \`arnx setup --add\` to cover these paths. arnx works best on single-package Python and TypeScript repos; browser-only tests aren't run.`;
 }
+
+/** The projects that own some of the `changed` files and hold none of those under their own root: a project rooted in
+ * one folder that owns another's files by a wide `owns` (`/*` takes every top-level folder whole). Its tests run in
+ * an environment built for its root, not for that code. The root project holds every file, so it is never one. */
+export function ownedFromOutside(file: ReviewFile, changed: string[]): { project: ReviewConfig; files: string[] }[] {
+  return route(file, changed, Number.MAX_SAFE_INTEGER).routed.filter((x) => {
+    const root = bare(x.project.workdir);
+    return root !== "" && root !== "." && x.owned.length > 0 && !x.owned.some((f) => f.startsWith(`${root}/`));
+  }).map((x) => ({ project: x.project, files: x.owned }));
+}
