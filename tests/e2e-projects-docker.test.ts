@@ -444,7 +444,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: projects", () => {
     markReal(rdir);
     const result = await accept(repo, rdir, SETTINGS);
     expect(result.kept.map((p) => relative(repo, p))).toEqual([
-      expect.stringMatching(/^\.arnx\/tests\/tests\/arnx\/r\d{8}_[0-9a-f]{6}\/add_subtracts_arnx\/add_subtracts_arnx_test\.go$/)]);
+      expect.stringMatching(/^\.arnx\/tests\/tests\/arnx\/r\d{8}_[0-9a-f]{6}\/add_subtracts_arnx\/add_subtracts_arnx_test\.go\.arnx$/)]);
     expect(readFileSync(result.kept[0]!, "utf8")).toBe(GO_TEST);
     // Nothing outside .arnx/ changed in the repository.
     expect(runGit(repo, "status", "--porcelain", "--untracked-files=all").trim().split("\n")
@@ -662,7 +662,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker: projects", () => {
     markReal(rdir);
     const result = await accept(repo, rdir, SETTINGS);
     expect(result.kept.map((p) => relative(repo, p))).toEqual([
-      expect.stringMatching(/^\.arnx\/tests\/a\/tests\/arnx\/r\d{8}_[0-9a-f]{6}\/next_is_off_by_one_arnx\/next_is_off_by_one_arnx_test\.go$/)]);
+      expect.stringMatching(/^\.arnx\/tests\/a\/tests\/arnx\/r\d{8}_[0-9a-f]{6}\/next_is_off_by_one_arnx\/next_is_off_by_one_arnx_test\.go\.arnx$/)]);
     const checked = (await check(repo, SETTINGS)).find((r) => r.project === "a")!;
     expect(checked.failed.map((t) => t.testId.split("::").at(-1))).toEqual(["TestNextIsTwo"]);
   }, 1_800_000);
