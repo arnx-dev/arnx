@@ -17,9 +17,9 @@ import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
 const RID = "20261011-a1b2c3";
-/** Where the accepted test runs from, and where accept keeps it (.arnx/tests/, out of the project's own run). */
+/** Where the accepted test runs from, and where accept keeps it (.arnx/tests/, under a name no runner picks up). */
 const RUN = "tests/arnx/r20261011_a1b2c3/test_y.py";
-const KEPT = `.arnx/tests/${RUN}`;
+const KEPT = `.arnx/tests/${RUN}.arnx`;
 
 /** A fake sandbox where the accepted test fails, counting its runs. */
 function failing(): { sessions: SessionFactory; runs: () => number } {
@@ -68,6 +68,14 @@ test("accept records the sha256 of each file it keeps", async () => {
   expect(rec.files[KEPT].tests).toEqual(["test_a"]);
 });
 
+test("an edited suffixed accepted test makes check refuse (exit 4)", async () => {
+  const { repo, cli, runs } = await accepted();
+  expect(KEPT.endsWith(".py.arnx")).toBe(true);
+  writeFileSync(join(repo, KEPT), "def test_a():\n    assert True\n");
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(runs()).toBe(0);
+});
+
 test("check refuses an edited accepted test (exit 4) and runs nothing; --keep-edits records it", async () => {
   const { repo, cli, runs } = await accepted();
   expect(await cli.run("check")).toBe(1); // red until the bug is fixed
@@ -105,12 +113,17 @@ test("check refuses a deleted accepted test; accept --again copies it back and r
   expect(runs()).toBe(1);
 });
 
-test("a test file accept never recorded is still run (kept by an older arnx)", async () => {
+test("a test file no pin covers is named and never run (exit 4)", async () => {
+  // Only pinned files are placed: one the record does not name (a record removed before it was ever committed or
+  // recorded here) is not run, and not left out unseen either.
   const { repo, cli, runs } = await accepted();
   rmSync(join(repo, ACCEPTED_RECORD));
   writeFileSync(join(repo, KEPT), "def test_a():\n    assert True\n");
-  expect(await cli.run("check")).toBe(1);
-  expect(runs()).toBe(1);
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain(`added    ${KEPT}: not in ${ACCEPTED_RECORD} (arnx accept did not write it)`);
+  expect(cli.stdout).toContain("Not written by arnx accept: delete it, then arnx check");
+  expect(runs()).toBe(0);
 });
 
 test("check --json gives each project's passed and failed tests and the overall result", async () => {
@@ -118,7 +131,7 @@ test("check --json gives each project's passed and failed tests and the overall 
   cli.out.length = 0;
   expect(await cli.run("check", "--json", "--quiet")).toBe(1);
   const j = JSON.parse(cli.stdout);
-  expect(j).toEqual({ schema_version: 1, command: "check", result: "fail", exit_code: 1, changed: [], may_contradict: [], stand_ins_shown: false, projects: [{ project: "app",
+  expect(j).toEqual({ schema_version: 1, command: "check", result: "fail", exit_code: 1, changed: [], may_contradict: [], stand_ins_shown: false, stored_older: 0, projects: [{ project: "app",
     files: [KEPT], no_report: false, no_report_reason: null, log: null, passed: [], skipped: 0,
     accepted: [`${RUN}::test_a`],
     failed: [{ test_id: `${RUN}::test_a`, outcome: "failed", message: "assert False\ntrace", accepted: true }] }] });
@@ -313,13 +326,15 @@ test("the accepted tests edited in the record are refused (exit 4) where accept 
 
 test("the accepted tests edited in the record are refused against the committed pins", () => untested({}));
 
-test("a record of an older arnx (no accepted tests) is no alarm; accept --again adds them", async () => {
+test("a record of an older arnx (no accepted tests) is no alarm; accept --again adds them, and discarding that is an edit",
+  async () => {
   const env = withConfig();
   const { repo, cli, runs } = await accepted(env);
   const pins = localPinsPath(env, realpathSync(repo))!;
   for (const [path, entries] of [[join(repo, ACCEPTED_RECORD), "files"], [pins, "files"]] as const) {
     const d = JSON.parse(readFileSync(path, "utf8"));
     delete d[entries][KEPT].tests;
+    delete d[entries][KEPT].ids;
     writeFileSync(path, JSON.stringify(d, null, 2) + "\n");
   }
   commit(repo, "accepted tests, recorded by an older arnx");
@@ -328,9 +343,14 @@ test("a record of an older arnx (no accepted tests) is no alarm; accept --again 
   expect(await cli.run("accept", "--again", "--no-answers", RID)).toBe(0);
   expect(JSON.parse(readFileSync(join(repo, ACCEPTED_RECORD), "utf8")).files[KEPT].tests).toEqual(["test_a"]);
   expect(await cli.run("check")).toBe(1);
-  runGit(repo, "checkout", "-q", "--", ACCEPTED_RECORD); // back to the older record: arnx wrote it here too
-  expect(await cli.run("check")).toBe(1);
-  expect(runs()).toBe(2);
+  // Back to the older record by discarding the accept: no commit holds the lists it drops, so it is an edit.
+  runGit(repo, "checkout", "-q", "--", ACCEPTED_RECORD);
+  cli.out.length = 0;
+  expect(await cli.run("check")).toBe(TESTS_CHANGED);
+  expect(cli.stdout).toContain(`To restore it: arnx accept --again ${RID}`);
+  expect(cli.stdout).not.toContain("git checkout");
+  expect(cli.stdout).not.toContain("--keep-edits");
+  expect(runs()).toBe(1);
 });
 
 test("--keep-edits keeps the accepted tests of the files it records again", async () => {

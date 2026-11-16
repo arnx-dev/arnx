@@ -1,6 +1,6 @@
 // arnx cloud's HTTP side, for arnx models (the arnx cloud API, v1): the account token from a device login
 // (RFC 8628), kept per user and machine, never in the repository; the calls, as JSON or as server-sent events with
-// progress lines; and what an error answer means for the user: 402 is a top-up and `unsupported_cli` an update of arnx
+// progress lines; and what an error answer means for the user: 402 means no credit left and `unsupported_cli` an update of arnx
 // (exit 3), an unreachable service or a 503 says arnx cloud is unavailable (exit 2) and, when the user's own keys are
 // set, how to use them instead. A network failure does not prove arnx cloud is closed: only its explicit `not_open`
 // answer says so (exit 2).
@@ -254,8 +254,7 @@ export class CloudClient {
     if (e.code === "not_open") return new CloudNotOpen(NOT_OPEN, part);
     if (e.code === "insufficient_credits" || a.status === 402) {
       return new SetupRequired(`${e.message} Balance ${usd(e.balance_micro_usd ?? 0)}; ${usd(e.needed_micro_usd ?? 0)} ` +
-        `more lets this start. Top up at ${e.topup_url ?? "https://arnx.dev/credits"} (\`arnx credits\` shows the ` +
-        "balance); `arnx review --resume` continues an interrupted review after a top-up");
+        `more lets this start. ${OWN_KEYS}`);
     }
     if (e.code === "unsupported_cli") {
       const needs = e.min_cli_version ? `arnx ${e.min_cli_version} or later` : "a newer arnx";
@@ -334,6 +333,10 @@ async function readStream(res: Response, c: CallOptions): Promise<Answer> {
 
 // --- account and login ---------------------------------------------------------------------------------------------------
 
+/** What a user with no arnx cloud credit can do. */
+const OWN_KEYS = "arnx works with your own model keys: `arnx cloud off`, then export ANTHROPIC_API_KEY (or another " +
+  "provider's key).";
+
 export interface Account { account_id: string; email?: string; balance_micro_usd: number; held_micro_usd: number;
   topup_url: string }
 
@@ -342,11 +345,10 @@ export interface Account { account_id: string; email?: string; balance_micro_usd
 export function describeAccount(a: Account): string[] {
   if (a.balance_micro_usd < 0) {
     return [`✗ Outstanding balance: ${usd(-a.balance_micro_usd)} (a review's overage)`,
-      "New arnx cloud reviews are paused until you top up.", `Top up: ${a.topup_url}`];
+      `New arnx cloud reviews are paused. ${OWN_KEYS}`];
   }
   return [`arnx cloud · ${a.email ?? a.account_id}`, `  Available: ${usd(a.balance_micro_usd)}`,
-    ...a.held_micro_usd ? [`  Reserved:  ${usd(a.held_micro_usd)} (reviews in progress)`] : [],
-    `Top up: ${a.topup_url}`];
+    ...a.held_micro_usd ? [`  Reserved:  ${usd(a.held_micro_usd)} (reviews in progress)`] : []];
 }
 
 export interface LoginDeps {

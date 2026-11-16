@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { adapterFor } from "./adapters";
 import type { TestResult } from "./adapters/types";
 import type { ReviewConfig } from "./config";
-import { asError, serialFlag } from "./outcomes";
+import { asError, projectReader, serialFlag } from "./outcomes";
 import { copyTreeInside, readRegular, realFolders, removeTree, writeNew } from "./safefs";
 import { REPORT_DIR, realKeyCopies, type Runner } from "./sandbox";
 import { withRealKeys } from "./secrets";
@@ -209,7 +209,8 @@ export async function rerunWithRealKeys(runner: Runner, snap: string, cfg: Revie
     mkdirSync(dirname(report), { recursive: true });
     adapter.reportSetup?.(copy, cfg.runner);
     const flag = o.serial ? serialFlag(cfg, copy) : null;
-    const command = adapter.command(cfg.testCommand, targets, `/src/${REPORT_DIR}/realkey.xml`, cfg.runner);
+    const command = adapter.command(cfg.testCommand, targets, `/src/${REPORT_DIR}/realkey.xml`, cfg.runner,
+      projectReader(cfg, copy));
     const run = await runner.sealed(flag ? `${command} ${flag}` : command, o.timeout, copy);
     // Only a regular file in a real folder of the copy: a link the test made there is not followed.
     const text = run.timedOut || !realFolders(copy, `${REPORT_DIR}/realkey.xml`) ? null : readRegular(report, MAX_KEY_FILE);

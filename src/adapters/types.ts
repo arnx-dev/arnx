@@ -74,8 +74,10 @@ export interface Adapter {
   /** Where the runner says it wrote its report (the last such line of its output); null: it said none. Absent, or
    * undefined, for a runner that never says. */
   reportSaid?(output: string, runner: string): string | null | undefined;
-  /** Shell command that runs the targets and writes a report to reportPath (inside the container). */
-  command(testCommand: string, targets: string[], reportPath: string, runner: string): string;
+  /** Shell command that runs the targets and writes a report to reportPath (inside the container). `read`: the
+   * runner's own config files, as serialFlag reads them (a runner option arnx adds can depend on them). */
+  command(testCommand: string, targets: string[], reportPath: string, runner: string,
+          read?: (rel: string) => string | null): string;
   /** The flag that makes the runner use one process for arnx's runs of a few generated files, only when the project
    * configured parallel workers (`test_command` or the runner's own config files, read through `read`: a path
    * relative to the project's root, null when there is no such file); null: nothing to turn off. Appended last, so
@@ -93,7 +95,8 @@ export interface Adapter {
   /** Shell command that lists the tests a run of the targets would run (all of them with none), running none; null when
    * the runner has no list form or test_command cannot be turned into one safely. A runner that writes its list to a
    * file writes it to listPath (inside the container). */
-  listCommand?(testCommand: string, targets: string[], listPath: string, runner: string): string | null;
+  listCommand?(testCommand: string, targets: string[], listPath: string, runner: string,
+               read?: (rel: string) => string | null): string | null;
   /** What a list run shows, from its output, the file at listPath (null when none was written) and its exit code;
    * null when that cannot be read for sure (an older runner without the list form, a cut-off output). */
   parseList?(output: string, listed: string | null, exitCode: number | null, runner: string, projectRoot: string)

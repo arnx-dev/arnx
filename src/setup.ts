@@ -23,7 +23,7 @@ import { configSuspects,
 } from "./config";
 import { type Detection, describeDetection, detect, isTestPath, TYPECHECK_EXAMPLE, typeCheckable } from "./detect";
 import { draftYaml, NOT_SET_UP, quickDraft, sourceFirst } from "./draft";
-import { NO_TESTS, route, SCRIPTS, usesBlocked } from "./route";
+import { NO_TESTS, ownedFromOutside, route, SCRIPTS, usesBlocked } from "./route";
 import { MANY_SERVICES, manyServices, manyServicesReason } from "./facts";
 import { A_FAKED_FILE, classify, describeHints, diagnose, firstErrors, firstLine, type Hint, markUnproven, missingLeftOut, npxDownload, npxText,
   loadFailure, passingApart, unexplainedFiles } from "./diagnose";
@@ -54,6 +54,7 @@ import { agentUse, logUsage } from "./usage";
 import { randomHex } from "./util";
 import { VERSION } from "./version";
 import { acceptedPins, type AcceptedPins } from "./check";
+import { storedName } from "./kept";
 import { collect, DOME, dockerSession, isKeptPath, ownTestsInWriteDir, ownTestsProblem, probeRun, swapIn, writeDirOf }
   from "./testround";
 import { type TestsDirChoice, testsDirFor } from "./testsdir";
@@ -62,6 +63,11 @@ export const SUITE_TIMEOUT = 1800;
 /** The one-line test's run after the suite (probe): a handful of seconds in a working environment. */
 export const PROBE_TIMEOUT = 300;
 export const OUTPUT_TAIL = 6000;
+/** How many of the change's files a quick setup names to its agent. */
+const CHANGED_SHOWN = 20;
+/** The first `max` of `xs`, and how many more there are. */
+const someOf = (xs: string[], max = 5): string =>
+  xs.slice(0, max).join(", ") + (xs.length > max ? ` (+${xs.length - max} more)` : "");
 
 /** What a suite's failures were: tests kept by `arnx accept` that fail as pinned, failures that block, failures the
  * baseline holds, the baseline's tests that no longer fail (`left`, ids), tests that failed and then passed when run
@@ -268,6 +274,9 @@ export function hasOwnTests(cfg: ReviewConfig, snap: string): boolean {
 /** The summary of a project with no tests of its own whose environment arnx's one-line test proved. */
 export const NO_OWN_TESTS = "no tests of its own; arnx's one-line test runs";
 
+/** Said after a suite's counts when its runner also ran a file under .arnx/ (left out of them). */
+export const ARNX_COLLECTED = "; note: the runner also ran a file under .arnx/, left out of these counts";
+
 /** Most failing files run apart from the rest of the suite to look for order dependence (one extra run). */
 const APART_MAX = 20;
 
@@ -333,10 +342,10 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
           : `${plural(seen.tests, "test")} listed`}, ${plural(sample.files.length, "small file")} ran: `;
       }
     }
-    // A whole-suite run carries a canary: one-line tests where arnx keeps accepted tests (.arnx/tests/), which the
-    // project's own run must never collect.
+    // A whole-suite run carries a canary: one-line tests where arnx keeps accepted tests (.arnx/tests/), stored as
+    // accept stores them, which proves the project's own run never collects a kept file.
     const canary = targets.length || sample ? [] : adapterFor(cfg).probes(cfg.runner)
-      .map((p) => ({ path: join(snap, DOME, writeDirOf(cfg), p.file), source: p.source }));
+      .map((p) => ({ path: join(snap, DOME, writeDirOf(cfg), storedName(p.file)), source: p.source }));
     for (const c of canary) {
       mkdirSync(dirname(c.path), { recursive: true });
       writeFileSync(c.path, c.source);
@@ -355,14 +364,13 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
       source: { repo: leftOut.repo, head: null }, fakedKeys: leftOut.fakedKeys, tests: rerunCandidates([reported]), all: [reported],
       target: (t) => t.fileAttr || null, budget: leftOut.reruns ?? keyReruns(), timeout: SUITE_TIMEOUT, ...(boundary ? { id: (x: string) => boundary.mask(x) } : {}) })
       : undefined;
-    const all = reported && leftOut ? markUnproven(reported, { leftOut: leftOut.secret, fakedKeys: leftOut.fakedKeys, all: leftOut.all,
+    let all = reported && leftOut ? markUnproven(reported, { leftOut: leftOut.secret, fakedKeys: leftOut.fakedKeys, all: leftOut.all,
       ...(real ? { real } : {}) }) : reported;
-    if ((all ?? []).some((t) => [t.fileAttr, t.testId].some((x) => x && /(?:^|\/)\.arnx\//.test(x)))) {
-      return [false, "the project's test run collects files under .arnx/ (a test arnx placed in .arnx/tests/ ran). " +
-        "arnx keeps its accepted tests there so your own run never runs them: make the runner leave .arnx/ out " +
-        "(pytest: norecursedirs or testpaths; vitest, jest: exclude), then run setup again", tailOf(result.output), [],
-        [], "", { ...none, stoppedAt: "config" }] as Out;
-    }
+    // A runner that still picks up a file under .arnx/ (the canary, under its stored name) is noted, never the
+    // developer's to change: what it ran there does not count, and arnx keeps working (check runs kept files by name).
+    const inArnx = (t: TestResult) => [t.fileAttr, t.testId].some((x) => x && /(?:^|\/)\.arnx\//.test(x));
+    const collectsArnx = (all ?? []).some(inArnx);
+    if (collectsArnx) all = all!.filter((t) => !inArnx(t));
     // A project with no tests of its own has no suite to run: arnx's one-line test, which reviews depend on anyway,
     // proves the environment instead.
     if (!targets.length && !all?.length && cfg.language !== "rust" && !hasOwnTests(cfg, snap)) {
@@ -395,7 +403,7 @@ export async function runSuite(cfg: ReviewConfig, snap: string, buildLog: string
     }
     const fetched = all === null ? npxDownload(result.output) : null;
     const summary = fetched ? `the suite produced no report: ${npxText(fetched)}`
-      : all === null ? noReport(result, cfg) : listed + verdict;
+      : all === null ? noReport(result, cfg) : listed + verdict + (collectsArnx ? ARNX_COLLECTED : "");
     // Accepted tests that fail as pinned are not the environment's to fix: diagnosis and retries leave them out.
     const results = withoutAccepted(all, cfg, accepted, acceptedTestsDir);
     let said = "";
@@ -1341,6 +1349,7 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     notice: "",
     // Source files outside every project went back to the agent once (by folder); the rest arnx lists itself.
     placesAsked: false,
+    rootsAsked: false,
     // The runs of each web UI app that counted (countsAsUiRun), and the apps listed as web UI (webUiPaths).
     uiRuns: new Map<string, number>(), webUi: new Set<string>(),
     // Per web UI app: how many counted runs stopped at listing and the last such error; what the user reads when all did.
@@ -1534,6 +1543,20 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
     };
     const untouched = (f: ReviewFile): ReviewConfig[] => o.quick && !f.legacy
       ? f.projects.filter((p) => !keep.has(p.name) && p.workdir !== "." && !touched(f).has(p.name)) : [];
+    // A quick setup is for the files the change touches: a project that owns some of them and holds none under its
+    // root goes back once, with the files; the same file tried or proposed again is taken as it is.
+    const rootAway = (f: ReviewFile, only?: string): string => {
+      if (!o.quick || f.legacy || state.rootsAsked) return "";
+      const away = ownedFromOutside(f, sourceFirst(o.quick.files))
+        .filter((x) => !keep.has(x.project.name) && (!only || x.project.name === only));
+      if (!away.length) return "";
+      state.rootsAsked = true;
+      return "refused once: " + away.map((x) => `${x.project.name}'s root is ${x.project.workdir}, but the files ` +
+        `this change touches that it owns are all outside it (${someOf(x.files)}): tests run in an environment built ` +
+        `for ${x.project.workdir} do not load that code as its own project does.`).join("\n") +
+        "\nGive those files a project rooted where they are, with its own install and test_command (owns `/*` takes " +
+        "every top-level folder whole), or try or propose the same file again to keep it as it is.";
+    };
     const tryProject = async (input: Record<string, unknown>): Promise<string> => {
       if (state.needed) throw stopped();
       const n = ++state.attempts;
@@ -1550,6 +1573,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           `it: set up only ${[...touched(f)].join(", ") || "the projects that own a changed file"}. propose takes ` +
           `${name} out of the file and lists /${cfg.workdir}/ under uncovered as "${NOT_SET_UP}".`;
       }
+      const away = rootAway(f, name);
+      if (away) return away;
       // Answers of nothing make tests pass or fail for no reason, and a before/after check then proves nothing.
       if (cfg.install.some((c) => /\bMagicMock\b/.test(c))) {
         return "refused: install replaces code with MagicMock, which answers everything with nothing, so tests pass or " +
@@ -2036,6 +2061,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           ownTests, failed: [] });
         return `refused:\n${problems.join("\n")}`;
       }
+      const away = rootAway(f);
+      if (away) return away;
       // The map's paths are checked once, before any project runs: uses entries wider than meant go back as hints,
       // and the same file proposed again is accepted. Approved projects must stay as they are, so none is named.
       if (!state.pathsChecked) {
@@ -2173,7 +2200,8 @@ async function setupBody(repo: string, settings: Settings, agentModel: AgentMode
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
       } else {
         // The agent starts from the draft, with what stopped it (comment lines: the file stays the same YAML).
-        draft = `${clip(said, 3000).split("\n").map((l) => `# ${l}`).join("\n")}\n${q.yaml}`;
+        draft = `# The change this review is for touches: ${someOf(o.quick.files, CHANGED_SHOWN)}\n` +
+          `${clip(said, 3000).split("\n").map((l) => `# ${l}`).join("\n")}\n${q.yaml}`;
       }
     }
     const { agent: result } = drafted ? { agent: drafted } : await withRole("setup", () => brain.agentRound("setup", {

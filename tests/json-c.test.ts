@@ -18,7 +18,7 @@ import { useTmp } from "./helpers/tmp";
 const tmp = useTmp();
 const RID = "20261011-a1b2c3";
 const RUN = "tests/arnx/r20261011_a1b2c3/test_y.py";
-const KEPT = `.arnx/tests/${RUN}`;
+const KEPT = `.arnx/tests/${RUN}.arnx`;
 
 /** The accepted test fails in the fake sandbox; any other test passes. */
 const sessions: SessionFactory = async (_c, snap, _l, body) =>
@@ -66,7 +66,7 @@ test("accept --json: the review, kept files, marks, answers, the check, the fix 
   expect(await run.run("accept", "--json", "--quiet")).toBe(0);
   const j = JSON.parse(run.stdout);
   expect(j).toEqual({ schema_version: 1, command: "accept", result: "ok", exit_code: 0, review_id: RID,
-    kept: [KEPT, ".arnx/tests/tests/arnx/r20261011_a1b2c3/answers/test_round.py"], dest: ".arnx/tests/tests/arnx/r20261011_a1b2c3",
+    kept: [KEPT, ".arnx/tests/tests/arnx/r20261011_a1b2c3/answers/test_round.py.arnx"], dest: ".arnx/tests/tests/arnx/r20261011_a1b2c3",
     issues: 1, marks: { real: 1, intended: 0, noise: 1, rewrite: 0, unmarked: 0, left_as_prefilled: 1 }, // F1 real as pre-filled
     answers: [{ question: "Q1", result: "locked", tests: ["test_rounds_down"], cost_usd: 0, rewrite_of: null }],
     check: { failing: [{ project: "app", test_id: `${RUN}::test_a`, message: "assert False\ntrace" }], passing: 0 },
@@ -74,7 +74,7 @@ test("accept --json: the review, kept files, marks, answers, the check, the fix 
     next: ["give the fix prompt to your coding agent", "arnx check"] });
   // The text a person reads goes to stderr, as without --json.
   expect(run.stderr).toContain(`✓ Accepted 1 test from 1 issue (1 finding)\n  1 mark was pre-filled (not reviewed in ` +
-    `triage)\n  kept: ${KEPT}\n  kept: .arnx/tests/tests/arnx/r20261011_a1b2c3/answers/test_round.py\nQ1: `);
+    `triage)\n  kept: ${KEPT}\n  kept: .arnx/tests/tests/arnx/r20261011_a1b2c3/answers/test_round.py.arnx\nQ1: `);
   expect(run.stderr).toContain("Q1: the code already does it; 1 test(s) kept to lock it · $0.00");
 });
 

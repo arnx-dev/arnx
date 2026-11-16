@@ -38,6 +38,7 @@ import { type FakeCloud, fakeCloud, type StepScript, TOKEN } from "./helpers/clo
 import { fakeFactory, FakeSession, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
 
 // No test here may reach a provider: only this machine's own fake server gets past this.
@@ -408,6 +409,7 @@ test("arnx check says no real value: its results, its JSON, its summary and its 
   const repo = leakyRepo({ standIns: true });
   mkdirSync(join(repo, ".arnx/tests/tests/arnx/r1"), { recursive: true });
   writeFileSync(join(repo, ".arnx/tests/tests/arnx/r1/test_kept.py"), "def test_kept():\n    assert False\n");
+  pinKept(repo);
   const failing = () => [junitXml([["tests/arnx/r1/test_kept.py", "test_kept", "failed",
     `assert "${UNCHANGED}" == "${b64(`app:${UNCHANGED}`)}"`]]), `E  ${UNCHANGED}\n`, false] as [string, string, boolean];
   const results = await check(repo, SETTINGS, { sessionFactory: fakeFactory(failing) });

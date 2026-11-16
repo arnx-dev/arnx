@@ -114,7 +114,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     writeFileSync(join(rdir, "review.md"), md);
     const result = await accept(repo, rdir, settings);
     // named after what it protects: the finding's explanation
-    expect(result.kept.map((p) => basename(p))).toContain("test_any_member_can_invite_only_admins_should.py");
+    expect(result.kept.map((p) => basename(p))).toContain("test_any_member_can_invite_only_admins_should.py.arnx");
     expect(isApproved(parseReviewConfig(readFileSync(reviewConfigPath(repo), "utf8")))).toBe(true);
     // The project's own pytest run, with .arnx/tests/ there as in the repository, never collects the kept test; arnx
     // check puts it in place in its copy and runs it: red until the bug is fixed.
@@ -249,7 +249,7 @@ describe.skipIf(!process.env.ARNX_DOCKER_TESTS)("docker", () => {
     writeFileSync(join(rdir, "review.md"), md);
     const result = await accept(repo, rdir, settings);
     // no explanation: named after its test function
-    expect(result.kept.map((p) => basename(p))).toEqual(["test_add.py"]);
+    expect(result.kept.map((p) => basename(p))).toEqual(["test_add.py.arnx"]);
   }, 900_000);
 
   test("approve refuses a test_command that runs a fixed folder besides {targets}, and stamps the fixed one",

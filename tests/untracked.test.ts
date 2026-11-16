@@ -21,6 +21,7 @@ import { Cli } from "./helpers/cli";
 import { answerRound, FakeJson, FakeSession, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo, initRepo, runGit } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -292,6 +293,7 @@ test("check runs on the working tree with its untracked files (accepted tests ar
   commit(repo, "layout");
   writeFileSync(join(repo, ".arnx/tests/svc/tests/arnx/r1/test_r1_calc.py"), "def test_ok(): pass\n"); // accepted, uncommitted
   const held: boolean[] = [];
+  pinKept(repo);
   await check(repo, SETTINGS, { sessionFactory: async (_c, snap, _l, body) => {
     held.push(existsSync(join(snap, "svc/tests/arnx/r1/test_r1_calc.py")));
     return body(new FakeSession(snap, () => [junitXml([["tests/arnx/r1/test_r1_calc.py", "test_ok", "passed", ""]]),

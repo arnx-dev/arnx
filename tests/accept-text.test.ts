@@ -66,7 +66,7 @@ test("accept: the owner's example (one file, all marks pre-filled, no questions)
   expect(cli.stdout.slice(cli.stdout.indexOf("✓ Accepted"))).toBe([
     "✓ Accepted 4 tests from 2 issues (4 findings)",
     "  4 marks were pre-filled (not reviewed in triage)",
-    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py`,
+    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py.arnx`,
     "",
     "4 fail, as expected until the bugs are fixed; 5 pass:",
     "  ✗ test_s1_discount_over_100_rejected  Failed: DID NOT RAISE ValueError",
@@ -126,7 +126,7 @@ test("accept: all accepted tests pass: nothing to fix, commit them", async () =>
     [`${DIR}/test_r20261011_a1b2c3.py`, "test_s2", "passed", ""]] });
   expect(await cli.run("accept", "--no-answers")).toBe(0);
   expect(cli.stdout.slice(cli.stdout.indexOf(`  kept: `))).toBe([
-    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py`,
+    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py.arnx`,
     "",
     "All 2 accepted tests pass: the bugs they prove look fixed already.",
     "",
@@ -145,7 +145,7 @@ test("accept --no-check: the accepted tests fail until the fix, not run", async 
   const { cli } = await reviewed({ cases: OWNER });
   expect(await cli.run("accept", "--no-answers", "--no-check")).toBe(0);
   expect(cli.stdout.slice(cli.stdout.indexOf(`  kept: `))).toBe([
-    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py`,
+    `  kept: .arnx/tests/${DIR}/test_r20261011_a1b2c3.py.arnx`,
     "",
     "4 accepted tests fail until the fix (not run: --no-check).",
     "",
@@ -164,15 +164,10 @@ test("accept with nothing to answer needs no model key", async () => {
   expect(bare.stdout).toContain("✓ Accepted 4 tests");
 });
 
-test("accept says the one-line exclude when the project's command has it", async () => {
+test("accept asks for no exclude, even when arnx's own command leaves .arnx out", async () => {
+  // Kept files are stored under names no runner picks up: the project's own run needs nothing changed.
   const { cli } = await reviewed({ cases: OWNER, command: "python -m pytest --ignore=.arnx {targets}" });
   expect(await cli.run("accept", "--no-answers")).toBe(0);
-  expect(cli.stdout).toContain("Your own test run collects .arnx/ too (shop): exclude it there, as test_command in " +
-    "review.yaml does.");
-});
-
-test("accept stays quiet about the runner when the command leaves .arnx alone", async () => {
-  const { cli } = await reviewed({ cases: OWNER });
-  expect(await cli.run("accept", "--no-answers")).toBe(0);
   expect(cli.stdout).not.toContain("collects .arnx/");
+  expect(cli.stdout).not.toMatch(/exclude/i);
 });

@@ -111,14 +111,18 @@ const order = (o: string) => ["passed", "failed", "error", "skipped"].indexOf(o)
  * project configures parallel workers and has not opted out with `parallel: keep`; else null. */
 export function serialFlag(cfg: ReviewConfig, snap: string): string | null {
   if (cfg.keepParallel) return null;
-  const read = (rel: string) => {
+  return adapterFor(cfg).serialFlag?.(cfg.testCommand, projectReader(cfg, snap), cfg.runner) ?? null;
+}
+
+/** Reads a file of the project in the snapshot by its path from the project's root; null when there is none. */
+export function projectReader(cfg: ReviewConfig, snap: string): (rel: string) => string | null {
+  return (rel) => {
     try {
       return readFileSync(join(snap, cfg.workdir, rel), "utf8");
     } catch {
       return null;
     }
   };
-  return adapterFor(cfg).serialFlag?.(cfg.testCommand, read, cfg.runner) ?? null;
 }
 
 /** Run the targets with the configured command; null results when the run timed out or wrote no readable report.
@@ -132,7 +136,8 @@ export async function runTests(session: Runner, snap: string, cfg: ReviewConfig,
   mkdirSync(dirname(report), { recursive: true }); // pytest creates it; node:test and others do not
   adapter.reportSetup?.(snap, cfg.runner);
   const flag = o.serial ? serialFlag(cfg, snap) : null;
-  const command = adapter.command(cfg.testCommand, targets, `/src/${REPORT_DIR}/${reportName}`, cfg.runner);
+  const command = adapter.command(cfg.testCommand, targets, `/src/${REPORT_DIR}/${reportName}`, cfg.runner,
+    projectReader(cfg, snap));
   const result = await session.run(flag ? `${command} ${flag}` : command, timeout);
   if (result.timedOut) return [result, null];
   const file = existsSync(report) ? report : reportElsewhere(adapter.reportSaid?.(result.output, cfg.runner), snap);

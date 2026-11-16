@@ -46,12 +46,12 @@ test("a kept test of a project with its own tests folder stays where the runner 
   writeFileSync(join(rdir, "review.md"), blankMarks(readFileSync(join(rdir, "review.md"), "utf8"))
     .replace("Mark: [ ] real", "Mark: [x] real"));
   const result = await accept(repo, rdir, SETTINGS);
-  const kept = join(repo, ".arnx", "tests", "src", "js", "__tests__", "arnx", "r20261022_0a1b2c", "pkg_wrongSpec.tsx");
+  const kept = join(repo, ".arnx", "tests", "src", "js", "__tests__", "arnx", "r20261022_0a1b2c", "pkg_wrongSpec.tsx.arnx");
   expect(result.kept).toEqual([kept]);
   // Found again as the project's kept file, by the folder and the name.
   const cfg = file.projects[0]!;
   expect(acceptedRoots(cfg)).toContain("src/js/__tests__/arnx");
-  expect(keptTestFiles(repo, cfg)).toEqual([".arnx/tests/src/js/__tests__/arnx/r20261022_0a1b2c/pkg_wrongSpec.tsx"]);
+  expect(keptTestFiles(repo, cfg)).toEqual([".arnx/tests/src/js/__tests__/arnx/r20261022_0a1b2c/pkg_wrongSpec.tsx.arnx"]);
   expect(isKeptPath(cfg, "src/js/__tests__/arnx/r20261022_0a1b2c/pkg_wrongSpec.tsx")).toBe(true);
   // A project that keeps its default folder, or sets accepted_tests_dir itself, is unchanged.
   const plain = parseReviewFile(YAML.replace(/    tests_dir:.*\n    test_files:.*\n/, "")).projects[0]!;

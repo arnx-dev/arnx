@@ -138,6 +138,17 @@ test("a runner that does not start stops at the listing", async () => {
   expect(result(model, 1)).toContain("unrecognized arguments: --cov");
 });
 
+// A runner prints what stops it first (a configuration error), then pages of what it did list: the agent reads the end
+// of the output, so the error lines go to it by name.
+test("a runner stopped by its configuration: the error line reaches the agent, however long the listing after it", async () => {
+  const many = Array.from({ length: 2000 }, (_, i) => `tests/test_file_number_${i}.py: 3`).join("\n");
+  const output = `ERROR: Unknown config option: cache_dir\n\n${many}\n`;
+  const { model } = await setup(answers({ exit: 4, output }), 1);
+  expect(result(model, 1)).toContain("listing the tests stopped with an error (exit 4) before any test ran");
+  expect(result(model, 1)).toContain("ERROR: Unknown config option: cache_dir");
+  expect(result(model, 1)).not.toContain("the end of the output says why");
+});
+
 test("a one-line test the runner does not list from tests_dir stops the try before the suite", async () => {
   const { model, sessions } = await setup(answers({ output: listed },
     { probe: { exit: 5, output: "no tests collected in 0.01s" } }), 1);

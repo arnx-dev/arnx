@@ -19,7 +19,7 @@ import { staleLine, staleRewrites } from "./standins";
 import { isSourcePath, SOURCE } from "./untested";
 import { NOT_SET_UP } from "./draft";
 import { isDraftedGoInstall } from "./adapters/go";
-import { route } from "./route";
+import { ownedFromOutside, route } from "./route";
 
 // Rough minutes and USD per project, for the estimate shown before setup starts.
 const MIN_PER_PROJECT = [1, 3];
@@ -449,4 +449,14 @@ export function describeChanges(old: ReviewFile, now: ReviewFile): string[] {
     if (keys.length) out.push(`${keys.join(", ")} changed`);
   }
   return out;
+}
+
+/** After a quick setup: the changed source files owned by a project rooted in another folder (route.ts
+ * ownedFromOutside), whose tests so run in an environment built for other code. Null when there is none. */
+export function quickOutsideLine(file: ReviewFile, changed: string[]): string | null {
+  const away = ownedFromOutside(file, changed.filter(isSourcePath));
+  if (!away.length) return null;
+  const n = new Set(away.flatMap((x) => x.files)).size;
+  const roots = away.map((x) => `${x.project.name}'s root (${x.project.workdir})`).join(", ");
+  return `Tested from another folder's environment: ${n} changed source file${n === 1 ? " is" : "s are"} outside ${roots}.`;
 }

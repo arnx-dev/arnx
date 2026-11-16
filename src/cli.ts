@@ -11,9 +11,9 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { accept, findAccepted, findReview, hasAnswers, makeAnswerRunner, projectsCollectingArnx, recordChosen }
-  from "./accept";
+import { accept, findAccepted, findReview, hasAnswers, makeAnswerRunner, recordChosen } from "./accept";
 import { ACCEPTED_RECORD, changedAccepted, changedSummary, check, checkJson, checkSummary, contradictionLines,
+  linkAdvice, linkedDome, storedOlderText, storeOlderKept,
   failingList, keepEdits, mayContradict, recordAnswerWatch,
   legacyAccepted, moveOut,
   localPinsPath, TESTS_CHANGED } from "./check";
@@ -63,7 +63,7 @@ import { approveFile, coverageFiles, coverageMap, describeCoverage, entryHoldsTe
   DISK_FULL_STOP, WEB_UI_STOP } from "./setup";
 import { withRepoHolds } from "./standins";
 import { approvalScreen, approvalWarnings, type FilesSummary, filesSummary, nextStep, notTestedRecord, PROVEN_BASELINE,
-  PROVEN_COPY, proofState, quickCoverageLine, repoTypecheckGaps, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
+  PROVEN_COPY, proofState, quickCoverageLine, quickOutsideLine, repoTypecheckGaps, REVIEW_FILE, setupPreview, worthALook } from "./setupview";
 import { isoSeconds } from "./util";
 import { spend } from "./spend";
 import { installSkills, SKILL_DIRS, skillDirsShown, skillStates, userSkillRoot } from "./skill";
@@ -786,7 +786,7 @@ class Commands {
     try {
       const acct = await this.cloudClient(url, token, s, mode).call<Account>("GET", "/v1/account");
       out.push([acct.balance_micro_usd > 0, "Credits", `${usd(acct.balance_micro_usd)} available` +
-        (acct.balance_micro_usd > 0 ? "" : `; top up at ${acct.topup_url}`)]);
+        (acct.balance_micro_usd > 0 ? "" : "; own keys: arnx cloud off")]);
     } catch (e) {
       if (!(e instanceof ArnxError)) throw e;
       out.push([false, "Credits", oneLine(e.message)]);
@@ -1054,6 +1054,8 @@ class Commands {
         `${APPROVAL_RECORD}`);
       const left = quickCoverageLine(proposed, quick.files, !!result.waiting?.length);
       if (left) this.d.out(left);
+      const outside = quickOutsideLine(proposed, quick.files);
+      if (outside) this.d.out(outside);
       for (const line of repoTypecheckGaps(proposed, repo)) this.d.out(line);
       if (result.waiting?.length) {
         this.d.out(`Not set up yet, though ${result.waiting.length === 1 ? "it uses" : "they use"} what this change ` +
@@ -1675,6 +1677,9 @@ class Commands {
     if (a.values["keep-edits"]) return this.keepEdits(a);
     if (a.values.move) return this.moveOut(a);
     const repo = this.repo();
+    // accept writes under .arnx/: never through a link there.
+    const linked = linkedDome(repo);
+    if (linked) throw new ArnxError(linkAdvice([linked]));
     const { s: file, mode } = this.settings(repo, a);
     let s = file;
     const rdir = findReview(repo, a.positionals[0] ?? null);
@@ -1746,6 +1751,8 @@ class Commands {
     }
     for (const [qid, ids] of byAnswer) this.d.out(`${ids.join(", ")} set aside: your answer to ${qid} has its own test`);
     for (const p of tests) this.d.out(`  kept: ${relative(repo, p)}`);
+    const older = storedOlderText(result.storedOlder);
+    if (older) this.d.out(older);
     if (result.fixOverrides.length) {
       this.d.out(`Fix prompt: yours for ${result.fixOverrides.join(", ")} (${PROMPTS_FILE})`);
     }
@@ -1826,16 +1833,6 @@ class Commands {
       this.d.out("");
       this.d.out(c.bold(real.length ? "Next: commit the fix and the accepted tests together"
         : "Next: commit the accepted tests"));
-    }
-    let collecting: string[] = [];
-    try {
-      collecting = projectsCollectingArnx(loadReviewFile(repo, { requireApproved: false }));
-    } catch {
-      // a repository without a readable review.yaml has no runner to name; accept is done
-    }
-    if (collecting.length) {
-      this.d.out(`Your own test run collects .arnx/ too (${collecting.join(", ")}): exclude it there, as test_command ` +
-        "in review.yaml does.");
     }
     const rel = (p: string) => relative(repo, p).split(sep).join("/");
     // The same next steps as the text above.
@@ -1943,7 +1940,7 @@ class Commands {
       const acct = await this.cloudClient(url, token, s, mode).call<Account>("GET", "/v1/account");
       if (acct.balance_micro_usd > 0) return n;
       return { phase: n.phase, where: `${n.where}; the arnx cloud balance is ${usd(acct.balance_micro_usd)}`,
-        command: "arnx credits", why: `top up at ${acct.topup_url}`, then: n.command };
+        command: "arnx cloud off", why: "or arnx login to another account", then: n.command };
     } catch (e) {
       if (!(e instanceof ArnxError)) throw e;
       return { ...n, why: `${n.why} (arnx cloud could not be asked for the balance: ${oneLine(e.message)})` };
@@ -2004,9 +2001,17 @@ class Commands {
     if (a.positionals.length && !a.values.review) throw new ArnxError("a review id goes with --review: " +
       `arnx check --review ${a.positionals[0]}`);
     const repo = this.repo();
+    const json = !!a.values.json;
+    // A link at .arnx or .arnx/tests: nothing is read, moved or written through it, review copies included.
+    const linked = linkedDome(repo);
+    if (linked) {
+      const changed = [{ path: linked, review: "", change: "modified" as const }];
+      if (json) this.emitRaw(checkJson([], TESTS_CHANGED, changed));
+      else this.d.out(colorLines(changedSummary(changed, repo), paint(!!this.d.color)));
+      return TESTS_CHANGED;
+    }
     suffixReviewCopies(repo);
     const s = loadSettings(repo);
-    const json = !!a.values.json;
     if (a.values.review) return this.recheck(a, repo, s, json);
     // Accepted tests edited or deleted since accept are not run: passing them would prove nothing. Nor are they when
     // their pins were changed or removed by anything but arnx.
@@ -2016,6 +2021,9 @@ class Commands {
       else this.d.out(colorLines(changedSummary(changed, repo), paint(!!this.d.color)));
       return TESTS_CHANGED;
     }
+    // Kept files an older arnx stored by the names they run by: out of the project's runs, before anything runs.
+    const stored = storeOlderKept(repo, localPinsPath(this.d.env, repo));
+    if (!json && storedOlderText(stored)) this.d.out(storedOlderText(stored));
     // Accepted tests an older arnx kept in the projects' own test folders: their runs collect them.
     const legacy = [...legacyAccepted(repo, s).keys()];
     if (legacy.length) {
@@ -2042,7 +2050,7 @@ class Commands {
     const lines = text.split("\n");
     const at = lines.at(-1)!.startsWith("Next:") ? lines.length - 1 : lines.length;
     lines.splice(at, 0, ...contradictionLines(pairs));
-    if (json) this.emitRaw(checkJson(results, code, [], pairs));
+    if (json) this.emitRaw(checkJson(results, code, [], pairs, stored.stored.length));
     else this.d.out(colorLines(lines.join("\n"), paint(!!this.d.color)));
     await this.sendTelemetry("check", () => checkData(results, code, (performance.now() - started) / 1000));
     return code;

@@ -26,6 +26,7 @@ import { fakeFactory, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { RecordingAgent, RecordingJson } from "./helpers/recording";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
 
 const tmp = useTmp();
@@ -124,6 +125,7 @@ test("a finding beside a fake says fix the code, and how to run it with the real
   expect(summary(r, "review.md")).toContain(FIX);
   expect(render(r).replace(/\s+/g, " ")).toContain(FIX);
   put(repo, ".arnx/tests/tests/arnx/r1/test_kept.py", SOURCE);
+  pinKept(repo);
   const [said, code] = checkSummary(await check(repo, SETTINGS, { sessionFactory: fakeFactory(() =>
     [junitXml([["tests/arnx/r1/test_kept.py", "test_add", "failed", "E   assert 1 == 2"]]), "1 failed\n", false]) }));
   expect(code).toBe(1);
@@ -143,6 +145,7 @@ test("a skipped test in a run with a fake counts in the line about faked keys", 
   const { review: r } = await review(repo, "", "skipped");
   expect(summary(r, "review.md")).toContain("1 test skipped");
   put(repo, ".arnx/tests/tests/arnx/r1/test_kept.py", SOURCE);
+  pinKept(repo);
   const [said] = checkSummary(await check(repo, SETTINGS, { sessionFactory: fakeFactory(() =>
     [junitXml([["tests/arnx/r1/test_kept.py", "test_add", "skipped", ""]]), "1 skipped\n", false]) }));
   expect(said).toContain("tests/data/server.pem");

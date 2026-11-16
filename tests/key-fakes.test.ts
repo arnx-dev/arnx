@@ -21,6 +21,7 @@ import { fakeFactory, tool } from "./helpers/fakes";
 import { commit, gitRepo } from "./helpers/gitutil";
 import { junitXml } from "./helpers/junit";
 import { RecordingAgent, RecordingJson, treeText } from "./helpers/recording";
+import { pinKept } from "./helpers/pins";
 import { useTmp } from "./helpers/tmp";
 
 const { fakeKeys, looksLikeName, maskPrivateKeys, secretPins } = secrets;
@@ -385,6 +386,7 @@ const FIXTURE_TEST = "from keyparse import parse\n\ndef test_add():\n    parse(o
 const reportFor = (t: string) => JSON.stringify({ tests: [{ test: `${t}::test_add`, expects: "x" }], suspected_defects: [{ test: `${t}::test_add`, explanation: "It broke." }], questions: [] });
 const keptTest = (repo: string, content: string) => {
   put(repo, ".arnx/tests/tests/arnx/r1/test_kept.py", content);
+  pinKept(repo);
 };
 
 test("real pytest, a test that parses a fixture key: a fake reads as unproven, and a pin makes it run", async () => {

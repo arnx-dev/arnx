@@ -24,6 +24,21 @@ refused before anything runs. `arnx setup` sets up the whole repository and runs
 Lost? `arnx next` says where the repository is in this flow and the command to run now. `arnx doctor` says what is
 missing (keys, Docker, configuration); setup and review run the same checks first.
 
+## Install
+
+With npm (Node 20 or later):
+
+    npm install -g @arnx-dev/arnx
+
+Or a standalone binary, no Node needed (`darwin-arm64`, `darwin-x64`, `linux-x64` or `linux-arm64`):
+
+    curl -fLO https://github.com/arnx-dev/arnx/releases/latest/download/arnx-linux-x64
+    chmod +x arnx-linux-x64 && mv arnx-linux-x64 /usr/local/bin/arnx
+
+Each release lists the binaries' sha256 in `SHA256SUMS`. The macOS binaries are not signed yet: one downloaded in a
+browser is quarantined, and `xattr -d com.apple.quarantine /usr/local/bin/arnx` releases it. `arnx --version` names
+the build; `arnx doctor` checks Docker, keys and configuration.
+
 ## Projects and setup
 
 `arnx setup` reads your repository and proposes one project per unit whose tests run on their own (a package, a
@@ -149,7 +164,7 @@ What a review sends, and what it leaves out (untracked files, `.arnxignore`, sec
 ## Exit codes and JSON
 
 Exit codes: 0 fine (nothing to review, whether an empty change, lockfiles or generated files alone, or documentation alone, is fine too and runs no review; confirmed findings are worth a look and do not fail the run; CI reads `result` `findings` in `review --json`, or `findings[].confirmed`), 1 a finding the second opinion did not check, 2 incomplete, 3 setup needed. `arnx check`: 0 all accepted
-tests pass, 1 some fail, 2 some did not report, are unproven or were not run, 3 nothing accepted yet, 4 an accepted test changed since accept.
+tests pass, 1 some fail, are skipped or do not report, 2 no report, unproven tests or a kept file whose record names no accepted test not run, 3 nothing accepted yet, 4 an accepted test changed since accept.
 A test file that does not finish (its tests have no result) is one error, never a finding, and makes the review incomplete. Files that time out together are run apart (180 s each, 600 s in all); files the time never reached are named as not run. A failing test in a file that hangs in a later run reads as flaky.
 
 When a commit's own environment does not build or runs no test (an older commit whose install no longer works), that project is reported not tested, the other projects finish, and the review makes no model call for it and exits 2. If the image built for another commit of the project exists and holds no differing copy of the code, the tests run on it instead; the report says so, the review is never complete, and findings from it do not fail the run. A failure to reach the package index is not this: it keeps its own advice.
@@ -220,8 +235,10 @@ checked, and review.md and review.json (`types_unchecked`) record it. Run your o
 2. `arnx accept <id>` (without an id: the review started last). Tests behind findings marked real are copied into
    `.arnx/tests/`, at the path each runs from: `.arnx/tests/<project root>/tests/arnx/r<id>/` (`accepted_tests_dir`
    in `.arnx/config.toml`; at that default a TypeScript project uses `__tests__/arnx/r<id>/`, a Rust crate
-   `tests/arnx_<id>_<name>.rs`, and a Go module `r<id>/<name>_arnx/<name>_arnx_test.go`). pytest, node --test, nextest and go test leave that folder out; for a runner that collects it, such as vitest, accept shows the one-line exclude. Only
-   `arnx check` puts them in place, in a throwaway copy. Each file is named after the problem it
+   `tests/arnx_<id>_<name>.rs`, and a Go module `r<id>/<name>_arnx/<name>_arnx_test.go`). Each file, support files such as `conftest.py` too, is stored with `.arnx` appended
+   to its name (`test_x.py.arnx`), which no test runner, type checker or linter picks up: your own test run, `tsc` and
+   eslint never see them, whatever their configuration. Only `arnx check` puts them in place, under the names they
+   run by, in a throwaway copy. Each file is named after the problem it
    protects (`test_deep_json_recursion.py`); answered questions become tests of the behaviour you described (one model
    round each, run in parallel; `answer_model` in `.arnx/config.toml` can pick a cheaper model; `--no-answers` skips
    them). Only the tests you keep go in: those of findings marked intended or noise, flaky ones and those set aside
@@ -230,8 +247,6 @@ checked, and review.md and review.json (`types_unchecked`) record it. Run your o
    A test that assumed an answer you gave differently is left out too when your answer got a test of its own. The test
    of a bug not fixed yet is kept as it is: it fails in `arnx check` until the fix. Accept then runs the accepted tests
    and lists the ones that fail now (`--no-check` skips the run). Your code is not changed and nothing is committed.
-   `arnx setup` proves the place: its run of your suite carries a one-line test in `.arnx/tests/`, and setup stops
-   if your runner collects it (a pytest `norecursedirs`, say, that drops the default hidden-folder rule).
 3. Fix the code, or hand `arnx prompt` (also in `.arnx/reviews/<id>/fix-prompt.md`; `accept --copy` puts it on the
    clipboard) to your coding agent: the failing tests, what each bug is, your answers, and the rules (yours with
    `arnx prompts copy fix.rules`). `arnx check` runs the accepted tests in the proven sandbox, services included,
@@ -247,7 +262,14 @@ nothing, and a coding agent told to make `arnx check` pass cannot do it that way
 test does not help either: a sha256 there counts only when it is the committed one or one `arnx accept` wrote on this
 machine (it keeps a copy in `~/.config/arnx/pins/`, outside the repository); a changed or removed entry exits 4 too.
 A fresh clone or CI has no such copy and trusts the committed record, so a commit that edits both shows only in its
-diff: `arnx review` of that change names the accepted tests and pins it edits or removes.
+diff: `arnx review` of that change names the accepted tests and pins it edits or removes. In CI, check out the full
+history (`fetch-depth: 0` with actions/checkout) so `arnx check` can compare the record with its history; a shallow
+clone trusts the committed record as it is. `arnx check` runs only
+pinned files, read as regular files (never through a link) and never placed over a file of your project: a file under
+`.arnx/tests/` that accept did not write, or a link there, exits 4 too (OS and editor leftovers such as `.DS_Store`,
+`*.swp`, `name~` and Python's `__pycache__` are ignored). An accepted test that ends skipped, or that the run does not
+report at all (your test configuration deselects, filters or drops it), does not pass (exit 1); a parametrized one
+must report as the variant accept recorded, not through another.
 Changed by mistake: `arnx accept --again <id>` copies the review's tests back (your edits are lost); `arnx check`
 also names `git checkout -- <file>` when the committed copy is the accepted one. Changed on purpose:
 `arnx accept --keep-edits` records the accepted tests as they are now. An answer's test can ask for the opposite of an
@@ -258,8 +280,11 @@ unchanged); decide which one holds. `arnx check --json` prints the result as JSO
 (each project's passed and failed tests, the overall result, the changed files) for programs and coding agents.
 
 Tests an older arnx kept inside your projects (`tests/arnx/`, with expected-fail markers) are in your own test run:
-`arnx check` runs nothing until `arnx accept --move` moves them to `.arnx/tests/`, removes their markers and pins
-them there. Commit the move.
+`arnx check` runs nothing until `arnx accept --move` moves them to `.arnx/tests/` (stored with `.arnx` appended),
+removes their markers and pins every file it moves there (Python's `__pycache__` stays where it is). Commit the move. Files an older arnx kept in `.arnx/tests/` under the names
+they run by are stored with `.arnx` appended by the next `arnx check` or `arnx accept`, each pin moved with its file
+(one edited since accept is refused first, as any accepted test is). Commit the renamed files and
+`.arnx/accepted-tests.json`.
 
 Accept before fixing: a test you saw fail before the fix and pass after it is good evidence that the fix changed the
 behaviour it checks, provided the test checks the right thing (that is what your mark says).
@@ -280,7 +305,7 @@ there when one fails).
 The arnx skill lets a coding agent (Claude Code, and others that read Agent Skills) close the loop itself: when it has
 finished a change it runs `arnx review` once, after saying what it may cost, and hands you the findings, questions and
 cost, changing no code. Once you have run `arnx triage` and `arnx accept`, it runs `arnx check`, fixes the code from
-`arnx prompt` until `arnx check` passes, then runs each touched project's full suite with the accepted tests in it (a
+`arnx prompt` until `arnx check` passes, then runs each touched project's full suite (a
 passing `arnx check` covers only the accepted tests), and reports. Setup, marking findings, answering
 questions, `arnx accept`, `arnx init`, any login and commits stay yours: the skill tells the agent never to run them,
 and never to edit accepted tests (`arnx check` would refuse them anyway). Without arnx installed, the

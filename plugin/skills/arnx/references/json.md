@@ -139,12 +139,12 @@ The code to enter and the page to open are on stderr while it waits.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `balance_usd` | number | The available balance (the text's "Available"); negative is a debt (nothing new starts until a top-up). |
+| `balance_usd` | number | The available balance (the text's "Available"); negative is a debt (nothing new starts until it is cleared). |
 | `held_usd` | number | Reserved by reviews in progress (not spendable; `balance_usd` already leaves it out). |
 | `reserved_usd` | number | The same as `held_usd`, under the text's name ("Reserved"). |
 | `email` | string or null | The account's email. |
 | `account_id` | string | The account. |
-| `topup_url` | string | Where to top up. |
+| `topup_url` | string | The account link. |
 
 | `result` | Exit | When |
 |---|---|---|
@@ -394,7 +394,7 @@ the owner answered that question and the answer's round kept a test.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `changed` | array | The accepted test files recorded as they are now, each `{ path, change }`; `change` is `modified`, `deleted`, `repinned` or `unpinned`, as in [check-json.md](check-json.md). Empty when nothing changed. |
+| `changed` | array | The accepted test files recorded as they are now, each `{ path, change }`; `change` is `modified`, `deleted`, `repinned` or `unpinned`, as in [check-json.md](check-json.md) (`--keep-edits` refuses `duplicate`, `added` and `collides`). Empty when nothing changed. |
 | `restored_tests` | array of strings | The files whose accepted-test list (`tests` in `.arnx/accepted-tests.json`) was edited: an edit there is not kept (it could relabel a failing accepted test as another one), so the list arnx wrote (HEAD's, else this machine's) is recorded again. The files themselves are recorded as they are now. Usually empty. |
 | `recorded` | string | The record, `.arnx/accepted-tests.json` (unchanged when `changed` is empty): commit it with the tests. |
 

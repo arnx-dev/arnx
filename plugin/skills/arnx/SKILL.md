@@ -69,9 +69,10 @@ answers are theirs: do not write them, and do not treat a mark you suggested as 
 
 After the user says they accepted:
 
-1. `arnx check --json` runs the accepted tests (kept in `.arnx/tests/`, out of the project's own runner) on your
-   working tree. Those of the issues just marked real fail: expected, and the list to fix. Fields:
-   [references/check-json.md](references/check-json.md).
+1. `arnx check --json` runs the accepted tests (kept in `.arnx/tests/` under names no runner, type checker or linter
+   picks up) on your working tree. Those of the issues just marked real fail: expected, and the list to fix. Fields:
+   [references/check-json.md](references/check-json.md). `stored_older` above 0: check renamed older kept files;
+   tell the user to commit them with `.arnx/accepted-tests.json`.
 2. `arnx prompt <id>` prints the fix prompt (also `.arnx/reviews/<id>/fix-prompt.md`): the failing tests, each bug,
    the user's answers as intended behaviour, and the rules. Fix from it, and only what it lists. Fix the **code
    under test**, never the tests. If a fix depends on what the code is meant to do and no answer says, do not guess:
@@ -81,22 +82,20 @@ After the user says they accepted:
 | Exit | `result` | What to do |
 |---|---|---|
 | 0 | `pass` | Go to 5. |
-| 1 | `fail` | Fix the code for each `failed` test, run again. After 3 rounds still failing, stop and report. A `may_contradict` pair (an answer's test passes now, an accepted test fails): stop and show the user the pair; which one holds is theirs. |
-| 2 | `no-report` | Tests did not report (timeout, runner), are unproven, or a kept test file was not run (`not_run`). Report it; do not loop. |
+| 1 | `fail` | Fix the code for each `failed` test, run again. A `skipped_accepted` or `missing_accepted` test does not pass either: find what skips it or leaves it out (never by editing the test). After 3 rounds still failing, stop and report. A `may_contradict` pair (an answer's test passes now, an accepted test fails): stop and show the user the pair; which one holds is theirs. |
+| 2 | `no-report` | The tests gave no report (timeout, runner), some are unproven (`could_not_run`), or a kept test file whose record names no accepted test was not run (`not_run`). Report it; do not loop. A file with named accepted tests that reports nothing is exit 1 (`missing_accepted`). |
 | 3 | `nothing-accepted` | Nothing was accepted: ask the user whether they ran `arnx accept <id>`. |
 | 4 | `tests-changed` | An accepted test file, or its entry in `.arnx/accepted-tests.json`, changed since accept; nothing ran. Do not touch them: report each `changed` entry to the user. Restoring (`arnx accept --again <id>`; plain `arnx check` names a `git checkout` when the committed copy is the accepted one) or keeping the edit (`--keep-edits`) is theirs. |
 
 ## 5. Run the full suites
 
-A passing `arnx check` covers only the accepted tests; the project's own runner never runs them. For each project
+A passing `arnx check` covers only the accepted tests; the project's own runner never sees them. For each project
 the change touched (its `root` in `.arnx/review.yaml`), run its whole suite the way the project runs it (README, CI,
-Makefile; `test_command` in review.yaml names the runner and `image` the environment), accepted tests included.
+Makefile; `test_command` in review.yaml names the runner and `image` the environment).
 
 - All pass: say so, with the counts.
-- A test fails: run it again without the new accepted folder (pytest `--ignore`, the runner's exclude). Passes
-  without it: the accepted tests broke it; report the failing tests and the accepted file. Fails either way: your fix
-  or the code broke it; fix the code and go back to 4.3. Never edit accepted tests. A fix to the project's own tests
-  is the user's call: propose it, do not make it.
+- A test fails: your fix or the code broke it (accepted tests are never part of this run); fix the code and go back
+  to 4.3. Never edit accepted tests. A fix to the project's own tests is the user's call: propose it, do not make it.
 - You cannot run a suite (no environment, Docker not reachable): say which, and ask the user to run it. Never call
   the work done without it.
 
@@ -132,7 +131,7 @@ this change`) or lists paths in `uncovered` or `untested`:
 
 1. **Fixed**: each accepted issue you fixed: its id, one line on the bug, and what you changed.
 2. **Check**: the last `arnx check` result (pass, or the failing tests).
-3. **Full suites**: per project, the counts, and any test the accepted tests break (with the file).
+3. **Full suites**: per project, the counts.
 4. **For you**: what is left, then: on your go, I commit the fixes with the accepted tests and their pins, and push.
 
 ## Exit codes
@@ -140,8 +139,8 @@ this change`) or lists paths in `uncovered` or `untested`:
 | Code | `arnx review` | `arnx check` |
 |---|---|---|
 | 0 | no `not-checked` finding; `confirmed` findings do not fail the run (also when `status` is `partly-covered` or `not-tested`) | all accepted tests pass |
-| 1 | a `not-checked` finding | some accepted tests fail |
-| 2 | incomplete (or failed: the message says why) | some tests did not report, are unproven or were not run |
+| 1 | a `not-checked` finding | some accepted tests fail, are skipped or do not report |
+| 2 | incomplete (or failed: the message says why) | no report, unproven tests, or a kept file whose record names no accepted test not run |
 | 3 | setup needed (config, consent, keys, Docker, environment) | nothing accepted yet |
 | 4 | | an accepted test changed since accept |
 | 130 | interrupted | interrupted |
