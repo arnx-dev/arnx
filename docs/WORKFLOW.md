@@ -178,10 +178,13 @@ runs, so scan needs no Docker and no setup. A suspect is unproven: only `arnx re
 - It keeps `.arnx/scans/<id>/scan.json` and the hunters' logs in a folder git ignores. No other command reads it.
 - It stops at `scan_usd` under `[budget]` in `.arnx/config.toml` (default $0.50). On checkout-demo's
   `discount-codes` branch it took 18 s and $0.03.
-- arnx cloud does not scan yet: `arnx scan --local` uses your keys.
+- Without the models' keys, a machine logged in to arnx cloud scans there: scan says so first, asks arnx cloud's
+  consent (`--yes` gives it; recorded once there is a config), opens with a hold of `scan_usd` and shows what arnx
+  cloud billed. `--local` or `ARNX_MODELS=local` keep your keys and stop instead. Not logged in: exit 3, naming both
+  ways on (export a key, or `arnx login`).
 - Exit codes: 0 when it ran, with suspects or none, and when there is nothing to scan; 2 when it could not run (a
-  model failed, or the budget ran out before any list); 3 when something must be set first (keys, arnx cloud on, a
-  repository only in languages arnx does not review).
+  model failed, or the budget ran out before any list); 3 when something must be set first (keys or a login, arnx
+  cloud's consent or credit, a repository only in languages arnx does not review).
 
 What scan sends: [SAFETY.md](SAFETY.md#what-a-review-sends).
 

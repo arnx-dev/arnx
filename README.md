@@ -26,8 +26,8 @@ You need Docker running, and macOS or Linux (on Windows, WSL 2).
 A review costs from a few cents to a few dollars (our own: $0.17 to $3.19) and stops writing tests
 at your cap, `review_usd` (default $3.00).
 
-No Docker yet? `arnx scan` lists what may be broken in your change in under a minute, with your own keys: no
-Docker, no setup, nothing run. On checkout-demo it took 18 s and $0.03. The suspects are unproven until
+No Docker yet? `arnx scan` lists what may be broken in your change in under a minute: no Docker, no setup,
+nothing run. Without a model key it runs on arnx cloud after `arnx login`, and says so. On checkout-demo it took 18 s and $0.03. The suspects are unproven until
 `arnx review` tests them ([how scan works](docs/WORKFLOW.md#scan-suspects-without-docker)).
 
 No model keys? `arnx init --cloud`, then `arnx login`: [arnx cloud](docs/CLOUD.md) runs the models,

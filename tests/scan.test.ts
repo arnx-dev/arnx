@@ -1,5 +1,5 @@
 // arnx scan: the hunt alone, on this machine. Scripted models only: no test here calls a paid model or Docker.
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Boundary } from "../src/boundary";
@@ -12,8 +12,18 @@ import { AWS_KEY } from "./helpers/fakekeys";
 import { FakeJson, ScriptedAgent, text, tool } from "./helpers/fakes";
 import { commit, gitRepo, runGit } from "./helpers/gitutil";
 import { useTmp } from "./helpers/tmp";
+import { type FakeCloud, fakeCloud, TOKEN } from "./helpers/cloudfake";
+import { writeCredentials } from "../src/cloud";
+import { LocalBrain } from "../src/localbrain";
+import { Workspace } from "../src/agent";
+import { adapterFor } from "../src/adapters";
 
 const tmp = useTmp();
+let clouds: FakeCloud[] = [];
+afterEach(() => {
+  for (const c of clouds) c.stop();
+  clouds = [];
+});
 
 const SUSPECT = { file: "app.py", line: 2, claim: "add returns the difference of its arguments",
   why: "the change replaced + with -", input: "add(1, 2)", expected: "3", actual: "-1" };
@@ -128,21 +138,105 @@ test("the budget stops a scan before the hunt reply: not run, the cap named", as
   expect(agent.calls.length).toBe(1);
 });
 
-test("arnx cloud does not scan: refused before anything is sent", async () => {
+test("--cloud without a login stops before anything is sent", async () => {
   const repo = changed();
   const { agent, m } = models();
-  const cli = new Cli({ cwd: repo, scanModels: () => m });
+  const cli = new Cli({ cwd: repo, env: { HOME: join(tmp(), "home") }, scanModels: () => m });
   expect(await cli.run("scan", "--cloud")).toBe(3);
-  expect(cli.stderr).toContain("arnx cloud does not scan");
+  expect(cli.stderr).toContain("arnx login");
   expect(agent.calls.length).toBe(0);
 });
 
-test("missing keys stop a scan with exit 3, nothing sent", async () => {
+test("missing keys and no login stop a scan with exit 3, naming both ways on, nothing sent", async () => {
   const repo = changed();
-  const cli = new Cli({ cwd: repo });
+  const cli = new Cli({ cwd: repo, env: { HOME: join(tmp(), "home") } });
   expect(await cli.run("scan")).toBe(3);
   expect(cli.stderr).toContain("ANTHROPIC_API_KEY");
+  expect(cli.stderr).toContain("`arnx login` to scan on arnx cloud");
   expect(existsSync(join(repo, ".arnx"))).toBe(false);
+});
+
+/** A machine logged in to a fake arnx cloud whose round reads app.py, then ends at the hunt's reply. */
+function cloudScan(): { home: string; c: FakeCloud } {
+  const S = { id: "S1", file: "app.py", line: 2, claim: SUSPECT.claim, by: "reviewer", why: SUSPECT.why,
+    input: SUSPECT.input, expected: SUSPECT.expected, actual: SUSPECT.actual };
+  const c = fakeCloud({ rounds: { "*": [
+    { type: "actions", actions: [{ name: "read_file", input: { path: "app.py" } }] },
+    { type: "final", suspects: [S], hunt: { lists: [{ source: "reviewer", suspects: [S] }], tested: ["S1"],
+      merged: [{ source: "reviewer", index: 0, into: "S1", duplicate: false }], dropped: [] } },
+    { type: "done", stop: "end_turn" }] } });
+  clouds.push(c);
+  const home = join(tmp(), "home");
+  writeCredentials({ HOME: home }, { url: c.url, token: TOKEN });
+  return { home, c };
+}
+
+test("no model key on a logged-in machine: the scan runs on arnx cloud, said first, and ends at the hunt", async () => {
+  const repo = changed();
+  const { home, c } = cloudScan();
+  const cli = new Cli({ cwd: repo, env: { HOME: home, ARNX_CLOUD_URL: c.url }, sleep: async () => {} });
+  expect(await cli.run("scan", "--yes")).toBe(0);
+  expect(cli.stdout).toContain("No ANTHROPIC_API_KEY set: this scan runs on arnx cloud, billed to your arnx cloud credit");
+  expect(cli.stdout).toContain("S1  app.py:2");
+  expect(cli.stdout).toContain(SUSPECT.claim);
+  expect(cli.stdout).toContain("billed by arnx cloud");
+  expect(cli.stdout).not.toMatch(/finding|issue|\bbug/i);
+  // The scan opened with a hold of the scan's budget, asked for the hunt alone, and was closed.
+  const create = c.seen.find((x) => x.path === "/v1/reviews")!.body as Record<string, unknown>;
+  expect(create.budget_cap_micro_usd).toBe(500_000);
+  const start = c.seen.find((x) => x.path.endsWith("/agent"))!.body as Record<string, unknown>;
+  expect([start.hunt, start.hunt_only]).toEqual([true, true]);
+  expect(c.seen.some((x) => x.path.endsWith("/judge"))).toBe(false);
+  expect((c.seen.find((x) => x.path.endsWith("/finish"))!.body as { stop: string }).stop).toBe("completed");
+  // Nothing but the scan's own folder: no config, no consent written before `arnx init`.
+  expect(readdirSync(join(repo, ".arnx"))).toEqual(["scans"]);
+  const scans = join(repo, ".arnx", "scans");
+  const saved = JSON.parse(readFileSync(join(scans, readdirSync(scans).find((d) => d !== ".gitignore")!, "scan.json"),
+    "utf8"));
+  expect([saved.billed_by, saved.models.reviewer, saved.suspects.length]).toEqual(["arnx cloud", "arnx:medium", 1]);
+  expect(JSON.stringify(saved)).not.toMatch(/claude|gpt|anthropic:|openai:|h-2026/i);
+});
+
+test("own keys asked for by name never switch to arnx cloud", async () => {
+  const repo = changed();
+  const { home, c } = cloudScan();
+  for (const [args, env] of [[["scan", "--local"], {}], [["scan"], { ARNX_MODELS: "local" }]] as const) {
+    const cli = new Cli({ cwd: repo, env: { HOME: home, ARNX_CLOUD_URL: c.url, ...env } });
+    expect(await cli.run(...args)).toBe(3);
+    expect(cli.stderr).toContain("ANTHROPIC_API_KEY");
+  }
+  expect(c.seen.length).toBe(0);
+});
+
+test("arnx cloud's consent: without --yes and no terminal nothing is sent; with a config it is recorded", async () => {
+  const repo = changed();
+  const { home, c } = cloudScan();
+  const env = { HOME: home, ARNX_CLOUD_URL: c.url };
+  const refused = new Cli({ cwd: repo, env });
+  expect(await refused.run("scan")).toBe(3);
+  expect(refused.stderr).toContain("`arnx scan --yes`");
+  expect(c.seen.length).toBe(0);
+  expect(await new Cli({ cwd: repo, env }).run("init")).toBe(0);
+  const first = new Cli({ cwd: repo, env, sleep: async () => {} });
+  expect(await first.run("scan", "--yes")).toBe(0);
+  expect(readFileSync(join(repo, ".arnx", "config.toml"), "utf8")).toMatch(/^cloud_consent_at = /m);
+});
+
+test("a hunt-only round's suspects are its final step, so a remote caller gets them", async () => {
+  const repo = changed();
+  const { m } = models();
+  const steps: { type: string; suspects?: { claim: string }[] }[] = [];
+  const brain = new LocalBrain({ agentModel: m.agentModel, prices: {}, boundary: new Boundary() });
+  const ws = new Workspace(repo, { adapter: adapterFor({ language: "python" }), runner: "pytest" });
+  const cfg = detectedProject({ root: ".", language: "python", runner: "pytest" });
+  const r = await brain.agentRound("review", { cfg, diff: "", scope: { owned: ["app.py"], used: [] }, scoped: false,
+    envTests: [], maxQuestions: 5, dbNames: [], budgetUsd: 1, huntOnly: true,
+    hunt: { context: "", root: repo, searchDirs: ["."] } }, Promise.resolve({ tools: () => ws.tools(),
+    call: (n: string, a: Record<string, unknown>) => ws.call(n, a),
+    onStep: (s: unknown) => { steps.push(s as (typeof steps)[number]); } }));
+  expect(r.hunt?.suspects?.map((x) => x.claim)).toEqual([SUSPECT.claim]);
+  expect(steps.find((x) => x.type === "final")!.suspects!.map((x) => x.claim)).toEqual([SUSPECT.claim]);
+  expect(steps.at(-1)!.type).toBe("done");
 });
 
 test("a repository only in languages arnx does not review is refused, as review refuses it", async () => {

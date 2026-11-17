@@ -11,8 +11,10 @@ import { adapterFor } from "./adapters";
 import type { AdapterId } from "./adapters/types";
 import { Workspace } from "./agent";
 import type { Boundary } from "./boundary";
-import type { ReviewInput, RoundHunt } from "./brain";
-import { type Change, describe, resolveChange, sliceDiff, takeSnapshot } from "./change";
+import { createHash } from "node:crypto";
+import type { Brain, ReviewInput, RoundHunt } from "./brain";
+import { added, type Change, describe, removed, resolveChange, sliceDiff, takeSnapshot } from "./change";
+import type { CloudBrain } from "./cloudbrain";
 import { configSuspects, isSeedFile, loadReviewFile, type ReviewConfig, reviewConfigPath, type ReviewFile,
   sandboxOnlyOf, secretPinsOf } from "./config";
 import { CONTEXT_LIMIT, contextPack } from "./context";
@@ -64,6 +66,8 @@ export interface ScanResult {
   costUsd: number;
   /** Some call's cost is unknown (an unpriced model): `costUsd` is a floor. */
   costUnknown: boolean;
+  /** arnx cloud ran the scan: `costUsd` is what it billed. */
+  cloud?: true;
   budgetUsd: number;
   /** The budget stopped a round before its hunt reply. */
   capped: boolean;
@@ -196,7 +200,9 @@ const cost = (uses: (ModelUse | null | undefined)[]) => uses.reduce((n, u) => n 
 const unknown = (uses: (ModelUse | null | undefined)[]) => uses.some((u) => !!u && (u.unknownCalls > 0 || !!u.unpriced));
 
 /** The hunt of a change, with nothing proven: see the file's head. */
-export async function runScan(repo: string, o: { settings: Settings; models: ScanModels; boundary: Boundary;
+export async function runScan(repo: string, o: { settings: Settings; boundary: Boundary;
+  /** The models on the user's own keys; or `cloud`, the brain that speaks to arnx cloud. */
+  models?: ScanModels; cloud?: CloudBrain;
   range?: string | null; untracked?: boolean; docs?: boolean; progress?: Say; now?: Date;
   /** How long the reviewer's hunt reply waits for the second hunter (default: as a review). */
   secondHuntWaitMs?: number; lateHuntWaitMs?: number }): Promise<ScanResult> {
@@ -231,19 +237,25 @@ export async function runScan(repo: string, o: { settings: Settings; models: Sca
   const tmp = mkdtempSync(join(tmpdir(), "arnx-scan-"));
   const b = o.boundary;
   const m = o.models;
+  if (!m && !o.cloud) throw new ArnxError("arnx scan: no models and no arnx cloud brain");
   // The second hunter a review would use: the configured one, else the second opinion when it is another vendor's.
   const vendor = (ref: string) => ref.split(":")[0];
-  const secondHunter = m.secondHunter ?? (m.challenger && vendor(m.challenger.ref) !== vendor(refString(s.reviewer)) &&
-    !(m.challenger instanceof FallbackJson) ? m.challenger : null);
-  const brain = new LocalBrain({ agentModel: m.agentModel, prices: allPrices(s), boundary: b, prompts: promptsFor(repo),
-    ...(m.hunter ? { hunter: m.hunter } : {}), ...(m.ranker ? { ranker: m.ranker } : {}), secondHunter,
-    ...(o.secondHuntWaitMs === undefined ? {} : { secondHuntWaitMs: o.secondHuntWaitMs }),
+  const secondHunter = !m ? null : m.secondHunter ?? (m.challenger &&
+    vendor(m.challenger.ref) !== vendor(refString(s.reviewer)) && !(m.challenger instanceof FallbackJson)
+    ? m.challenger : null);
+  const brain: Brain = o.cloud ?? new LocalBrain({ agentModel: m!.agentModel, prices: allPrices(s), boundary: b,
+    prompts: promptsFor(repo), ...(m!.hunter ? { hunter: m!.hunter } : {}), ...(m!.ranker ? { ranker: m!.ranker } : {}),
+    secondHunter, ...(o.secondHuntWaitMs === undefined ? {} : { secondHuntWaitMs: o.secondHuntWaitMs }),
     ...(o.lateHuntWaitMs === undefined ? {} : { lateHuntWaitMs: o.lateHuntWaitMs }) });
   const uses: (ModelUse | null)[] = [];
-  let spent = 0, capped = false;
+  let spent = 0, capped = false, billed: number | null = null, failed = true;
   const projects: ScanProject[] = [];
   const lists: ScanSuspect[][] = [];
   try {
+    // arnx cloud opens the scan with a hold of the scan's budget (402 there: no credit left, exit 3).
+    await o.cloud?.start({ files: change.files, added: added(change), removed: removed(change),
+      diffSha256: createHash("sha256").update(change.diff).digest("hex"), budgetUsd: s.scanBudgetUsd,
+      projects: plan.planned.map(({ cfg }) => ({ name: cfg.name, language: cfg.language, runner: cfg.runner })) });
     // Nothing has left yet: the filter knows the diff before the first request, and the tree before the first round.
     b.addDiff(change.diff, pins);
     b.add(configSuspects(repo));
@@ -285,7 +297,8 @@ export async function runScan(repo: string, o: { settings: Settings; models: Sca
       const h: RoundHunt | undefined = r.hunt;
       // A hunter still out when the reviewer replied: waited for here, so its cost is counted.
       const late = h?.late ? await h.late() : null;
-      const reviewerUse: ModelUse = { ...r.agent.usage, model: m.agentModel.model, calls: r.agent.calls,
+      const reviewerUse: ModelUse = { ...r.agent.usage, model: m?.agentModel.model ?? `${o.cloud!.label}/reviewer`,
+        calls: r.agent.calls,
         unknownCalls: r.agent.unknownCalls ?? 0, costUsd: r.agent.costUsd };
       const roundUses = [reviewerUse, h?.second ?? null, ...h?.extras ?? [], late];
       uses.push(...roundUses);
@@ -302,8 +315,16 @@ export async function runScan(repo: string, o: { settings: Settings; models: Sca
       lists.push(h.suspects.map((x) => ({ ...x, project: cfg.name, testNamesFile: named(x.file) })));
       say(`${h.suspects.length} suspect${h.suspects.length === 1 ? "" : "s"}`);
     }
+    failed = false;
   } finally {
     rmSync(tmp, { recursive: true, force: true });
+    // arnx cloud closes the scan however it ended, and settles its hold: what it billed is the scan's cost.
+    if (o.cloud) {
+      const bill = await o.cloud.finish({ stop: failed ? "failed" : capped ? "budget" : "end_turn",
+        projectsReviewed: projects.filter((p) => !p.stopped).length, testsWritten: 0, passed: 0, findings: 0, flaky: 0,
+        seconds: Math.round((performance.now() - started) / 1000) }).catch(() => null);
+      if (bill) billed = bill.costUsd;
+    }
   }
   // No project gave a list: the scan did not run, whatever stopped it (exit 2), never a scan with no suspects.
   if (projects.every((p) => p.stopped)) {
@@ -312,10 +333,13 @@ export async function runScan(repo: string, o: { settings: Settings; models: Sca
   }
   const result: ScanResult = { id, dir: posix.join(SCANS_DIR, id), change: describe(change),
     projectsFrom: file ? "review.yaml" : "detected", projects, suspects: inTurn(lists), notScanned: plan.notScanned,
-    costUsd: Math.round(spent * 1e6) / 1e6, costUnknown: unknown(uses), budgetUsd: s.scanBudgetUsd, capped,
+    costUsd: Math.round((billed ?? spent) * 1e6) / 1e6, costUnknown: !o.cloud && unknown(uses),
+    ...(o.cloud ? { cloud: true as const } : {}), budgetUsd: s.scanBudgetUsd, capped,
     seconds: Math.round((performance.now() - started) / 100) / 10,
-    models: { reviewer: refString(s.reviewer), hunter: m.hunter?.ref ?? null, ranker: m.ranker?.ref ?? null,
-      second_hunter: secondHunter?.ref ?? null } };
+    // arnx cloud's work goes by its tier, never a model.
+    models: o.cloud ? { reviewer: o.cloud.shown, hunter: null, ranker: null, second_hunter: null }
+      : { reviewer: refString(s.reviewer), hunter: m!.hunter?.ref ?? null, ranker: m!.ranker?.ref ?? null,
+        second_hunter: secondHunter?.ref ?? null } };
   writeFileSync(join(dir, "scan.json"), JSON.stringify(scanJson(result), null, 2) + "\n");
   return result;
 }
@@ -339,7 +363,8 @@ export function scanJson(r: ScanResult): Record<string, unknown> {
       ...(p.stopped ? { stopped: p.stopped } : {}), ...(p.partial ? { partial: true } : {}) })),
     suspects: r.suspects.map((x) => ({ id: x.id, project: x.project, file: x.file, line: x.line, claim: x.claim, why: x.why,
       input: x.input, expected: x.expected, actual: x.actual, by: x.by, test_names_file: x.testNamesFile })),
-    not_scanned: r.notScanned, cost_usd: r.costUsd, cost_unknown: r.costUnknown, budget_usd: r.budgetUsd,
+    not_scanned: r.notScanned, cost_usd: r.costUsd, cost_unknown: r.costUnknown,
+    ...(r.cloud ? { billed_by: "arnx cloud" } : {}), budget_usd: r.budgetUsd,
     capped: r.capped, seconds: r.seconds, models: r.models, next: ["arnx review"] };
 }
 
@@ -347,7 +372,7 @@ export function scanJson(r: ScanResult): Record<string, unknown> {
 export function scanSummary(r: ScanResult): string[] {
   const n = r.suspects.length;
   const several = r.projects.length > 1;
-  const spent = `${money(r.costUsd)}${r.costUnknown ? "+" : ""}`;
+  const spent = `${money(r.costUsd)}${r.costUnknown ? "+" : ""}${r.cloud ? " billed by arnx cloud" : ""}`;
   const out = [`Scanned ${r.change}: ${n ? `${n} suspect${n === 1 ? "" : "s"}` : "no suspects"} (${spent}, ${r.seconds} s).`];
   if (n) out.push("Unproven: nothing was run. Each is a guess until a test fails.");
   for (const x of r.suspects) {

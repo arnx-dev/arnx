@@ -146,8 +146,11 @@ export class LocalBrain implements Brain {
         hunting = false;
         const next = await hunt.afterHunt(reply);
         opts.budgetUsd = Math.max(0, opts.budgetUsd - next.spent);
-        // A scan stops at the hunt's reply: nothing is written or run.
-        if (x.huntOnly) return null;
+        // A scan stops at the hunt's reply: nothing is written or run. Its suspects are the round's final step.
+        if (x.huntOnly) {
+          t.onStep?.({ type: "final", turn, text: reply, suspects: hunt.state.suspects ?? [], ...huntOf() });
+          return null;
+        }
         // No suspect: nothing to prove, so the round ends here and spends nothing more.
         if (next.message === null) {
           say("nothing suspected; no tests written");

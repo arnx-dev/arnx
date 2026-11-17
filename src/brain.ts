@@ -88,7 +88,7 @@ export interface ReviewInput extends RoundBase {
   /** A resumed round's suspects from the hunt a failed call cut off, and that hunt's record: no hunter runs, and the
    * round opens with the task and these suspects. The remote brain ignores it. */
   prior?: { suspects: Suspect[]; record: HuntRecord };
-  /** The round ends once the hunt has replied: no test is asked for (`arnx scan`). The remote brain ignores it. */
+  /** The round ends once the hunt has replied, its suspects the round's final: no test is asked for (`arnx scan`). */
   huntOnly?: boolean;
 }
 

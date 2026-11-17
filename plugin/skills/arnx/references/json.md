@@ -265,7 +265,8 @@ test. The same object is kept in `.arnx/scans/<scan_id>/scan.json`.
 | `cost_usd` | number | What the scan cost; `cost_unknown: true` when a model had no price (then it is a floor). |
 | `budget_usd` | number | The cap: `[budget] scan_usd`, default 0.50. `capped: true` when it stopped a project. |
 | `seconds` | number | How long it took. |
-| `models` | object | `{ reviewer, hunter, ranker, second_hunter }`. |
+| `models` | object | `{ reviewer, hunter, ranker, second_hunter }`; on arnx cloud, `reviewer` is the tier (`arnx:medium`) and the others are null. |
+| `billed_by` | string | `arnx cloud` when the scan ran there; `cost_usd` is then what it billed. Absent with your own keys. |
 | `next` | array of strings | `arnx review`. |
 
 | `result` | Exit | When |
@@ -273,8 +274,9 @@ test. The same object is kept in `.arnx/scans/<scan_id>/scan.json`.
 | `ok` | 0 | The scan ran, with suspects or none. |
 
 Nothing to scan (an empty change, or documentation alone) is exit 0 as for review. `error` with exit 2: the scan could
-not run (no project gave a list: a model failed, or the budget ran out first). Exit 3: what must be set first (keys,
-arnx cloud on, a repository only in languages arnx does not review).
+not run (no project gave a list: a model failed, or the budget ran out first). Exit 3: what must be set first (keys
+or an arnx cloud login, arnx cloud's consent, `--yes` for an agent, or credit; a repository only in languages arnx does
+not review).
 
 ### triage
 
