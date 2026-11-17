@@ -161,6 +161,33 @@ What a review sends, and what it leaves out (untracked files, `.arnxignore`, sec
 [SAFETY.md](SAFETY.md#what-a-review-sends). A changed file holding a private key is reviewed with a fake in the sandbox and
 `[private key]` for models; a test that needs the real key reads as unproven until `arnx allow-secret PATH`.
 
+## Scan: suspects without Docker
+
+`arnx scan` runs the first step of a review alone. The same models read the same change, taken the same way
+(default range, `--range`, `--untracked`, `--docs`, the size limit, lockfiles and generated files), and list
+suspects, ranked: where, what could break, why, and an input to try. Nothing is written into your project and nothing
+runs, so scan needs no Docker and no setup. A suspect is unproven: only `arnx review` turns one into a failing test.
+
+- Before `arnx init`, scan uses arnx's default models for the keys you have and reads the projects from your files.
+  With `.arnx/review.yaml`, it scans its projects. It writes no config and records no consent.
+- The reviewer gets its read tools only (list, read, search), and the round ends at its list. The second hunter, the
+  part hunters of a large change and the ranker run as in a review. The code index of `context = "precise"` needs
+  Docker, so scan reads context by names.
+- A suspect says when no test file of its project names its file (by module or file name). That is certain when it
+  says so. A test file that does name it may still not test it, so scan never says a file is tested.
+- It keeps `.arnx/scans/<id>/scan.json` and the hunters' logs in a folder git ignores. No other command reads it.
+- It stops at `scan_usd` under `[budget]` in `.arnx/config.toml` (default $0.50). On checkout-demo's
+  `discount-codes` branch it took 18 s and $0.03.
+- Without the models' keys, a machine logged in to arnx cloud scans there: scan says so first, asks arnx cloud's
+  consent (`--yes` gives it; recorded once there is a config), opens with a hold of `scan_usd` and shows what arnx
+  cloud billed. `--local` or `ARNX_MODELS=local` keep your keys and stop instead. Not logged in: exit 3, naming both
+  ways on (export a key, or `arnx login`).
+- Exit codes: 0 when it ran, with suspects or none, and when there is nothing to scan; 2 when it could not run (a
+  model failed, or the budget ran out before any list); 3 when something must be set first (keys or a login, arnx
+  cloud's consent or credit, a repository only in languages arnx does not review).
+
+What scan sends: [SAFETY.md](SAFETY.md#what-a-review-sends).
+
 ## Exit codes and JSON
 
 Exit codes: 0 fine (nothing to review, whether an empty change, lockfiles or generated files alone, or documentation alone, is fine too and runs no review; confirmed findings are worth a look and do not fail the run; CI reads `result` `findings` in `review --json`, or `findings[].confirmed`), 1 a finding the second opinion did not check, 2 incomplete, 3 setup needed. `arnx check`: 0 all accepted

@@ -199,6 +199,12 @@ A submodule shows as a pointer only.
 With arnx cloud, the same content goes to arnx cloud instead of your providers, and arnx cloud passes it to its model
 providers ([CLOUD.md](CLOUD.md)).
 
+`arnx scan` sends the diff and the files its models read, by the same rules (untracked files, `.arnxignore`, secrets,
+stand-ins), and no test output, because it runs nothing. Before `arnx init` there is no `.arnxignore`, so only the
+secrets filter and git's own ignore rules leave files out; scan says so before it sends. With your own keys it goes to
+your providers. Without them, on a machine logged in to arnx cloud, scan says it is switching to arnx cloud and asks
+for arnx cloud's consent (`--yes` gives it) before anything is sent; `--local` or `ARNX_MODELS=local` never switch.
+
 ## Telemetry
 
 Off unless you turn it on: anonymous usage counts, never code or file names. `arnx init` writes `telemetry = false` at

@@ -48,7 +48,8 @@ nothing: `arnx consent --cloud` (`--yes` in scripts) records it.
 Money:
 
 - A review first reserves at most your cap (`review_usd` under `[budget]`, default $3.00), is billed what it actually
-  cost, and is always closed, also when it fails or you interrupt it.
+  cost, and is always closed, also when it fails or you interrupt it. `arnx scan` does the same with `scan_usd`
+  (default $0.50), and runs on arnx cloud when the models' keys are missing.
 - The cost shows per role under the tier, such as `arnx:medium/reviewer`, in review.md, review.json and
   `.arnx/usage.jsonl`; arnx cloud does not name the models it used.
 - A balance too low to start stops with exit 3 and the balance; your own model keys

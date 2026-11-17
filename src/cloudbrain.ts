@@ -102,6 +102,8 @@ export interface CloudBrainOptions {
   boundary: Boundary;
   /** Lines for the user outside a round (the review opening, the bill at finish). */
   progress?: Say;
+  /** What those lines call it: "review" (default), or "scan" for `arnx scan`, whose rounds end at the hunt. */
+  noun?: "review" | "scan";
 }
 
 /** What one loop needs besides its first step. */
@@ -136,6 +138,10 @@ export class CloudBrain implements Brain {
 
   constructor(readonly o: CloudBrainOptions) {
     this.tier = o.tier;
+  }
+
+  private get noun(): string {
+    return this.o.noun ?? "review";
   }
 
   get boundary(): Boundary {
@@ -181,11 +187,11 @@ export class CloudBrain implements Brain {
     { idempotencyKey: randomUUID(), component: "brain" });
     this.named(r);
     this.review = { id: r.review_id, maxOutput: r.limits?.max_tool_output_bytes ?? MAX_TOOL_OUTPUT };
-    this.o.progress?.(`arnx cloud (${this.shown}): review opened with a hold of ${usd(r.hold_micro_usd)}; ` +
+    this.o.progress?.(`arnx cloud (${this.shown}): ${this.noun} opened with a hold of ${usd(r.hold_micro_usd)}; ` +
       `${usd(r.balance_micro_usd)} available besides`);
     // arnx cloud holds what the balance allows: below the cap, the review can stop early.
     if (r.hold_micro_usd < micro(x.budgetUsd)) {
-      this.o.progress?.(`Your arnx cloud balance caps this review at ${usd(r.hold_micro_usd)} (your cap is ` +
+      this.o.progress?.(`Your arnx cloud balance caps this ${this.noun} at ${usd(r.hold_micro_usd)} (your cap is ` +
         `${usd(micro(x.budgetUsd))}): it may stop early; own keys: arnx cloud off`);
     }
     return { reviewId: r.review_id };
@@ -229,7 +235,8 @@ export class CloudBrain implements Brain {
       if (cloudStepShown(p.message)) say(p.message);
     } };
     const path = `/v1/reviews/${id}/projects/${encodeURIComponent(cfg.name)}/agent`;
-    say(h ? "arnx cloud is looking for defects" : "arnx cloud is writing tests");
+    say(x.huntOnly ? "arnx cloud is reading the change" : h ? "arnx cloud is looking for defects"
+      : "arnx cloud is writing tests");
     // A start that timed out or failed on the way (a network failure, 503) is sent once more with the same
     // Idempotency-Key: arnx cloud answers it from the round it already started instead of starting another.
     // arnx cloud takes no field for these notes: they go in the text it reads.
@@ -239,7 +246,9 @@ export class CloudBrain implements Brain {
       scope: { owns: cfg.owns, uses: cfg.uses, changed_owned: scope.owned, changed_used: scope.used,
         scoped: x.scoped },
       facts: projectFacts(cfg, x.envTests, x.dbNames), max_questions: x.maxQuestions,
-      budget_micro_usd: micro(x.budgetUsd), hunt: !!h, ...(parts.length ? { parts } : {}) },
+      budget_micro_usd: micro(x.budgetUsd), hunt: !!h, ...(parts.length ? { parts } : {}),
+      // A scan: the round ends at the hunt's reply, its suspects the round's final.
+      ...(x.huntOnly && h ? { hunt_only: true } : {}) },
     { ...stream, idempotencyKey: randomUUID(), retries: 1 });
     first.catch(() => {});
     let suspects: Suspect[] | null = null, recorded = false, lateRecorded = false;
@@ -291,7 +300,9 @@ export class CloudBrain implements Brain {
         parts: lists.filter((l) => /^part-\d+$/.test(l.source)).map((l) => l.list), second: of("second") ?? null,
         tested }, null, 2) + "\n");
     }
-    this.sayer(project, x.progress)(`checking ${tested.length} thing${tested.length === 1 ? "" : "s"} in this change`);
+    if (!x.huntOnly) {
+      this.sayer(project, x.progress)(`checking ${tested.length} thing${tested.length === 1 ? "" : "s"} in this change`);
+    }
   }
 
   /** The second hunter's list, arrived after the tests started: kept in hunt.json, not tested. */
@@ -576,14 +587,14 @@ export class CloudBrain implements Brain {
         projects_reviewed: totals.projectsReviewed, tests_written: totals.testsWritten, passed: totals.passed,
         findings: totals.findings, flaky: totals.flaky, seconds: Math.max(0, totals.seconds) });
       this.named(r);
-      this.o.progress?.(`arnx cloud (${this.shown}) billed ${usd(r.billed_micro_usd)} for this review; ` +
+      this.o.progress?.(`arnx cloud (${this.shown}) billed ${usd(r.billed_micro_usd)} for this ${this.noun}; ` +
         `${usd(r.balance_micro_usd)} available now`);
       return { costUsd: r.billed_micro_usd / 1_000_000,
         byRole: Object.fromEntries(r.by_role.map((x) => [x.role, x.cost_micro_usd / 1_000_000])) };
     } catch (e) {
       if (e instanceof CloudError && e.body?.code === "review_finished") return null;
       if (!(e instanceof ArnxError)) throw e;
-      this.o.progress?.(`could not close the review on arnx cloud (${e.message}); it expires there on its own and ` +
+      this.o.progress?.(`could not close the ${this.noun} on arnx cloud (${e.message}); it expires there on its own and ` +
         "its unused hold is released then");
       return null;
     }

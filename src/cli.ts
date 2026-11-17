@@ -47,6 +47,7 @@ import { acceptData, checkData, reportTelemetry, reviewData, type Sender, setupD
   from "./telemetry";
 import { Progress, type Live } from "./progress";
 import { runReview } from "./reviewer";
+import { runScan, type ScanModels, scanJson, scanSummary } from "./scan";
 import { envOwner, OutOfTime, requireDocker, type TimeLimit, timeIsUp, withTimeLimit } from "./sandbox";
 import { ageDays, type CacheRecord, type EnvImage, KEEP_DAYS, oldImages, pruneEnv, totalSize } from "./envprune";
 import { cloudModels, cloudUrl, defaultSettings, type Env, keyNames, loadSettings, missingKeys, modelRefs, type ModelsMode,
@@ -135,6 +136,8 @@ Prepare, once per repository (the first review sets up what it needs)
   remove [--yes] [--tests]              what arnx put in this repository: listed, deleted with --yes
 
 Review, after each change
+  scan [--range A..B] [--untracked] [--docs] [--yes]
+                                        suspects in the change, unproven: no Docker, no tests run
   review [--range A..B] [--untracked] [--no-hunt] [--docs] [--resume]
                                         test the change: branch commits, uncommitted work, or the last commit
 
@@ -169,6 +172,8 @@ export interface CliDeps {
   setupSessions?: SessionFactory;
   /** The review itself (default: reviewer's runReview); tests replace it to see what runs before it. */
   runReview?: typeof runReview;
+  /** `arnx scan`'s models (default: made from the settings and keys); tests give scripted ones. */
+  scanModels?: (s: Settings) => ScanModels;
   /** Interactive marking: keys from the terminal and a full-screen draw (absent when not a terminal). */
   keys?: () => AsyncIterator<Key> & { close?(): void };
   draw?: (lines: string[]) => void;
@@ -212,6 +217,9 @@ const COMMANDS: Record<string, { options: Options; positionals: number }> = Obje
     "no-untracked": { type: "boolean" }, ...MODELS }, positionals: 0 },
   approve: { options: { yes: { type: "boolean" }, project: { type: "string" }, quiet: { type: "boolean" } },
     positionals: 0 },
+  scan: { options: { range: { type: "string" }, quiet: { type: "boolean" }, docs: { type: "boolean" },
+    yes: { type: "boolean" },
+    untracked: { type: "boolean" }, "no-untracked": { type: "boolean" }, ...MODELS }, positionals: 0 },
   review: { options: { range: { type: "string" }, quiet: { type: "boolean" }, "no-hunt": { type: "boolean" },
     docs: { type: "boolean" },
     resume: { type: "boolean" }, untracked: { type: "boolean" }, "no-untracked": { type: "boolean" }, ...MODELS },
@@ -809,13 +817,15 @@ class Commands {
 
   /** With arnx models in effect, the brain that speaks to arnx cloud (it needs this machine's login); null for the
    * local brain on the user's own keys. */
-  private async cloudBrain(repo: string, s: Settings, mode: ModelsMode): Promise<((say: Say) => CloudBrain) | null> {
+  private async cloudBrain(repo: string, s: Settings, mode: ModelsMode, noun?: "scan")
+    : Promise<((say: Say) => CloudBrain) | null> {
     if (!cloudModels(s)) return null;
     const url = cloudUrl(s, this.d.env);
     const token = tokenFor(this.d.env, url);
     if (!token) throw notLoggedIn(url);
     const client = this.cloudClient(url, token, s, mode);
-    return (say) => new CloudBrain({ client, tier: s.cloud!.effort, progress: say, boundary: this.boundary });
+    return (say) => new CloudBrain({ client, tier: s.cloud!.effort, progress: say, boundary: this.boundary,
+      ...(noun ? { noun } : {}) });
   }
 
   /** A client for `url`; with the repository's settings and models, an outage says how to use the user's own keys. */
@@ -1525,6 +1535,100 @@ class Commands {
     this.emit(r.code === 0 ? "ok" : "fail", r.code, { approved: r.code === 0, projects: r.projects,
       ...(r.code === 0 ? {} : { detail: r.detail }), next: [r.code === 0 ? "arnx review" : "arnx approve"] });
     return r.code;
+  }
+
+  /** The hunt of a review alone: suspects, unproven, without Docker or setup. Own keys, or arnx cloud: with the models'
+   * keys missing and nothing asking for own keys (--local, ARNX_MODELS=local), a logged-in machine scans on arnx cloud
+   * and says so first. It writes only its own folder (.arnx/scans/) and, once there is a config, the cloud consent;
+   * never anything review, accept or check read. Exit 0 with or without suspects; 2 when it could not run, 3 for what
+   * has to be set first (keys or a login, the consent, models, language, credit). */
+  async scan(a: Args): Promise<number> {
+    const untracked = untrackedFlag(a);
+    const repo = this.repo();
+    // Before `arnx init`: arnx's default models for the keys present; nothing is written to make it so.
+    const initialized = existsSync(settingsPath(repo));
+    const file = initialized ? loadSettings(repo) : defaultSettings(this.d.env);
+    let mode = this.mode(file, a);
+    let s = withModels(file, mode);
+    const scanModels = this.d.scanModels;
+    if (!cloudModels(s) && !scanModels) {
+      const refs = [s.reviewer, s.hunter ?? s.reviewer, ...s.secondHunter ? [s.secondHunter] : [s.challenger]];
+      const missing = missingKeys(s, this.d.env, refs);
+      if (missing.length) {
+        // Own keys asked for by name: no switch to arnx cloud.
+        if (mode.from !== "file") throw new SetupRequired(keysHint(missing, false));
+        const them = missing.length > 1 ? "them" : "it";
+        if (!tokenFor(this.d.env, cloudUrl(s, this.d.env))) {
+          throw new SetupRequired(`no ${missing.join(", ")} set, and not logged in to arnx cloud: export ${them} to ` +
+            "scan with your own keys, or `arnx login` to scan on arnx cloud");
+        }
+        mode = { cloud: true, from: "flag" };
+        s = withModels(file, mode);
+        this.d.out(`No ${missing.join(", ")} set: this scan runs on arnx cloud, billed to your arnx cloud credit. ` +
+          `To use your own keys, export ${them} (or \`arnx scan --local\`).`);
+      }
+    }
+    const cloud = cloudModels(s);
+    if (!initialized) {
+      this.d.out(`No .arnx/config.toml${cloud ? "" : ": arnx's default models"}. ${existsSync(join(repo, IGNORE_FILE))
+        ? "" : "No .arnxignore: every file git tracks may be read (secret-looking values go as fakes). "}` +
+        "`arnx init` writes both.");
+    }
+    if (cloud && !tokenFor(this.d.env, cloudUrl(s, this.d.env))) throw notLoggedIn(cloudUrl(s, this.d.env));
+    if (cloud && !s.cloudConsentAt) {
+      // arnx cloud asks once: recorded once there is a config to hold it; before `arnx init`, asked for each scan.
+      const yes = a.values.yes as boolean | undefined;
+      if (!yes && !this.d.interactive) {
+        throw new SetupRequired("sending code to arnx cloud has not been agreed to; nothing sent: " +
+          "`arnx scan --yes` agrees, or `arnx consent --cloud` once there is a config");
+      }
+      if (yes) this.d.out(`${sendQuestion("arnx cloud")} yes (--yes)`);
+      else if (!await this.confirm(sendQuestion("arnx cloud"), false)) {
+        throw new SetupRequired("consent declined; nothing sent");
+      }
+      if (initialized) {
+        const at = isoSeconds(new Date());
+        recordConsent(repo, "cloud_consent_at", at);
+        s = { ...s, cloudConsentAt: at };
+      }
+    }
+    // Own keys: said, not asked, and not recorded (a scan writes no config).
+    if (!cloud && !s.consentAt) {
+      const providers = [...new Set([s.reviewer, s.hunter ?? s.reviewer, ...s.secondHunter ? [s.secondHunter] : []]
+        .map((r) => providerName(s, r.provider)))];
+      this.d.out(`Sends your change and the files arnx reads to ${providers.join(", ")}, with your keys.`);
+    }
+    const remote = cloud ? await this.cloudBrain(repo, s, mode, "scan") : null;
+    if (remote) this.cloudPrompts(repo);
+    const progress = new Progress(this.progressLine, { quiet: a.values.quiet as boolean | undefined,
+      live: this.d.live ?? null, cost: costSince() });
+    let models: ScanModels | undefined;
+    if (remote) models = undefined;
+    else if (scanModels) models = scanModels(s);
+    else {
+      this.unpriced(s, [s.reviewer, s.hunter, s.secondHunter]);
+      const secondHunter = makeSecondHunter(s, this.d.env, this.boundary);
+      models = { agentModel: makeAgentModel(s, this.d.env, this.boundary),
+        hunter: makeJsonModel(s.hunter ?? s.reviewer, s, this.d.env, this.boundary),
+        ranker: makeJsonModel(s.reviewer, s, this.d.env, this.boundary),
+        ...secondHunter ? { secondHunter } : { challenger: makeChallenger(s, this.d.env, this.boundary) } };
+    }
+    for (const m of models ? [models.agentModel, models.hunter, models.ranker, models.secondHunter, models.challenger]
+      : []) {
+      if (m) m.notice = progress.say;
+    }
+    progress.start();
+    let result;
+    try {
+      result = await runScan(repo, { settings: s, ...(models ? { models } : {}),
+        ...(remote ? { cloud: remote(progress.say) } : {}), boundary: this.boundary,
+        range: (a.values.range as string | undefined) ?? null, untracked, docs: !!a.values.docs, progress: progress.say });
+    } finally {
+      progress.stop();
+    }
+    for (const line of scanSummary(result)) this.d.out(line);
+    this.emit("ok", 0, { ...scanJson(result), file: `${result.dir}/scan.json` });
+    return 0;
   }
 
   async review(a: Args): Promise<number> {
@@ -2404,6 +2508,7 @@ async function run(command: string, args: Args, commands: Commands, d: CliDeps):
       case "setup": return await commands.setup(args);
       case "approve": return await commands.approve(args);
       case "review": return await commands.review(args);
+      case "scan": return await commands.scan(args);
       case "check": return await commands.check(args);
       case "prompt": return await commands.prompt(args);
       case "triage": return await commands.mark(args);
