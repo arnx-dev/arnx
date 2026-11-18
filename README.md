@@ -6,39 +6,46 @@ arnx asks models what your change could have broken, turns each suspicion into a
 runs it in Docker on your code with the change and without it. Every finding is a test that failed.
 No failing test, no finding. Keep the tests you want, and they guard that behaviour from then on.
 
-![arnx init, then arnx review on a branch that adds discount codes: arnx proves a half-cent rounding bug with a failing test and asks two questions](assets/demo.gif)
+![arnx scan on a branch that adds discount codes lists the planted bug first: codes are deduplicated before they are normalized. arnx init and arnx review then prove it with a failing test](assets/demo.gif)
 
 Open source (Apache 2.0). Python, JavaScript/TypeScript, Rust ([early](docs/WORKFLOW.md#rust-crates)) and Go
 ([early](docs/WORKFLOW.md#go-modules)).
 
 ## Try it
 
-You need Docker running, and macOS or Linux (on Windows, WSL 2).
+macOS or Linux (on Windows, WSL 2).
+
+**1. Scan: what may be broken, in under a minute.** No Docker, no setup, nothing run.
 
     npm install -g @arnx-dev/arnx       # Node 20 or later
     export ANTHROPIC_API_KEY=...        # you pay Anthropic directly
-    arnx init
 
     # ... let your agent change something ...
 
+    arnx scan
+
+A scan costs a few cents and lists suspects, ranked: where, what could break, why, and an input to try.
+Each one is unproven until a test fails ([how scan works](docs/WORKFLOW.md#scan-suspects-without-docker)).
+No model key? Run `arnx login` first: the scan runs on [arnx cloud](docs/CLOUD.md), and arnx says so.
+The first 100 accounts get $5 of credit.
+
+**2. Review: prove them with tests.** You need Docker running.
+
+    arnx init
     arnx review                         # the first one also works out how to run your tests
 
 A review costs from a few cents to a few dollars (our own: $0.17 to $3.19) and stops writing tests
-at your cap, `review_usd` (default $3.00).
-
-No Docker yet? `arnx scan` lists what may be broken in your change in under a minute: no Docker, no setup,
-nothing run. Without a model key it runs on arnx cloud after `arnx login`, and says so. On checkout-demo it took 18 s and $0.03. The suspects are unproven until
-`arnx review` tests them ([how scan works](docs/WORKFLOW.md#scan-suspects-without-docker)).
-
-No model keys? `arnx init --cloud`, then `arnx login`: [arnx cloud](docs/CLOUD.md) runs the models,
-and the first 100 accounts get $5 of credit. Tests still run in your Docker. No Node? Use a
+at your cap, `review_usd` (default $3.00). No model keys? `arnx init --cloud`, then `arnx login`:
+arnx cloud runs the models, and tests still run in your Docker. No Node? Use a
 [standalone binary](docs/WORKFLOW.md#install).
 
 Want to see it on something small first? [checkout-demo](https://github.com/arnx-dev/checkout-demo) is a tiny
-checkout with a bug we planted on purpose. In our run it took about a minute and under $0.15, setup included:
+checkout with a bug we planted on purpose. In our runs the scan took under a minute and a few cents, and the
+review about a minute and under $0.15, setup included:
 
     git clone https://github.com/arnx-dev/checkout-demo && cd checkout-demo
     git switch discount-codes
+    arnx scan
     arnx init
     arnx review
 
