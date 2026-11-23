@@ -759,14 +759,33 @@ const inName = (c: number) => (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (
   c === 36 || c === 46 || c === 45;
 const startsName = (c: number) => (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c === 95 || c === 36;
 const isQuote = (c: number) => c === 34 || c === 39 || c === 96;
+const isLetter = (c: number) => (c >= 97 && c <= 122) || (c >= 65 && c <= 90);
+const isLetterOrDigit = (c: number) => isLetter(c) || (c >= 48 && c <= 57);
 
 /** The [name, value] pairs of `text` where a quoted value is given to a name: `name = "v"`, `"name": "v"`, a keyword
  * argument (`api_key="v"`), `row["name"] = "v"`. Each `=` or `:` is found first and its name read backwards from it, so
- * the time grows with the text alone: from the name's side, a long run of `a.b-c.` makes every `.` and `-` a new start. */
-export function assignedPairs(text: string): [string, string][] {
+ * the time grows with the text alone: from the name's side, a long run of `a.b-c.` makes every `.` and `-` a new start.
+ * `notInStrings`: a bare name whose `=` or `:` stands inside a string gives no pair (`ask("Password:")).toBe("")`): the
+ * quote after it closes that string, and what follows is code. Told by an odd count of that quote before it on its line
+ * and by a "value" that starts with a sign, as code between two strings does and a string's own text rarely. */
+export function assignedPairs(text: string, notInStrings = false): [string, string][] {
   const out: [string, string][] = [];
   const given = new RegExp(GIVEN);
   let floor = 0;
+  // Quotes since the line's start, counted once as the matches move on. An escaped one is none, nor an apostrophe in a word.
+  let counted = 0;
+  const open = new Map<number, number>();
+  const oddBefore = (quote: number, at: number): boolean => {
+    for (; counted < at; counted++) {
+      const c = text.charCodeAt(counted);
+      if (c === 92) counted++;
+      else if (c === 10) open.clear();
+      else if (isQuote(c) && !(c === 39 && isLetter(text.charCodeAt(counted - 1)) && isLetter(text.charCodeAt(counted + 1)))) {
+        open.set(c, (open.get(c) ?? 0) + 1);
+      }
+    }
+    return (open.get(quote) ?? 0) % 2 === 1;
+  };
   for (let m = given.exec(text); m; m = given.exec(text)) {
     let at = m.index;
     while (at > floor && SPACE.test(text[at - 1]!)) at--;
@@ -793,6 +812,10 @@ export function assignedPairs(text: string): [string, string][] {
       }
     }
     if (name < 0) {
+      given.lastIndex = m.index + 1;
+      continue;
+    }
+    if (notInStrings && !quote && !isLetterOrDigit(m[2]!.charCodeAt(0)) && oddBefore(m[1]!.charCodeAt(0), m.index)) {
       given.lastIndex = m.index + 1;
       continue;
     }
@@ -895,7 +918,7 @@ export function suspects(path: string, text: string, pins: readonly string[], wh
     else if (wordy === "word" && !usedAsName(value, text, path)) add(value, WORD_RULE);
   };
   const near = namedLines(text);
-  for (const [name, value] of assignedPairs(near)) named(name, value);
+  for (const [name, value] of assignedPairs(near, true)) named(name, value);
   for (const m of near.matchAll(PAIR)) named(m[2]!, m[4]!);
   if (CONFIG.test(path)) for (const m of near.matchAll(UNQUOTED)) named(m[1]!, m[2]!);
   /** On a command line or in a URL: what is there unquoted is a value only when it holds nothing a template does. */
