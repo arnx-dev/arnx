@@ -1,6 +1,6 @@
 # Installing arnx
 
-Show the user the line that fits and run it only after they say yes. Logins are theirs to run, never yours.
+Point the user to arnx's own install instructions; installing is theirs to do, and so is any login.
 
 ## Requirements
 
@@ -10,22 +10,15 @@ says what is missing. Never print or ask for key values: the user exports them i
 
 ## Install
 
-With npm (Node 20 or later), no login needed:
-
-    npm install -g @arnx-dev/arnx
-
-Or the standalone binary, no Node needed (the user picks `darwin-arm64`, `darwin-x64`, `linux-x64` or `linux-arm64`):
-
-    curl -fLO https://github.com/arnx-dev/arnx/releases/latest/download/arnx-linux-x64 && chmod +x arnx-linux-x64 && mv arnx-linux-x64 /usr/local/bin/arnx
-
-The macOS binaries are not signed yet: one downloaded in a browser is quarantined, and
-`xattr -d com.apple.quarantine /usr/local/bin/arnx` releases it. No Windows build; WSL 2 with Docker Desktop should work, but we have not tested it.
+arnx's install instructions: <https://github.com/arnx-dev/arnx/blob/main/docs/WORKFLOW.md#install>. They cover the
+npm package (Node 20 or later, no login needed) and the standalone binaries for macOS and Linux (no Node needed).
+No Windows build; WSL 2 with Docker Desktop should work, but we have not tested it.
 
 Check it: `arnx --version`.
 
 ## Minimum version
 
-This skill needs **arnx 0.1.0** or later. Older: upgrade with the same line (`npm install -g @arnx-dev/arnx`, or download the binary again).
+This skill needs **arnx 0.1.0** or later. Older: the same instructions upgrade it.
 
 ## After installing: the user's steps
 

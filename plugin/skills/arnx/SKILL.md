@@ -18,9 +18,9 @@ Never skip a step or change the order. Do not fix anything before the user has t
 
 1. `arnx --version`. It needs **0.1.0** or later. Every command takes `--json`
    ([references/json.md](references/json.md)).
-   - Command not found: show the user the install line from [references/install.md](references/install.md) and run
-     it **only after the user says yes**. Any login it needs is theirs to run.
-   - Too old: tell the user the version found, the minimum, and the upgrade line in the same file. Stop there.
+   - Command not found: point the user to the install instructions in
+     [references/install.md](references/install.md). Installing is theirs to do. Stop there.
+   - Too old: tell the user the version found, the minimum, and the same instructions. Stop there.
 2. `.arnx/config.toml` must exist. If not, tell the user to run `arnx init` themselves (it writes the config that
    names their models). Never run `arnx init`. Stop there.
 3. `arnx next` prints where the repository is in the flow and the command to run now (`arnx next --json`: the
